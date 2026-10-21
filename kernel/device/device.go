@@ -111,3 +111,32 @@ func IRQObject(line uint8) (uint64, bool) {
 	}
 	return uint64(line), true
 }
+
+// DiskIRQObject is the IRQ object of the disk's line 11, whose interrupt the
+// kernel's IRQ 11 handler serves.
+const DiskIRQObject = uint64(11)
+
+// IRQLine is which interrupt line an IRQ capability's object names.
+type IRQLine uint8
+
+const (
+	// IRQOther is a line no wait serves, such as the inert placeholder.
+	IRQOther IRQLine = iota
+	// IRQNet is the network function's routed line.
+	IRQNet
+	// IRQDisk is the disk's line 11.
+	IRQDisk
+)
+
+// ClassifyIRQ names the line of an IRQ object, given the network line's
+// object when one is routed. The network line is never 11, but it is matched
+// first so that the two can never both claim one object.
+func ClassifyIRQ(object, netObject uint64, netRouted bool) IRQLine {
+	switch {
+	case netRouted && object == netObject:
+		return IRQNet
+	case object == DiskIRQObject:
+		return IRQDisk
+	}
+	return IRQOther
+}

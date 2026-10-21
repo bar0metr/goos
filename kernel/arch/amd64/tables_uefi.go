@@ -412,6 +412,11 @@ func EnableConsoleInterrupt()
 //export goos_take_irq_11
 func TakeIRQ11() bool
 
+// IRQ11Pending reports the pending device interrupt without consuming it.
+//
+//export goos_irq_11_is_pending
+func IRQ11Pending() bool
+
 // SetIRQ11Waiter records a one-based scheduler slot for the next IRQ11.
 //
 //export goos_set_irq_11_waiter

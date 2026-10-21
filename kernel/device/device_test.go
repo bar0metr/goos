@@ -28,3 +28,26 @@ func TestDMAAndIRQObjectsRejectInvalidAuthority(t *testing.T) {
 		t.Fatal("missing PCI IRQ accepted")
 	}
 }
+
+func TestClassifyIRQ(t *testing.T) {
+	net, _ := IRQObject(19)
+	for _, tc := range []struct {
+		object, net uint64
+		routed      bool
+		want        IRQLine
+	}{
+		{net, net, true, IRQNet},
+		{net, net, false, IRQOther},
+		{DiskIRQObject, net, true, IRQDisk},
+		{DiskIRQObject, 0, false, IRQDisk},
+		{InertIRQObject, net, true, IRQOther},
+		{InertIRQObject, InertIRQObject, false, IRQOther},
+		{4, net, true, IRQOther},
+		// A network line on 11 would be the network's, never both.
+		{DiskIRQObject, DiskIRQObject, true, IRQNet},
+	} {
+		if got := ClassifyIRQ(tc.object, tc.net, tc.routed); got != tc.want {
+			t.Fatalf("ClassifyIRQ(%d, %d, %v) = %d, want %d", tc.object, tc.net, tc.routed, got, tc.want)
+		}
+	}
+}

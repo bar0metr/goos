@@ -112,6 +112,26 @@ func dispatchProcessWait(processHandle uint64, resultAddress uint64, timeout uin
 	return call.end(uint64(action)<<32 | uint64(status))
 }
 
+// irqLine names the line of an IRQ capability's object. The disk's line 11
+// event is taken by IRQWait, whose single waiter the interrupt wakes, or by
+// IRQTake after a WaitAny reported it.
+func irqLine(object uint64) device.IRQLine {
+	netObject, routed := netIRQObject()
+	return device.ClassifyIRQ(object, netObject, routed)
+}
+
+// irqPending reports, without consuming it, the pending event of a line
+// WaitAny can watch.
+func irqPending(object uint64) bool {
+	switch irqLine(object) {
+	case device.IRQNet:
+		return amd64.NetIRQPending()
+	case device.IRQDisk:
+		return amd64.IRQ11Pending()
+	}
+	return false
+}
+
 func waitIRQ(handler nativeCallHandler, irqHandle uint64, task uint64) (kcall.Status, bool) {
 	if task >= sched.MaxTasks {
 		return kcall.StatusInvalidArgument, false
@@ -125,7 +145,7 @@ func waitIRQ(handler nativeCallHandler, irqHandle uint64, task uint64) (kcall.St
 		return kcall.StatusPermissionDenied, false
 	}
 	authority, allowed := owner.Handles().Lookup(handle.ID(irqHandle), handle.TypeIRQ, capability.Wait)
-	if !allowed || authority.Object() != 11 {
+	if !allowed || authority.Object() != device.DiskIRQObject {
 		return kcall.StatusPermissionDenied, false
 	}
 	if amd64.TakeIRQ11() {
@@ -267,8 +287,13 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 	// it may raise at once finds someone to wake; the recheck below sees an
 	// event that arrived before the registration.
 	for index := range entries {
-		if entries[index].Key.Kind == kernelwait.KindIRQ {
+		if entries[index].Key.Kind != kernelwait.KindIRQ {
+			continue
+		}
+		if irqLine(entries[index].Key.Object) == device.IRQNet {
 			amd64.RearmNetIRQ()
+		} else {
+			amd64.RearmIRQ11()
 		}
 	}
 	// Registration precedes the final readiness observation: a publisher
@@ -343,10 +368,11 @@ func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent
 		}
 		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindConsole, Object: authority.Object()}, Events: kernelwait.Readable}, kcall.StatusOK, 0
 	case handle.TypeIRQ:
-		// Only the network line is waitable: the disk's driver blocks in
-		// IRQWait, which owns its line's single waiter. Readiness is the
-		// pending event, which the wait reports and IRQTake consumes.
-		if !isNetIRQ(authority.Object()) {
+		// The network and disk lines are waitable. Readiness is the pending
+		// event, which the wait reports and IRQTake consumes. The disk's
+		// line also keeps its IRQWait waiter, which the interrupt wakes
+		// directly and which takes the event first.
+		if irqLine(authority.Object()) == device.IRQOther {
 			return kernelwait.Entry{}, kcall.StatusUnsupported, diag.DenyObject
 		}
 		if events != kcall.WaitReadable {
@@ -447,7 +473,7 @@ func readyWaitAny(owner *process.Process, entries []kernelwait.Entry) uint64 {
 			input, _ := consoleInput(entry.Key.Object)
 			ready = amd64.InputPending(input)
 		case kernelwait.KindIRQ:
-			ready = amd64.NetIRQPending()
+			ready = irqPending(entry.Key.Object)
 		case kernelwait.KindLog:
 			ready = logfmt.SequenceBefore(entry.Cursor, systemLog.Total())
 		case kernelwait.KindThread:
@@ -504,28 +530,42 @@ func wakeConsoleWaiters() {
 	}
 }
 
-// wakeIRQWaiters publishes the network line's pending event. Its interrupt
-// wakes the kernel loop, which runs this, so the driver's wait completes on
-// the same path as every other readiness without a tick of delay.
+// wakeIRQWaiters publishes the pending events of the network and disk
+// lines. Their interrupts wake the kernel loop, which runs this, so a
+// driver's wait completes on the same path as every other readiness without
+// a tick of delay. The disk's interrupt wakes the loop only when no IRQWait
+// waiter took the event.
 func wakeIRQWaiters() {
 	if object, routed := netIRQObject(); routed && amd64.NetIRQPending() {
 		publishWaitAny(kernelwait.Key{Kind: kernelwait.KindIRQ, Object: object}, kernelwait.Readable)
 	}
+	if amd64.IRQ11Pending() {
+		publishWaitAny(kernelwait.Key{Kind: kernelwait.KindIRQ, Object: device.DiskIRQObject}, kernelwait.Readable)
+	}
 }
 
-// IRQTake consumes the network line's pending event without blocking. A
-// driver calls it after reading its device's interrupt status, so an event
-// raised after that read stays pending for its next wait.
+// IRQTake consumes the pending event of the network or disk line without
+// blocking. A driver calls it after reading its device's interrupt status,
+// so an event raised after that read stays pending for its next wait.
 func (handler nativeCallHandler) IRQTake(irqHandle uint64) kcall.Status {
 	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
 	authority, allowed := owner.Handles().Lookup(handle.ID(irqHandle), handle.TypeIRQ, capability.Wait)
-	if !allowed || !isNetIRQ(authority.Object()) {
+	if !allowed {
 		return kcall.StatusPermissionDenied
 	}
-	if !amd64.TakeNetIRQ() {
+	taken := false
+	switch irqLine(authority.Object()) {
+	case device.IRQNet:
+		taken = amd64.TakeNetIRQ()
+	case device.IRQDisk:
+		taken = amd64.TakeIRQ11()
+	default:
+		return kcall.StatusPermissionDenied
+	}
+	if !taken {
 		return kcall.StatusNotFound
 	}
 	return kcall.StatusOK

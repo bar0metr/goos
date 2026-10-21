@@ -331,9 +331,10 @@ first by PID 1 (ADR 0034, 0035, 0190):
   `offset + width <= size`. There is no other port-I/O path from ring 3.
 - **IRQ**: an IRQ object for line 11, the disk's, or for the network
   function's routed line. `IRQWait` requires Wait and serves line 11 only;
-  a `WaitAny` interest and `IRQTake` require Wait and serve the network line
-  only. The kernel masks the level-triggered route in the handler and
-  unmasks it on the next wait.
+  a `WaitAny` interest and `IRQTake` require Wait and serve both lines. An
+  `IRQWait` waiter on line 11 takes the event before any `WaitAny` sees it.
+  The kernel masks the level-triggered route in the handler and unmasks it
+  on the next wait.
 - **DMA**: a DMA-domain device object, domain 1 for the disk and 2 for the
   network function. `DMAAllocate` requires Write, refuses a domain whose
   device was not discovered, and maps up to 64 zeroed contiguous pages RW+NX
