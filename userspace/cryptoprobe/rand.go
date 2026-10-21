@@ -3,30 +3,19 @@
 package cryptoprobe
 
 import (
-	"crypto/rand"
-	"errors"
+	"io"
+
 	"goos/userspace/cryptosys"
 )
 
 const Name = "rand"
 
-func Run() error {
-	reader := cryptosys.Reader{}
-	var available [1]byte
-	// Go 1.25 rand.Read aborts on reader errors; check kernel availability first.
-	if _, err := reader.Read(available[:]); err != nil {
-		return err
-	}
-	previous := rand.Reader
-	rand.Reader = reader
-	defer func() { rand.Reader = previous }()
+func Run() error { return probeRandom(cryptosys.Reader{}) }
+
+// probeRandom checks the kernel-backed reader without replacing the entropy
+// source of other crypto callers in the process.
+func probeRandom(reader io.Reader) error {
 	var sample [32]byte
-	n, err := rand.Read(sample[:])
-	if err != nil {
-		return err
-	}
-	if n != len(sample) {
-		return errors.New("rand.Read returned a short sample")
-	}
-	return nil
+	_, err := io.ReadFull(reader, sample[:])
+	return err
 }
