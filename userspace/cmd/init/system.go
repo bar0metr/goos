@@ -457,11 +457,7 @@ func loadBootstrapIndex() bool {
 		return bootstrapIndex != nil
 	}
 	bootstrapIndexRead = true
-	member, ok := execproto.ArchiveMember([]byte(commands.BootstrapIndexPath))
-	if !ok {
-		return false
-	}
-	offset, size, found := initramfs.Extent(systemImage, member)
+	offset, size, found := execproto.ArchiveExtent(systemImage, []byte(commands.BootstrapIndexPath))
 	if !found || !commands.Valid(systemImage[offset:offset+size]) {
 		syslog.Warn("recovery command index unusable")
 		return false

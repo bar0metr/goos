@@ -66,11 +66,7 @@ func LocateImage(image []byte, path []byte) (uint32, uint32, ImageStatus) {
 	if !InBootstrap(path) {
 		return 0, 0, ImageOutsideArchive
 	}
-	name, ok := ArchiveMember(path)
-	if !ok {
-		return 0, 0, ImageNotFound
-	}
-	offset, size, found := initramfs.Extent(image, name)
+	offset, size, found := ArchiveExtent(image, path)
 	if !found {
 		return 0, 0, ImageNotFound
 	}
@@ -80,23 +76,16 @@ func LocateImage(image []byte, path []byte) (uint32, uint32, ImageStatus) {
 	return uint32(offset), uint32(size), ImageFound
 }
 
-// ArchiveMember maps a path below BootstrapRoot to the name of its archive
-// member. The mapping is the one the VFS mount makes: /bootstrap/X is the
-// member system/X. The name is valid until the next call.
-func ArchiveMember(path []byte) ([]byte, bool) {
-	target := &memberName
-	if len(path) <= len(BootstrapRoot) || !hasPrefix(path, BootstrapRoot) || len(archivePrefix)+len(path)-len(BootstrapRoot) > len(target) {
-		return nil, false
+// ArchiveExtent finds the member of a path below BootstrapRoot in the mapped
+// boot archive and returns the offset and length of its bytes. It joins
+// archivePrefix and the rest of the path only while comparing names, so it
+// keeps no buffer that two callers could share.
+func ArchiveExtent(image []byte, path []byte) (int, int, bool) {
+	if len(path) <= len(BootstrapRoot) || !hasPrefix(path, BootstrapRoot) {
+		return 0, 0, false
 	}
-	size := copy(target[:], archivePrefix)
-	size += copy(target[size:], path[len(BootstrapRoot):])
-	return target[:size], true
+	return initramfs.ExtentUnder(image, []byte(archivePrefix), path[len(BootstrapRoot):])
 }
-
-// memberName holds the name ArchiveMember builds. A local buffer of this size
-// would be allocated on every call, and the heap of a GoOS process does not
-// give it back.
-var memberName [MaxPath]byte
 
 // InBootstrap reports whether a canonical path is /bootstrap or lies under it.
 func InBootstrap(path []byte) bool {

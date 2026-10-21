@@ -88,11 +88,12 @@ func TestOriginIsExplicit(t *testing.T) {
 			t.Fatalf("%q = %d, want %d", path, got, want)
 		}
 	}
-	if member, ok := ArchiveMember([]byte("/bootstrap/bin/ls")); !ok || string(member) != "system/bin/ls" {
-		t.Fatalf("member = %q, %v", member, ok)
+	image := systemImage(t)
+	if offset, size, ok := ArchiveExtent(image, []byte("/bootstrap/bin/ls")); !ok || string(image[offset:offset+size]) != "LS IMAGE" {
+		t.Fatalf("extent = %d+%d, %v", offset, size, ok)
 	}
-	for _, path := range []string{"/bootstrap", "/bootstrap/", "/system/bin/ls"} {
-		if _, ok := ArchiveMember([]byte(path)); ok {
+	for _, path := range []string{"/bootstrap", "/bootstrap/", "/system/bin/ls", "/bootstrapx/bin/ls"} {
+		if _, _, ok := ArchiveExtent(image, []byte(path)); ok {
 			t.Fatalf("%q mapped to a member", path)
 		}
 	}

@@ -219,7 +219,7 @@ func (archive *Archive) content(entry member) ([]byte, bool) {
 	if len(entry.link) == 0 {
 		return nil, false
 	}
-	target, ok := find(archive.data, entry.link, 1)
+	target, ok := find(archive.data, memberName{head: entry.link}, 1)
 	return target.data, ok
 }
 

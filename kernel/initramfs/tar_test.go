@@ -104,3 +104,24 @@ func TestExtentsOfDistinctMembers(t *testing.T) {
 		t.Fatal("absolute archive path accepted")
 	}
 }
+
+func TestExtentUnderMatchesTheJoinedName(t *testing.T) {
+	archive := archiveWith(t, "system/bin/ls", []byte("list"))
+	offset, size, ok := Extent(archive, []byte("system/bin/ls"))
+	if !ok {
+		t.Fatal("joined name not found")
+	}
+	name := "system/bin/ls"
+	for split := 0; split <= len(name); split++ {
+		gotOffset, gotSize, found := ExtentUnder(archive, []byte(name[:split]), []byte(name[split:]))
+		if !found || gotOffset != offset || gotSize != size {
+			t.Fatalf("split %d = %d+%d, %v", split, gotOffset, gotSize, found)
+		}
+	}
+	// The joined name obeys the same path rules as a whole one.
+	for _, parts := range [][2]string{{"system/", "/bin/ls"}, {"system/", "../system/bin/ls"}, {"system/bin/", ".."}, {"/", "system/bin/ls"}, {"", ""}, {"system/bin/ls", "/"}} {
+		if _, _, found := ExtentUnder(archive, []byte(parts[0]), []byte(parts[1])); found {
+			t.Fatalf("%q + %q found", parts[0], parts[1])
+		}
+	}
+}
