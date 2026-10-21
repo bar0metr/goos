@@ -35,7 +35,9 @@ type validationReadState struct {
 	initOnce sync.Once
 
 	localEntered atomic.Uint32
+	localActive  atomic.Uint32
 	localPeak    atomic.Uint32
+	localTimed   atomic.Bool
 	localRelease chan struct{}
 	localOnce    sync.Once
 
@@ -83,25 +85,30 @@ func (service *Service) validationReadGate(owner vfs.Owner, file vfs.Handle, lan
 	return validationReadGate{}
 }
 
-func (gate validationReadGate) hold() {
+func (gate validationReadGate) hold() { gate.holdWithin(2 * time.Second) }
+
+func (gate validationReadGate) holdWithin(timeout time.Duration) {
 	if gate.state == nil {
 		return
 	}
 	switch gate.kind {
 	case ValidationReadLocal:
-		entered := gate.state.localEntered.Add(1)
+		gate.state.localEntered.Add(1)
+		active := gate.state.localActive.Add(1)
+		defer gate.state.localActive.Add(^uint32(0))
 		for {
 			peak := gate.state.localPeak.Load()
-			if peak >= entered || gate.state.localPeak.CompareAndSwap(peak, entered) {
+			if peak >= active || gate.state.localPeak.CompareAndSwap(peak, active) {
 				break
 			}
 		}
-		if entered >= 2 {
+		if active >= 2 {
 			gate.state.localOnce.Do(func() { close(gate.state.localRelease) })
 		}
 		select {
 		case <-gate.state.localRelease:
-		case <-time.After(2 * time.Second):
+		case <-time.After(timeout):
+			gate.state.localTimed.Store(true)
 			gate.state.localOnce.Do(func() { close(gate.state.localRelease) })
 		}
 	case ValidationReadPersistent:
@@ -126,7 +133,11 @@ func (service *Service) ReleaseValidationPersistentRead() {
 // ValidationReadLocalOverlap reports whether both selected local plans entered
 // workers at once.
 func (service *Service) ValidationReadLocalOverlap() bool {
-	return validationReads.localPeak.Load() >= 2
+	return validationReads.localOverlap()
+}
+
+func (state *validationReadState) localOverlap() bool {
+	return state.localPeak.Load() >= 2 && !state.localTimed.Load()
 }
 
 // ValidationPersistentActive reports whether the held persistent worker is in
