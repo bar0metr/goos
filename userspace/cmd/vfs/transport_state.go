@@ -2,6 +2,7 @@ package main
 
 import (
 	"goos/kernel/ramfs"
+	supervisor "goos/userspace/init"
 	"sync/atomic"
 )
 
@@ -13,6 +14,9 @@ import (
 type filesystemAvailability struct {
 	reason      atomic.Uint32
 	quarantined atomic.Bool
+	// recoveries is owner-only. Count admissions here as well as notices in
+	// PID 1: the old process can exit before its notice reaches PID 1.
+	recoveries int
 }
 
 func (state *filesystemAvailability) fail(reason ramfs.Status, unanswered bool) {
@@ -35,8 +39,11 @@ func (state *filesystemAvailability) failure() ramfs.Status {
 // reports that this attach ends a quarantine.
 func (state *filesystemAvailability) admit(fenced bool) (allowed, recovered bool) {
 	recovered = state.quarantined.Load()
-	if recovered && !fenced {
-		return false, false
+	if recovered {
+		if !fenced || state.recoveries >= supervisor.MaxRestarts {
+			return false, false
+		}
+		state.recoveries++
 	}
 	state.reason.Store(0)
 	state.quarantined.Store(false)

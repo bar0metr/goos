@@ -214,8 +214,10 @@ page index starts empty, so nothing the old writer left in the cache is served.
 A notice for a superseded generation is ignored. PID 1 makes at most
 `supervisor.MaxRestarts` such replacements per boot, because each follows a
 six-second request deadline and the supervisor's restart window alone would
-not stop a service that stalls every time. Past that bound no attach is
-fenced and the cache stays quarantined until the VFS itself is replaced.
+not stop a service that stalls every time. The VFS also bounds fenced recovery admissions by the same limit: a service
+may exit before PID 1 handles its notice, and that ordering must not bypass
+the bound. Past the bound the cache stays quarantined until the VFS itself
+is replaced.
 
 The cache object is not replaced. The kernel copies executable pages from the
 last slot of the boot cache object, so a fresh cache generation would need the

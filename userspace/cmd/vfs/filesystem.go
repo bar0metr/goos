@@ -145,7 +145,7 @@ func attachFilesystem(attach vfs.FilesystemAttach) vfs.Status {
 	allowed, recovered := filesystemState.availability.admit(attach.Fenced)
 	if !allowed {
 		sys.HandleClose(attach.Client)
-		syslog.Warn("filesystem reattach refused", syslog.Str("reason", "cache quarantined without a fence"))
+		syslog.Warn("filesystem reattach refused", syslog.Str("reason", "cache quarantined; fence missing or recovery limit reached"))
 		return vfs.StatusBackendError
 	}
 	if filesystem != 0 {

@@ -101,7 +101,12 @@ with a session notice over channels they already hold; the FAT32 service
 restarts behind it and is mounted again. `/tmp` starts empty, and files open
 in the old instance are gone.
 A dead or stalled FAT32 service is an I/O error on those three mounts only; a
-restarted one is attached under the same mounts. Stable FAT32 object cookies
+restarted one is attached under the same mounts. After an unanswered accepted
+request, the VFS quarantines the cache and asks PID 1 to replace the service.
+PID 1 kills that instance and waits for the kernel to report its exit before
+sending a fenced attach (ADR 0204). In validation builds, the FAT32 service
+stalls on a request for `.validation-fat32-stall`; the boot test uses that
+name to check recovery. Stable FAT32 object cookies
 belong to the service instance that issued them, so callers must reopen old
 handles after a FAT32 service restart (ADR 0119). Kernel launch
 grants explicitly identify the client or server side of a channel; neither

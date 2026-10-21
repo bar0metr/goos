@@ -2,6 +2,7 @@ package main
 
 import (
 	"goos/kernel/ramfs"
+	supervisor "goos/userspace/init"
 	"testing"
 )
 
@@ -62,5 +63,27 @@ func TestFailureWithoutQuarantineAdmitsAnyAttach(t *testing.T) {
 	state.fail(ramfs.StatusPeerDied, false)
 	if allowed, recovered := state.admit(false); !allowed || recovered || state.failure() != ramfs.StatusOK {
 		t.Fatal("an ordinary restart needs no fence")
+	}
+}
+
+// A dead writer may trigger its ordinary restart before PID 1 handles its
+// lost notice. Count recoveries at admission too, so this event ordering
+// cannot bypass the supervisor's bound.
+func TestFencedCacheRecoveryStopsAtSupervisorBound(t *testing.T) {
+	state := &filesystemAvailability{}
+	for recovery := 0; recovery < supervisor.MaxRestarts; recovery++ {
+		state.fail(ramfs.StatusTimeout, true)
+		if allowed, _ := state.admit(false); allowed || state.recoveries != recovery {
+			t.Fatal("an unfenced attempt changed the recovery budget")
+		}
+		if allowed, recovered := state.admit(true); !allowed || !recovered {
+			t.Fatalf("recovery %d refused", recovery)
+		}
+	}
+	state.fail(ramfs.StatusTimeout, true)
+	for attempt := 0; attempt < 4; attempt++ {
+		if allowed, _ := state.admit(true); allowed || !state.quarantined.Load() || state.failure() != ramfs.StatusTimeout {
+			t.Fatal("a fenced attach bypassed the recovery bound")
+		}
 	}
 }
