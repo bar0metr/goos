@@ -1215,6 +1215,12 @@ test-pve-goroutines:
 	@$(MAKE) --no-print-directory -j8 pve-artifacts VALIDATION=1
 	@$(PVELAB) run --scenario goroutines --cpu host --sockets 1 --cores 8 $(PVE_RUN_FLAGS)
 
+.PHONY: test-pve-native-concurrency
+# Runtime, region rendezvous and fenced VFS recovery in one validation guest.
+test-pve-native-concurrency:
+	@$(MAKE) --no-print-directory -j8 pve-artifacts VALIDATION=1 VFS_PROBE=1
+	@$(PVELAB) run --scenario native-concurrency --cpu host --sockets 1 --cores 8 $(PVE_RUN_FLAGS)
+
 # Native concurrency contracts (docs/development/native-concurrency-audit.md).
 # test-concurrency-audit checks that every package-level variable under
 # userspace/ has an audit row; test-userspace-libs runs the libraries'
