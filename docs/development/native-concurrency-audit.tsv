@@ -784,3 +784,4 @@ CA-1006	goos/userspace/bin/threadprobe	windowAfter	process	owned	threadprobe reg
 CA-1007	goos/userspace/bin/threadprobe	windowReady	process	atomic	threadprobe region-window
 CA-1008	goos/userspace/bin/threadprobe	windowDone	process	atomic	threadprobe region-window
 CA-1009	goos/userspace/bin/threadprobe	windowPeerCPUOverlaps	process	atomic	threadprobe region-window
+CA-1010	goos/userspace/safesave	temporarySequence	process	atomic	TestTemporaryIDsAreUniqueUnderContention

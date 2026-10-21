@@ -157,9 +157,9 @@ helpers `AppendUint`, `BenchCount`, `BenchChunk`, `AppendBenchResult`,
 
 Independent instances safe: `Line` (`NewLine`), `Bulk` (`NewBulk`,
 `ReadFile`, `WriteFile`), `CopyFile` and `SaveFile` with different Bulks,
-`Stream`. Saves to one target also share its temporary pathname: only the
-save that creates that path owns it. An existing temporary file must not be
-deleted by a competing save. `VFSRequests` serves one owner's endpoint set; owners sequence
+`Stream`. Each save reserves a request-owned temporary name by exclusive Create.
+Collisions are skipped without modifying an existing file. Failed Replace
+may already have committed the rename, so no pathname cleanup follows it. `VFSRequests` serves one owner's endpoint set; owners sequence
 asynchronous sends and handoffs themselves. A used Bulk must not be copied.
 Its Memory and any aliases remain caller-owned; do not replace or resize the
 Memory slice.
@@ -401,7 +401,7 @@ native collector and scheduler tests.
 | `network`, `netdev`, `netapi`, `tcpapi`, `udpapi`, `tcpdispatch`, `tcpserve`, `udpserve`, `tcpupstream`, `upstream` | Independent instances safe | Codecs are Concurrent-safe; stacks, pools and dispatch tables are objects run by one service loop. |
 | `dns`, `dnswire`, `dnsq`, `dnstcp`, `resolvapi`, `hostname` | Independent instances safe | The resolver cache is a `dns` object owned by the resolver service's loop; codecs are Concurrent-safe. |
 | `vfs`, `block`, `fat32`, `partition` | Independent instances safe with separate backends | Volume and mount state belong to an owner; VFS workers use captured read plans and obey the persistent lane and barriers. The fixture's `validationReads` (CA-0760) has owner-only arms; worker gates use published atomics and channels. |
-| `safesave` | One owner per temporary pathname | Separate workspaces do not isolate saves to the same target. A competing save refuses an existing temporary file; it must not delete or publish another save's data. |
+| `safesave` | One owner per request-owned temporary pathname | Atomic Create reserves a candidate with a monotonic suffix; collisions are skipped within a bound. Separate workspaces can save the same target without sharing a temporary file. Stale candidates remain untouched. No cleanup follows an ambiguous Replace. |
 | `config`, `release`, `commands`, `truststate`, `truststore`, `trustupdate`, `remotepolicy`, `httpwire`, `fetch`, `sshserver`, `tty`, `init`, `linux` | Concurrent-safe codecs and policy, or Independent instances safe objects | Package-level variables are immutable tables and error values. |
 
 ## Programs

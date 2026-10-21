@@ -71,7 +71,7 @@ as Finder traversal, remain valid.
 | `runtime/sys` | C calls; R hooks/scratch | Callers own buffer and handle lifetimes. M-local scratch is pinned; wait hooks run before scratch acquisition. Native host stubs do not emulate per-M TLS. |
 | `runtime/thread` | C calls; R lifecycle | Scheduler, threadprobe and goprobe start native threads. Hook setters run at startup. Join has one owner; Slot/Self identify the current M, not a persistent G identity. |
 | `runtime/tls` | R | Runtime callers pin while retaining an M-local Block pointer. hostBlock is a test singleton, not native TLS-isolation evidence. |
-| `safesave` | One owner per temporary pathname | edit and configd use Save through utility/config. Different buffers do not isolate saves to the same target. An existing temp is not evidence of a dead owner. |
+| `safesave` | One owner per request-owned temporary pathname | edit and configd use Save through utility/config. Atomic Create reserves unique candidates across processes; occupied names are skipped. No cleanup follows an ambiguous Replace; forward retries use a fresh candidate. |
 | `shell` | C codecs; I state | shell and PID 1 own TerminalEnvironment. Entries aliases storage until Store/Reset. RunLog requires exclusive hooks and scratch. |
 | `sshserver` | I, region-bound | remoted-worker owns Server, private Conn and callbacks. Event borrows storage until Poll. Synchronous pump scopes must not park or migrate. |
 | `startup` | C immutable Data; I Writer | Programs read kernel startup mappings. PID 1 alone mutates templates through Writer/BindHandles before handing them over. |

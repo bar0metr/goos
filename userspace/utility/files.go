@@ -103,9 +103,9 @@ func Replace(source, target []byte) vfs.Status {
 // SaveFile replaces target with what source produces, writing it through bulk
 // to a temporary file beside target first, so target keeps its old contents
 // until the new ones are complete (ADR 0129). Each concurrent save needs its
-// own Bulk and Source. Saves to the same target compete to create its temporary
-// file; an existing file returns StatusAlreadyExists without being changed.
-// A stale temporary file needs explicit owner cleanup before another save.
+// own Bulk and Source. Atomic Create reserves a separate temporary filename;
+// collisions and stale candidates are skipped without being changed. A Replace
+// error may follow a committed rename; retry uses a fresh candidate.
 func SaveFile(target []byte, bulk *Bulk, source safesave.Source) (vfs.Status, safesave.Stage) {
 	if bulk.temporary == nil {
 		bulk.temporary = new([limits.PathMax]byte)
