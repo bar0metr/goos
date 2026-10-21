@@ -265,6 +265,11 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		return writeWaitAnyMask(handler.root, resultAddress, mask), false
 	}
 	if timeout == 0 {
+		// A poll unmasks the lines it names too: the goroutine poller
+		// polls with no wait while every thread is busy, and a line left
+		// masked would hold its event back until a thread idles. An event
+		// raised now stays pending for the next poll.
+		rearmIRQEntries(entries)
 		return kcall.StatusTimeout, false
 	}
 	// No interests is a timed sleep, so it needs a deadline to end on.
@@ -286,16 +291,7 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 	// A line is unmasked only once its waiter is registered, so the interrupt
 	// it may raise at once finds someone to wake; the recheck below sees an
 	// event that arrived before the registration.
-	for index := range entries {
-		if entries[index].Key.Kind != kernelwait.KindIRQ {
-			continue
-		}
-		if irqLine(entries[index].Key.Object) == device.IRQNet {
-			amd64.RearmNetIRQ()
-		} else {
-			amd64.RearmIRQ11()
-		}
-	}
+	rearmIRQEntries(entries)
 	// Registration precedes the final readiness observation: a publisher
 	// changes an object's state under its lock before it publishes, so either
 	// the check below sees the change or the publication sees this
@@ -307,6 +303,22 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		return writeWaitAnyMask(handler.root, resultAddress, mask), false
 	}
 	return kcall.StatusNotFound, true
+}
+
+// rearmIRQEntries unmasks the lines a wait names. Its driver reads the
+// device's interrupt status before it waits again, so the level-triggered
+// line is no longer asserted for an event already taken.
+func rearmIRQEntries(entries []kernelwait.Entry) {
+	for index := range entries {
+		if entries[index].Key.Kind != kernelwait.KindIRQ {
+			continue
+		}
+		if irqLine(entries[index].Key.Object) == device.IRQNet {
+			amd64.RearmNetIRQ()
+		} else {
+			amd64.RearmIRQ11()
+		}
+	}
 }
 
 func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent) (kernelwait.Entry, kcall.Status, diag.Deny) {
