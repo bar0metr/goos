@@ -22,29 +22,81 @@ func TestAddSessionControlRoundTrip(t *testing.T) {
 }
 
 func TestSetFilesystemControlRoundTrip(t *testing.T) {
-	message, ok := SetFilesystemRequest(handle.ID(11), 3)
-	if !ok {
-		t.Fatal("request encode failed")
+	for _, fenced := range []bool{false, true} {
+		message, ok := SetFilesystemRequest(FilesystemAttach{Client: 11, Generation: 0x0102030405060708, Fenced: fenced}, 3)
+		if !ok {
+			t.Fatal("request encode failed")
+		}
+		attach, ok := DecodeSetFilesystem(message)
+		if !ok || attach.Client != 11 || attach.Generation != 0x0102030405060708 || attach.Fenced != fenced {
+			t.Fatalf("attach = %+v, %v", attach, ok)
+		}
+		if _, ok := DecodeAddSession(message); ok {
+			t.Fatal("a filesystem endpoint was taken for a session")
+		}
 	}
-	client, ok := DecodeSetFilesystem(message)
-	if !ok || client != 11 {
-		t.Fatalf("client = %d, %v", client, ok)
+	for _, attach := range []FilesystemAttach{{Generation: 1}, {Client: 11}} {
+		if _, ok := SetFilesystemRequest(attach, 3); ok {
+			t.Fatalf("encoded %+v", attach)
+		}
 	}
-	if _, ok := DecodeAddSession(message); ok {
-		t.Fatal("a filesystem endpoint was taken for a session")
+	if _, ok := SetFilesystemRequest(FilesystemAttach{Client: 11, Generation: 1}, 0); ok {
+		t.Fatal("encoded an uncorrelated request")
 	}
-	if _, ok := SetFilesystemRequest(0, 3); ok {
-		t.Fatal("encoded a request with no endpoint")
+	message, _ := SetFilesystemRequest(FilesystemAttach{Client: 11, Generation: 4, Fenced: true}, 3)
+	for name, damage := range map[string]func(*ipc.Message){
+		"no endpoint":   func(m *ipc.Message) { m.HandleCount = 0 },
+		"zero endpoint": func(m *ipc.Message) { m.Handles[0] = 0 },
+		"two handles":   func(m *ipc.Message) { m.HandleCount, m.Handles[1] = 2, 12 },
+		"old version":   func(m *ipc.Message) { m.Version-- },
+		"old payload":   func(m *ipc.Message) { m.PayloadSize = 1 },
+		"unknown flag":  func(m *ipc.Message) { m.Payload[1] = 2 },
+		"zero gen":      func(m *ipc.Message) { clear(m.Payload[2:10]) },
+		"notification":  func(m *ipc.Message) { m.Kind = ipc.KindNotification },
+		"uncorrelated":  func(m *ipc.Message) { m.Correlation = 0 },
+	} {
+		corrupt := message
+		damage(&corrupt)
+		if _, ok := DecodeSetFilesystem(corrupt); ok {
+			t.Fatalf("decoded a request with %s", name)
+		}
 	}
-	corrupt := message
-	corrupt.HandleCount = 0
-	if _, ok := DecodeSetFilesystem(corrupt); ok {
-		t.Fatal("decoded a request with no endpoint")
+}
+
+func TestFilesystemLostNoticeRoundTrip(t *testing.T) {
+	notice, ok := FilesystemLostNotice(0x1122334455667788)
+	if !ok || notice.Kind != ipc.KindNotification || notice.Correlation != 0 || notice.HandleCount != 0 {
+		t.Fatalf("notice = %+v, %v", notice, ok)
 	}
-	corrupt = message
-	corrupt.Version--
-	if _, ok := DecodeSetFilesystem(corrupt); ok {
-		t.Fatal("decoded an older control version")
+	if generation, ok := DecodeFilesystemLostNotice(&notice); !ok || generation != 0x1122334455667788 {
+		t.Fatalf("decode = %#x, %v", generation, ok)
+	}
+	if _, ok := FilesystemLostNotice(0); ok {
+		t.Fatal("a notice without an attachment generation")
+	}
+	for name, damage := range map[string]func(*ipc.Message){
+		"request":     func(m *ipc.Message) { m.Kind = ipc.KindRequest },
+		"reply":       func(m *ipc.Message) { m.Kind = ipc.KindReply },
+		"correlated":  func(m *ipc.Message) { m.Correlation = 1 },
+		"handle":      func(m *ipc.Message) { m.HandleCount, m.Handles[0] = 1, 5 },
+		"operation":   func(m *ipc.Message) { m.Payload[0] = operationSession },
+		"short":       func(m *ipc.Message) { m.PayloadSize = 1 },
+		"zero gen":    func(m *ipc.Message) { clear(m.Payload[1:9]) },
+		"old version": func(m *ipc.Message) { m.Version-- },
+		"foreign":     func(m *ipc.Message) { m.ProtocolID++ },
+	} {
+		message := notice
+		damage(&message)
+		if _, ok := DecodeFilesystemLostNotice(&message); ok {
+			t.Fatalf("damaged notice accepted: %s", name)
+		}
+	}
+	// The notice is no session notice and no request the VFS serves.
+	if _, ok := DecodeSessionNotice(&notice); ok {
+		t.Fatal("a filesystem notice taken for a session notice")
+	}
+	if _, ok := DecodeSetFilesystem(notice); ok {
+		t.Fatal("a filesystem notice taken for an attach")
 	}
 }
 
