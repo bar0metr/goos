@@ -614,7 +614,6 @@ CA-0613	goos/userspace/editor	saveAsChoices	process	immutable	none
 CA-0614	goos/userspace/editor	saveAsPrompt	process	immutable	none
 CA-0615	goos/userspace/editor	saveAsTitle	process	immutable	none
 CA-0616	goos/userspace/exec	linuxPathVariable	process	immutable	none
-CA-0617	goos/userspace/exec	memberName	process	owned	none
 CA-0618	goos/userspace/fat32	dotDotName	process	immutable	none
 CA-0619	goos/userspace/fat32	dotName	process	immutable	none
 CA-0620	goos/userspace/fat32	longSlots	process	immutable	none
@@ -637,8 +636,8 @@ CA-0636	goos/userspace/linux	fsprobe	process	immutable	none
 CA-0637	goos/userspace/linux	hello	process	immutable	none
 CA-0638	goos/userspace/linux	helloPIE	process	immutable	none
 CA-0639	goos/userspace/linux	muslHello	process	immutable	none
-CA-0640	goos/userspace/log	component	process	immutable	TestEncodeConcurrentRecordsIntact
-CA-0641	goos/userspace/log	console	process	immutable	TestEncodeConcurrentRecordsIntact
+CA-0640	goos/userspace/log	component	process	immutable	none
+CA-0641	goos/userspace/log	console	process	immutable	none
 CA-0642	goos/userspace/network	LoopbackAddress	process	immutable	none
 CA-0643	goos/userspace/network	LoopbackPrefix	process	immutable	none
 CA-0644	goos/userspace/network	broadcastIPv4	process	immutable	none
@@ -755,7 +754,7 @@ CA-0756	goos/userspace/runtime/tls	blocks	thread	runtime	TestBlockLayout
 CA-0757	goos/userspace/runtime/tls	hostBlock	process	runtime	none
 CA-0758	goos/userspace/cmd/init	vfsReadPoolData	process	immutable	test-vfs-goroutine-acceptance
 CA-0759	goos/userspace/cmd/vfs	readPoolProbe	process	owned	test-vfs-goroutine-acceptance
-CA-0760	goos/userspace/vfs	validationReads	process	atomic	test-vfs-goroutine-acceptance
+CA-0760	goos/userspace/vfs	validationReads	process	owned	test-vfs-goroutine-acceptance
 CA-0761	goos/userspace/cmd/init	fatalEntered	process	owned	none
 CA-0800	goos/userspace/cmd/init	filesystemRequests	process	lock	TestOwnedVFSAbsoluteDeadlineBeforeAndAfterSend
 CA-0801	goos/userspace/cmd/shell	filesystemRequests	process	lock	TestOwnedVFSCompletedWorkWithheldReplyStillQuarantines

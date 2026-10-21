@@ -299,7 +299,7 @@ returns false; nothing is retried.
 
 | ID | Symbol | Owner | Blocks / allocates / calls back | Synchronization and visibility | Why | Cancellation, peer death, partial I/O, timeout, exit | Test |
 |---|---|---|---|---|---|---|---|
-| CA-0640, CA-0641 | `component`, `console` | process | No | Written by `Init`, then read | Identity of the component | None | `TestEncodeConcurrentRecordsIntact` |
+| CA-0640, CA-0641 | `component`, `console` | process | No | Written by `Init`, then read | Identity of the component | None | none: `TestEncodeConcurrentRecordsIntact` passes its own component and reads neither |
 
 ## `startup`
 
@@ -312,22 +312,24 @@ passes and is Single-owner per template. `equals` (CA-0702) and `magic`
 
 ## `fetchtransport`
 
-An `Adapter` drives the command's TCP session, so it is Single-owner, and so
-are the connections and outputs it returns. Its request, reply, path buffer
-and file buffer are fields of the Adapter; the package has no package-level
-variables. Name resolution goes through `utility.CallResolver` and is
-Concurrent-safe.
+An `Adapter` is a process singleton: call `New` at most once per process.
+Every Adapter uses utility's process-wide TCP session, its first transmit
+slot and `TCPCall`, which drops replies meant for other requests, and `New`
+maps the session's windows again without unmapping the old ones. Moving the
+request, reply, path and file buffers into the Adapter therefore does not
+make two Adapters independent. The Adapter, its connections and its outputs
+belong to the goroutine that runs `main`, since `ConnectTLS` uses utility's
+current line. `fetch` and `trust` each call `New` once. Name resolution goes
+through `utility.CallResolver` and is Concurrent-safe.
 
 ## `exec`
 
 The launch protocol codecs and builders are Independent instances safe.
-`ArchiveMember` and `LocateImage` are Unusable concurrently (temporary): the
-member name is built in a package buffer and returned. Only PID 1's single
-service loop calls them. The fix is a caller-owned buffer.
-
-| ID | Symbol | Owner | Blocks / allocates / calls back | Synchronization and visibility | Why | Cancellation, peer death, partial I/O, timeout, exit | Test |
-|---|---|---|---|---|---|---|---|
-| CA-0617 | `memberName` | process | No | Owned by PID 1's service loop | A 4 KiB local would be heap-allocated on every launch | None | none: single caller, documented |
+`LocateImage` and `ArchiveExtent` are Concurrent-safe: they compare the
+archive prefix and the rest of the path as two parts
+(`initramfs.ExtentUnder`) and keep no buffer. The package has no
+package-level variables. Tests: `TestLocateImageNamesTheBytesOfAnExecutable`,
+`TestExtentUnderMatchesTheJoinedName`.
 
 ## Runtime packages
 
@@ -365,7 +367,7 @@ need review. No full audit of these packages has been completed here.
 | Package | Class of the exported API | Notes |
 |---|---|---|
 | `wait` | Concurrent-safe | `Any` and `Sleep` keep nothing between calls; the caller owns the interest array. |
-| `fsproto` | Concurrent-safe | Codecs over a caller's message, cache and name buffer; `Serve` works on the caller's volume. Test: `TestCodecConcurrentCallerBuffers`. |
+| `fsproto` | Concurrent-safe for distinct messages, name buffers and caches | A cache allows one exchange in flight, because names longer than the inline limit share its name page. `Serve` is as safe as its volume; fat32 runs one service loop. Test: `TestCodecConcurrentCallerBuffers`, inline names only. |
 | `terminal` | Independent instances safe | `Output` batches into caller storage and hands a whole batch to its sink; `Parser` keeps per-instance state. Test: `TestIndependentOutputsAndParsers`. |
 | `nativefiles` | Independent instances safe | A `Files` owns its `Bulk`; requests go through `utility`. |
 | `tlsclient` | Independent instances safe | A client per connection; `Roots` is immutable once loaded. `LoadSystemRoots` uses the caller's Bulk. |
@@ -377,7 +379,7 @@ need review. No full audit of these packages has been completed here.
 | `editor`, `filemanager`, `viewer`, `tui`, `fsdisplay` | Independent instances safe | Screen state per instance; output through a `terminal.Output`. `tui.DefaultTheme` (CA-0707) is immutable by convention. |
 | `network`, `netdev`, `netapi`, `tcpapi`, `udpapi`, `tcpdispatch`, `tcpserve`, `udpserve`, `tcpupstream`, `upstream` | Independent instances safe | Codecs are Concurrent-safe; stacks, pools and dispatch tables are objects run by one service loop. |
 | `dns`, `dnswire`, `dnsq`, `dnstcp`, `resolvapi`, `hostname` | Independent instances safe | The resolver cache is a `dns` object owned by the resolver service's loop; codecs are Concurrent-safe. |
-| `vfs`, `block`, `fat32`, `partition`, `safesave` | Independent instances safe | Volume, mount and save state per object, run by one service loop or one save. |
+| `vfs`, `block`, `fat32`, `partition`, `safesave` | Independent instances safe | Volume, mount and save state per object, run by one service loop or one save. In `vfs`, the acceptance fixture's `validationReads` (CA-0760) keeps its arms for the owner only; the worker gate uses atomics and channels that `initOnce` publishes before the first plan reaches a worker. |
 | `config`, `release`, `commands`, `truststate`, `truststore`, `trustupdate`, `remotepolicy`, `httpwire`, `fetch`, `sshserver`, `tty`, `init`, `linux` | Concurrent-safe codecs and policy, or Independent instances safe objects | Package-level variables are immutable tables and error values. |
 
 ## Programs

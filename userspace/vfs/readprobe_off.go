@@ -26,4 +26,4 @@ func (service *Service) ValidationReadLocalOverlap() bool   { return false }
 func (service *Service) ValidationPersistentActive() bool   { return false }
 func (service *Service) ValidationPersistentTimedOut() bool { return false }
 func (service *Service) ValidationPersistentDone() bool     { return false }
-func (service *Service) ValidationLocalEntered() uint32 { return 0 }
+func (service *Service) ValidationLocalEntered() uint32     { return 0 }
