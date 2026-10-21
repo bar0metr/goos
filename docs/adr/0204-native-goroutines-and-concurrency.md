@@ -215,7 +215,10 @@ read runs, that a write and a sync wait behind that read, that a client which
 dies with a ReadInto pending leaves no mapping, and that 4,096 further reads
 leave the VFS heap on a plateau. The VFS reports its events to PID 1 as
 control notifications, since the kernel accepts a reply only for a pending
-request. Ordinary validation images leave the fixture out.
+request. Ordinary validation images leave the fixture out. `make
+test-pve-goroutines VALIDATION=1 VFS_PROBE=1` boots that image under KVM on
+eight processors; the run on 2026-10-21 passed the fixture and every goprobe
+check, with an eight-thread compute speedup of 2.9 to 4.4 over one thread.
 
 Building the fixture found a separate gap. The standard native target keeps
 TinyGo's UEFI `putchar`, which dereferences the absent firmware table, so a
