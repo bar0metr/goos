@@ -1,7 +1,7 @@
 # Userspace library caller audit
 
-This audit covers 63 library packages at `97c0d25`. Follow-up changes remove
-shared exec name scratch, reject a false overlap result in the VFS probe,
+This audit covers 63 library packages at `97c0d25`. The baseline already removes shared exec name scratch. Later fixes reject
+a false overlap result in the VFS probe,
 stop crypto probes from replacing process entropy, and prevent competing
 saves from taking over another save's temporary file. The contract summary
 and variable inventory live in [native-concurrency-audit.md](native-concurrency-audit.md).
@@ -22,13 +22,15 @@ internals.
 
 Two objects sharing a Bulk, Stack, Resolver, transport, sink or temporary
 pathname do not satisfy I merely because their struct addresses differ.
-Callbacks on an I object run synchronously and must not reenter that object.
+Callbacks must not start concurrent or otherwise unsupported operations on
+the same instance. Designed synchronous visitor and reentry protocols, such
+as Finder traversal, remain valid.
 
 ## Caller matrix
 
 | Package | Class | Production callers and ownership boundary |
 |---|---|---|
-| `admincmd` | C helpers; I Finder; O native commands | date/find/grep/head/hexdump/tail/wc use the main output line and path scratch. Finder owns Files and callbacks. |
+| `admincmd` | C helpers; I Finder; O native commands | Native LineArguments uses main-owned path scratch; NativeOutput writes records through utility.Write. Finder and file lifetimes are owner-sequenced. |
 | `block` | C codecs; I Service | block, fat32, init, virtio-blk and fsck-fat run serially. Reply.Data borrows Service.buffer. |
 | `commands` | C | init, shell and command manifests read metadata after startup. Lookup/append targets belong to the caller. |
 | `config` | C codecs; I Store/Client | configd, init, netd, resolved, shell, logd and remoted use service-owned transports. PersistStore inherits safesave pathname ownership. |
@@ -42,7 +44,7 @@ Callbacks on an I object run synchronously and must not reenter that object.
 | `exec` | C codecs/lookups; I builders | init and shell build launches. ArchiveExtent/LocateImage keep no shared name buffer. PID 1 copies the immutable linuxPathVariable slice. |
 | `fat32` | I | fat32 and fsck-fat own FileSystem, Volume, Device and synchronous clock/check/repair callbacks. Distinct filesystems require distinct device scratch. |
 | `fetch` | C parsing; I Run | fetch and trustupdate own Environment, connection and output for the duration of Run. |
-| `fetchtransport` | O | fetch and trust create one Adapter each. All its sockets and outputs share utility's process TCP session and slot zero. Close is not concurrent cancellation. |
+| `fetchtransport` | O | fetch and trust create one Adapter each. Sockets share utility's process TCP session and slot zero; file outputs share the Adapter's Bulk, and stdout uses the standard output stream. Close is not concurrent cancellation. |
 | `filemanager` | I | gfm owns App, Panels, FS, Programs and Output. Borrowed panel views expire on mutation. |
 | `fsdisplay` | C | df, mount and filemanager supply formatting destinations. |
 | `fsproto` | C with separate caches | VFS serializes a whole persistent exchange. fat32 runs one loop. Long names share NamePage, so one cache allows one exchange in flight. |

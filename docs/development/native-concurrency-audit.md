@@ -3,11 +3,10 @@
 A native program may run several OS threads (ADR 0203) and, when built with
 the `goos_goroutines` tag, many goroutines scheduled over them. This document
 records intended ownership and concurrency contracts under `userspace/`.
-It is an inventory, not a completed library audit. The current hardening and
-host failure tests cover utility transactions and path-page reuse; other
-package classifications below remain provisional until their call graphs,
-callbacks, shared mappings and failure paths have been checked. A complete
-variable inventory is not proof of concurrent safety.
+The [caller audit](native-concurrency-callers.md) covers ownership, callbacks,
+shared storage and failure paths in all 63 library packages. Its bounded
+scope does not prove the entire native runtime or collector correct. A
+complete variable inventory alone is not proof of concurrent safety.
 
 The machine-readable part is
 [`native-concurrency-audit.tsv`](native-concurrency-audit.tsv): one row per
@@ -376,9 +375,9 @@ listed for inventory coverage, not re-audited by the utility changes.
 
 ## Other libraries
 
-The caller audit covers the 63 library packages listed below, including
+The [caller audit](native-concurrency-callers.md) covers all 63 library packages, including
 transitive dependencies, borrowed buffers, callbacks and teardown. Its
-baseline is `97c0d25`; subsequent fixes remove shared exec scratch, tighten
+baseline is `97c0d25`, which already removes shared exec scratch; later fixes tighten
 the read-pool probe and preserve temporary-file ownership. Package-local
 state alone does not establish safety. Independent objects must also own
 their writable buffers, transports, backing stores and sinks independently.
