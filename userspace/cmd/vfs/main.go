@@ -27,6 +27,7 @@ var (
 	consoleHandle        handle.ID
 	initialSessionHandle handle.ID
 	controlHandle        handle.ID
+	recoveryHandle       handle.ID
 	wire                 [ipc.WireMaxSize]byte
 	sessions             [maxSessions]uint64
 	sessionGenerations   [maxSessions]uint64
@@ -105,6 +106,10 @@ func userspaceMain() {
 	controlHandle, found = startupData.Handle("control")
 	if !found {
 		fatal("VFS_CONTROL_MISSING\n")
+	}
+	recoveryHandle, found = startupData.Handle("recovery")
+	if !found {
+		fatal("VFS_RECOVERY_MISSING\n")
 	}
 	imageHandle, found := startupData.Handle("image")
 	if !found {

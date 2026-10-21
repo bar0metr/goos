@@ -165,3 +165,36 @@ func TestPublishAndWithdrawControlRoundTrip(t *testing.T) {
 		t.Fatal("publish request without a correlation was encoded")
 	}
 }
+
+func TestReplaceControlCodec(t *testing.T) {
+	request, ok := ReplaceControlRequest(17, 22)
+	if !ok {
+		t.Fatal("encode")
+	}
+	if server, ok := DecodeReplaceControl(request); !ok || server != 17 {
+		t.Fatal("decode")
+	}
+	if _, ok := DecodeAddSession(request); ok {
+		t.Fatal("handoff decoded as AddSession")
+	}
+	if _, ok := ReplaceControlRequest(0, 22); ok {
+		t.Fatal("missing server accepted")
+	}
+	if _, ok := ReplaceControlRequest(17, 0); ok {
+		t.Fatal("missing correlation accepted")
+	}
+	for _, damage := range []func(*ipc.Message){
+		func(m *ipc.Message) { m.Kind = ipc.KindNotification },
+		func(m *ipc.Message) { m.Correlation = 0 },
+		func(m *ipc.Message) { m.HandleCount = 0 },
+		func(m *ipc.Message) { m.Handles[0] = 0 },
+		func(m *ipc.Message) { m.PayloadSize = 2 },
+		func(m *ipc.Message) { m.Version-- },
+	} {
+		bad := request
+		damage(&bad)
+		if _, ok := DecodeReplaceControl(bad); ok {
+			t.Fatal("malformed handoff accepted")
+		}
+	}
+}

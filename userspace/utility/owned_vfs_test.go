@@ -2,6 +2,7 @@ package utility
 
 import (
 	"bytes"
+	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
@@ -288,5 +289,68 @@ func TestVFSControlPollKeepsNoticesAndDropsStrays(t *testing.T) {
 	service.queued[7] = []ipc.Message{first}
 	if s.pollControlOn(7) || len(service.queued[7]) != 1 {
 		t.Fatal("polled a quarantined control endpoint")
+	}
+}
+
+// A busy persistent lane can outlive an ordinary control's budget. Its
+// quarantine must not prevent the independent supervisor recovery channel
+// from delivering the notice and acknowledging a drained control handoff.
+func TestIndependentRecoveryAfterBusyControlTimeout(t *testing.T) {
+	service := newScript()
+	s := newOwned(service, 10)
+	oldControl, recovery, freshControl := handle.ID(7), handle.ID(8), handle.ID(9)
+	request, _ := vfs.AddSessionRequest(55, 20)
+	service.status = kcall.StatusTimeout
+	if _, status, sent := s.controlOn(oldControl, &request, 2); status != kcall.StatusTimeout || !sent {
+		t.Fatal("busy accepted control did not time out")
+	}
+	// The old AddSession is ambiguous. Its client would be closed by PID 1;
+	// the request is never repeated on either new endpoint.
+	service.status = kcall.StatusOK
+	service.drained = kcall.StatusNotFound
+	lost, _ := vfs.FilesystemLostNotice(1)
+	service.queued[recovery] = []ipc.Message{lost}
+	if !s.pollControlOn(recovery) {
+		t.Fatal("independent notice path unavailable")
+	}
+	if generation, ok := s.takeLost(); !ok || generation != 1 {
+		t.Fatal("lost notice hidden by control quarantine")
+	}
+	oldWriterAlive := true
+	exitObserved := false
+	handedOff := false
+	service.drained = kcall.StatusOK
+	service.reply = func(m ipc.Message) ipc.Message {
+		if _, ok := vfs.DecodeReplaceControl(m); ok {
+			handedOff = true
+		} else if attach, ok := vfs.DecodeSetFilesystem(m); ok {
+			if oldWriterAlive || !exitObserved || !attach.Fenced || !handedOff {
+				t.Fatal("reattach before both fences")
+			}
+		} else {
+			t.Fatal("ambiguous control replayed")
+		}
+		reply, _ := vfs.AddSessionReply(vfs.StatusOK, m.Correlation)
+		return reply
+	}
+	rotate, _ := vfs.ReplaceControlRequest(77, 21)
+	if result, status, sent := s.controlOn(recovery, &rotate, 20); result != vfs.StatusOK || status != kcall.StatusOK || !sent {
+		t.Fatal("handoff failed")
+	}
+	// PID 1 kills the old writer and waits for its kernel exit event before
+	// constructing the new attachment. No unquarantine of oldControl occurs.
+	oldWriterAlive = false
+	exitObserved = true
+	attach, _ := vfs.SetFilesystemRequest(vfs.FilesystemAttach{Client: 88, Generation: 2, Fenced: exitObserved}, 22)
+	if result, status, sent := s.controlOn(freshControl, &attach, 20); result != vfs.StatusOK || status != kcall.StatusOK || !sent {
+		t.Fatal("fenced reattach failed")
+	}
+	late, _ := vfs.AddSessionReply(vfs.StatusOK, 20)
+	service.queued[oldControl] = []ipc.Message{late}
+	if s.pollControlOn(oldControl) || len(service.queued[oldControl]) != 1 {
+		t.Fatal("old control or its stale reply revived")
+	}
+	if len(service.sent) != 3 || service.sent[0] != oldControl || service.sent[1] != recovery || service.sent[2] != freshControl {
+		t.Fatalf("unexpected replay or route: %v", service.sent)
 	}
 }

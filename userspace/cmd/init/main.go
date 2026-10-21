@@ -241,7 +241,7 @@ func userspaceMain() {
 		// every slot is taken, the wait is bounded instead.
 		controlUnwatched := false
 		if controlUsable && count < len(interests) {
-			interests[count] = userwait.Interest{Handle: handle.ID(vfsControlHandle), Events: kcall.WaitReadable}
+			interests[count] = userwait.Interest{Handle: handle.ID(vfsRecovery[0]), Events: kcall.WaitReadable}
 			count++
 		} else {
 			controlUnwatched = controlUsable

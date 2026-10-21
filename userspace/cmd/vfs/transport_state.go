@@ -1,6 +1,8 @@
 package main
 
 import (
+	"goos/kernel/handle"
+	"goos/kernel/ipc"
 	"goos/kernel/ramfs"
 	supervisor "goos/userspace/init"
 	"sync/atomic"
@@ -55,4 +57,23 @@ func remainingExchange(start, now, duration uint64) (uint64, bool) {
 		return 0, false
 	}
 	return duration - (now - start), true
+}
+
+// retireControl runs at a drained barrier. Earlier admitted requests have
+// finished; unread requests must not execute after the endpoint handoff.
+// Release their received attachments, then retire the old endpoint. Its
+// client closes the other side after the handoff acknowledgement, dropping
+// stale replies without replaying any ambiguous operation.
+func retireControl(old, next handle.ID, receive func(handle.ID) (ipc.Message, ipc.Status), close func(handle.ID)) handle.ID {
+	for {
+		message, status := receive(old)
+		if status != ipc.StatusOK {
+			break
+		}
+		for index := 0; index < int(message.HandleCount); index++ {
+			close(message.Handles[index])
+		}
+	}
+	close(old)
+	return next
 }

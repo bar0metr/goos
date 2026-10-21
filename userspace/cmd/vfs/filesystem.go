@@ -133,7 +133,7 @@ func notifyFilesystemLost(generation uint64) {
 	if ok {
 		size, ok = ipc.Encode(notice, wire[:])
 	}
-	if !ok || sys.IPCSend(controlHandle, wire[:size]) != kcall.StatusOK {
+	if !ok || sys.IPCSend(recoveryHandle, wire[:size]) != kcall.StatusOK {
 		syslog.Error("filesystem replacement not requested")
 	}
 }
@@ -179,4 +179,41 @@ func attachFilesystem(attach vfs.FilesystemAttach) vfs.Status {
 		write("[WARN] no persistent storage\n")
 	}
 	return vfs.StatusBackendError
+}
+
+// pollRecovery runs at the same drained owner boundary as ordinary controls.
+// Its endpoint is independent of a control exchange PID 1 may have abandoned
+// while a persistent read occupied the execution lane.
+func pollRecovery() bool {
+	message, status := receiveNow(uint64(recoveryHandle))
+	if status == ipc.StatusNotFound {
+		return false
+	}
+	if status != ipc.StatusOK {
+		fatal("VFS_RECOVERY_FAILED\n")
+	}
+	return processRecovery(message)
+}
+
+func processRecovery(message ipc.Message) bool {
+	server, valid := vfs.DecodeReplaceControl(message)
+	result := vfs.StatusInvalidArgument
+	if valid {
+		// Older admitted controls have retired before this barrier. Do not
+		// execute unread old controls, even if their requests transferred
+		// handles: PID 1 cannot know whether they completed. Release their
+		// attachments and close the endpoint holding any stale replies.
+		controlHandle = retireControl(controlHandle, server, func(endpoint handle.ID) (ipc.Message, ipc.Status) {
+			return receiveNow(uint64(endpoint))
+		}, func(id handle.ID) { sys.HandleClose(id) })
+		result = vfs.StatusOK
+	} else {
+		closeAttached(message.Handles[:message.HandleCount])
+	}
+	reply, ok := vfs.AddSessionReply(result, message.Correlation)
+	if !ok {
+		fatal("VFS_RECOVERY_REPLY_FAILED\n")
+	}
+	send(uint64(recoveryHandle), reply)
+	return true
 }

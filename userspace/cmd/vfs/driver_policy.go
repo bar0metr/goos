@@ -8,8 +8,8 @@ import (
 
 const (
 	// The runtime poller needs its own wake interest; the owner needs control
-	// and completion interests; the single Remote lane may wait on one more.
-	concurrentSessionLimit = kcall.WaitAnyMaxObjects - 4
+	// recovery and completion interests; the single Remote lane may wait on one more.
+	concurrentSessionLimit = kcall.WaitAnyMaxObjects - 5
 	maxBulkObject          = uint64(64 << 20)
 )
 

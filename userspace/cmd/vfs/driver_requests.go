@@ -16,6 +16,7 @@ const (
 	driverControl
 	driverClose
 	driverOffline
+	driverRecovery
 )
 
 // driverRequest holds the wire message and resources the owner must retain

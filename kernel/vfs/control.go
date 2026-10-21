@@ -32,6 +32,7 @@ const (
 	// operationFilesystemLost is the VFS telling PID 1 that the filesystem
 	// service it attached last left an exchange unanswered.
 	operationFilesystemLost = byte(9)
+	operationReplaceControl = byte(10)
 )
 
 // SessionNotice hands a client of a restarted VFS the client end of a new
@@ -213,4 +214,25 @@ func DecodeAddSessionReply(message ipc.Message) (Status, bool) {
 		return 0, false
 	}
 	return Status(message.Payload[0]), true
+}
+
+// ReplaceControlRequest hands VFS a new supervisor control endpoint over its
+// independent recovery endpoint. VFS installs it only at a drained barrier,
+// discards unread old controls and closes the old endpoint before replying.
+// PID 1 must not replay the old endpoint's ambiguous operations.
+func ReplaceControlRequest(server handle.ID, correlation uint64) (ipc.Message, bool) {
+	if server == 0 || correlation == 0 {
+		return ipc.Message{}, false
+	}
+	return ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest,
+		Correlation: correlation, Payload: [ipc.MaxPayload]byte{operationReplaceControl}, PayloadSize: 1,
+		Handles: [ipc.MaxAttachedHandles]handle.ID{server}, HandleCount: 1}, true
+}
+
+func DecodeReplaceControl(message ipc.Message) (handle.ID, bool) {
+	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindRequest || message.Correlation == 0 ||
+		message.PayloadSize != 1 || message.Payload[0] != operationReplaceControl || message.HandleCount != 1 || message.Handles[0] == 0 {
+		return 0, false
+	}
+	return message.Handles[0], true
 }

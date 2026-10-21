@@ -14,6 +14,7 @@ import (
 	syslog "goos/userspace/log"
 	"goos/userspace/partition"
 	"goos/userspace/runtime/sys"
+	"goos/userspace/utility"
 )
 
 // The FAT32 filesystem service runs in its own process between the VFS and the
@@ -47,6 +48,10 @@ var (
 	// cacheFence decides whether an attach may state that no earlier
 	// filesystem service can still write the file cache.
 	cacheFence filesystemFence
+	// vfsRecovery is independent of ordinary VFS controls. A timed-out
+	// AddSession or Sync must not hide a filesystem replacement notice.
+	vfsRecovery         [2]uint64
+	vfsRecoveryRequests utility.VFSRequests
 	// filesystemChecker is the one application temporarily holding the
 	// exclusive filesystem block slice.
 	filesystemChecker uint64
@@ -102,6 +107,15 @@ func renewFilesystemChannels(spec *supervisor.LaunchSpec) bool {
 // the services started next find /state in place. fenced states that every
 // earlier instance has exited; the VFS needs it to end a cache quarantine.
 func attachFilesystem(fenced bool) {
+	// The old service can exit before its lost notice reaches PID 1. A
+	// quarantined ordinary control still needs a fresh endpoint before any
+	// attachment is sent, even when its notice has not been consumed yet.
+	if !filesystemRequests.PollControl(handle.ID(vfsControlHandle)) && !replaceVFSControl() {
+		sys.HandleClose(filesystemClient)
+		filesystemClient = 0
+		filesystemAttached = false
+		return
+	}
 	client := filesystemClient
 	filesystemClient = 0
 	filesystemAttached = false
@@ -132,8 +146,11 @@ func attachFilesystem(fenced bool) {
 // pollFilesystemNotices takes the replacement notices the VFS sent on its
 // control endpoint, and reports whether that endpoint may be waited on.
 func pollFilesystemNotices() bool {
-	usable := filesystemRequests.PollControl(handle.ID(vfsControlHandle))
-	if generation, lost := filesystemRequests.FilesystemLost(); lost {
+	if vfsRecovery[0] == 0 {
+		return false
+	}
+	usable := vfsRecoveryRequests.PollControl(handle.ID(vfsRecovery[0]))
+	if generation, lost := vfsRecoveryRequests.FilesystemLost(); lost {
 		replaceFilesystem(generation)
 	}
 	return usable
@@ -147,6 +164,9 @@ func pollFilesystemNotices() bool {
 func replaceFilesystem(generation uint64) {
 	switch cacheFence.lost(generation) {
 	case filesystemLostStop:
+		if !replaceVFSControl() {
+			return
+		}
 		syslog.Warn("filesystem service stalled; replacing it")
 		mark("FAT32_STALL_REPLACING\n")
 		if filesystemProcessHandle == 0 || sys.ProcessKill(filesystemProcessHandle) != kcall.StatusOK {
@@ -155,6 +175,9 @@ func replaceFilesystem(generation uint64) {
 			syslog.Warn("filesystem service not stopped")
 		}
 	case filesystemLostAwait:
+		if !replaceVFSControl() {
+			return
+		}
 		syslog.Warn("filesystem service gone with the file cache quarantined")
 	case filesystemLostExhausted:
 		syslog.Error("filesystem cache stays quarantined", syslog.Str("reason", "recovery limit reached"))
@@ -172,5 +195,35 @@ func injectFilesystemFault() bool {
 	filesystemProcessHandle = 0
 	syslog.Warn("filesystem fault injected")
 	mark("FAT32_FAULT_INJECTED\n")
+	return true
+}
+
+// replaceVFSControl retires any unresolved ordinary control exchange without
+// replaying it. The independent recovery endpoint orders the handoff after
+// admitted work drains. Only its acknowledgement permits PID 1 to use the
+// new client; a lost acknowledgement leaves both paths fail-closed.
+func replaceVFSControl() bool {
+	var pair [2]uint64
+	if !createChannel(&pair) {
+		return false
+	}
+	correlation++
+	request, ok := vfs.ReplaceControlRequest(handle.ID(pair[1]), correlation)
+	if !ok {
+		closePair(pair)
+		return false
+	}
+	result, status, sent := vfsRecoveryRequests.Control(handle.ID(vfsRecovery[0]), &request, attachDeadline)
+	if status != kcall.StatusOK || result != vfs.StatusOK {
+		if !sent {
+			sys.HandleClose(handle.ID(pair[1]))
+		}
+		sys.HandleClose(handle.ID(pair[0]))
+		syslog.Error("vfs control replacement failed")
+		return false
+	}
+	sys.HandleClose(handle.ID(vfsControlHandle))
+	vfsControlHandle = pair[0]
+	mark("VFS_CONTROL_REPLACED_OK\n")
 	return true
 }

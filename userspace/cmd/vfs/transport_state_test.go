@@ -1,7 +1,10 @@
 package main
 
 import (
+	"goos/kernel/handle"
+	"goos/kernel/ipc"
 	"goos/kernel/ramfs"
+	"goos/kernel/vfs"
 	supervisor "goos/userspace/init"
 	"testing"
 )
@@ -85,5 +88,27 @@ func TestFencedCacheRecoveryStopsAtSupervisorBound(t *testing.T) {
 		if allowed, _ := state.admit(true); allowed || !state.quarantined.Load() || state.failure() != ramfs.StatusTimeout {
 			t.Fatal("a fenced attach bypassed the recovery bound")
 		}
+	}
+}
+
+func TestControlHandoffDiscardsUnreadAttachmentsWithoutReplay(t *testing.T) {
+	add, _ := vfs.AddSessionRequest(51, 2)
+	attach, _ := vfs.SetFilesystemRequest(vfs.FilesystemAttach{Client: 52, Generation: 1}, 3)
+	sync, _ := vfs.SyncRequest(4)
+	queue := []ipc.Message{add, attach, sync}
+	var closed []handle.ID
+	current := retireControl(10, 20, func(endpoint handle.ID) (ipc.Message, ipc.Status) {
+		if endpoint != 10 {
+			t.Fatal("drained new endpoint")
+		}
+		if len(queue) == 0 {
+			return ipc.Message{}, ipc.StatusNotFound
+		}
+		message := queue[0]
+		queue = queue[1:]
+		return message, ipc.StatusOK
+	}, func(id handle.ID) { closed = append(closed, id) })
+	if current != 20 || len(queue) != 0 || len(closed) != 3 || closed[0] != 51 || closed[1] != 52 || closed[2] != 10 {
+		t.Fatalf("handoff current=%d closed=%v unread=%d", current, closed, len(queue))
 	}
 }

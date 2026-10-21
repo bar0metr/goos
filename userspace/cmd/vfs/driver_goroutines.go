@@ -19,12 +19,13 @@ const (
 )
 
 type concurrentDriver struct {
-	pool           *vfsservice.ReadPool
-	requests       driverRequests
-	completionRead handle.ID
-	controlPending bool
-	offlinePending bool
-	nextSession    int
+	pool            *vfsservice.ReadPool
+	requests        driverRequests
+	completionRead  handle.ID
+	controlPending  bool
+	recoveryPending bool
+	offlinePending  bool
+	nextSession     int
 }
 
 var readDriver concurrentDriver
@@ -70,9 +71,15 @@ func (driver *concurrentDriver) run() {
 		var indexes [userwait.MaxObjects]int
 		interests[0] = userwait.Interest{Handle: driver.completionRead, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 		count, controlIndex := 1, -1
-		if driver.pool.Available() != 0 && !driver.controlPending {
+		if driver.pool.Available() != 0 && !driver.controlPending && !driver.recoveryPending {
 			controlIndex = count
 			interests[count] = userwait.Interest{Handle: controlHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+			count++
+		}
+		recoveryIndex := -1
+		if driver.pool.Available() != 0 && !driver.recoveryPending {
+			recoveryIndex = count
+			interests[count] = userwait.Interest{Handle: recoveryHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 			count++
 		}
 		firstSession := count
@@ -117,6 +124,15 @@ func (driver *concurrentDriver) run() {
 				driver.controlPending = true
 			} else if status != ipc.StatusNotFound {
 				fatal("VFS_CONTROL_FAILED\n")
+			}
+		}
+		if recoveryIndex >= 0 && ready.ReadyMask&(uint64(1)<<recoveryIndex) != 0 && driver.pool.Available() != 0 {
+			message, status := receiveNow(uint64(recoveryHandle))
+			if status == ipc.StatusOK {
+				driver.admitBarrier(driverRecovery, -1, message)
+				driver.recoveryPending = true
+			} else if status != ipc.StatusNotFound {
+				fatal("VFS_RECOVERY_FAILED\n")
 			}
 		}
 		for interest := firstSession; interest < count && driver.pool.Available() != 0; interest++ {
@@ -280,6 +296,9 @@ func (driver *concurrentDriver) complete() {
 			}
 		case driverOffline:
 			driver.offlinePending = false
+		case driverRecovery:
+			processRecovery(request.message)
+			driver.recoveryPending = false
 		}
 		if !driver.requests.release(completion.Ticket) || !driver.pool.Retire(completion.Ticket) {
 			fatal("VFS_RETIRE_FAILED\n")

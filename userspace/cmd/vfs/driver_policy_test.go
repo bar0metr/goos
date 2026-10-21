@@ -85,7 +85,7 @@ func TestSessionGenerationAndWaitBudget(t *testing.T) {
 	if !sameSession(7, 2, 7, 2) || sameSession(7, 1, 7, 2) || sameSession(7, 2, 8, 2) || sameSession(0, 1, 0, 1) {
 		t.Fatal("stale session accepted")
 	}
-	if concurrentSessionLimit+2+1+1 != kcall.WaitAnyMaxObjects {
+	if concurrentSessionLimit+3+1+1 != kcall.WaitAnyMaxObjects {
 		t.Fatal("owner interests, remote waiter and poller wake exceed kernel wait budget")
 	}
 }
