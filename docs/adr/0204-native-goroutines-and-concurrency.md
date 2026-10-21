@@ -179,7 +179,9 @@ available through WaitAny and IRQTake.
 
 Two goroutines that wait on the same log or line form an aliased aggregate,
 which the poller resolves with one-tick probes rather than one kernel wait.
-The complete service-library wait audit remains unfinished.
+The [caller audit](../development/native-concurrency-callers.md) covers the
+service-library ownership boundaries. Separate native G log-event and IRQ
+fixtures remain a validation gap: goprobe has neither capability.
 
 ## Collector integration
 
@@ -222,7 +224,12 @@ after clearing the inner regions. The four-worker run included 15 peer
 collector rounds and 26 samples of the held worker running on another CPU.
 The reclamation assertion allows conservative retention and requires at least
 8 KiB back per round; this run reclaimed 22,400 bytes per round. This covers
-native arena transitions, not suspended goroutine stack plans or KVM acceptance.
+native arena transitions, not suspended goroutine stack plans. The combined
+KVM run on eight processors also passed both probes: 160 requests gave up,
+120 collections completed, and the four-worker probe recorded 30 cross-CPU
+samples. The [validation report](../development/native-concurrency-validation.md)
+records the tested revision, runtime and VFS recovery checks, measurements
+and remaining evidence limits.
 
 The first KVM run on eight processors stopped in `goprobe threads`: a
 processor whose last dispatched call was ThreadSuspend spun on the process
