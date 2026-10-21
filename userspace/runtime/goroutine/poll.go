@@ -64,6 +64,16 @@ func (c *Cancel) Canceled() bool {
 // other goroutines. Called outside a goroutine, on a scheduler stack, it
 // waits on the kernel directly.
 func Wait(interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int, deadline int64, cancel *Cancel) (uint64, kcall.Status) {
+	if interests == nil || count < 0 || count > MaxWaiters {
+		return 0, kcall.StatusInvalidArgument
+	}
+	if cancel != nil && cancel.Canceled() {
+		return 0, StatusCanceled
+	}
+	return waitPlain(interests, count, deadline, cancel, plainWaitOps{probe: sys.WaitAny, park: parkPlain})
+}
+
+func parkPlain(interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int, deadline int64, cancel *Cancel) (uint64, kcall.Status) {
 	return parkWait(interests, nil, count, deadline, cancel)
 }
 
