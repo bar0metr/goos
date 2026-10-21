@@ -235,9 +235,38 @@ func StreamWrite(stream handle.ID, data []byte) (int, kcall.Status) {
 	return int(w.transferWire[2]), result
 }
 
-// StreamWait waits up to timeout ticks for the stream to become ready.
+// StreamWait waits up to timeout finite ticks for either endpoint's native
+// stream condition. It requires only capability.Wait, rejects timeout zero
+// with InvalidArgument, and reports PeerDied directly. It remains a native
+// thread-blocking wait: WaitAny cannot preserve this rights/closure contract.
+// Goroutines consuming a known endpoint can use StreamWaitRead/StreamWaitWrite.
 func StreamWait(stream handle.ID, timeout uint64) kcall.Status {
 	return status(streamWait(uint64(stream), timeout))
+}
+
+// StreamWaitRead observes a reading endpoint through WaitAny, parking only the
+// goroutine when the scheduler handles the wait. It requires Read|Wait, narrower
+// authority than StreamWait's Wait-only contract. Timeout zero polls;
+// WaitAnyInfiniteTimeout waits without a deadline. Peer closure is readiness
+// (OK), not PeerDied: StreamRead reports PeerDied after buffered data is drained.
+// Readiness reserves no bytes, so a concurrent reader may consume them first.
+func StreamWaitRead(stream handle.ID, timeout uint64) kcall.Status {
+	return streamWaitReady(stream, kcall.WaitReadable|kcall.WaitPeerClosed, timeout)
+}
+
+// StreamWaitWrite is StreamWaitRead for a writing endpoint, requiring
+// Write|Wait. Timeout zero polls and WaitAnyInfiniteTimeout has no deadline.
+// Peer closure returns OK readiness; the following StreamWrite reports
+// PeerDied. Readiness reserves no buffer space for a concurrent writer.
+func StreamWaitWrite(stream handle.ID, timeout uint64) kcall.Status {
+	return streamWaitReady(stream, kcall.WaitWritable|kcall.WaitPeerClosed, timeout)
+}
+
+func streamWaitReady(stream handle.ID, events kcall.WaitEvent, timeout uint64) kcall.Status {
+	var interests [kcall.WaitAnyMaxObjects]Interest
+	interests[0] = Interest{Handle: stream, Events: events}
+	_, result := WaitAny(&interests, 1, timeout)
+	return result
 }
 
 // HandleClose closes a handle.

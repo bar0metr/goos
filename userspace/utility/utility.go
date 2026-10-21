@@ -310,7 +310,8 @@ func ReadInput(target []byte) (uint64, int) {
 func ReadInputWithin(target []byte, deadline uint64) (uint64, int) {
 	count, status := sys.StreamRead(handle.ID(stdinHandle), target)
 	if status == kcall.StatusResourceExhausted {
-		waitStatus := sys.StreamWait(handle.ID(stdinHandle), deadline)
+		// Peer closure counts as ready; the next read reports PeerDied.
+		waitStatus := sys.StreamWaitRead(handle.ID(stdinHandle), deadline)
 		if waitStatus == kcall.StatusTimeout {
 			return uint64(kcall.StatusResourceExhausted), 0
 		}
@@ -542,7 +543,8 @@ func (nativeStream) write(target uint64, value []byte) int {
 			return len(value)
 		}
 		if status == kcall.StatusResourceExhausted {
-			if sys.StreamWait(handle.ID(target), streamWaitDeadline) != kcall.StatusOK {
+			// Peer closure counts as ready; the next write reports PeerDied.
+			if sys.StreamWaitWrite(handle.ID(target), streamWaitDeadline) != kcall.StatusOK {
 				sys.Exit(2)
 			}
 			continue
