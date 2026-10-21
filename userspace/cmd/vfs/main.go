@@ -160,8 +160,8 @@ func pollControl() bool {
 
 // processControl runs only on the namespace owner after earlier work drains.
 func processControl(message ipc.Message) bool {
-	if client, ok := vfs.DecodeSetFilesystem(message); ok {
-		reply, encoded := vfs.AddSessionReply(attachFilesystem(client), message.Correlation)
+	if attach, ok := vfs.DecodeSetFilesystem(message); ok {
+		reply, encoded := vfs.AddSessionReply(attachFilesystem(attach), message.Correlation)
 		if !encoded {
 			fatal("VFS_CONTROL_REPLY_FAILED\n")
 		}

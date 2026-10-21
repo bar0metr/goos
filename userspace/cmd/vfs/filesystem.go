@@ -34,6 +34,8 @@ type filesystemTransport struct {
 	availability filesystemAvailability
 	// applied is owner-only: the offline notification has been handled.
 	applied bool
+	// generation is owner-only: the attachment PID 1 named for this client.
+	generation uint64
 }
 
 func (transport *filesystemTransport) Exchange(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
@@ -114,28 +116,45 @@ func applyFilesystemOffline() {
 	}
 	service.DetachFilesystem()
 	if filesystemState.availability.quarantined.Load() {
-		syslog.Warn("filesystem cache quarantined; online recovery unavailable")
+		syslog.Warn("filesystem cache quarantined; replacement requested")
+		notifyFilesystemLost(filesystemState.generation)
 	} else {
 		syslog.Warn("filesystem service gone")
 	}
 }
 
+// notifyFilesystemLost asks PID 1 to replace the filesystem service of the
+// attachment generation. Closing the endpoint does not stop a service that
+// still holds the cache mapping; PID 1 ends it and attaches a new one behind
+// a fence. A notice that cannot be sent leaves the cache quarantined.
+func notifyFilesystemLost(generation uint64) {
+	notice, ok := vfs.FilesystemLostNotice(generation)
+	var size int
+	if ok {
+		size, ok = ipc.Encode(notice, wire[:])
+	}
+	if !ok || sys.IPCSend(controlHandle, wire[:size]) != kcall.StatusOK {
+		syslog.Error("filesystem replacement not requested")
+	}
+}
+
 // attachFilesystem is an owner-side barrier. An uncertain old cache writer
-// is not fenced merely by a new endpoint or correlation: refuse reattachment
-// for this instance instead of sharing its cache with a new filesystem.
-func attachFilesystem(client handle.ID) vfs.Status {
-	if filesystemState.availability.quarantined.Load() {
-		sys.HandleClose(client)
+// is not fenced merely by a new endpoint or correlation: while the cache is
+// quarantined, only an attach PID 1 sends behind its fence is accepted.
+func attachFilesystem(attach vfs.FilesystemAttach) vfs.Status {
+	allowed, recovered := filesystemState.availability.admit(attach.Fenced)
+	if !allowed {
+		sys.HandleClose(attach.Client)
+		syslog.Warn("filesystem reattach refused", syslog.Str("reason", "cache quarantined without a fence"))
 		return vfs.StatusBackendError
 	}
 	if filesystem != 0 {
 		sys.HandleClose(filesystem)
 	}
-	filesystem = client
-	filesystemState.endpoint = client
+	filesystem = attach.Client
+	filesystemState.endpoint = attach.Client
 	filesystemState.correlation = 0
-	filesystemState.availability.reason.Store(0)
-	filesystemState.availability.quarantined.Store(false)
+	filesystemState.generation = attach.Generation
 	filesystemState.applied = false
 	first := !service.PersistentMounted()
 	if service.AttachFilesystem(&filesystemState) {
@@ -148,6 +167,10 @@ func attachFilesystem(client handle.ID) vfs.Status {
 		} else {
 			mark("FAT32_REATTACHED_OK\n")
 			syslog.Info("filesystem service reattached", syslog.Str("path", "/persist"))
+		}
+		if recovered {
+			mark("FILE_CACHE_RECOVERED_OK\n")
+			syslog.Info("filesystem cache recovered behind a fence")
 		}
 		return vfs.StatusOK
 	}

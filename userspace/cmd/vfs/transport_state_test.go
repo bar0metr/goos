@@ -39,3 +39,28 @@ func TestExchangeDeadlineIsNotRenewedByStaleReplies(t *testing.T) {
 		}
 	}
 }
+
+func TestQuarantinedCacheAdmitsOnlyFencedAttach(t *testing.T) {
+	state := &filesystemAvailability{}
+	if allowed, recovered := state.admit(false); !allowed || recovered {
+		t.Fatal("an unfenced attach of a healthy cache was refused")
+	}
+	state.fail(ramfs.StatusTimeout, true)
+	if allowed, _ := state.admit(false); allowed || !state.quarantined.Load() || state.failure() != ramfs.StatusTimeout {
+		t.Fatal("an unfenced attach lifted the quarantine")
+	}
+	if allowed, recovered := state.admit(true); !allowed || !recovered {
+		t.Fatal("a fenced attach did not end the quarantine")
+	}
+	if state.quarantined.Load() || state.failure() != ramfs.StatusOK {
+		t.Fatal("a fenced attach kept the old failure")
+	}
+}
+
+func TestFailureWithoutQuarantineAdmitsAnyAttach(t *testing.T) {
+	state := &filesystemAvailability{}
+	state.fail(ramfs.StatusPeerDied, false)
+	if allowed, recovered := state.admit(false); !allowed || recovered || state.failure() != ramfs.StatusOK {
+		t.Fatal("an ordinary restart needs no fence")
+	}
+}

@@ -138,3 +138,44 @@ func TestSerialBatchAppliesOfflineBeforeEveryReadyAction(t *testing.T) {
 		}
 	}
 }
+
+// A quarantined cache stays detached for an unfenced attach and comes back
+// for a fenced one, with the files the sessions opened before the timeout.
+func TestSerialBatchQuarantineRecoversBehindFence(t *testing.T) {
+	service, transport, files, before := serialBatchFixture(t)
+	transport.timeout = fsproto.OperationWrite
+	dispatchSerialBatch(1<<1, 2, before, nil, func(int) {
+		service.Dispatch(1, vfs.Request{Operation: vfs.OperationWrite, Handle: files[0], Data: []byte("lost")})
+	})
+	before()
+	if !transport.availability.quarantined.Load() {
+		t.Fatal("accepted timeout did not quarantine cache")
+	}
+	// The replacement shares the same cache object, as the native one does.
+	replacement := &batchTransport{volume: transport.volume, cache: transport.cache}
+	attach := func(fenced bool) bool {
+		allowed, _ := transport.availability.admit(fenced)
+		return allowed && service.AttachFilesystem(replacement)
+	}
+	if attach(false) {
+		t.Fatal("unfenced attach reused a quarantined cache")
+	}
+	frozen := append([]byte(nil), transport.cache...)
+	if reply := service.Dispatch(2, vfs.Request{Operation: vfs.OperationWrite, Handle: files[1], Data: []byte("refused")}); reply.Status != vfs.StatusPeerDied || !bytes.Equal(transport.cache, frozen) {
+		t.Fatalf("write after a refused attach = %+v", reply)
+	}
+	if !attach(true) {
+		t.Fatal("fenced attach refused")
+	}
+	if reply := service.Dispatch(2, vfs.Request{Operation: vfs.OperationWrite, Handle: files[1], Data: []byte("recovered")}); reply.Status != vfs.StatusOK || reply.Size != 9 {
+		t.Fatalf("write through an open file after recovery = %+v", reply)
+	}
+	opened := service.Dispatch(3, vfs.Request{Operation: vfs.OperationOpen, Path: []byte("/home/file"), Rights: vfs.Read})
+	if opened.Status != vfs.StatusOK {
+		t.Fatal(opened.Status)
+	}
+	reply := service.Dispatch(3, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64})
+	if reply.Status != vfs.StatusOK || string(reply.Data) != "recovered" {
+		t.Fatalf("read after recovery = %+v", reply)
+	}
+}
