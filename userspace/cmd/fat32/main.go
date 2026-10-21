@@ -301,16 +301,13 @@ func serve() {
 // such name.
 const stallName = ".validation-fat32-stall"
 
-// stall waits for a message on a channel whose other end this process keeps
-// and never writes.
+// stall waits only for a block reply. No block request is outstanding here,
+// so that endpoint stays idle. Closing the VFS endpoint cannot wake this
+// wait. Reuse the granted endpoint: this service has no channel-create quota.
 func stall() {
 	mark("FAT32_STALLED\n")
-	reader, _, status := sys.ChannelCreate()
-	if status != kcall.StatusOK {
-		fatal("FAT32_STALL_FAILED\n")
-	}
 	var interests [userwait.MaxObjects]userwait.Interest
-	interests[0] = userwait.Interest{Handle: reader, Events: kcall.WaitReadable}
+	interests[0] = userwait.Interest{Handle: blockHandle, Events: kcall.WaitReadable}
 	for {
 		userwait.Any(&interests, 1, kcall.WaitAnyInfiniteTimeout)
 	}
