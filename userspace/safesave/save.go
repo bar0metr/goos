@@ -26,6 +26,8 @@ const (
 
 // Files is the part of the VFS a save uses.
 type Files interface {
+	// Create atomically creates a file only if path is absent. An existing
+	// file is left unchanged and reports StatusAlreadyExists.
 	Create(path []byte) vfs.Status
 	Unlink(path []byte) vfs.Status
 	OpenWrite(path []byte) (vfs.Handle, vfs.Status)
@@ -74,10 +76,13 @@ func TemporaryPath(target []byte, out *[limits.PathMax]byte) ([]byte, vfs.Status
 }
 
 // Save writes what source produces to the temporary file beside target,
-// through buffer, and then replaces target with it. A temporary file left by
-// an earlier, interrupted save is removed first. On any failure the temporary
-// file is removed, best effort, and target is as it was; the status says why
-// and the stage where.
+// through buffer, and then replaces target with it. An existing temporary file
+// reports StatusAlreadyExists at StageTemporary without being opened or changed.
+// This includes stale files: saves fail closed until explicit owner cleanup.
+// Only a save that successfully creates the temporary file may remove or replace
+// it. On later failure it removes that file best effort, leaving target as it
+// was; the status says why and the stage where. Concurrent callers need separate
+// buffer, source, and temp workspaces and must not modify another save's file.
 func Save(files Files, target []byte, buffer []byte, source Source, temp *[limits.PathMax]byte) (vfs.Status, Stage) {
 	if len(buffer) == 0 {
 		return vfs.StatusInvalidArgument, StageWrite
@@ -87,11 +92,6 @@ func Save(files Files, target []byte, buffer []byte, source Source, temp *[limit
 		return status, StageTemporary
 	}
 	status = files.Create(path)
-	if status == vfs.StatusAlreadyExists {
-		if status = files.Unlink(path); status == vfs.StatusOK {
-			status = files.Create(path)
-		}
-	}
 	if status != vfs.StatusOK {
 		return status, StageTemporary
 	}

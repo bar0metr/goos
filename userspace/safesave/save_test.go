@@ -135,15 +135,97 @@ func TestSaveCreatesANewFile(t *testing.T) {
 	}
 }
 
-func TestSaveRemovesAStaleTemporaryFile(t *testing.T) {
+func TestSavePreservesAStaleTemporaryFile(t *testing.T) {
 	model := newModel()
 	model.files["/home/.doc.txt.~save"] = []byte("left by a crash")
 	var temp [limits.PathMax]byte
-	if status, _ := Save(model, []byte("/home/doc.txt"), make([]byte, 8), &chunks{text: []byte("second"), step: 8}, &temp); status != vfs.StatusOK {
-		t.Fatalf("save = %d", status)
+	source := &chunks{text: []byte("second"), step: 8}
+	for attempt := 0; attempt < 2; attempt++ {
+		status, stage := Save(model, []byte("/home/doc.txt"), make([]byte, 8), source, &temp)
+		if status != vfs.StatusAlreadyExists || stage != StageTemporary {
+			t.Fatalf("save = %d at %d", status, stage)
+		}
 	}
-	if got := string(model.files["/home/doc.txt"]); got != "second" {
+	if got := string(model.files["/home/doc.txt"]); got != "original" {
 		t.Fatalf("target holds %q", got)
+	}
+	if got := string(model.files["/home/.doc.txt.~save"]); got != "left by a crash" {
+		t.Fatalf("temporary file holds %q", got)
+	}
+	if len(model.calls) != 1 || model.calls["create"] != 2 || len(model.open) != 0 || len(model.removed) != 0 || string(source.text) != "second" {
+		t.Fatalf("refused save touched existing state: calls=%v removed=%v source=%q", model.calls, model.removed, source.text)
+	}
+}
+
+// interleavedFiles pauses the owner between Create and OpenWrite, and checks
+// the completed temporary file just before its atomic replacement.
+type interleavedFiles struct {
+	Files
+	beforeOpen    func()
+	beforeReplace func()
+}
+
+func (files interleavedFiles) OpenWrite(path []byte) (vfs.Handle, vfs.Status) {
+	files.beforeOpen()
+	return files.Files.OpenWrite(path)
+}
+
+func (files interleavedFiles) Replace(source, target []byte) vfs.Status {
+	files.beforeReplace()
+	return files.Files.Replace(source, target)
+}
+
+func TestConcurrentSaveRefusesTheOwnersTemporaryFile(t *testing.T) {
+	model := newModel()
+	// Separate buffers, paths, and sources model independent callers/processes;
+	// only the filesystem is shared. No scheduler timing is needed.
+	var ownerTemp, loserTemp [limits.PathMax]byte
+	ownerBuffer, loserBuffer := make([]byte, 4), make([]byte, 8)
+	ownerSource := &chunks{text: []byte("complete owner text"), step: 3}
+	loserSource := &chunks{text: []byte("loser text"), step: 8}
+	files := interleavedFiles{
+		Files: model,
+		beforeOpen: func() {
+			if _, found := model.files["/home/.doc.txt.~save"]; !found {
+				t.Fatal("owner has not created its temporary file")
+			}
+			status, stage := Save(model, []byte("/home/doc.txt"), loserBuffer, loserSource, &loserTemp)
+			if status != vfs.StatusAlreadyExists || stage != StageTemporary {
+				t.Fatalf("competing save = %d at %d", status, stage)
+			}
+			if len(model.calls) != 1 || model.calls["create"] != 2 || len(model.open) != 0 || len(model.removed) != 0 {
+				t.Fatalf("loser did more than attempt creation: calls=%v removed=%v", model.calls, model.removed)
+			}
+			if contents, found := model.files["/home/.doc.txt.~save"]; !found || len(contents) != 0 {
+				t.Fatalf("owner's temporary file changed: exists=%t contents=%q", found, contents)
+			}
+			if string(model.files["/home/doc.txt"]) != "original" || string(loserSource.text) != "loser text" {
+				t.Fatal("loser changed the target or consumed its source")
+			}
+		},
+		beforeReplace: func() {
+			if got := string(model.files["/home/doc.txt"]); got != "original" {
+				t.Fatalf("target changed before replacement: %q", got)
+			}
+			if got := string(model.files["/home/.doc.txt.~save"]); got != "complete owner text" {
+				t.Fatalf("replacement is incomplete: %q", got)
+			}
+			if len(model.open) != 0 {
+				t.Fatal("replacement attempted before close")
+			}
+		},
+	}
+	if status, stage := Save(files, []byte("/home/doc.txt"), ownerBuffer, ownerSource, &ownerTemp); status != vfs.StatusOK || stage != 0 {
+		t.Fatalf("owner save = %d at %d", status, stage)
+	}
+	if got := string(model.files["/home/doc.txt"]); got != "complete owner text" {
+		t.Fatalf("target holds %q", got)
+	}
+	if model.calls["open"] != 1 || model.calls["replace"] != 1 || len(model.removed) != 0 {
+		t.Fatalf("unexpected save operations: calls=%v removed=%v", model.calls, model.removed)
+	}
+	if _, found := model.files["/home/.doc.txt.~save"]; found || len(model.open) != 0 {
+		t.Fatal("temporary file or handle left behind")
 	}
 }
 
@@ -196,6 +278,34 @@ func TestShortWriteIsNoSpace(t *testing.T) {
 	}
 	if got := string(model.files["/home/doc.txt"]); got != "original" {
 		t.Fatalf("original became %q", got)
+	}
+}
+
+func TestFailedCleanupLeavesTheTemporaryFileFailClosed(t *testing.T) {
+	model := newModel()
+	model.limit = 5
+	model.failOp, model.failAt, model.failAs = "unlink", 1, vfs.StatusBackendError
+	var temp [limits.PathMax]byte
+	status, stage := Save(model, []byte("/home/doc.txt"), make([]byte, 4), &chunks{text: []byte("does not fit"), step: 4}, &temp)
+	if status != vfs.StatusNoSpace || stage != StageWrite {
+		t.Fatalf("owner save = %d at %d", status, stage)
+	}
+	if len(model.removed) != 1 || len(model.open) != 0 {
+		t.Fatal("owner did not attempt cleanup and close its handle")
+	}
+	source := &chunks{text: []byte("retry"), step: 4}
+	status, stage = Save(model, []byte("/home/doc.txt"), make([]byte, 4), source, &temp)
+	if status != vfs.StatusAlreadyExists || stage != StageTemporary {
+		t.Fatalf("retry save = %d at %d", status, stage)
+	}
+	if got := string(model.files["/home/doc.txt"]); got != "original" {
+		t.Fatalf("target holds %q", got)
+	}
+	if got := string(model.files["/home/.doc.txt.~save"]); got != "does " {
+		t.Fatalf("temporary file holds %q", got)
+	}
+	if len(model.removed) != 1 || model.calls["open"] != 1 || model.calls["replace"] != 0 || string(source.text) != "retry" {
+		t.Fatalf("retry touched the leftover file: calls=%v removed=%v source=%q", model.calls, model.removed, source.text)
 	}
 }
 
