@@ -110,7 +110,7 @@ done
 # before the first prompt, because PID 1 is the only authority that can create
 # independent VFS sessions or send a VFS control request.
 if [ "${VFSPROBE:-0}" = 1 ]; then
-	sed -n '/^VFS_READPOOL_BEGIN$/,/^VFS_READPOOL_OK$/p' "$log" | tr -d '\r' >"$work/vfsprobe"
+	tr -d '\r' <"$log" | sed -n '/^VFS_READPOOL_BEGIN$/,/^VFS_READPOOL_OK$/p' >"$work/vfsprobe"
 	for marker in \
 		VFS_READPOOL_LOCAL_OVERLAP_OK \
 		VFS_READPOOL_PERSISTENT_LOCAL_OK \

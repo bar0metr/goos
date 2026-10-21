@@ -9,6 +9,7 @@ import (
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	"goos/userspace/runtime/sys"
+	"goos/userspace/utility"
 )
 
 const (
@@ -17,7 +18,6 @@ const (
 	vfsReadPoolPersistentPath = "/persist/.validation-readpool-slow"
 	vfsReadPoolDeadPath       = "/persist/.validation-readpool-dead"
 	vfsReadPoolImagePath      = "/bootstrap/vfs"
-	vfsReadPoolReady          = uint64(0xfffffffffffffffe)
 	vfsReadPoolRounds         = 4096
 )
 
@@ -40,7 +40,7 @@ func probeVFSReadPool() bool {
 		clients[index], reason = openVFSSession()
 		if reason != "" {
 			closeVFSReadPoolClients(&clients)
-			return false
+			return vfsReadPoolFailed("session")
 		}
 	}
 	defer closeVFSReadPoolClients(&clients)
@@ -57,118 +57,131 @@ func probeVFSReadPool() bool {
 		!writeVFSReadPoolFile(clients[persistentClient], vfsReadPoolPersistentPath, vfsReadPoolData[:]) ||
 		!writeVFSReadPoolFile(clients[persistentClient], vfsReadPoolDeadPath, vfsReadPoolData[:]) ||
 		!writeVFSReadPoolFile(clients[writerClient], vfsReadPoolWriterPath, nil) {
-		return false
+		return vfsReadPoolFailed("prepare-files")
 	}
 
 	ramfs, ok := openVFSReadPoolFile(clients[ramfsClient], vfsReadPoolLocalPath, vfs.Read)
 	if !ok {
-		return false
+		return vfsReadPoolFailed("open-ramfs")
 	}
 	image, ok := openVFSReadPoolFile(clients[imageClient], vfsReadPoolImagePath, vfs.Read)
 	if !ok {
-		return false
+		return vfsReadPoolFailed("open-image")
 	}
 	imageCheck, ok := openVFSReadPoolFile(clients[imageCheckClient], vfsReadPoolImagePath, vfs.Read)
 	if !ok {
-		return false
+		return vfsReadPoolFailed("open-image-check")
 	}
 	persistent, ok := openVFSReadPoolFile(clients[persistentClient], vfsReadPoolPersistentPath, vfs.Read)
 	if !ok {
-		return false
+		return vfsReadPoolFailed("open-persistent")
 	}
 	writer, ok := openVFSReadPoolFile(clients[writerClient], vfsReadPoolWriterPath, vfs.Write)
 	if !ok {
-		return false
+		return vfsReadPoolFailed("open-writer")
 	}
 	dead, ok := openVFSReadPoolFile(clients[deadClient], vfsReadPoolDeadPath, vfs.Read)
 	if !ok {
-		return false
+		return vfsReadPoolFailed("open-dead")
 	}
 
 	// Two independent local clients must occupy the two workers together.
 	ramfsRead, ok := sendVFSReadPoolRead(clients[ramfsClient], ramfs, uint32(len(vfsReadPoolData)))
 	if !ok {
-		return false
+		return vfsReadPoolFailed("send-ramfs")
 	}
 	imageRead, ok := sendVFSReadPoolRead(clients[imageClient], image, uint32(len(vfsReadPoolData)))
 	if !ok {
-		return false
+		return vfsReadPoolFailed("send-image")
 	}
 	ramfsReply, ok := receiveVFSReadPoolRead(ramfsRead)
-	if !ok || !sameBytes(ramfsReply.Data, vfsReadPoolData[:]) {
-		return false
+	if !ok {
+		return vfsReadPoolFailed("reply-ramfs")
+	}
+	if !sameBytes(ramfsReply.Data, vfsReadPoolData[:]) {
+		vfsReadPoolReplyFailed("ramfs-bytes", uint64(len(ramfsReply.Data)))
+		return vfsReadPoolFailed("reply-ramfs")
 	}
 	imageReply, ok := receiveVFSReadPoolRead(imageRead)
 	if !ok {
-		return false
+		return vfsReadPoolFailed("reply-image")
 	}
 	imageHash := hashVFSReadPool(imageReply.Data)
 	imageCheckRead, ok := sendVFSReadPoolRead(clients[imageCheckClient], imageCheck, uint32(len(vfsReadPoolData)))
 	if !ok {
-		return false
+		return vfsReadPoolFailed("send-image-check")
 	}
 	imageCheckReply, ok := receiveVFSReadPoolRead(imageCheckRead)
 	if !ok || imageHash != hashVFSReadPool(imageCheckReply.Data) || len(imageReply.Data) != len(imageCheckReply.Data) {
-		return false
+		return vfsReadPoolFailed("reply-image-check")
 	}
 	writeVFSReadPoolHashes(hashVFSReadPool(ramfsReply.Data), imageHash)
 
+	mark("VFS_READPOOL_STEP local\n")
 	// The selected persistent plan reports entry from the VFS owner. Only then
 	// do we enqueue local reads plus write and control barriers behind it.
 	persistentRead, ok := sendVFSReadPoolRead(clients[persistentClient], persistent, uint32(len(vfsReadPoolData)))
 	if !ok || !awaitVFSReadPoolEntry() {
-		return false
+		return vfsReadPoolFailed("persistent-entry")
 	}
 	localDuringPersistent, ok := sendVFSReadPoolRead(clients[ramfsClient], ramfs, uint32(len(vfsReadPoolData)))
 	if !ok {
-		return false
+		return vfsReadPoolFailed("send-local-during")
 	}
 	imageDuringPersistent, ok := sendVFSReadPoolRead(clients[imageClient], image, uint32(len(vfsReadPoolData)))
 	if !ok || !awaitVFSReadPoolLocal() {
-		return false
+		return vfsReadPoolFailed("send-image-during-or-local-ready")
 	}
 	writePending, ok := sendVFSReadPoolWrite(clients[writerClient], writer, []byte("gate"))
 	if !ok {
-		return false
+		return vfsReadPoolFailed("send-write")
 	}
 	correlation++
 	syncRequest, encoded := vfs.SyncRequest(correlation)
 	if !encoded || !sendMessage(vfsControlHandle, syncRequest) {
-		return false
+		return vfsReadPoolFailed("send-sync")
 	}
 	syncCorrelation := correlation
 	if _, ok = receiveVFSReadPoolRead(localDuringPersistent); !ok {
-		return false
+		return vfsReadPoolFailed("reply-local-during")
 	}
 	if _, ok = receiveVFSReadPoolRead(imageDuringPersistent); !ok {
-		return false
+		return vfsReadPoolFailed("reply-image-during")
 	}
 	persistentReply, ok := receiveVFSReadPoolRead(persistentRead)
 	if !ok || !sameBytes(persistentReply.Data, vfsReadPoolData[:]) {
-		return false
+		return vfsReadPoolFailed("reply-persistent")
 	}
 	if _, ok = receiveVFSReadPoolRead(writePending); !ok || !receiveVFSReadPoolSync(syncCorrelation) {
-		return false
+		return vfsReadPoolFailed("reply-write-sync")
 	}
 
+	mark("VFS_READPOOL_STEP barriers\n")
 	// Close the only client endpoint after transferring a writable page to a
 	// ReadInto request. The VFS must unmap/close it before its peer-death close.
 	if !sendVFSReadPoolDeadRead(clients[deadClient], dead) {
-		return false
+		return vfsReadPoolFailed("send-dead")
 	}
 	sys.HandleClose(clients[deadClient])
 	clients[deadClient] = 0
 
+	mark("VFS_READPOOL_STEP peer-death\n")
 	// This long portion is selected only by VFS_PROBE=1. It produces four VFS
 	// memory samples through the real concurrent-driver read/retire path.
 	for round := 0; round < vfsReadPoolRounds; round++ {
 		reply, received := callSession(clients[ramfsClient], vfs.Request{Operation: vfs.OperationRead, Handle: ramfs, Size: uint32(len(vfsReadPoolData))})
 		if !received || reply.Status != vfs.StatusOK {
-			return false
+			return vfsReadPoolFailed("plateau-read")
 		}
 	}
 	mark("VFS_READPOOL_OK\n")
 	return true
+}
+
+// vfsReadPoolFailed names the step that failed and reports failure.
+func vfsReadPoolFailed(step string) bool {
+	mark("VFS_READPOOL_STEP_FAILED " + step + "\n")
+	return false
 }
 
 func closeVFSReadPoolClients(clients *[6]handle.ID) {
@@ -237,29 +250,53 @@ func sendVFSReadPoolRequest(session handle.ID, request vfs.Request, attached han
 
 func receiveVFSReadPoolRead(pending vfsReadPoolPending) (vfs.Reply, bool) {
 	message, status := receive(uint64(pending.session), vfsSessionDeadline)
-	if status != ipc.StatusOK || message.Correlation != pending.correlation {
-		return vfs.Reply{}, false
+	if status != ipc.StatusOK {
+		return vfs.Reply{}, vfsReadPoolReplyFailed("receive", uint64(status))
+	}
+	if message.Correlation != pending.correlation {
+		return vfs.Reply{}, vfsReadPoolReplyFailed("correlation", message.Correlation)
 	}
 	reply, decoded := vfs.DecodeReply(message)
-	return reply, decoded && reply.Operation == pending.operation && reply.Status == vfs.StatusOK
+	if !decoded || reply.Operation != pending.operation {
+		return vfs.Reply{}, vfsReadPoolReplyFailed("decode", uint64(reply.Operation))
+	}
+	if reply.Status != vfs.StatusOK {
+		return vfs.Reply{}, vfsReadPoolReplyFailed("status", uint64(reply.Status))
+	}
+	return reply, true
 }
 
-func awaitVFSReadPoolEntry() bool {
-	message, status := receive(vfsControlHandle, vfsSessionDeadline)
-	if status != ipc.StatusOK || message.Correlation != vfsReadPoolReady {
-		return false
-	}
-	result, decoded := vfs.DecodeAddSessionReply(message)
-	return decoded && result == vfs.StatusOK
+// vfsReadPoolReplyFailed records why a reply was refused.
+func vfsReadPoolReplyFailed(reason string, value uint64) bool {
+	var line [96]byte
+	text := append(line[:0], "VFS_READPOOL_REPLY_FAILED "...)
+	text = append(text, reason...)
+	text = append(text, ' ')
+	text = utility.AppendUint(text, value)
+	mark(string(append(text, '\n')))
+	return false
 }
 
-func awaitVFSReadPoolLocal() bool {
+// The VFS reports the fixture's events as control notifications whose one
+// payload byte names the event.
+const (
+	vfsReadPoolPersistentEntered byte = 1
+	vfsReadPoolLocalCompleted    byte = 2
+)
+
+func awaitVFSReadPoolEntry() bool { return awaitVFSReadPoolEvent(vfsReadPoolPersistentEntered) }
+
+func awaitVFSReadPoolLocal() bool { return awaitVFSReadPoolEvent(vfsReadPoolLocalCompleted) }
+
+func awaitVFSReadPoolEvent(event byte) bool {
 	message, status := receive(vfsControlHandle, vfsSessionDeadline)
-	if status != ipc.StatusOK || message.Correlation != 0xfffffffffffffffd {
-		return false
+	if status != ipc.StatusOK {
+		return vfsReadPoolReplyFailed("event-receive", uint64(status))
 	}
-	result, decoded := vfs.DecodeAddSessionReply(message)
-	return decoded && result == vfs.StatusOK
+	if message.ProtocolID != vfs.ControlProtocolID || message.Kind != ipc.KindNotification || message.PayloadSize != 1 || message.Payload[0] != event {
+		return vfsReadPoolReplyFailed("event", uint64(message.Payload[0]))
+	}
+	return true
 }
 
 func receiveVFSReadPoolSync(correlation uint64) bool {
@@ -296,7 +333,7 @@ func hashVFSReadPool(data []byte) uint64 {
 }
 
 func writeVFSReadPoolHashes(ramfs, image uint64) {
-	var line [64]byte
+	var line [96]byte
 	prefix := "VFS_READPOOL_HASH ramfs=0x"
 	size := copy(line[:], prefix)
 	for shift := uint(60); ; shift -= 4 {

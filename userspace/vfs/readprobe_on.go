@@ -144,3 +144,6 @@ func (service *Service) ValidationPersistentTimedOut() bool {
 // ValidationPersistentDone reports that the selected persistent plan left its
 // gate.
 func (service *Service) ValidationPersistentDone() bool { return validationReads.persistentDone.Load() }
+
+// ValidationLocalEntered is how many armed local plans entered their gate.
+func (service *Service) ValidationLocalEntered() uint32 { return validationReads.localEntered.Load() }
