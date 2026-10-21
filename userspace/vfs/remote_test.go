@@ -247,3 +247,43 @@ func TestDetachedRemoteWriteDoesNotReuseSharedCache(t *testing.T) {
 		}
 	}
 }
+
+// The service that left an exchange unanswered may write the shared cache
+// until PID 1's fence sees it exit. Nothing it wrote there is served once a
+// replacement is attached: the page index lives in the VFS, and a reattach
+// starts it empty, so every page is read again through the new service.
+func TestReattachDoesNotServeOldWriterCacheBytes(t *testing.T) {
+	device := testFAT32Device()
+	service := &Service{}
+	if !service.Init() || !service.MountBootstrap(testSystemImage(t)) || !service.AttachCache(testCache) {
+		t.Fatal("service init failed")
+	}
+	if !service.AttachFilesystem(newLoopback(device)) {
+		t.Fatal("volume refused")
+	}
+	writePersistent(t, service, "/home/cached", "trusted-bytes")
+	if !service.Sync() {
+		t.Fatal("sync failed")
+	}
+	read := func() vfs.Reply {
+		opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/home/cached")})
+		if opened.Status != vfs.StatusOK {
+			t.Fatalf("open = %d", opened.Status)
+		}
+		defer service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+		return service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64})
+	}
+	if reply := read(); reply.Status != vfs.StatusOK || string(reply.Data) != "trusted-bytes" {
+		t.Fatalf("read before quarantine = %+v", reply)
+	}
+	service.DetachFilesystem()
+	for index := range testCache {
+		testCache[index] = 'X'
+	}
+	if !service.AttachFilesystem(newLoopback(device)) {
+		t.Fatal("replacement refused")
+	}
+	if reply := read(); reply.Status != vfs.StatusOK || string(reply.Data) != "trusted-bytes" {
+		t.Fatalf("read after reattach = %q (%d)", reply.Data, reply.Status)
+	}
+}
