@@ -327,8 +327,9 @@ through `utility.CallResolver` and is Concurrent-safe.
 The launch protocol codecs and builders are Independent instances safe.
 `LocateImage` and `ArchiveExtent` are Concurrent-safe: they compare the
 archive prefix and the rest of the path as two parts
-(`initramfs.ExtentUnder`) and keep no buffer. The package has no
-package-level variables. Tests: `TestLocateImageNamesTheBytesOfAnExecutable`,
+(`initramfs.ExtentUnder`) and keep no buffer. `linuxPathVariable` (CA-0616)
+is the remaining package-level slice; PID 1 copies it into its startup writer
+and does not modify it. Tests: `TestLocateImageNamesTheBytesOfAnExecutable`,
 `TestExtentUnderMatchesTheJoinedName`.
 
 ## Runtime packages
