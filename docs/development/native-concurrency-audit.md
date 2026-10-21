@@ -86,8 +86,11 @@ host tests do not establish native TLS isolation.
 
 The syscall handler slots use atomic pointer publication. Each published
 function-value holder must stay immutable until no caller can still read it.
-The goroutine runtime's two handler holders satisfy that condition; atomic
-publication does not permit a caller to mutate a holder in place.
+The goroutine runtime's handler holders satisfy that condition; atomic
+publication does not permit a caller to mutate a holder in place. The
+runtime's join claims, which name the threads parked goroutines join, are
+guarded by their own spin lock and held only between a join's first poll and
+its return.
 
 The VFS driver owns admission, namespace state, replies and session generations.
 Workers receive read plans and request-owned targets through channels. One

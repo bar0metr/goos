@@ -144,11 +144,34 @@ errors and finite timeout. StreamWait keeps its native contract, which needs
 only the Wait right and reports a closed peer as PeerDied. StreamWaitRead and
 StreamWaitWrite wait through WaitAny instead: they need the Read or Write
 right as well, and report peer closure as readiness, so the next read or
-write returns PeerDied. Utility's standard streams use them. ThreadJoin,
-cursor-log waits and IRQWait still block their native thread: the kernel
-records a joiner by task, a cursor wait needs a cursor in the registration,
-and the disk interrupt line has no readiness that WaitAny could observe. The
-complete service-library wait audit remains unfinished.
+write returns PeerDied. Utility's standard streams use them.
+
+ThreadJoin polls with JoinPoll, parks on a WaitAny interest in the thread's
+end and polls again for the code. The interest's handle is the thread's ID
+with kcall.WaitAnyThreadEnd set; it is ready once the thread no longer runs,
+and the kernel publishes it from the thread's teardown. A goroutine joiner
+registers no joiner task with the kernel. The runtime refuses a second
+goroutine joiner of one thread with AlreadyExists, as the kernel refuses a
+second native joiner, but a native joiner and a goroutine joiner of one
+thread do not exclude each other: the first to collect the end gets the code
+and the other gets NotFound.
+
+WaitAnyCursor parks through its own hook. The poller always waits in the
+cursor format, so each registration keeps its log cursor and every other
+interest carries the zero cursor the kernel requires.
+
+IRQWait parks on the line's readiness and takes the event with IRQTake,
+waiting again when another taker got it first. The disk's line 11 is visible
+to WaitAny: with no IRQWait waiter its interrupt wakes the kernel loop, which
+publishes the pending event, and a native IRQWait waiter still takes the
+event before any WaitAny sees it. A zero-time WaitAny unmasks the lines it
+names, so the polls of busy threads do not hold a parked goroutine's
+interrupt back until a thread idles. Through the adapter IRQWait also serves
+the network line, which the native call refuses.
+
+Two goroutines that wait on the same log or line form an aliased aggregate,
+which the poller resolves with one-tick probes rather than one kernel wait.
+The complete service-library wait audit remains unfinished.
 
 ## Collector integration
 
