@@ -195,15 +195,24 @@ Mutations, session close, namespace operations and control requests pass through
 ordered barriers. Each session has at most one admitted request; generations
 prevent delivery to a reused owner slot. A stream bridges Go-channel completion
 hints into the owner's native readiness wait. The goroutine driver caps sessions
-at 60 to leave room for control, completion, the persistent lane and the runtime
-poller's own wake interest.
+at 59 to leave room for control, recovery, completion, the persistent lane and
+the runtime poller's own wake interest.
 
 Persistent reads serialize the whole Remote operation, including cache use.
 Workers publish transport failure; the owner detaches at a drained boundary.
 An unanswered accepted exchange quarantines the shared cache. The VFS detaches
 the filesystem service, refuses executable-slot writes against that cache and
-sends PID 1 a control notification naming the attachment generation; local
-reads continue. Closing an endpoint does not stop a stalled service that still
+sends PID 1 a notification naming the attachment generation over an independent
+recovery endpoint; local reads continue. An ordinary control may already have
+timed out behind the persistent lane and quarantined its endpoint. PID 1 uses
+its existing authority to create a fresh control channel and sends the server
+end over the recovery endpoint. At a drained barrier the VFS releases handles
+from unread old controls, closes the old endpoint and acknowledges the handoff.
+PID 1 closes its old client and uses the new ID only after that acknowledgement.
+Neither side replays ambiguous old controls. Earlier admitted controls finish
+before the handoff; AddSession clients abandoned by PID 1 close, so the VFS
+also reclaims their orphaned sessions. A filesystem restart renews a quarantined
+control endpoint before attempting SetFilesystem even if its notice is late. Closing an endpoint does not stop a stalled service that still
 maps the cache, so PID 1 kills that instance and waits for the kernel to report
 its exit. The kernel reports it after the last task of the process has ended.
 The supervisor restarts the service only after that exit, and PID 1 then sends
@@ -214,9 +223,9 @@ page index starts empty, so nothing the old writer left in the cache is served.
 A notice for a superseded generation is ignored. PID 1 makes at most
 `supervisor.MaxRestarts` such replacements per boot, because each follows a
 six-second request deadline and the supervisor's restart window alone would
-not stop a service that stalls every time. The VFS also bounds fenced recovery admissions by the same limit: a service
-may exit before PID 1 handles its notice, and that ordering must not bypass
-the bound. Past the bound the cache stays quarantined until the VFS itself
+not stop a service that stalls every time. The VFS also bounds fenced recovery
+admissions by the same limit: a service may exit before PID 1 handles its
+notice, and that ordering must not bypass the bound. Past the bound the cache stays quarantined until the VFS itself
 is replaced.
 
 The cache object is not replaced. The kernel copies executable pages from the

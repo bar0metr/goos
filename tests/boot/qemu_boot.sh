@@ -670,8 +670,11 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	# out its six-second deadline, quarantines the cache and asks PID 1 for a
 	# replacement; PID 1 ends the service, and only its reported exit lets the
 	# replacement share the cache.
+	cache_reattach=$(log_count "$log" '^SYSTEM_REATTACHED_OK$')
 	printf 'cd /persist/.validation-fat32-stall\n'
-	sleep 10
+	await_count "$log" '^FILE_CACHE_RECOVERED_OK$' 1
+	await_count "$log" '^SYSTEM_REATTACHED_OK$' "$((cache_reattach + 1))"
+	sleep 3
 	printf 'cat /home/demo/message.txt; echo after-fat32-stall\n'
 	sleep 2
 	# The default CPU has no RDRAND. getrandom and AT_RANDOM still work, from
@@ -911,6 +914,7 @@ require_regex storage.fat32-rest-of-namespace '^after-fat32-fault$' 'the shell a
 require_window storage.fat32-volume-served-again '^persistent$' 'the volume read through the restarted service' "$log" 'goos> cat /home/demo/message.txt; echo after-fat32-restart' 'after-fat32-restart'
 require_marker storage.fat32-stalled FAT32_STALLED "$log" 'validation-fat32-stall'
 require_marker storage.fat32-stall-replacing FAT32_STALL_REPLACING "$log" 'validation-fat32-stall'
+require_marker storage.fat32-control-renewed VFS_CONTROL_REPLACED_OK "$log" 'validation-fat32-stall'
 require_marker storage.fat32-cache-recovered FILE_CACHE_RECOVERED_OK "$log" 'validation-fat32-stall'
 forbid_regex storage.fat32-recovery-bounded 'FILE_CACHE_RECOVERY_LIMIT' 'one stall within the recovery bound' "$log" 'validation-fat32-stall'
 require_window storage.fat32-volume-after-stall '^persistent$' 'the volume read through the replacement of a stalled service' "$log" 'goos> cat /home/demo/message.txt; echo after-fat32-stall' 'after-fat32-stall'
