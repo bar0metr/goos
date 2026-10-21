@@ -107,3 +107,27 @@ func TestPermanentConcurrentDistinct(t *testing.T) {
 		})
 	}
 }
+
+// TestFreedPageReadsZeroWhenDiscardFails gives back a written page where
+// VMDiscard does not succeed, as on the host, and takes it again.
+func TestFreedPageReadsZeroWhenDiscardFails(t *testing.T) {
+	pool := hostPool(t, 2)
+	ref, ok := pool.Allocate()
+	if !ok {
+		t.Fatal("allocate")
+	}
+	page := pool.Page(ref)
+	for index := range page {
+		page[index] = 0xa5
+	}
+	pool.Free(ref)
+	again, ok := pool.Allocate()
+	if !ok || again != ref {
+		t.Fatalf("reallocate = %d, %v", again, ok)
+	}
+	for index, value := range pool.Page(again) {
+		if value != 0 {
+			t.Fatalf("byte %d = %#x after reuse", index, value)
+		}
+	}
+}

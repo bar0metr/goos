@@ -91,7 +91,11 @@ func (pool *Pool) Free(ref uint32) {
 	if ref == 0 || uint64(ref) >= pool.next {
 		return
 	}
-	sys.VMDiscard(pool.base+(uint64(ref)-1)*PageSize, PageSize)
+	if sys.VMDiscard(pool.base+(uint64(ref)-1)*PageSize, PageSize) != kcall.StatusOK {
+		// The page keeps its memory, so it is cleared here: Allocate
+		// promises a zeroed page either way.
+		clear(pool.Page(ref)[:])
+	}
 	pool.slot(pool.depth)[0] = ref
 	pool.depth++
 }
