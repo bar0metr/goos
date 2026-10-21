@@ -128,3 +128,34 @@ func TestWaitHandlerDeclinesToKernel(t *testing.T) {
 		t.Fatalf("declined wait = %d, %v; native = %d, %v", mask, status, wantMask, wantStatus)
 	}
 }
+
+func TestThreadJoinHandlerDispatchAndPolling(t *testing.T) {
+	defer InstallThreadJoinHandler(nil)
+	wantCode, wantStatus := ThreadJoin(9, true)
+	calls := 0
+	handler := ThreadJoinHandler(func(thread uint64) (uint64, kcall.Status, bool) {
+		calls++
+		if thread != 9 {
+			t.Fatalf("join handler(%d)", thread)
+		}
+		// The adapter polls through the raw call without re-entering itself.
+		if code, status := ThreadJoin(thread, true); code != wantCode || status != wantStatus {
+			t.Fatalf("raw poll = %d, %v; want %d, %v", code, status, wantCode, wantStatus)
+		}
+		return 42, kcall.StatusOK, true
+	})
+	InstallThreadJoinHandler(&handler)
+	if code, status := ThreadJoin(9, false); code != 42 || status != kcall.StatusOK || calls != 1 {
+		t.Fatalf("join = %d, %v; calls=%d", code, status, calls)
+	}
+	if code, status := ThreadJoin(9, true); code != wantCode || status != wantStatus || calls != 1 {
+		t.Fatalf("poll = %d, %v; calls=%d", code, status, calls)
+	}
+	InstallThreadJoinHandler(nil)
+	wantCode, wantStatus = ThreadJoin(9, false)
+	handler = func(uint64) (uint64, kcall.Status, bool) { return 99, kcall.StatusOK, false }
+	InstallThreadJoinHandler(&handler)
+	if code, status := ThreadJoin(9, false); code != wantCode || status != wantStatus {
+		t.Fatalf("declined join = %d, %v; want native %d, %v", code, status, wantCode, wantStatus)
+	}
+}

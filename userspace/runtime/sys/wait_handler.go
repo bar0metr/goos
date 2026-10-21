@@ -38,3 +38,14 @@ var processWaitHandler atomic.Pointer[ProcessWaitHandler]
 // InstallProcessWaitHandler publishes an immutable runtime-owned handler,
 // or nil to use native process waits.
 func InstallProcessWaitHandler(handler *ProcessWaitHandler) { processWaitHandler.Store(handler) }
+
+// ThreadJoinHandler parks a thread joiner through the scheduler. It runs
+// before ThreadJoin pins its native scratch and follows WaitHandler's native
+// fallback contract. Polls bypass it.
+type ThreadJoinHandler func(thread uint64) (code uint64, status kcall.Status, handled bool)
+
+var threadJoinHandler atomic.Pointer[ThreadJoinHandler]
+
+// InstallThreadJoinHandler publishes an immutable runtime-owned handler, or
+// nil to use native joins.
+func InstallThreadJoinHandler(handler *ThreadJoinHandler) { threadJoinHandler.Store(handler) }

@@ -26,8 +26,16 @@ func ThreadCreate(argument uintptr) (uint64, uint64, kcall.Status) {
 func ThreadExit(code uint64) { threadExit(code) }
 
 // ThreadJoin waits for thread to end and returns its exit code. With poll it
-// answers Timeout rather than wait.
+// answers Timeout rather than wait. A wait goes to the installed
+// ThreadJoinHandler first, which may park only the calling goroutine.
 func ThreadJoin(thread uint64, poll bool) (uint64, kcall.Status) {
+	if !poll {
+		if handler := threadJoinHandler.Load(); handler != nil {
+			if code, status, handled := (*handler)(thread); handled {
+				return code, status
+			}
+		}
+	}
 	w := current()
 	defer tls.Unpin()
 	w.countWire = 0
