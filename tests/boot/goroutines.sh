@@ -3,8 +3,9 @@
 # (ADR 0204) with goprobe: the worker pool, goroutines on several
 # processors at once, channels and select, the sync package, timers and
 # contexts, fairness on one permit, panics, the goroutine limit, the roots
-# of goroutines in every waiting state, handle waits, thread.Start threads
-# with goroutines, and the faults that end the process. Writes
+# of goroutines in every waiting state, handle waits, a goroutine that joins
+# a native thread, thread.Start threads with goroutines, and the faults that
+# end the process. Writes
 # build/reports/goroutines-SUITE.txt.
 #
 # SUITE picks the checks: runtime (scheduling, channels, sync, timers,
@@ -160,6 +161,7 @@ else
 	if wants io; then
 		probe io
 		probe waitsets
+		require '^GOPROBE_WAITSETS_JOIN spins=[1-9][0-9]*$' 'goprobe waitsets: a goroutine joined a native thread while another ran'
 	fi
 	if wants faults; then
 		# A goroutine that overflows its stack hits the guard below it and

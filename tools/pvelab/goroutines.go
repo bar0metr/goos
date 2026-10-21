@@ -14,21 +14,26 @@ type goroutinesScenario struct{}
 
 func (goroutinesScenario) Name() string { return "goroutines" }
 
-var goroutineChecks = []struct{ command, marker string }{
-	{"goprobe pool", "GOPROBE_POOL_OK"},
-	{"goprobe smoke 2", "GOPROBE_SMOKE_OK"},
-	{"goprobe smoke 8", "GOPROBE_SMOKE_OK"},
-	{"goprobe chan", "GOPROBE_CHAN_OK"},
-	{"goprobe sync", "GOPROBE_SYNC_OK"},
-	{"goprobe timers", "GOPROBE_TIMERS_OK"},
-	{"goprobe fair", "GOPROBE_FAIR_OK"},
-	{"goprobe panic", "GOPROBE_PANIC_OK"},
-	{"goprobe limit", "GOPROBE_LIMIT_OK"},
-	{"goprobe io", "GOPROBE_IO_OK"},
-	{"goprobe waitsets", "GOPROBE_WAITSETS_OK"},
-	{"goprobe threads", "GOPROBE_THREADS_OK"},
-	{"goprobe gc 1", "GOPROBE_GC_OK"},
-	{"goprobe gc 8", "GOPROBE_GC_OK"},
+// goroutineChecks lists each fixture command, its completion marker, and
+// the measurement records, by name, it must also print once.
+var goroutineChecks = []struct {
+	command, marker string
+	records         []string
+}{
+	{"goprobe pool", "GOPROBE_POOL_OK", nil},
+	{"goprobe smoke 2", "GOPROBE_SMOKE_OK", nil},
+	{"goprobe smoke 8", "GOPROBE_SMOKE_OK", nil},
+	{"goprobe chan", "GOPROBE_CHAN_OK", nil},
+	{"goprobe sync", "GOPROBE_SYNC_OK", nil},
+	{"goprobe timers", "GOPROBE_TIMERS_OK", nil},
+	{"goprobe fair", "GOPROBE_FAIR_OK", nil},
+	{"goprobe panic", "GOPROBE_PANIC_OK", nil},
+	{"goprobe limit", "GOPROBE_LIMIT_OK", nil},
+	{"goprobe io", "GOPROBE_IO_OK", nil},
+	{"goprobe waitsets", "GOPROBE_WAITSETS_OK", []string{"GOPROBE_WAITSETS_JOIN"}},
+	{"goprobe threads", "GOPROBE_THREADS_OK", nil},
+	{"goprobe gc 1", "GOPROBE_GC_OK", nil},
+	{"goprobe gc 8", "GOPROBE_GC_OK", nil},
 }
 
 func goroutineMarker(out, marker string) error {
@@ -47,6 +52,21 @@ func goroutineMarker(out, marker string) error {
 	return nil
 }
 
+// goroutineRecord checks that output holds exactly one record named name,
+// with its fields.
+func goroutineRecord(out, name string) error {
+	matches := 0
+	for _, line := range strings.Split(strings.ReplaceAll(out, "\r", ""), "\n") {
+		if strings.HasPrefix(line, name+" ") {
+			matches++
+		}
+	}
+	if matches != 1 {
+		return fmt.Errorf("expected one %s record, got %d", name, matches)
+	}
+	return nil
+}
+
 func (goroutinesScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	g := s.Guest
 	var evidence strings.Builder
@@ -60,6 +80,11 @@ func (goroutinesScenario) Run(ctx context.Context, s *Session) (Result, error) {
 		}
 		if err := goroutineMarker(out, check.marker); err != nil {
 			return "", fail(ClassScenario, check.command, err)
+		}
+		for _, name := range check.records {
+			if err := goroutineRecord(out, name); err != nil {
+				return "", fail(ClassScenario, check.command, err)
+			}
 		}
 		evidence.WriteString(out)
 		g.pass(check.command)

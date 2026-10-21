@@ -4,6 +4,7 @@ package main
 
 import (
 	"runtime"
+	"sync/atomic"
 	"time"
 
 	"goos/internal/capability"
@@ -11,10 +12,12 @@ import (
 	"goos/kernel/kcall"
 	"goos/userspace/runtime/goroutine"
 	"goos/userspace/runtime/sys"
+	"goos/userspace/runtime/thread"
 )
 
 // waitsets distinguishes a forbidden duplicate within one native wait from
-// valid overlapping subscriptions belonging to separate goroutines.
+// valid overlapping subscriptions belonging to separate goroutines, then
+// joins a native thread from a parked goroutine.
 func waitsets() {
 	runtime.GOMAXPROCS(1)
 	first, firstWriter, status := sys.StreamCreate()
@@ -91,5 +94,81 @@ func waitsets() {
 	goroutine.ReadStats(&after)
 	check(after.Waiters == baseline.Waiters, "wait-set subscriptions leaked")
 	record("GOPROBE_WAITSETS").field("polls", after.Polls-baseline.Polls).field("mask", a.mask).end()
+	joinParked()
 	ok("GOPROBE_WAITSETS_OK")
+}
+
+// joinGate holds the native thread joinParked joins until the joiner has
+// parked.
+var joinGate chan struct{}
+
+func joinTarget(uintptr) { <-joinGate }
+
+// joinParked joins a native thread from a goroutine while another goroutine
+// keeps the only permit busy: the joiner parks on the thread's end instead
+// of blocking its thread, a second goroutine joiner is refused as a second
+// native joiner is, and the end wakes the first with the thread's code.
+func joinParked() {
+	runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(runtime.NumCPU())
+	joinGate = make(chan struct{})
+	var baseline goroutine.Stats
+	goroutine.ReadStats(&baseline)
+	id, status := thread.Start(joinTarget, 0)
+	check(status == kcall.StatusOK, "start joined thread")
+	type answer struct {
+		code   uint64
+		status kcall.Status
+	}
+	joined := make(chan answer, 1)
+	go func() {
+		code, status := thread.Join(id)
+		joined <- answer{code, status}
+	}()
+	deadline := now() + 2e9
+	for {
+		var stats goroutine.Stats
+		goroutine.ReadStats(&stats)
+		if stats.Waiters == baseline.Waiters+1 {
+			break
+		}
+		check(now() < deadline, "the joiner did not park on the thread's end")
+		runtime.Gosched()
+	}
+	_, status = thread.Join(id)
+	check(status == kcall.StatusAlreadyExists, "a second joiner was not refused")
+	var spins atomic.Uint64
+	stop := make(chan struct{})
+	spun := make(chan struct{})
+	go func() {
+		defer close(spun)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				spins.Add(1)
+				runtime.Gosched()
+			}
+		}
+	}()
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case result := <-joined:
+		record("GOPROBE_FAILURE").field("code", result.code).field("status", uint64(result.status)).end()
+		fail("the join returned before the thread ended")
+	default:
+	}
+	close(joinGate)
+	result := <-joined
+	close(stop)
+	<-spun
+	check(result.status == kcall.StatusOK && result.code == 0, "the parked join did not collect the thread's code")
+	_, status = thread.Join(id)
+	check(status == kcall.StatusNotFound, "a joined thread was joined again")
+	check(spins.Load() > 0, "no goroutine ran while the joiner waited")
+	var after goroutine.Stats
+	goroutine.ReadStats(&after)
+	check(after.Waiters == baseline.Waiters, "the join left its wait registered")
+	record("GOPROBE_WAITSETS_JOIN").field("spins", spins.Load()).end()
 }

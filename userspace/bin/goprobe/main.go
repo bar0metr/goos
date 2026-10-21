@@ -15,7 +15,7 @@
 //	limit       the goroutine limit stops a go statement in its creator
 //	gc N        roots of parked, sleeping, waiting, and migrating goroutines
 //	io          handle waits that park only the goroutine
-//	waitsets    duplicate-interest validation and overlapping waits
+//	waitsets    duplicate-interest validation, overlapping waits, and a parked join
 //	threads     thread.Start threads and goroutines together
 //	bench       scheduler, channel, timer, and CPU scaling measurements
 //	overflow    a goroutine that overflows its stack ends the process
