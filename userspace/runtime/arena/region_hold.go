@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 
 	"goos/internal/validation"
-	"goos/userspace/runtime/sys"
 )
 
 // A validation image can stop a thread inside a region transition, after it
@@ -25,7 +24,7 @@ var (
 
 // HoldRegionTransition makes the calling thread's next Enter or Leave stop
 // between its cursor and innermost stores until ReleaseRegionTransition. It
-// exists only in validation builds.
+// takes effect only in validation builds.
 func HoldRegionTransition() {
 	if !validation.Enabled {
 		panic("arena: region transition holds need a validation build")
@@ -54,6 +53,5 @@ func holdTransition(t *threadState) {
 	}
 	holding.Store(1)
 	for holding.Load() != 0 {
-		sys.ThreadYield()
 	}
 }
