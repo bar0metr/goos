@@ -199,3 +199,26 @@ func TestCursorWaitHandlerDispatchAndPolling(t *testing.T) {
 		t.Fatalf("declined cursor wait = %d, %v; native = %d, %v", mask, status, wantMask, wantStatus)
 	}
 }
+
+func TestIRQWaitHandlerDispatch(t *testing.T) {
+	defer InstallIRQWaitHandler(nil)
+	InstallIRQWaitHandler(nil)
+	want := IRQWait(5)
+	calls := 0
+	handler := IRQWaitHandler(func(irq handle.ID) (kcall.Status, bool) {
+		calls++
+		if irq != 5 {
+			t.Fatalf("IRQ handler(%d)", irq)
+		}
+		return kcall.StatusOK, true
+	})
+	InstallIRQWaitHandler(&handler)
+	if status := IRQWait(5); status != kcall.StatusOK || calls != 1 {
+		t.Fatalf("IRQ wait = %v; calls=%d", status, calls)
+	}
+	handler = func(handle.ID) (kcall.Status, bool) { return kcall.StatusOK, false }
+	InstallIRQWaitHandler(&handler)
+	if status := IRQWait(5); status != want {
+		t.Fatalf("declined IRQ wait = %v, want native %v", status, want)
+	}
+}

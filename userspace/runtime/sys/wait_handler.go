@@ -59,3 +59,13 @@ var cursorWaitHandler atomic.Pointer[CursorWaitHandler]
 // InstallCursorWaitHandler publishes an immutable runtime-owned handler, or
 // nil to use native cursor waits.
 func InstallCursorWaitHandler(handler *CursorWaitHandler) { cursorWaitHandler.Store(handler) }
+
+// IRQWaitHandler parks an IRQWait caller through the scheduler. It runs
+// before the native call and follows WaitHandler's native fallback contract.
+type IRQWaitHandler func(irq handle.ID) (status kcall.Status, handled bool)
+
+var irqWaitHandler atomic.Pointer[IRQWaitHandler]
+
+// InstallIRQWaitHandler publishes an immutable runtime-owned handler, or nil
+// to use native IRQ waits.
+func InstallIRQWaitHandler(handler *IRQWaitHandler) { irqWaitHandler.Store(handler) }

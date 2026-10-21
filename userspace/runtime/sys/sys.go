@@ -419,8 +419,17 @@ func PortWrite(device handle.ID, specification uint64, value uint64) kcall.Statu
 	return status(portWrite(uint64(device), specification, value))
 }
 
-// IRQWait blocks until the interrupt line the capability names fires.
-func IRQWait(irq handle.ID) kcall.Status { return status(irqWait(uint64(irq))) }
+// IRQWait blocks until the interrupt line the capability names fires, and
+// consumes the event. The installed IRQWaitHandler goes first: it parks only
+// the calling goroutine, waiting with WaitAny and consuming with IRQTake.
+func IRQWait(irq handle.ID) kcall.Status {
+	if handler := irqWaitHandler.Load(); handler != nil {
+		if status, handled := (*handler)(irq); handled {
+			return status
+		}
+	}
+	return status(irqWait(uint64(irq)))
+}
 
 // IRQTake consumes the pending event of a line a WaitAny reported ready, or
 // returns NotFound when there is none. It never blocks.

@@ -16,6 +16,7 @@ var (
 	nativeProcessWaitHandler sys.ProcessWaitHandler = schedulerProcessWait
 	nativeThreadJoinHandler  sys.ThreadJoinHandler  = schedulerThreadJoin
 	nativeCursorWaitHandler  sys.CursorWaitHandler  = schedulerCursorWait
+	nativeIRQWaitHandler     sys.IRQWaitHandler     = schedulerIRQWait
 )
 
 func installWaitHooks() {
@@ -24,6 +25,7 @@ func installWaitHooks() {
 	sys.InstallProcessWaitHandler(&nativeProcessWaitHandler)
 	sys.InstallThreadJoinHandler(&nativeThreadJoinHandler)
 	sys.InstallCursorWaitHandler(&nativeCursorWaitHandler)
+	sys.InstallIRQWaitHandler(&nativeIRQWaitHandler)
 }
 
 func canParkNativeWait() bool {
@@ -121,6 +123,15 @@ func schedulerThreadJoin(thread uint64) (uint64, kcall.Status, bool) {
 	}
 	code, status := joinThread(thread, threadJoinOps{probe: pollJoin, wait: waitReady})
 	return code, status, true
+}
+
+// schedulerIRQWait parks a goroutine on an interrupt line's readiness under
+// the same fallback policy, then consumes the event with IRQTake.
+func schedulerIRQWait(irq handle.ID) (kcall.Status, bool) {
+	if !canParkNativeWait() {
+		return kcall.StatusOK, false
+	}
+	return waitForIRQ(irq, irqWaitOps{take: sys.IRQTake, wait: waitReady}), true
 }
 
 func pollJoin(thread uint64) (uint64, kcall.Status) { return sys.ThreadJoin(thread, true) }
