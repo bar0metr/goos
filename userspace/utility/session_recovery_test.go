@@ -28,6 +28,8 @@ type scriptedService struct {
 	entered    chan handle.ID
 	resume     chan struct{}
 	waits      []uint64
+	// drained, when set, is the status of a receive with nothing queued.
+	drained kcall.Status
 }
 
 func newScript() *scriptedService {
@@ -68,6 +70,8 @@ func (s scriptedIPC) waitReceive(channel handle.ID, wire []byte, ticks uint64) k
 	var reply ipc.Message
 	if queue := service.queued[channel]; len(queue) != 0 {
 		reply, service.queued[channel] = queue[0], queue[1:]
+	} else if service.drained != kcall.StatusOK {
+		return service.drained
 	} else {
 		reply = service.reply(service.last[channel])
 	}

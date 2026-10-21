@@ -54,6 +54,20 @@ func (v *VFSRequests) Control(channel handle.ID, request *ipc.Message, budget ui
 	return v.client.controlOn(channel, request, budget)
 }
 
+// PollControl drains a control endpoint between exchanges, without waiting,
+// and keeps the filesystem replacement notices it finds; everything else is
+// discarded. It reports false for an endpoint quarantined by an earlier
+// failure, which must not be waited on.
+func (v *VFSRequests) PollControl(channel handle.ID) bool {
+	return v.client.pollControlOn(channel)
+}
+
+// FilesystemLost returns, once, the attachment generation of the latest
+// filesystem replacement notice received by Control or PollControl.
+func (v *VFSRequests) FilesystemLost() (uint64, bool) {
+	return v.client.takeLost()
+}
+
 // Complete validates an asynchronous request's reply under the same failure
 // policy as Call. The owner retires the request's shared object on failure.
 func (v *VFSRequests) Complete(channel handle.ID, request vfs.Request, correlation uint64, reply *ipc.Message, status kcall.Status) (vfs.Reply, bool) {

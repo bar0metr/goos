@@ -218,3 +218,75 @@ func TestVFSControlAbsoluteBudgetAndUnsentOwnership(t *testing.T) {
 		})
 	}
 }
+
+func TestVFSControlKeepsFilesystemLostNotice(t *testing.T) {
+	service := newScript()
+	s := newOwned(service, 10)
+	notice, _ := vfs.FilesystemLostNotice(4)
+	service.queued[7] = []ipc.Message{notice}
+	service.reply = func(m ipc.Message) ipc.Message {
+		reply, _ := vfs.AddSessionReply(vfs.StatusOK, m.Correlation)
+		return reply
+	}
+	request, _ := vfs.SyncRequest(9)
+	result, status, sent := s.controlOn(7, &request, 5)
+	if status != kcall.StatusOK || !sent || result != vfs.StatusOK || s.bound() != 7 {
+		t.Fatalf("notice before the reply failed the exchange: %v %v %v", result, status, sent)
+	}
+	if generation, ok := s.takeLost(); !ok || generation != 4 {
+		t.Fatalf("notice lost: %d %v", generation, ok)
+	}
+	if _, ok := s.takeLost(); ok {
+		t.Fatal("notice delivered twice")
+	}
+	// Any other notification is still no reply.
+	stray, _ := vfs.SessionNotice(55)
+	service.queued[7] = []ipc.Message{stray}
+	if _, status, _ := s.controlOn(7, &request, 5); status == kcall.StatusOK || s.bound() != 0 {
+		t.Fatal("a stray notification was taken for a control reply")
+	}
+}
+
+func TestVFSControlNoticeDoesNotExtendBudget(t *testing.T) {
+	service := newScript()
+	s := newOwned(service, 10, 11, 12, 15)
+	notice, _ := vfs.FilesystemLostNotice(2)
+	service.queued[7] = []ipc.Message{notice}
+	service.reply = func(m ipc.Message) ipc.Message {
+		reply, _ := vfs.AddSessionReply(vfs.StatusOK, m.Correlation)
+		return reply
+	}
+	request, _ := vfs.SyncRequest(9)
+	if _, status, sent := s.controlOn(7, &request, 5); status != kcall.StatusTimeout || !sent || s.bound() != 0 {
+		t.Fatalf("a notice renewed the control budget: %v %v", status, sent)
+	}
+	if generation, ok := s.takeLost(); !ok || generation != 2 {
+		t.Fatal("notice received before the expiry was dropped")
+	}
+}
+
+func TestVFSControlPollKeepsNoticesAndDropsStrays(t *testing.T) {
+	service := newScript()
+	service.drained = kcall.StatusNotFound
+	s := newOwned(service, 10)
+	first, _ := vfs.FilesystemLostNotice(3)
+	latest, _ := vfs.FilesystemLostNotice(5)
+	stray, _ := vfs.SessionNotice(99)
+	late, _ := vfs.AddSessionReply(vfs.StatusOK, 8)
+	service.queued[7] = []ipc.Message{first, stray, late, latest}
+	if !s.pollControlOn(7) || s.bound() != 7 {
+		t.Fatal("polling discarded the endpoint")
+	}
+	if len(service.closed) != 1 || service.closed[0] != 99 {
+		t.Fatalf("stray handles not closed: %v", service.closed)
+	}
+	if generation, ok := s.takeLost(); !ok || generation != 5 {
+		t.Fatalf("latest notice = %d %v", generation, ok)
+	}
+	// A quarantined endpoint is neither read nor reported usable.
+	s.abandon()
+	service.queued[7] = []ipc.Message{first}
+	if s.pollControlOn(7) || len(service.queued[7]) != 1 {
+		t.Fatal("polled a quarantined control endpoint")
+	}
+}

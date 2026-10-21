@@ -17,7 +17,12 @@ type clockTransport interface {
 // and supervisor callers that own several endpoint IDs. The caller provides
 // correlations from its service-loop sequence, including asynchronous sends.
 // Endpoint ownership/closure and acquisition of fresh authority stay outside.
-type ownedVFS[T clockTransport, P requestPaths] struct{ vfsSession[T, P] }
+type ownedVFS[T clockTransport, P requestPaths] struct {
+	vfsSession[T, P]
+	// lost is the attachment generation of the latest filesystem
+	// replacement notice the control endpoint delivered, or zero.
+	lost uint64
+}
 
 func (s *ownedVFS[T, P]) callOn(channel handle.ID, request vfs.Request, attached handle.ID, correlation, budget uint64) (vfs.Reply, bool) {
 	s.hold()
@@ -134,6 +139,15 @@ func (s *ownedVFS[T, P]) controlOn(channel handle.ID, request *ipc.Message, budg
 		return 0, kcall.StatusTimeout, true
 	}
 	status, valid := s.receive(ticks)
+	// A filesystem replacement notice the VFS sent before this exchange's
+	// reply is kept for the owner, not taken for a malformed reply.
+	for status == kcall.StatusOK && valid && s.noteLost() {
+		if ticks = remaining(deadline, s.io.now); ticks == 0 {
+			s.abandon()
+			return 0, kcall.StatusTimeout, true
+		}
+		status, valid = s.receive(ticks)
+	}
 	if status != kcall.StatusOK || !valid {
 		s.abandon()
 		if status == kcall.StatusOK {
@@ -147,6 +161,51 @@ func (s *ownedVFS[T, P]) controlOn(channel handle.ID, request *ipc.Message, budg
 		return 0, kcall.StatusCorruptData, true
 	}
 	return result, kcall.StatusOK, true
+}
+
+// noteLost records the received message if it is a filesystem replacement
+// notice. Notices carry no handles.
+func (s *ownedVFS[T, P]) noteLost() bool {
+	generation, ok := vfs.DecodeFilesystemLostNotice(&s.incoming)
+	if ok {
+		s.lost = generation
+		s.incoming = ipc.Message{}
+	}
+	return ok
+}
+
+// pollControlOn drains, without waiting, the messages a control endpoint
+// received outside an exchange. It keeps filesystem replacement notices and
+// discards anything else, closing its handles: no request is outstanding, so
+// nothing else is owed. A quarantined endpoint is not read. It reports
+// whether the endpoint is still usable.
+func (s *ownedVFS[T, P]) pollControlOn(channel handle.ID) bool {
+	s.hold()
+	defer s.end()
+	s.bindHeld(channel)
+	for s.bound() != 0 {
+		clear(s.wire[:])
+		s.incoming = ipc.Message{}
+		if s.io.waitReceive(s.bound(), s.wire[:], 0) != kcall.StatusOK {
+			break
+		}
+		if decodeIPC(s.wire[:], &s.incoming, s.io.close) && !s.noteLost() {
+			for index := 0; index < int(s.incoming.HandleCount); index++ {
+				s.io.close(s.incoming.Handles[index])
+			}
+		}
+		s.incoming = ipc.Message{}
+	}
+	return s.bound() != 0
+}
+
+// takeLost returns and clears the latest filesystem replacement notice.
+func (s *ownedVFS[T, P]) takeLost() (uint64, bool) {
+	s.hold()
+	defer s.end()
+	generation := s.lost
+	s.lost = 0
+	return generation, generation != 0
 }
 
 // completeOn validates an asynchronously sent request. A decoded error status
