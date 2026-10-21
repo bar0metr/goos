@@ -768,3 +768,19 @@ CA-0990	goos/userspace/runtime/arena	allocWindowRetries	process	atomic	runtime/a
 CA-0991	goos/userspace/runtime/arena	regionWindowRetries	process	atomic	TestWindowNamesRegionTransitionsBeforeAllocatorWindows
 CA-0992	goos/userspace/runtime/arena	holdSlot	process	atomic	threadprobe region-window
 CA-0993	goos/userspace/runtime/arena	holding	process	atomic	threadprobe region-window
+CA-0994	goos/userspace/bin/threadprobe	windowRound	process	atomic	threadprobe region-window
+CA-0995	goos/userspace/bin/threadprobe	windowStep	process	atomic	threadprobe region-window
+CA-0996	goos/userspace/bin/threadprobe	windowMover	process	atomic	threadprobe region-window
+CA-0997	goos/userspace/bin/threadprobe	windowCollector	process	atomic	threadprobe region-window
+CA-0998	goos/userspace/bin/threadprobe	windowStop	process	atomic	threadprobe region-window
+CA-0999	goos/userspace/bin/threadprobe	windowRejected	process	atomic	threadprobe region-window
+CA-1000	goos/userspace/bin/threadprobe	windowRetries	process	atomic	threadprobe region-window
+CA-1001	goos/userspace/bin/threadprobe	windowCollections	process	atomic	threadprobe region-window
+CA-1002	goos/userspace/bin/threadprobe	windowReclaimed	process	atomic	threadprobe region-window
+CA-1003	goos/userspace/bin/threadprobe	windowPeerRounds	process	atomic	threadprobe region-window
+CA-1004	goos/userspace/bin/threadprobe	windowChecks	process	atomic	threadprobe region-window
+CA-1005	goos/userspace/bin/threadprobe	windowBefore	process	owned	threadprobe region-window
+CA-1006	goos/userspace/bin/threadprobe	windowAfter	process	owned	threadprobe region-window
+CA-1007	goos/userspace/bin/threadprobe	windowReady	process	atomic	threadprobe region-window
+CA-1008	goos/userspace/bin/threadprobe	windowDone	process	atomic	threadprobe region-window
+CA-1009	goos/userspace/bin/threadprobe	windowPeerCPUOverlaps	process	atomic	threadprobe region-window

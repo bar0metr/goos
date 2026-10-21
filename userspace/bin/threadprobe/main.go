@@ -6,8 +6,9 @@
 // IDs, joins, exit codes, and the task quota; "gc N ROUNDS" has N threads
 // allocate, share, and drop objects across collections; "roots" checks the
 // roots of threads that run, wait in a call, or allocate in a region while
-// another collects; "storm N ROUNDS" has N threads ask for collections at
-// once; "fault" and "overflow" end a worker with a fault, which ends the
+// another collects; "region-window N ROUNDS" stops a thread inside region
+// transitions while another collects (region_window.go); "storm N ROUNDS"
+// has N threads ask for collections at once; "fault" and "overflow" end a worker with a fault, which ends the
 // process; "bench N OPS MODE" times N threads that allocate, with the heap
 // lock alone (lock), with thread-owned slabs (cache), or with owned slabs
 // and 256 free pages retained (retain), and prints the allocator profile. Only the main thread prints. It is built only into validation
@@ -29,7 +30,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "threadprobe smoke N|lifecycle|gc N R|roots|storm N R|fault|overflow|bench N OPS MODE",
+	Usage:   "threadprobe smoke N|lifecycle|gc N R|roots|region-window N R|storm N R|fault|overflow|bench N OPS MODE",
 	Summary: "native thread checks",
 	MaxArgs: 4,
 }
@@ -63,6 +64,10 @@ func run(data startup.Data) {
 		collect(int(parse(count)), int(parse(rounds)))
 	case utility.Equal(mode, "roots"):
 		roots()
+	case utility.Equal(mode, "region-window") && data.ArgCount() == 3:
+		count, _ := data.Arg(2)
+		rounds, _ := data.Arg(3)
+		regionWindow(int(parse(count)), int(parse(rounds)))
 	case utility.Equal(mode, "storm") && data.ArgCount() == 3:
 		count, _ := data.Arg(2)
 		rounds, _ := data.Arg(3)
