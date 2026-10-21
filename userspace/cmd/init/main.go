@@ -443,8 +443,14 @@ func mark(message string) {
 	}
 }
 
+// fatalEntered keeps a fatal report that runs out of memory from starting
+// another: the log path may allocate, and the out-of-memory hook calls fatal.
+var fatalEntered bool
+
 func fatal(message string) {
-	if !syslog.Error(message[:len(message)-1]) {
+	first := !fatalEntered
+	fatalEntered = true
+	if !first || !syslog.Error(message[:len(message)-1]) {
 		write(message)
 	}
 	sys.Diagnostics(serviceDeviceHandle)
