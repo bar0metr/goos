@@ -28,6 +28,13 @@ const (
 	// the thread's task ID, so a wake never reaches a later thread in the
 	// same slot.
 	KindThread
+	// KindThreadEnd is the end of a native thread of the waiter's process
+	// (kcall.WaitAnyThreadEnd). Its object is the thread's task ID and its
+	// event Exited.
+	KindThreadEnd
+
+	// lastKind is the highest valid kind; validKey bounds keys by it.
+	lastKind = KindThreadEnd
 )
 
 type Event uint8
@@ -285,7 +292,7 @@ func validEntry(entry Entry) bool {
 }
 
 func validKey(key Key) bool {
-	if key.Object == 0 || key.Kind < KindChannel || key.Kind > KindThread {
+	if key.Object == 0 || key.Kind < KindChannel || key.Kind > lastKind {
 		return false
 	}
 	if (key.Kind == KindChannel || key.Kind == KindStream) && key.Side > 1 {

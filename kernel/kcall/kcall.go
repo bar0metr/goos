@@ -658,7 +658,30 @@ const (
 	// WaitAnyThread is the handle of an interest in the calling thread's
 	// own wake flag, with WaitReadable; it names no handle-table entry.
 	WaitAnyThread = ^uint64(0)
+	// WaitAnyThreadEnd marks the handle of an interest in the end of a
+	// native thread of the caller's process, with WaitCompleted: the handle
+	// is the thread's ID with this bit set (ThreadEndInterest). The bit lies
+	// in the index half of a handle ID, above every handle table and task
+	// slot, so the encoding names no handle-table entry, and the ID's
+	// generation keeps a later thread in the same slot from matching. The
+	// interest is ready once the thread has ended, joined or not; ThreadJoin
+	// then collects its code. A thread may name its own end, which is never
+	// ready while it waits.
+	WaitAnyThreadEnd = uint64(1) << 31
 )
+
+// ThreadEndInterest returns the WaitAny handle of an interest in the end of
+// thread.
+func ThreadEndInterest(thread uint64) uint64 { return thread | WaitAnyThreadEnd }
+
+// ThreadEndTarget returns the thread a WaitAny handle names through
+// WaitAnyThreadEnd, and false for any other handle.
+func ThreadEndTarget(handle uint64) (uint64, bool) {
+	if handle == WaitAnyThread || handle&WaitAnyThreadEnd == 0 {
+		return 0, false
+	}
+	return handle &^ WaitAnyThreadEnd, true
+}
 
 type WaitEvent uint64
 

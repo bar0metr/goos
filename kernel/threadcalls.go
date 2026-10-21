@@ -292,6 +292,12 @@ func nativeThreadEnding(owner *process.Process, task sched.TaskID, code uint64) 
 	if found && !ending.Leaving {
 		group.SetExitCode(code)
 	}
+	if found {
+		// The group already records the end, under the registry's write
+		// lock, so a waiter's recheck sees it or this finds its
+		// registration.
+		publishWaitAny(kernelwait.Key{Kind: kernelwait.KindThreadEnd, Object: uint64(task)}, kernelwait.Exited)
+	}
 	if recorded, set := group.ExitCode(); set {
 		return ending, found, recorded
 	}

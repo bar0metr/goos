@@ -17,6 +17,7 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/mm/vm"
+	"goos/kernel/nativethread"
 	"goos/kernel/process"
 	"goos/kernel/sched"
 	"goos/kernel/stream"
@@ -213,6 +214,8 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		var reason diag.Deny
 		if uint64(handleID) == kcall.WaitAnyThread {
 			entry, status, reason = threadWaitEntry(taskID, events)
+		} else if thread, end := kcall.ThreadEndTarget(uint64(handleID)); end {
+			entry, status, reason = threadEndEntry(owner, thread, events)
 		} else {
 			entry, status, reason = resolveWaitAny(owner, handleID, events)
 		}
@@ -237,7 +240,7 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 	if !kernelwait.ValidEntries(entries) {
 		return kcall.StatusResourceExhausted, false
 	}
-	if mask := readyWaitAny(entries); mask != 0 {
+	if mask := readyWaitAny(owner, entries); mask != 0 {
 		trace(diag.WaitReady, owner.ID(), uint64(taskID), entries[0].Key.Object, uint64(mask))
 		return writeWaitAnyMask(handler.root, resultAddress, mask), false
 	}
@@ -273,7 +276,7 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 	// the check below sees the change or the publication sees this
 	// registration. A wake before assembly commits the task to BLOCKED stays
 	// pending and keeps it running.
-	if mask := readyWaitAny(entries); mask != 0 {
+	if mask := readyWaitAny(owner, entries); mask != 0 {
 		waitAnyTable.Cancel(taskID)
 		trace(diag.WaitRecheck, owner.ID(), uint64(taskID), waitTraceObject(entries), uint64(mask))
 		return writeWaitAnyMask(handler.root, resultAddress, mask), false
@@ -379,6 +382,23 @@ func threadWaitEntry(task sched.TaskID, events kcall.WaitEvent) (kernelwait.Entr
 	return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindThread, Object: uint64(task)}, Events: kernelwait.Readable}, kcall.StatusOK, 0
 }
 
+// threadEndEntry is an interest in the end of a native thread of the
+// caller's process (kcall.WaitAnyThreadEnd). It names a thread ThreadJoin
+// could name: one that runs or ended unjoined. The registry lock the call
+// holds keeps the group from changing under it.
+func threadEndEntry(owner *process.Process, thread uint64, events kcall.WaitEvent) (kernelwait.Entry, kcall.Status, diag.Deny) {
+	if events != kcall.WaitCompleted {
+		return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyEvents
+	}
+	if owner.ABI() != process.ABINative {
+		return kernelwait.Entry{}, kcall.StatusUnsupported, diag.DenyType
+	}
+	if _, found := owner.Threads().Find(sched.TaskID(thread)); !found {
+		return kernelwait.Entry{}, kcall.StatusNotFound, diag.DenyObject
+	}
+	return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindThreadEnd, Object: thread}, Events: kernelwait.Exited}, kcall.StatusOK, 0
+}
+
 func waitEvents(events kcall.WaitEvent) kernelwait.Event {
 	var result kernelwait.Event
 	if events&kcall.WaitReadable != 0 {
@@ -396,7 +416,9 @@ func waitEvents(events kcall.WaitEvent) kernelwait.Event {
 	return result
 }
 
-func readyWaitAny(entries []kernelwait.Entry) uint64 {
+// readyWaitAny reports which entries are ready. owner is the waiter's
+// process, whose thread group names the threads a thread-end entry watches.
+func readyWaitAny(owner *process.Process, entries []kernelwait.Entry) uint64 {
 	var mask uint64
 	for index, entry := range entries {
 		ready := false
@@ -430,6 +452,9 @@ func readyWaitAny(entries []kernelwait.Entry) uint64 {
 			ready = logfmt.SequenceBefore(entry.Cursor, systemLog.Total())
 		case kernelwait.KindThread:
 			ready = threadWakeSet(entry.Key.Object)
+		case kernelwait.KindThreadEnd:
+			state, found := owner.Threads().Find(sched.TaskID(entry.Key.Object))
+			ready = !found || state != nativethread.Running
 		}
 		if ready {
 			mask |= 1 << index

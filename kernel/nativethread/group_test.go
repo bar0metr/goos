@@ -153,3 +153,36 @@ func TestSuspensionIsExclusive(t *testing.T) {
 		t.Fatal("reset left threads")
 	}
 }
+
+func TestFindNamesJoinableThreadsByGeneration(t *testing.T) {
+	var group Group
+	group.Adopt(task(0, 1))
+	slot, _ := group.Reserve()
+	old := task(5, 1)
+	if !group.Commit(slot, old) {
+		t.Fatal("commit")
+	}
+	if _, found := group.Find(task(0, 1)); found {
+		t.Fatal("the main thread is joinable")
+	}
+	if state, found := group.Find(old); !found || state != Running {
+		t.Fatalf("running thread = %v, %v", state, found)
+	}
+	if _, found := group.Find(task(5, 2)); found {
+		t.Fatal("another generation of the slot's task was found")
+	}
+	group.Leave(old, 7)
+	group.Ended(old, 0)
+	if state, found := group.Find(old); !found || state != Exited {
+		t.Fatalf("ended thread = %v, %v", state, found)
+	}
+	if code, status := group.Join(task(0, 1), old, false); status != Joined || code != 7 {
+		t.Fatalf("join = %d, %v", code, status)
+	}
+	if _, found := group.Find(old); found {
+		t.Fatal("a joined thread is still found")
+	}
+	if _, found := group.Find(0); found {
+		t.Fatal("task zero is found")
+	}
+}

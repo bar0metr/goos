@@ -215,6 +215,21 @@ func (group *Group) Join(caller, thread sched.TaskID, register bool) (uint64, Jo
 	return 0, NotFound
 }
 
+// Find returns the state of a thread that Join can name: a running thread or
+// one that ended and was not joined. The main thread is never found.
+func (group *Group) Find(thread sched.TaskID) (State, bool) {
+	if thread == 0 {
+		return Free, false
+	}
+	for slot := 1; slot < Slots; slot++ {
+		entry := &group.threads[slot]
+		if entry.Task == thread && (entry.State == Running || entry.State == Exited) {
+			return entry.State, true
+		}
+	}
+	return Free, false
+}
+
 // Forget drops caller as joiner wherever it waits, when it ends.
 func (group *Group) Forget(caller sched.TaskID) {
 	for slot := range group.threads {
