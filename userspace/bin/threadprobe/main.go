@@ -30,7 +30,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "threadprobe smoke N|lifecycle|gc N R|roots|region-window N R|storm N R|fault|overflow|bench N OPS MODE",
+	Usage:   "threadprobe smoke|lifecycle|gc|roots|region-window|storm|fault|overflow|bench [ARGS...]",
 	Summary: "native thread checks",
 	MaxArgs: 4,
 }
