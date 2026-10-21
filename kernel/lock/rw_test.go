@@ -76,3 +76,19 @@ func TestRWWaitingWriterHoldsOffNewReaders(t *testing.T) {
 	rw.RLock()
 	rw.RUnlock()
 }
+
+func TestRWStoppedWriterLetsReadersIn(t *testing.T) {
+	stop := uint64(0)
+	// The writer marks itself pending on its first round, then is stopped.
+	Install(Hooks{Pause: func() { stop = 1 }})
+	defer Install(Hooks{})
+	var rw RW
+	rw.state.Store(1) // a reader on another processor
+	if rw.LockUnless(&stop) {
+		t.Fatal("a stopped writer took a lock a reader holds")
+	}
+	rw.state.Add(^uint32(0)) // that reader leaves
+	if !rw.tryRead() {
+		t.Fatalf("state %#x: a writer that gave up still holds new readers off", rw.state.Load())
+	}
+}
