@@ -166,6 +166,20 @@ retries within its rendezvous bound. Kernel snapshots include XMM words;
 conservative scanning must retain that coverage because LLVM can keep pointer
 aggregates only in vector registers during a copy.
 
+The first KVM run on eight processors stopped in `goprobe threads`: a
+processor whose last dispatched call was ThreadSuspend spun on the process
+registry for longer than the four-second lock watchdog, and the report named
+no writer as holder. The report could not name the reader. Review found one
+defect that fits: a waiting registry writer marks the lock pending, which
+keeps new readers out, and a writer stopped by ThreadSuspend gave up without
+clearing that mark. The runtime's thread calls write the registry, so a
+worker can be that writer. Every later reader then waited for a writer that
+no longer existed. A writer that gives up now clears its mark. Validation
+stuck-lock reports now list each processor's task slot, last call and held
+lock levels, and every native call records its number, including the wait
+paths entered from assembly. The next KVM run passed every check. One pass
+does not prove the race gone; TCG had not exposed it at all.
+
 The current hooks are experimental. Tests must still cover transitions during
 creation and completion, pending channel values, saved register roots, timer
 callbacks, mixed native threads, and failed rendezvous. A passing channel or
