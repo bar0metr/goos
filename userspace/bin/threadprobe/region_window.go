@@ -145,61 +145,77 @@ func checkHolders(holders *[windowLists]*holder, round uint32, mover, kind int) 
 	return true
 }
 
-// moveRound is the mover's side of a round.
+// windowHeads carries lists from a retired builder frame into the regions.
+// Atomic swaps prevent LLVM from removing the clears as dead stores and
+// leaving heap addresses in the mover's live frame through inner.Clear.
+type windowHeads [2 * windowLists]atomic.Pointer[node]
+
+//go:noinline
+func seedWindow(round uint32, mover int) *windowHeads {
+	heads := new(windowHeads)
+	for kind := 0; kind < 2; kind++ {
+		for index := range windowLists {
+			heads[kind*windowLists+index].Store(buildList(windowSeed(round, mover, kind, index), windowLength))
+		}
+	}
+	return heads
+}
+
+// placeHolders runs inside a region. It leaves only region holders pointing
+// to the lists, with no direct list address returned to its caller.
 //
 //go:noinline
-func moveRound(round uint32, mover int, outer, inner *arena.Region) {
-	const (
-		kindOuter = iota
-		kindInner
-		kindStack
-	)
-	// Everything is built in the heap first: inside a region every
-	// allocation is a region allocation.
-	outerHeads := new([windowLists]*node)
-	innerHeads := new([windowLists]*node)
+func placeHolders(heads *windowHeads, kind int) *[windowLists]*holder {
+	holders := new([windowLists]*holder)
 	for index := range windowLists {
-		outerHeads[index] = buildList(windowSeed(round, mover, kindOuter, index), windowLength)
-		innerHeads[index] = buildList(windowSeed(round, mover, kindInner, index), windowLength)
+		holders[index] = &holder{list: heads[kind*windowLists+index].Swap(nil)}
 	}
-	stackList := buildList(windowSeed(round, mover, kindStack, 0), windowLength)
+	return holders
+}
 
-	outerScope := outer.Enter()
-	var outerHolders, innerHolders [windowLists]*holder
-	for index := range windowLists {
-		outerHolders[index] = &holder{list: outerHeads[index]}
-		outerHeads[index] = nil
-	}
-
-	expect(outer.Used() >= windowLists*16, "region window: holders allocated in the outer region")
+// innerRound returns before the mover publishes stepCleared. Otherwise
+// conservative scanning would retain the old heads LLVM spilled in this
+// frame, even after the inner region's used range became empty.
+//
+//go:noinline
+func innerRound(round uint32, mover int, inner *arena.Region, heads *windowHeads, outerHolders *[windowLists]*holder) {
 	arena.HoldRegionTransition()
 	innerScope := inner.Enter()
-	for index := range windowLists {
-		innerHolders[index] = &holder{list: innerHeads[index]}
-		innerHeads[index] = nil
-	}
+	innerHolders := placeHolders(heads, 1)
 	expect(inner.Used() >= windowLists*16, "region window: holders allocated in the inner region")
 	windowStep.Store(stepEntered)
 	awaitStep(stepCollected)
-	expect(checkHolders(&outerHolders, round, mover, kindOuter), "region window: outer lists after a held Enter")
-	expect(checkHolders(&innerHolders, round, mover, kindInner), "region window: inner lists after a held Enter")
+	expect(checkHolders(outerHolders, round, mover, 0), "region window: outer lists after a held Enter")
+	expect(checkHolders(innerHolders, round, mover, 1), "region window: inner lists after a held Enter")
 
 	arena.HoldRegionTransition()
 	innerScope.Leave()
-	expect(checkHolders(&innerHolders, round, mover, kindInner), "region window: inner lists after a held Leave")
-	expect(checkHolders(&outerHolders, round, mover, kindOuter), "region window: outer lists after a held Leave")
-	expect(listHolds(stackList, windowSeed(round, mover, kindStack, 0), windowLength), "region window: the stack's list")
+	expect(checkHolders(innerHolders, round, mover, 1), "region window: inner lists after a held Leave")
+	expect(checkHolders(outerHolders, round, mover, 0), "region window: outer lists after a held Leave")
 	windowStep.Store(stepLeft)
 
 	awaitStep(stepMeasured)
 	inner.Clear()
 	expect(inner.Used() == 0, "region window: the inner region cleared")
-	innerHolders = [windowLists]*holder{}
+}
+
+// moveRound owns only outer-region addresses and the stack's list. The
+// inner list builder and checker frames retire before the reclamation GC.
+//
+//go:noinline
+func moveRound(round uint32, mover int, outer, inner *arena.Region) {
+	heads := seedWindow(round, mover)
+	stackList := buildList(windowSeed(round, mover, 2, 0), windowLength)
+	outerScope := outer.Enter()
+	outerHolders := placeHolders(heads, 0)
+	expect(outer.Used() >= windowLists*16, "region window: holders allocated in the outer region")
+	innerRound(round, mover, inner, heads, outerHolders)
+	expect(listHolds(stackList, windowSeed(round, mover, 2, 0), windowLength), "region window: the stack's list")
 	windowStep.Store(stepCleared)
 
 	awaitStep(stepReclaimed)
-	expect(checkHolders(&outerHolders, round, mover, kindOuter), "region window: outer lists after the inner region was swept")
-	expect(listHolds(stackList, windowSeed(round, mover, kindStack, 0), windowLength), "region window: the stack's list at the end")
+	expect(checkHolders(outerHolders, round, mover, 0), "region window: outer lists after the inner region was swept")
+	expect(listHolds(stackList, windowSeed(round, mover, 2, 0), windowLength), "region window: the stack's list at the end")
 	outerScope.Leave()
 	outer.Clear()
 	windowStep.Store(stepRoundEnded)
@@ -287,6 +303,9 @@ func collectRound() {
 	awaitStep(stepCleared)
 	collectOnce()
 	live := arena.HeapStats().Live
+	if held <= live || held-live < windowReclaimFloor {
+		report("THREADPROBE_REGION_WINDOW_RECLAIM held=", held, " live=", live, " round=", uint64(windowRound.Load()), "", 0)
+	}
 	expect(held > live && held-live >= windowReclaimFloor, "region window: the cleared inner region's lists were swept")
 	windowReclaimed.Add(held - live)
 	windowStep.Store(stepReclaimed)
