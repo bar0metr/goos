@@ -10,6 +10,7 @@ partition_log=build/logs/partition-tables.log
 stack_log=build/logs/kernel-stack-overflow.log
 poweroff_log=build/logs/poweroff.log
 poweroff_after_log=build/logs/poweroff-after.log
+stall_log=build/logs/fat32-stall.log
 pid=
 checks=0
 monitor=${TMPDIR:-/tmp}/goos-boot-monitor.$$
@@ -240,6 +241,44 @@ guest_memory_mib() {
 	esac
 }
 
+# The main session already injects three FAT32 exits, the supervisor's limit.
+# Test an unanswered exchange in a fresh boot rather than spending a fourth
+# restart from that same budget. Keep its writes off the persistence disk.
+check_filesystem_stall() {
+	stall_disk=build/boot-fat32-stall.img
+	cp "$disk" "$stall_disk"
+	rm -f "$stall_log"
+	( await_ready "$stall_log"
+		printf 'write /home/.validation-fat32-recovery persistent; cat /home/.validation-fat32-recovery; echo before-fat32-stall\n'
+		wait_for_marker fat32-stall.seed '^before-fat32-stall$' 30 "$stall_log"
+		sleep 1
+		printf 'cd /persist/.validation-fat32-stall\n'
+		wait_for_count fat32-stall.cache '^FILE_CACHE_RECOVERED_OK$' 1 60 "$stall_log"
+		wait_for_count fat32-stall.system '^SYSTEM_REATTACHED_OK$' 1 60 "$stall_log"
+		sleep 3
+		printf 'cat /home/.validation-fat32-recovery; echo after-fat32-stall\n'
+		sleep 2
+	) | qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
+		-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
+		-drive "if=none,id=goosdisk,format=raw,file=$stall_disk" \
+		-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
+		-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$stall_log" 2>&1 &
+	pid=$!
+	wait_for_marker fat32-stall '^after-fat32-stall$' 90 "$stall_log"
+	cleanup
+	require_window storage.fat32-stall-seed-write 'WRITE_PROCESS_OK$' 'the control file written before the stall' "$stall_log" 'write /home/.validation-fat32-recovery persistent;' 'before-fat32-stall'
+	require_window storage.fat32-stall-seed-read '^persistent$' 'the control file read before the stall' "$stall_log" 'write /home/.validation-fat32-recovery persistent;' 'before-fat32-stall'
+	require_marker storage.fat32-stalled FAT32_STALLED "$stall_log" 'validation-fat32-stall'
+	require_marker storage.fat32-stall-replacing FAT32_STALL_REPLACING "$stall_log" 'validation-fat32-stall'
+	require_marker storage.fat32-control-renewed VFS_CONTROL_REPLACED_OK "$stall_log" 'validation-fat32-stall'
+	require_marker storage.fat32-cache-recovered FILE_CACHE_RECOVERED_OK "$stall_log" 'validation-fat32-stall'
+	forbid_regex storage.fat32-recovery-bounded 'FILE_CACHE_RECOVERY_LIMIT' 'one stall within the recovery bound' "$stall_log" 'validation-fat32-stall'
+	require_window storage.fat32-volume-after-stall '^persistent$' 'the volume read through the replacement of a stalled service' "$stall_log" 'cat /home/.validation-fat32-recovery; echo after-fat32-stall' 'after-fat32-stall'
+	require_count storage.fat32-stall-vfs-stable '^VFS_SERVICE_OK$' 1 "$stall_log" 'validation-fat32-stall'
+	forbid_regex storage.fat32-stall-no-recovery 'BOOT_MODE_RECOVERY' 'no fallback to recovery mode' "$stall_log" 'validation-fat32-stall'
+	pass_group fat32-stall
+}
+
 trap cleanup EXIT
 trap 'cleanup; exit 130' HUP INT TERM
 
@@ -252,6 +291,11 @@ if [ "${1-}" = '--self-test-failure' ]; then
 	exit 0
 fi
 
+stall_only=false
+if [ "${1-}" = '--fat32-stall-only' ]; then
+	stall_only=true
+	shift
+fi
 iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
 disk=${3:?test disk path required}
@@ -267,6 +311,10 @@ variant=$(cut -d' ' -f5 build/config/build)
 # Every disk this script makes for itself is an installed one, made from the
 # build's system tree as make test-disk makes the main one (ADR 0175).
 system_tree=build/variants/$variant/system
+if "$stall_only"; then
+	check_filesystem_stall
+	exit 0
+fi
 go run ./tools/padimage "build/variants/$variant/userspace/bin/vmprobe" build/bigprobe 3145728
 # The padded program exercises a source much larger than the pages it touches.
 # Launch must not read the padding before the process starts.
@@ -436,13 +484,18 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'cd /\n'
 	sleep 1
+	stat_done=$(log_count "$log" '^STAT_PROCESS_OK$')
 	printf 'stat /system/bin/ls\n'
+	await_count "$log" '^STAT_PROCESS_OK$' "$((stat_done + 1))"
 	sleep 1
 	printf 'stat /system/bin\n'
+	await_count "$log" '^STAT_PROCESS_OK$' "$((stat_done + 2))"
 	sleep 1
 	printf 'stat -m /system\n'
+	await_count "$log" '^STAT_PROCESS_OK$' "$((stat_done + 3))"
 	sleep 1
 	printf 'stat -b /system/motd\n'
+	await_count "$log" '^STAT_PROCESS_OK$' "$((stat_done + 4))"
 	sleep 1
 	printf 'stat -x /system\n'
 	sleep 1
@@ -665,17 +718,6 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	printf 'ls /tmp; echo after-fat32-fault\n'
 	sleep 1
 	printf 'cat /home/demo/message.txt; echo after-fat32-restart\n'
-	sleep 2
-	# A FAT32 service that stalls keeps the file cache mapped. The VFS waits
-	# out its six-second deadline, quarantines the cache and asks PID 1 for a
-	# replacement; PID 1 ends the service, and only its reported exit lets the
-	# replacement share the cache.
-	cache_reattach=$(log_count "$log" '^SYSTEM_REATTACHED_OK$')
-	printf 'cd /persist/.validation-fat32-stall\n'
-	await_count "$log" '^FILE_CACHE_RECOVERED_OK$' 1
-	await_count "$log" '^SYSTEM_REATTACHED_OK$' "$((cache_reattach + 1))"
-	sleep 3
-	printf 'cat /home/demo/message.txt; echo after-fat32-stall\n'
 	sleep 2
 	# The default CPU has no RDRAND. getrandom and AT_RANDOM still work, from
 	# the kernel's jitter-seeded generator: static glibc reads AT_RANDOM
@@ -912,12 +954,6 @@ forbid_regex storage.fsck-not-run '^FSCK_FAT_CHECK_OK$' 'no check against the li
 require_window storage.fsck-busy-mounted '^persistent$' 'the volume still mounted after the refusal' "$log" 'goos> cat /home/demo/message.txt; echo after-fsck-busy' 'after-fsck-busy'
 require_regex storage.fat32-rest-of-namespace '^after-fat32-fault$' 'the shell and /tmp working after the fault' "$log" 'fault fat32'
 require_window storage.fat32-volume-served-again '^persistent$' 'the volume read through the restarted service' "$log" 'goos> cat /home/demo/message.txt; echo after-fat32-restart' 'after-fat32-restart'
-require_marker storage.fat32-stalled FAT32_STALLED "$log" 'validation-fat32-stall'
-require_marker storage.fat32-stall-replacing FAT32_STALL_REPLACING "$log" 'validation-fat32-stall'
-require_marker storage.fat32-control-renewed VFS_CONTROL_REPLACED_OK "$log" 'validation-fat32-stall'
-require_marker storage.fat32-cache-recovered FILE_CACHE_RECOVERED_OK "$log" 'validation-fat32-stall'
-forbid_regex storage.fat32-recovery-bounded 'FILE_CACHE_RECOVERY_LIMIT' 'one stall within the recovery bound' "$log" 'validation-fat32-stall'
-require_window storage.fat32-volume-after-stall '^persistent$' 'the volume read through the replacement of a stalled service' "$log" 'goos> cat /home/demo/message.txt; echo after-fat32-stall' 'after-fat32-stall'
 # File data moves between the VFS and the FAT32 service through the file cache
 # they share, not through messages (ADR 0098).
 require_marker storage.file-cache FILE_CACHE_OK "$log"
@@ -1603,5 +1639,7 @@ wait_for_marker poweroff-after '^kept across poweroff' 60 "$poweroff_after_log"
 cleanup
 require_regex poweroff.data-kept '^kept across poweroff' 'the file written before poweroff' "$poweroff_after_log" 'goos> cat /home/poweroff.txt'
 pass_group poweroff
+
+check_filesystem_stall
 
 printf '\nPASS qemu-boot (%s checks)\n' "$checks"

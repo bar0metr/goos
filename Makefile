@@ -555,6 +555,7 @@ test-fat32-stress:
 	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -timeout 60m ./userspace/fat32
 
 test-boot:
+	@sh tests/boot/qemu_boot_test.sh
 	@$(MAKE) --no-print-directory iso VALIDATION=1
 	@$(MAKE) --no-print-directory recovery-iso VALIDATION=1
 	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/boot-test-virtio-blk.img
