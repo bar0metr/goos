@@ -138,8 +138,17 @@ The G poller bounds registered interests to 63, reserving the remaining kernel
 interest for its own thread wake. A G with an additional runtime pin cannot
 park through these adapters.
 
-ProcessWait, ThreadJoin, cursor-log waits, and IRQWait still use their native
-blocking paths. The complete service-library wait audit remains unfinished.
+ProcessWait probes the process, then parks on its completion readiness and
+probes again for the exit code. It keeps the native call's rights check,
+errors and finite timeout. StreamWait keeps its native contract, which needs
+only the Wait right and reports a closed peer as PeerDied. StreamWaitRead and
+StreamWaitWrite wait through WaitAny instead: they need the Read or Write
+right as well, and report peer closure as readiness, so the next read or
+write returns PeerDied. Utility's standard streams use them. ThreadJoin,
+cursor-log waits and IRQWait still block their native thread: the kernel
+records a joiner by task, a cursor wait needs a cursor in the registration,
+and the disk interrupt line has no readiness that WaitAny could observe. The
+complete service-library wait audit remains unfinished.
 
 ## Collector integration
 
