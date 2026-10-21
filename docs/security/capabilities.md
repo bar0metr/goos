@@ -330,7 +330,8 @@ first by PID 1 (ADR 0034, 0035, 0190):
   `PortRead`/`PortWrite` require Read/Write, widths 1, 2, or 4, and
   `offset + width <= size`. There is no other port-I/O path from ring 3.
 - **IRQ**: an IRQ object for line 11, the disk's, or for the network
-  function's routed line. `IRQWait` requires Wait and serves line 11 only;
+  function's routed line. `IRQWait` and its nonblocking `IRQPoll` counterpart
+  require Wait and serve line 11 only;
   a `WaitAny` interest and `IRQTake` require Wait and serve both lines. The
   interrupt still wakes a native `IRQWait` waiter on line 11 directly;
   `WaitAny` observes the pending event without consuming it.

@@ -118,6 +118,10 @@ const (
 	// ThreadWakeTake clears the caller's own (ADR 0204).
 	OperationThreadWake
 	OperationThreadWakeTake
+	// OperationIRQPoll consumes a pending IRQWait event without blocking.
+	// It keeps IRQWait's line-11-only authority; the separate opcode leaves
+	// legacy IRQWait's unused arguments unchanged.
+	OperationIRQPoll
 )
 
 // Native thread layout (ADR 0203). A process has ThreadSlots thread slots.
@@ -273,6 +277,7 @@ type Handler interface {
 	CPURuntime(index uint64, address uint64) Status
 	TaskAffinity(process uint64, mask uint64, address uint64) Status
 	IRQTake(irq uint64) Status
+	IRQPoll(irq uint64) Status
 	RandomRead(address uint64, length uint64) Status
 	ValidationFault(device uint64) Status
 	SystemPowerOff(device uint64) Status
@@ -425,6 +430,8 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.TaskAffinity(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationIRQTake:
 		return Result{Status: handler.IRQTake(request.Arg0)}
+	case OperationIRQPoll:
+		return Result{Status: handler.IRQPoll(request.Arg0)}
 	case OperationRandomRead:
 		if request.Arg1 == 0 || request.Arg1 > MaxRandomRead {
 			return Result{Status: StatusInvalidArgument}
@@ -723,11 +730,3 @@ func ValidJoinFlags(flags uint64) bool {
 	}
 	return false
 }
-
-// IRQWaitPoll makes IRQWait consume a pending event without registering a
-// native waiter. It retains IRQWait's line-11 capability check and reports
-// NotFound when no event is pending.
-const IRQWaitPoll = uint64(1)
-
-// ValidIRQWaitFlags admits blocking and nonblocking IRQWait modes.
-func ValidIRQWaitFlags(flags uint64) bool { return flags == 0 || flags == IRQWaitPoll }

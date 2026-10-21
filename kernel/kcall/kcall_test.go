@@ -643,7 +643,7 @@ func TestDispatchExecutableCalls(t *testing.T) {
 			t.Fatalf("random read of %d bytes reached the handler", length)
 		}
 	}
-	if result := Dispatch(Request{Operation: OperationThreadWakeTake + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if result := Dispatch(Request{Operation: OperationIRQPoll + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}
@@ -841,5 +841,23 @@ func TestThreadStackLayout(t *testing.T) {
 	}
 	if ThreadSlotOf(ThreadStackTop(ThreadSlots-1)-ThreadStride-1) != ThreadSlots || ThreadSlotOf(0x1000) != ThreadSlots {
 		t.Fatal("an address below the thread area maps to a slot")
+	}
+}
+
+func (handler *testHandler) IRQPoll(irq uint64) Status {
+	handler.channel = irq
+	return StatusNotFound
+}
+
+func TestIRQPollIsAppendedAndNeverBlocks(t *testing.T) {
+	if OperationIRQWait != 17 || OperationThreadWakeTake != 70 || OperationIRQPoll != 71 {
+		t.Fatalf("IRQ ABI renumbered: wait=%d wake-take=%d poll=%d", OperationIRQWait, OperationThreadWakeTake, OperationIRQPoll)
+	}
+	for _, garbage := range []uint64{0, 1, 2, ^uint64(0)} {
+		handler := &testHandler{}
+		result := Dispatch(Request{Operation: OperationIRQPoll, Arg0: 0x10000001d, Arg1: garbage, Arg2: garbage}, handler)
+		if result.Action != ActionReturn || result.Status != StatusNotFound || handler.channel != 0x10000001d {
+			t.Fatalf("IRQ poll dispatch=%+v handle=%#x", result, handler.channel)
+		}
 	}
 }

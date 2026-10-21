@@ -240,7 +240,7 @@ func nativeCallLocks(operation kcall.Operation) lockSet {
 	case kcall.OperationConsoleWrite, kcall.OperationConsoleRead, kcall.OperationConsoleInterrupt, kcall.OperationConsoleInfo,
 		kcall.OperationPortRead, kcall.OperationPortWrite, kcall.OperationLogWrite, kcall.OperationLogRead, kcall.OperationLogBounds, kcall.OperationLogReadSequence,
 		kcall.OperationSystemReset, kcall.OperationSystemPowerOff, kcall.OperationPowerOffReady, kcall.OperationValidationFault, kcall.OperationClockSet,
-		kcall.OperationIRQWait, kcall.OperationIRQTake:
+		kcall.OperationIRQWait, kcall.OperationIRQTake, kcall.OperationIRQPoll:
 		return callDevice
 	case kcall.OperationDMAAllocate, kcall.OperationImageMap:
 		return handleRead | spaceWrite

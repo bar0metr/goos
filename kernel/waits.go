@@ -132,27 +132,19 @@ func irqPending(object uint64) bool {
 	return false
 }
 
-func waitIRQ(handler nativeCallHandler, irqHandle, flags, task uint64) (kcall.Status, bool) {
-	if !kcall.ValidIRQWaitFlags(flags) || task >= sched.MaxTasks {
+func waitIRQ(handler nativeCallHandler, irqHandle uint64, task uint64) (kcall.Status, bool) {
+	if task >= sched.MaxTasks {
 		return kcall.StatusInvalidArgument, false
 	}
 	taskID := sched.TaskID(amd64.TaskIDForSlot(task))
 	if _, _, valid := taskID.Parts(); !valid {
 		return kcall.StatusInvalidArgument, false
 	}
-	owner, found := handler.self()
-	if !found {
-		return kcall.StatusPermissionDenied, false
-	}
-	authority, allowed := owner.Handles().Lookup(handle.ID(irqHandle), handle.TypeIRQ, capability.Wait)
-	if !allowed || authority.Object() != device.DiskIRQObject {
+	if !handler.irqWaitAuthorized(irqHandle) {
 		return kcall.StatusPermissionDenied, false
 	}
 	if amd64.TakeIRQ11() {
 		return kcall.StatusOK, false
-	}
-	if flags == kcall.IRQWaitPoll {
-		return kcall.StatusNotFound, false
 	}
 	amd64.SetIRQ11Waiter(task + 1)
 	amd64.RearmIRQ11()
@@ -166,13 +158,36 @@ func waitIRQ(handler nativeCallHandler, irqHandle, flags, task uint64) (kcall.St
 	return kcall.StatusNotFound, true
 }
 
+// irqWaitAuthorized is the shared line and capability check for the
+// blocking IRQWait and its nonblocking IRQPoll counterpart. IRQTake serves
+// the network too, so it cannot replace this validation.
+func (handler nativeCallHandler) irqWaitAuthorized(irqHandle uint64) bool {
+	owner, found := handler.self()
+	if !found {
+		return false
+	}
+	authority, allowed := owner.Handles().Lookup(handle.ID(irqHandle), handle.TypeIRQ, capability.Wait)
+	return allowed && authority.Object() == device.DiskIRQObject
+}
+
+// IRQPoll consumes a pending disk IRQ event without registering a waiter.
+func (handler nativeCallHandler) IRQPoll(irqHandle uint64) kcall.Status {
+	if !handler.irqWaitAuthorized(irqHandle) {
+		return kcall.StatusPermissionDenied
+	}
+	if !amd64.TakeIRQ11() {
+		return kcall.StatusNotFound
+	}
+	return kcall.StatusOK
+}
+
 //export goos_dispatch_irq_wait
-func dispatchIRQWait(irqHandle, flags, rootAndTask uint64) uint64 {
+func dispatchIRQWait(irqHandle uint64, rootAndTask uint64) uint64 {
 	call, ok := beginNativeCall(kcall.OperationIRQWait, 0, 0)
 	if !ok {
 		return uint64(kcall.ActionRetry) << 32
 	}
-	status, blocked := waitIRQ(nativeCallHandler{root: rootAndTask &^ 0xfff}, irqHandle, flags, rootAndTask&0xfff)
+	status, blocked := waitIRQ(nativeCallHandler{root: rootAndTask &^ 0xfff}, irqHandle, rootAndTask&0xfff)
 	action := kcall.ActionReturn
 	if blocked {
 		action = kcall.ActionBlock

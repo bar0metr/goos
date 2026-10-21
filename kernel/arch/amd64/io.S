@@ -1434,11 +1434,10 @@ goos_user_call:
 	 jmp .user_call_result
 .user_call_irq_wait:
 	 movq 96(%rsp), %rcx
-	 movq 88(%rsp), %rdx
 	 movq GOOS_CPU_CURRENT(%rbx), %rax
-	 leaq goos_task_roots(%rip), %r8
-	 movq (%r8,%rax,8), %r8
-	 orq %rax, %r8
+	 leaq goos_task_roots(%rip), %rdx
+	 movq (%rdx,%rax,8), %rdx
+	 orq %rax, %rdx
 	 callq goos_dispatch_irq_wait
 	 jmp .user_call_result
 .user_call_stream_wait:

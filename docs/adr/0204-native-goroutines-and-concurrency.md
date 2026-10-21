@@ -163,8 +163,10 @@ WaitAnyCursor parks through its own hook. The poller always waits in the
 cursor format, so each registration keeps its log cursor and every other
 interest carries the zero cursor the kernel requires.
 
-IRQWait first probes through its native nonblocking mode, preserving the
-line-11-only capability check and consuming an already pending event. It
+IRQWait first probes with IRQPoll, preserving the line-11-only capability
+check and consuming an already pending event. IRQPoll uses a separate,
+append-only opcode so older IRQWait callers can keep arbitrary values in
+unused argument registers. It
 then parks on the line's readiness and takes the event with IRQTake,
 waiting again when another taker got it first. The disk's line 11 is visible
 to WaitAny: with no IRQWait waiter its interrupt wakes the kernel loop, which

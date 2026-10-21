@@ -312,6 +312,14 @@ goos_irq_wait:
     ret
 .size goos_irq_wait, .-goos_irq_wait
 
+.global goos_irq_poll
+.type goos_irq_poll,@function
+goos_irq_poll:
+    movl $71, %eax
+    int $0x80
+    ret
+.size goos_irq_poll, .-goos_irq_poll
+
 .global goos_stream_create
 .type goos_stream_create,@function
 goos_stream_create:

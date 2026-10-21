@@ -88,6 +88,8 @@ table with type, generation, and rights checks.
 | 55 | `IRQTake` | IRQ handle, Wait, the routed network line or line 11 | none beyond the handle | clears one pending flag | no; nothing pending → `NotFound` |
 | 56 | `RandomRead` | — | length 1..64, checked in `Dispatch`; `CopyOut` of generator output, after which the kernel clears its copy | at most 64 bytes from a per-CPU buffer; stirs the pool with the cycle counter | no; no generator output → `Unsupported` |
 
+| 71 | `IRQPoll` | IRQ handle, Wait, line 11, checked by the same validator as `IRQWait` | ignores unused arguments | atomically consumes one pending flag; registers no waiter | no; nothing pending → `NotFound` |
+
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording
 compiles away.
