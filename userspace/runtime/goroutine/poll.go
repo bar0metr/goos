@@ -64,6 +64,17 @@ func (c *Cancel) Canceled() bool {
 // other goroutines. Called outside a goroutine, on a scheduler stack, it
 // waits on the kernel directly.
 func Wait(interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int, deadline int64, cancel *Cancel) (uint64, kcall.Status) {
+	return parkWait(interests, nil, count, deadline, cancel)
+}
+
+// waitCursor is Wait over cursor interests, as sys.WaitAnyCursor takes
+// them: a log interest is ready once the log holds its cursor's record.
+func waitCursor(interests *[kcall.WaitAnyMaxObjects]sys.CursorInterest, count int, deadline int64, cancel *Cancel) (uint64, kcall.Status) {
+	return parkWait(nil, interests, count, deadline, cancel)
+}
+
+// parkWait is Wait for plain or, when plain is nil, cursor interests.
+func parkWait(plain *[kcall.WaitAnyMaxObjects]sys.Interest, cursor *[kcall.WaitAnyMaxObjects]sys.CursorInterest, count int, deadline int64, cancel *Cancel) (uint64, kcall.Status) {
 	if count < 0 || count > MaxWaiters {
 		return 0, kcall.StatusInvalidArgument
 	}
@@ -73,7 +84,10 @@ func Wait(interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int, deadline 
 	g := m.curG
 	if g == nil {
 		unpin()
-		return sys.WaitAny(interests, count, ticksUntil(deadline))
+		if plain == nil {
+			return sys.WaitAnyCursor(cursor, count, ticksUntil(deadline))
+		}
+		return sys.WaitAny(plain, count, ticksUntil(deadline))
 	}
 	if cancel != nil && cancel.Canceled() {
 		unpin()
@@ -81,7 +95,7 @@ func Wait(interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int, deadline 
 	}
 	index := indexOf(g)
 	seq := g.wait.begin(g.gen, cancel)
-	if !register(index, g.gen, seq, interests, count) {
+	if !register(index, g.gen, seq, plain, cursor, count) {
 		g.wait.state.Store(waitIdle)
 		unpin()
 		return 0, kcall.StatusResourceExhausted
@@ -136,8 +150,9 @@ func Wait(interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int, deadline 
 	return g.wait.mask, g.wait.status
 }
 
-// register records count interests for the goroutine at index.
-func register(index, gen, seq uint32, interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int) bool {
+// register records count interests for the goroutine at index, from plain
+// or, when plain is nil, from cursor.
+func register(index, gen, seq uint32, plain *[kcall.WaitAnyMaxObjects]sys.Interest, cursor *[kcall.WaitAnyMaxObjects]sys.CursorInterest, count int) bool {
 	poll.lock.lock()
 	defer poll.lock.unlock()
 	if int(poll.count)+count > MaxWaiters {
@@ -148,10 +163,13 @@ func register(index, gen, seq uint32, interests *[kcall.WaitAnyMaxObjects]sys.In
 		for poll.regs[slot].index != 0 {
 			slot++
 		}
-		poll.regs[slot] = registration{
-			handle: uint64(interests[bit].Handle), events: interests[bit].Events,
-			index: index + 1, gen: gen, seq: seq, bit: uint8(bit),
+		r := registration{index: index + 1, gen: gen, seq: seq, bit: uint8(bit)}
+		if plain != nil {
+			r.handle, r.events = uint64(plain[bit].Handle), plain[bit].Events
+		} else {
+			r.handle, r.events, r.cursor = uint64(cursor[bit].Handle), cursor[bit].Events, cursor[bit].Cursor
 		}
+		poll.regs[slot] = r
 		poll.count++
 	}
 	return true
@@ -202,7 +220,9 @@ func nudgePoller() {
 }
 
 // snapshot copies the registered interests after m's wake flag into
-// m.interests and returns how many it copied.
+// m.interests and returns how many it copied. The poller always waits in the
+// cursor format: the kernel takes a zero cursor for every object but the
+// log, so one format covers plain and cursor registrations.
 func snapshot(m *M) int {
 	poll.lock.lock()
 	count := 0
@@ -212,7 +232,7 @@ func snapshot(m *M) int {
 			continue
 		}
 		poll.snapshot[count] = r
-		m.interests[1+count] = sys.Interest{Handle: handle.ID(r.handle), Events: r.events}
+		m.interests[1+count] = sys.CursorInterest{Handle: handle.ID(r.handle), Events: r.events, Cursor: r.cursor}
 		count++
 	}
 	poll.lock.unlock()
@@ -233,7 +253,7 @@ func deliver(m *M, mask uint64, status kcall.Status, count int) {
 			r := poll.snapshot[slot]
 			members, size := waitGroup(&poll.snapshot, slot, count, &m.interests, &bits)
 			seen |= members
-			ready, status := sys.WaitAny(&m.interests, size, 0)
+			ready, status := sys.WaitAnyCursor(&m.interests, size, 0)
 			if status != kcall.StatusTimeout {
 				completeWait(r.index-1, r.gen, r.seq, groupReadyMask(ready, &bits, size), status)
 			}
@@ -266,7 +286,7 @@ func pollNow(m *M) bool {
 	before := sched.wakes.Load()
 	m.interests[0] = wakeInterest
 	count := snapshot(m)
-	mask, status := sys.WaitAny(&m.interests, 1+count, 0)
+	mask, status := sys.WaitAnyCursor(&m.interests, 1+count, 0)
 	m.counters.polls.Add(1)
 	if mask&1 != 0 {
 		drainWake(m)
@@ -301,7 +321,7 @@ func wait(m *M) {
 	sched.pollUntil.Store(deadline)
 	timeout := ticksUntil(deadline)
 	if suspect {
-		mask, status := sys.WaitAny(&m.interests, 1, timeout)
+		mask, status := sys.WaitAnyCursor(&m.interests, 1, timeout)
 		if mask == 0 && sched.dispatches.Load()+sched.wakes.Load() == before && allAsleep() && pollCount() == 0 && nextDeadline() == never {
 			deadlock()
 		}
@@ -309,16 +329,16 @@ func wait(m *M) {
 		return
 	}
 	if (timeout == kcall.WaitAnyInfiniteTimeout || timeout > idleTicks) && arena.IdlePending() {
-		mask, status := sys.WaitAny(&m.interests, 1+count, idleTicks)
+		mask, status := sys.WaitAnyCursor(&m.interests, 1+count, idleTicks)
 		if status == kcall.StatusTimeout {
 			arena.CollectIdle()
 			timeout = ticksUntil(deadline)
-			mask, status = sys.WaitAny(&m.interests, 1+count, timeout)
+			mask, status = sys.WaitAnyCursor(&m.interests, 1+count, timeout)
 		}
 		finishPoll(m, mask, status, count)
 		return
 	}
-	mask, status := sys.WaitAny(&m.interests, 1+count, timeout)
+	mask, status := sys.WaitAnyCursor(&m.interests, 1+count, timeout)
 	finishPoll(m, mask, status, count)
 }
 
@@ -338,7 +358,7 @@ func finishPoll(m *M, mask uint64, status kcall.Status, count int) {
 		drainWake(m)
 		if !anyWork() {
 			m.interests[0] = wakeInterest
-			wakeMask, _ := sys.WaitAny(&m.interests, 1, min(uint64(1), ticksUntil(nextDeadline())))
+			wakeMask, _ := sys.WaitAnyCursor(&m.interests, 1, min(uint64(1), ticksUntil(nextDeadline())))
 			if wakeMask&1 != 0 {
 				drainWake(m)
 			}

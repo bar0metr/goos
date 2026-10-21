@@ -85,12 +85,23 @@ type CursorInterest struct {
 	Cursor uint64
 }
 
+// WaitAnyCursor is WaitAny over cursor interests: a log interest is ready
+// once the log holds a record at or after its cursor. A wait goes to the
+// installed CursorWaitHandler first, which may park only the calling
+// goroutine.
 func WaitAnyCursor(interests *[kcall.WaitAnyMaxObjects]CursorInterest, count int, timeout uint64) (uint64, kcall.Status) {
-	w := current()
-	defer tls.Unpin()
 	if interests == nil || count < 0 || count > kcall.WaitAnyMaxObjects {
 		return 0, kcall.StatusInvalidArgument
 	}
+	if timeout != 0 {
+		if handler := cursorWaitHandler.Load(); handler != nil {
+			if mask, status, handled := (*handler)(interests, count, timeout); handled {
+				return mask, status
+			}
+		}
+	}
+	w := current()
+	defer tls.Unpin()
 	w.waitWire[0], w.waitWire[1] = timeout, 0
 	touch(unsafe.Slice((*byte)(unsafe.Pointer(&interests[0])), count*int(kcall.WaitAnyCursorInterestSize)))
 	result := status(waitAny(unsafe.Pointer(&interests[0]), uintptr(uint64(count)|kcall.WaitAnyCursorFlag), unsafe.Pointer(&w.waitWire[0])))

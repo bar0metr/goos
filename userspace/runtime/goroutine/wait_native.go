@@ -15,6 +15,7 @@ var (
 	nativeReceiveHandler     sys.ReceiveHandler     = schedulerReceive
 	nativeProcessWaitHandler sys.ProcessWaitHandler = schedulerProcessWait
 	nativeThreadJoinHandler  sys.ThreadJoinHandler  = schedulerThreadJoin
+	nativeCursorWaitHandler  sys.CursorWaitHandler  = schedulerCursorWait
 )
 
 func installWaitHooks() {
@@ -22,6 +23,7 @@ func installWaitHooks() {
 	sys.InstallReceiveHandler(&nativeReceiveHandler)
 	sys.InstallProcessWaitHandler(&nativeProcessWaitHandler)
 	sys.InstallThreadJoinHandler(&nativeThreadJoinHandler)
+	sys.InstallCursorWaitHandler(&nativeCursorWaitHandler)
 }
 
 func canParkNativeWait() bool {
@@ -65,6 +67,35 @@ func schedulerWait(interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int, 
 		return 0, kcall.StatusInvalidArgument, true
 	}
 	mask, status = Wait(interests, count, deadline, nil)
+	return mask, status, true
+}
+
+// schedulerCursorWait is schedulerWait for cursor interests: the poller's
+// registration keeps each log interest's cursor.
+func schedulerCursorWait(interests *[kcall.WaitAnyMaxObjects]sys.CursorInterest, count int, timeout uint64) (uint64, kcall.Status, bool) {
+	if count > MaxWaiters {
+		return 0, kcall.StatusOK, false
+	}
+	for index := 0; index < count; index++ {
+		if uint64(interests[index].Handle) == kcall.WaitAnyThread {
+			return 0, kcall.StatusOK, false
+		}
+	}
+	if !canParkNativeWait() {
+		return 0, kcall.StatusOK, false
+	}
+	mask, status := sys.WaitAnyCursor(interests, count, 0)
+	if status != kcall.StatusTimeout {
+		return mask, status, true
+	}
+	if count == 0 && timeout == kcall.WaitAnyInfiniteTimeout {
+		return 0, kcall.StatusInvalidArgument, true
+	}
+	deadline, valid := deadlineFromTicks(nanotime(), timeout)
+	if !valid {
+		return 0, kcall.StatusInvalidArgument, true
+	}
+	mask, status = waitCursor(interests, count, deadline, nil)
 	return mask, status, true
 }
 

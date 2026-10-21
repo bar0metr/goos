@@ -49,3 +49,13 @@ var threadJoinHandler atomic.Pointer[ThreadJoinHandler]
 // InstallThreadJoinHandler publishes an immutable runtime-owned handler, or
 // nil to use native joins.
 func InstallThreadJoinHandler(handler *ThreadJoinHandler) { threadJoinHandler.Store(handler) }
+
+// CursorWaitHandler parks a WaitAnyCursor caller through the scheduler. It
+// follows WaitHandler's native fallback contract; polls bypass it.
+type CursorWaitHandler func(*[kcall.WaitAnyMaxObjects]CursorInterest, int, uint64) (mask uint64, status kcall.Status, handled bool)
+
+var cursorWaitHandler atomic.Pointer[CursorWaitHandler]
+
+// InstallCursorWaitHandler publishes an immutable runtime-owned handler, or
+// nil to use native cursor waits.
+func InstallCursorWaitHandler(handler *CursorWaitHandler) { cursorWaitHandler.Store(handler) }

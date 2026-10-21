@@ -705,7 +705,7 @@ func drainWake(m *M) {
 }
 
 // wakeInterest is a wait's interest in the thread's own wake flag.
-var wakeInterest = sys.Interest{Handle: handle.ID(kcall.WaitAnyThread), Events: kcall.WaitReadable}
+var wakeInterest = sys.CursorInterest{Handle: handle.ID(kcall.WaitAnyThread), Events: kcall.WaitReadable}
 
 // wakeIdle wakes one idle thread, so it takes the poller's place.
 func wakeIdle() {
@@ -744,7 +744,7 @@ func pinnedLoop(m *M) {
 // waitOwn waits for m's wake flag until deadline.
 func waitOwn(m *M, deadline int64) {
 	m.interests[0] = wakeInterest
-	mask, _ := sys.WaitAny(&m.interests, 1, ticksUntil(deadline))
+	mask, _ := sys.WaitAnyCursor(&m.interests, 1, ticksUntil(deadline))
 	if mask&1 != 0 {
 		drainWake(m)
 	}

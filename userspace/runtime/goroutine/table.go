@@ -188,8 +188,9 @@ type M struct {
 	dispatches, seen uint64
 	tick             uint32
 	counters         mCounters
-	// interests is the thread's argument to the kernel's wait.
-	interests [kcall.WaitAnyMaxObjects]sys.Interest
+	// interests is the thread's argument to the kernel's wait, in the
+	// cursor format so that a log interest keeps its cursor.
+	interests [kcall.WaitAnyMaxObjects]sys.CursorInterest
 }
 
 // mCounters are one thread's counters. Only the thread writes them.
@@ -211,6 +212,8 @@ func indexOf(g *G) uint32 {
 type registration struct {
 	handle uint64
 	events kcall.WaitEvent
+	// cursor is a log interest's next record, zero for any other object.
+	cursor uint64
 	// index is the goroutine's table index plus one, zero for a free entry.
 	index, gen, seq uint32
 	// bit is the interest's position in the goroutine's own list.

@@ -159,3 +159,43 @@ func TestThreadJoinHandlerDispatchAndPolling(t *testing.T) {
 		t.Fatalf("declined join = %d, %v; want native %d, %v", code, status, wantCode, wantStatus)
 	}
 }
+
+func TestCursorWaitHandlerDispatchAndPolling(t *testing.T) {
+	defer InstallCursorWaitHandler(nil)
+	var interests [kcall.WaitAnyMaxObjects]CursorInterest
+	interests[0] = CursorInterest{Handle: 7, Events: kcall.WaitReadable, Cursor: 99}
+	wantMask, wantStatus := WaitAnyCursor(&interests, 1, 0)
+	calls := 0
+	handler := CursorWaitHandler(func(got *[kcall.WaitAnyMaxObjects]CursorInterest, count int, timeout uint64) (uint64, kcall.Status, bool) {
+		calls++
+		if got != &interests || count != 1 || timeout != 17 || got[0].Cursor != 99 {
+			t.Fatalf("cursor handler arguments: %p %d %d %v", got, count, timeout, got[0])
+		}
+		if mask, status := WaitAnyCursor(got, count, 0); mask != wantMask || status != wantStatus {
+			t.Fatalf("raw probe = %d, %v", mask, status)
+		}
+		return 1, kcall.StatusOK, true
+	})
+	InstallCursorWaitHandler(&handler)
+	if mask, status := WaitAnyCursor(&interests, 1, 17); mask != 1 || status != kcall.StatusOK || calls != 1 {
+		t.Fatalf("cursor wait = %d, %v; calls=%d", mask, status, calls)
+	}
+	WaitAnyCursor(&interests, 1, 0)
+	for _, count := range []int{-1, kcall.WaitAnyMaxObjects + 1} {
+		if _, status := WaitAnyCursor(&interests, count, 17); status != kcall.StatusInvalidArgument {
+			t.Fatalf("count %d: %v", count, status)
+		}
+	}
+	if _, status := WaitAnyCursor(nil, 0, 17); status != kcall.StatusInvalidArgument || calls != 1 {
+		t.Fatalf("nil interests: %v, calls=%d", status, calls)
+	}
+	InstallCursorWaitHandler(nil)
+	wantMask, wantStatus = WaitAnyCursor(&interests, 1, 17)
+	handler = func(*[kcall.WaitAnyMaxObjects]CursorInterest, int, uint64) (uint64, kcall.Status, bool) {
+		return 99, kcall.StatusOK, false
+	}
+	InstallCursorWaitHandler(&handler)
+	if mask, status := WaitAnyCursor(&interests, 1, 17); mask != wantMask || status != wantStatus {
+		t.Fatalf("declined cursor wait = %d, %v; native = %d, %v", mask, status, wantMask, wantStatus)
+	}
+}
