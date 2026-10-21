@@ -126,6 +126,18 @@ VALIDATION ?= 0
 ifeq ($(filter $(VALIDATION),0 1),)
 $(error VALIDATION must be 0 or 1)
 endif
+# VFS_PROBE builds the explicit native goroutine VFS acceptance fixture. It is
+# deliberately a separate validation variant so ordinary validation boots do
+# not run its 4,096-read memory plateau workload.
+VFS_PROBE ?= 0
+ifeq ($(filter $(VFS_PROBE),0 1),)
+$(error VFS_PROBE must be 0 or 1)
+endif
+ifeq ($(VFS_PROBE),1)
+ifneq ($(VALIDATION),1)
+$(error VFS_PROBE requires VALIDATION=1)
+endif
+endif
 VALIDATION_CA_BUNDLE ?=
 ifneq ($(strip $(VALIDATION_CA_BUNDLE)),)
 ifneq ($(VALIDATION),1)
@@ -148,6 +160,9 @@ endif
 ifeq ($(VALIDATION),1)
 BUILD_TAGS += goos_validation
 endif
+ifeq ($(VFS_PROBE),1)
+BUILD_TAGS += goos_vfs_probe
+endif
 TINYGO_TAGS := -tags "$(BUILD_TAGS)"
 # go_deps lists the Go and assembly files of every project package a userspace
 # program imports, as go list sees them under the userspace target's tags, so
@@ -166,10 +181,10 @@ endif
 # written; the kernel banner, uname, and system.build.release all read it there.
 VERSION := $(shell sed -n 's/^[[:space:]]*Release[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' internal/version/version.go)
 # Each configuration builds into its own tree, so switching HZ, DIAG,
-# VALIDATION, or OPT never mixes objects built for another configuration. The
+# VALIDATION, VFS_PROBE, or OPT never mixes objects built for another configuration. The
 # level is always in the name, so a tree built before the default changed is
 # never taken for one built at the new default.
-OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)-opt$(OPT)
+OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)$(if $(filter 1,$(VFS_PROBE)),-vfsprobe)-opt$(OPT)
 
 .DEFAULT_GOAL := all
 
@@ -1156,7 +1171,7 @@ test-trust-update:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1 VALIDATION_CA_BUNDLE=tools/tlsfixture/testdata/root-cert.pem VALIDATION_TRUST_UPDATE_URL=https://tls.test/update
 	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) sh tests/boot/trust-update.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation-opt$(OPT)/system
 
-.PHONY: test-goroutine-compiler
+.PHONY: test-goroutine-compiler test-vfs-goroutine-acceptance
 # Compile the real fixture and inspect its linked transport and LLVM lowering.
 test-goroutine-compiler: $(GOROUTINE_ROOT_STAMP) $(INIT_RUNTIME)
 	$(BUILD_ENV) go test ./tools/goroutineroot ./tools/stackframes
@@ -1181,6 +1196,17 @@ test-goroutine-gc: goroutine-test-images
 
 test-goroutine-io: goroutine-test-images
 	@SUITE=io SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
+
+# This named, explicit variant is the end-to-end acceptance fixture for the
+# real two-worker goroutine VFS. It is intentionally not part of ordinary
+# validation boots or test-all: the fixture also gathers a memory plateau.
+test-vfs-goroutine-acceptance: VFS_PROBE=1
+test-vfs-goroutine-acceptance: VALIDATION=1
+test-vfs-goroutine-acceptance:
+	@$(MAKE) --no-print-directory command-index VALIDATION=1 VFS_PROBE=1
+	@$(MAKE) --no-print-directory -j8 iso VALIDATION=1 VFS_PROBE=1
+	@$(MAKE) --no-print-directory -j8 test-disk VALIDATION=1 VFS_PROBE=1 TEST_DISK=$(BUILD_DIR)/vfs-goroutine-acceptance.img
+	@VFSPROBE=1 SUITE=runtime SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/vfs-goroutine-acceptance.img
 
 bench-goroutines: goroutine-test-images
 	@SUITE=bench SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img

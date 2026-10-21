@@ -23,7 +23,7 @@ suite=${SUITE:-all}
 log=build/logs/goroutines-$suite.log
 report=build/reports/goroutines-$suite.txt
 command_timeout=${COMMAND_TIMEOUT:-240}
-fatal='^PANIC\|^\[PANIC\]\|INIT_EXEC_.*FAILED\|VFS_OUT_OF_MEMORY\|SHELL_OUT_OF_MEMORY'
+fatal='^PANIC\|^\[PANIC\]\|INIT_EXEC_.*FAILED\|VFS_READPOOL_FAILED\|VFS_OUT_OF_MEMORY\|SHELL_OUT_OF_MEMORY'
 
 mkdir -p build/logs build/reports
 rm -f "$log" "$report"
@@ -105,6 +105,31 @@ until [ "$(prompts)" -ge 1 ]; do
 	sleep 0.1
 	elapsed=$((elapsed + 1))
 done
+
+# VFSPROBE selects the separately built VFS_PROBE=1 image. The fixture runs
+# before the first prompt, because PID 1 is the only authority that can create
+# independent VFS sessions or send a VFS control request.
+if [ "${VFSPROBE:-0}" = 1 ]; then
+	sed -n '/^VFS_READPOOL_BEGIN$/,/^VFS_READPOOL_OK$/p' "$log" | tr -d '\r' >"$work/vfsprobe"
+	for marker in \
+		VFS_READPOOL_LOCAL_OVERLAP_OK \
+		VFS_READPOOL_PERSISTENT_LOCAL_OK \
+		VFS_READPOOL_WRITE_BARRIER_OK \
+		VFS_READPOOL_CONTROL_BARRIER_OK \
+		VFS_READPOOL_PEER_CLEANUP_OK \
+		VFS_READPOOL_OK; do
+		grep -q "^$marker$" "$work/vfsprobe" || fail "VFS read-pool marker $marker"
+	done
+	grep -Eq '^VFS_READPOOL_HASH ramfs=0x[0-9a-f][0-9a-f]* image=0x[0-9a-f][0-9a-f]*$' "$work/vfsprobe" || fail 'VFS read hashes'
+	grep '^VFS_MEMORY ' "$work/vfsprobe" >"$work/vfs-memory" || fail 'VFS read-pool memory samples'
+	samples=$(wc -l <"$work/vfs-memory")
+	[ "$samples" -ge 4 ] || fail "only $samples VFS read-pool memory samples"
+	band_live=$(sed -n '2,3p' "$work/vfs-memory" | tr ' ' '\n' | sed -n 's/^live=//p' | sort -n | tail -n 1)
+	last_live=$(tail -n 1 "$work/vfs-memory" | tr ' ' '\n' | sed -n 's/^live=//p')
+	[ -n "$band_live" ] && [ -n "$last_live" ] || fail 'incomplete VFS read-pool memory samples'
+	[ "$last_live" -le $((band_live + 1048576)) ] || fail "VFS read-pool live heap grew from $band_live to $last_live"
+	grep '^VFS_READPOOL_\|^VFS_MEMORY ' "$work/vfsprobe" >>"$work/summary"
+fi
 
 if [ -n "${CHECKS:-}" ]; then
 	for check in $CHECKS; do

@@ -28,6 +28,7 @@ type driverRequest struct {
 	generation       uint64
 	message          ipc.Message
 	operation        vfs.Operation
+	file             vfs.Handle
 	mapBase, mapSize uint64
 }
 

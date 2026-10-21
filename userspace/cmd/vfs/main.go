@@ -270,6 +270,7 @@ func processControl(message ipc.Message) bool {
 // drain, so closing here does not abandon received handles in the IPC queue.
 func closeSession(index int) {
 	service.CloseSession(sessionOwner(index))
+	readPoolProbeSessionClosed(sessionOwner(index))
 	if validation.Enabled {
 		releaseWithheld(sessionOwner(index), sessions[index], false)
 		execCrashHandles[index] = 0
@@ -344,6 +345,7 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 	}
 	if validation.Enabled {
 		noteExecCrashOpen(owner, request, answer)
+		readPoolProbeOpen(owner, request, answer)
 		if withhold(owner, request, reply) {
 			if request.Operation == vfs.OperationPrepareExecutable {
 				mark("VFS_EXEC_SOURCE_WITHHELD\n")

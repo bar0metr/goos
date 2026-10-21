@@ -3,6 +3,7 @@
 package main
 
 import (
+	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -94,7 +95,15 @@ func (driver *concurrentDriver) run() {
 		if observed != liveSessions {
 			fatal("VFS_SESSIONS_CORRUPT\n")
 		}
-		ready, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout)
+		timeout := uint64(kcall.WaitAnyInfiniteTimeout)
+		if readPoolProbePending() {
+			timeout = clock.TicksPerSecond / 20
+		}
+		ready, status := userwait.Any(&interests, count, timeout)
+		if status == kcall.StatusTimeout && readPoolProbePending() {
+			readPoolProbePoll()
+			continue
+		}
 		if status != kcall.StatusOK {
 			fatal("VFS_WAIT_FAILED\n")
 		}
@@ -169,6 +178,7 @@ func (driver *concurrentDriver) admitBarrier(kind driverRequestKind, index int, 
 	}
 	request.ticket = ticket
 	driver.remember(request)
+	readPoolProbeBarrierAdmitted(kind, session.Owner, message)
 }
 
 func (driver *concurrentDriver) admitSession(index int, message ipc.Message) {
@@ -182,6 +192,7 @@ func (driver *concurrentDriver) admitSession(index int, message ipc.Message) {
 			parallel = false
 		} else if end, valid := bulkReadWindow(size, request.Offset, request.Size); valid {
 			target = sys.Window(base, size)[request.Offset:end]
+			readPoolProbeMapped(sessionOwner(index), request.Handle)
 		} else {
 			sys.VMUnmap(base, size)
 			base, size, parallel = 0, 0, false
@@ -197,6 +208,7 @@ func (driver *concurrentDriver) admitSession(index int, message ipc.Message) {
 	session := vfsservice.ReadSession{Owner: sessionOwner(index), Generation: sessionGenerations[index]}
 	var ticket uint64
 	var status vfs.Status
+	readPoolProbeReadAdmitted(session.Owner, request.Handle)
 	if request.Operation == vfs.OperationReadInto {
 		ticket, status = driver.pool.AdmitReadInto(session, message.Correlation, request.Handle, target)
 	} else {
@@ -212,7 +224,7 @@ func (driver *concurrentDriver) admitSession(index int, message ipc.Message) {
 	driver.remember(driverRequest{
 		ticket: ticket, kind: driverRead, index: index,
 		session: sessions[index], generation: session.Generation,
-		message: message, operation: request.Operation, mapBase: base, mapSize: size,
+		message: message, operation: request.Operation, file: request.Handle, mapBase: base, mapSize: size,
 	})
 }
 
@@ -245,17 +257,23 @@ func (driver *concurrentDriver) complete() {
 			}
 			if request.mapSize != 0 {
 				sys.VMUnmap(request.mapBase, request.mapSize)
+				readPoolProbeUnmapped(sessionOwner(request.index), request.file)
 			}
 			closeAttached(request.message.Handles[:request.message.HandleCount])
+			readPoolProbeReadCompleted()
+			readPoolProbeLocalCompleted()
+			readPoolProbePersistentCompleted()
 		case driverServe:
 			if current {
 				serve(sessionOwner(request.index), request.session, request.message)
+				readPoolProbeBarrierCompleted(driverServe, sessionOwner(request.index), request.message)
 			} else {
 				closeAttached(request.message.Handles[:request.message.HandleCount])
 			}
 		case driverControl:
 			processControl(request.message)
 			driver.controlPending = false
+			readPoolProbeBarrierCompleted(driverControl, 0, request.message)
 		case driverClose:
 			if current {
 				closeSession(request.index)

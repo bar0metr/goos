@@ -116,6 +116,9 @@ func startServices(ticks uint64) {
 		mark("LINUX_PID1_LAUNCH_OK\n")
 	}
 	chooseMode()
+	if validation.Enabled && boot.Mode() == supervisor.ModeNormal && !probeVFSReadPool() {
+		fatal("VFS_READPOOL_FAILED\n")
+	}
 	if validation.Enabled && boot.Mode() == supervisor.ModeNormal {
 		// The musl probe is a Linux fixture of the installed system.
 		if !probeLinuxMusl() {

@@ -19,6 +19,7 @@ const (
 type ReadPlan struct {
 	plan vfs.ReadPlan
 	lane ReadLane
+	gate validationReadGate
 }
 
 // BeginRead reserves the file cursor. The caller must drain all plans before
@@ -35,14 +36,17 @@ func (service *Service) BeginRead(owner vfs.Owner, file vfs.Handle) (ReadPlan, v
 	case plan.BackendIs(&service.persistent):
 		lane = ReadLanePersistent
 	}
-	return ReadPlan{plan: plan, lane: lane}, vfs.StatusOK
+	return ReadPlan{plan: plan, lane: lane, gate: service.validationReadGate(owner, file, lane)}, vfs.StatusOK
 }
 
 func (plan ReadPlan) Lane() ReadLane { return plan.lane }
 
 // Read writes only target and the backend state assigned to this plan's lane.
 // It never accesses the namespace or the Service's shared reply scratch.
-func (plan ReadPlan) Read(target []byte) (int, vfs.Status) { return plan.plan.Read(target) }
+func (plan ReadPlan) Read(target []byte) (int, vfs.Status) {
+	plan.gate.hold()
+	return plan.plan.Read(target)
+}
 
 // FinishRead commits the cursor on the service's owner, not on the worker.
 func (service *Service) FinishRead(plan ReadPlan, count int, status vfs.Status) vfs.Status {
