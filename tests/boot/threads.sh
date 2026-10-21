@@ -7,7 +7,9 @@
 # and a fault in a thread ends only its process. Writes build/reports/threads.txt.
 #
 # SUITE picks the checks: native (threads, lifecycle, faults), gc (roots and
-# collections), allocator (thread-owned slabs), or all, the default. SUITE=bench
+# collections, region transitions held during collections included), region
+# (only the region transitions), allocator (thread-owned slabs), or all, the
+# default. SUITE=bench
 # runs no check: it times allocation with the heap lock alone and with
 # thread-owned slabs on 1, 2, 4, and 8 threads, BENCH_RUNS times each with
 # BENCH_OPS allocations per thread, and writes
@@ -142,6 +144,17 @@ if wants gc; then
 		run "threadprobe storm $count 20"
 		require '^THREADPROBE_STORM_OK$' "collection requests from $count threads at once"
 		grep '^THREADPROBE_STORM ' "$work/output" >>"$work/summary"
+	done
+fi
+
+if wants gc || [ "$suite" = region ]; then
+	# A thread stopped inside region Enter and Leave while the main thread
+	# or another worker collects: every collection gives up until it is
+	# released, the next one runs, and no list is lost.
+	for check in 1:16 4:24; do
+		run "threadprobe region-window ${check%:*} ${check#*:}"
+		require '^THREADPROBE_REGION_WINDOW_OK rounds=' "region transitions held during collections with ${check%:*} threads"
+		grep '^THREADPROBE_REGION_WINDOW[_ ]' "$work/output" >>"$work/summary"
 	done
 fi
 

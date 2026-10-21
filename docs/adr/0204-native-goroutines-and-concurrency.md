@@ -166,6 +166,33 @@ retries within its rendezvous bound. Kernel snapshots include XMM words;
 conservative scanning must retain that coverage because LLVM can keep pointer
 aggregates only in vector registers during a copy.
 
+`threadprobe region-window N ROUNDS` now exercises the native region window.
+A validation-only hook holds one thread after the cursor store and before the
+innermost store in nested Enter and Leave. The main thread or a peer worker
+requests collections while that thread waits. Each request must record a
+region-window rejection, exhaust the bounded rendezvous, and leave the
+collection and accepted-suspension counts unchanged. After the worker closes
+the window, the next collection must finish. The worker checks heap lists
+reachable only through its stack and outer-region holders, checks inner-region
+lists after Leave, then clears the inner region. The collector must reclaim
+those lists while the outer lists survive. The builder hands off the lists
+through atomic pointers. The inner checker returns before the reclamation
+collection so LLVM's dead head spills no longer sit in a live frame. Workers
+acknowledge each round before the main thread changes their roles. The boot
+script runs 16 rounds
+with one worker and 24 with four under validation; CPU samples check that a
+peer collector observes the held worker on another processor in the multiworker
+run. The hook adds no calls to normal-build Enter or Leave. Separate
+allocator-window and region-window counters identify each rejection reason.
+TCG with four processors passed both commands: 160 collection requests gave
+up after 640 region-window rejections, then 120 collections completed with the
+window closed. The workers checked 1,600 lists and reclaimed 896,000 bytes
+after clearing the inner regions. The four-worker run included 15 peer
+collector rounds and 26 samples of the held worker running on another CPU.
+The reclamation assertion allows conservative retention and requires at least
+8 KiB back per round; this run reclaimed 22,400 bytes per round. This covers
+native arena transitions, not suspended goroutine stack plans or KVM acceptance.
+
 The first KVM run on eight processors stopped in `goprobe threads`: a
 processor whose last dispatched call was ThreadSuspend spun on the process
 registry for longer than the four-second lock watchdog, and the report named
@@ -180,10 +207,10 @@ lock levels, and every native call records its number, including the wait
 paths entered from assembly. The next KVM run passed every check. One pass
 does not prove the race gone; TCG had not exposed it at all.
 
-The current hooks are experimental. Tests must still cover transitions during
-creation and completion, pending channel values, saved register roots, timer
-callbacks, mixed native threads, and failed rendezvous. A passing channel or
-mutex test does not establish collector correctness.
+The goroutine stack hooks remain experimental. Tests must still cover
+transitions during creation and completion, pending channel values, saved
+register roots, timer callbacks, mixed native threads, and failed rendezvous
+with parked goroutines. A passing channel or mutex test does not establish collector correctness.
 
 ## Service integration and acceptance
 

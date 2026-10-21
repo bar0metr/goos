@@ -276,7 +276,7 @@ incomplete.
 | Target | What it runs |
 |---|---|
 | `test-native-threads` | `smoke` (threads of one process on several processors at once), `lifecycle` (IDs, joins, exit codes, the task quota, slot reuse), `fault` and `overflow` (a worker's fault or stack overflow into its guard ends the process, after which threads start again) |
-| `test-thread-gc` | `gc` (threads share and drop lists across collections), `roots` (lists held only by a thread that loops without calls, one that sleeps in a call, and one inside a region), `storm` (every thread asks for collections at once) |
+| `test-thread-gc` | `gc` (threads share and drop lists across collections), `roots` (lists held only by a thread that loops without calls, one that sleeps in a call, and one inside a region), `region-window` (a thread held inside region Enter and Leave while the main thread or another worker collects), `storm` (every thread asks for collections at once) |
 | `test-thread-allocator` | the host model and race tests of `cache.go`, then `bench` with the heap lock and with owned slabs, checking the profile's counters, and `gc` and `storm` over owned slabs |
 | `bench-thread-allocator` | the benchmark only, on 1, 2, 4, and 8 threads, under TCG |
 | `test-pve-threads` | the checks and the benchmark under KVM on eight processors |

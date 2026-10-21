@@ -634,8 +634,9 @@ test-smp:
 
 # Native threads (ADR 0203), one validation guest with four processors each:
 # test-native-threads checks threads, joins, exit codes, the task quota, and
-# faults; test-thread-gc the roots of every thread and collections they ask
-# for at once; test-thread-allocator the thread-owned slabs, with their host
+# faults; test-thread-gc the roots of every thread, collections they ask
+# for at once, and collections while a thread is held inside a region
+# transition; test-thread-allocator the thread-owned slabs, with their host
 # model and race tests. bench-thread-allocator only measures: allocation with
 # the heap lock alone and with owned slabs on 1, 2, 4, and 8 threads, on
 # eight processors, into build/reports/thread-allocator.md.
