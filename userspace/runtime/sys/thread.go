@@ -112,3 +112,36 @@ func ThreadWake(thread uint64) kcall.Status { return status(threadWake(thread)) 
 // ThreadWakeTake clears the calling thread's wake flag; NotFound means it
 // was not set.
 func ThreadWakeTake() kcall.Status { return status(threadWakeTake()) }
+
+// ThreadJoinClaim reserves a join independently of the calling native
+// thread and returns its token. The reservation excludes native joiners and
+// other claims until collection or release. It never blocks.
+func ThreadJoinClaim(thread uint64) (uint64, kcall.Status) {
+	return threadJoinToken(thread, kcall.JoinClaim, 0)
+}
+
+// ThreadJoinCollect polls a reserved join, returning Timeout while the
+// target runs. A successful collection consumes the token and returns the
+// exit code. The caller may use a different native thread than the claimant.
+func ThreadJoinCollect(thread, token uint64) (uint64, kcall.Status) {
+	return threadJoinToken(thread, kcall.JoinCollect, token)
+}
+
+// ThreadJoinRelease relinquishes an uncollected reservation. It never
+// blocks. NotFound means the claim no longer exists, including after a
+// successful collection.
+func ThreadJoinRelease(thread, token uint64) kcall.Status {
+	_, result := threadJoinToken(thread, kcall.JoinRelease, token)
+	return result
+}
+
+func threadJoinToken(thread, flags, token uint64) (uint64, kcall.Status) {
+	w := current()
+	defer tls.Unpin()
+	w.countWire = token
+	result := status(threadJoin(thread, flags, unsafe.Pointer(&w.countWire)))
+	if result != kcall.StatusOK {
+		return 0, result
+	}
+	return w.countWire, result
+}

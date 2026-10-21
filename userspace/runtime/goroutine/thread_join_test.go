@@ -6,113 +6,158 @@ import (
 
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
+	"goos/kernel/nativethread"
+	"goos/kernel/sched"
 	"goos/userspace/runtime/sys"
 )
 
-func TestThreadJoinImmediatePollKeepsNativeStatus(t *testing.T) {
-	for _, status := range []kcall.Status{kcall.StatusOK, kcall.StatusInvalidArgument, kcall.StatusAlreadyExists, kcall.StatusNotFound, kcall.StatusPermissionDenied} {
+func TestThreadJoinClaimKeepsNativeStatus(t *testing.T) {
+	for _, status := range []kcall.Status{kcall.StatusInvalidArgument, kcall.StatusAlreadyExists, kcall.StatusNotFound, kcall.StatusPermissionDenied, kcall.StatusResourceExhausted} {
 		t.Run(strconv.Itoa(int(status)), func(t *testing.T) {
 			ops := threadJoinOps{
-				probe: func(thread uint64) (uint64, kcall.Status) {
+				claim: func(thread uint64) (uint64, kcall.Status) {
 					if thread != 9 {
-						t.Fatalf("probe(%d)", thread)
+						t.Fatalf("claim(%d)", thread)
 					}
-					return 42, status
-				},
-				wait: func(*[kcall.WaitAnyMaxObjects]sys.Interest, int, int64) (uint64, kcall.Status) {
-					t.Fatal("an immediate result parked")
-					return 0, kcall.StatusOK
+					return 0, status
 				},
 			}
-			if code, got := joinThread(9, ops); code != 42 || got != status {
-				t.Fatalf("join = %d, %v; want 42, %v", code, got, status)
+			// No collect, wait or release may follow a failed claim.
+			if code, got := joinThread(9, ops); code != 0 || got != status {
+				t.Fatalf("join = %d, %v; want 0, %v", code, got, status)
 			}
-			if claimJoin(9) != kcall.StatusOK {
-				t.Fatal("an immediate result left a claim")
-			}
-			releaseJoin(9)
 		})
 	}
 }
 
 func TestThreadJoinParksOnTheEndThenCollects(t *testing.T) {
-	probes, waits := 0, 0
-	ops := threadJoinOps{
-		probe: func(thread uint64) (uint64, kcall.Status) {
-			probes++
-			if probes == 3 {
+	for _, delayed := range []bool{false, true} {
+		collects, waits, releases := 0, 0, 0
+		ops := threadJoinOps{
+			claim: func(uint64) (uint64, kcall.Status) { return 77, kcall.StatusOK },
+			collect: func(thread, token uint64) (uint64, kcall.Status) {
+				collects++
+				if thread != 9 || token != 77 {
+					t.Fatalf("collect(%d, %d)", thread, token)
+				}
+				if delayed && collects < 3 {
+					return 0, kcall.StatusTimeout
+				}
 				return 42, kcall.StatusOK
+			},
+			release: func(thread, token uint64) kcall.Status {
+				releases++
+				if thread != 9 || token != 77 {
+					t.Fatalf("release(%d, %d)", thread, token)
+				}
+				return kcall.StatusNotFound // successful collection consumed it
+			},
+			wait: func(interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int, deadline int64) (uint64, kcall.Status) {
+				waits++
+				want := sys.Interest{Handle: handle.ID(kcall.ThreadEndInterest(9)), Events: kcall.WaitCompleted}
+				if count != 1 || interests[0] != want || deadline != 0 {
+					t.Fatalf("wait interest=%v count=%d deadline=%d", interests[0], count, deadline)
+				}
+				return 1, kcall.StatusOK
+			},
+		}
+		wantCollects := 1
+		if delayed {
+			wantCollects = 3
+		}
+		if code, status := joinThread(9, ops); code != 42 || status != kcall.StatusOK || collects != wantCollects || waits != wantCollects-1 || releases != 1 {
+			t.Fatalf("join = %d, %v; collects=%d waits=%d releases=%d", code, status, collects, waits, releases)
+		}
+	}
+}
+
+func TestThreadJoinReleasesOnWaitFailureAndUnwind(t *testing.T) {
+	for _, panics := range []bool{false, true} {
+		releases := 0
+		ops := threadJoinOps{
+			claim:   func(uint64) (uint64, kcall.Status) { return 77, kcall.StatusOK },
+			collect: func(uint64, uint64) (uint64, kcall.Status) { return 0, kcall.StatusTimeout },
+			release: func(thread, token uint64) kcall.Status {
+				releases++
+				if thread != 9 || token != 77 {
+					t.Fatal("release lost its target or token")
+				}
+				return kcall.StatusOK
+			},
+			wait: func(*[kcall.WaitAnyMaxObjects]sys.Interest, int, int64) (uint64, kcall.Status) {
+				if panics {
+					panic("unwind the joining G")
+				}
+				return 0, kcall.StatusResourceExhausted
+			},
+		}
+		func() {
+			defer func() {
+				if recovered := recover(); panics != (recovered != nil) {
+					t.Fatalf("panic = %v, want panic=%v", recovered, panics)
+				}
+			}()
+			if _, status := joinThread(9, ops); status != kcall.StatusResourceExhausted {
+				t.Fatalf("wait failure = %v", status)
 			}
-			return 0, kcall.StatusTimeout
+		}()
+		if releases != 1 {
+			t.Fatalf("release count=%d", releases)
+		}
+	}
+}
+
+func TestThreadJoinMixedNativeJoinersAndMigration(t *testing.T) {
+	var group nativethread.Group
+	firstM, _ := sched.NewTaskID(0, 1)
+	secondM, _ := sched.NewTaskID(1, 1)
+	target, _ := sched.NewTaskID(2, 1)
+	group.Adopt(firstM)
+	slot, _ := group.Reserve()
+	group.Commit(slot, target)
+	currentM := firstM
+	ops := threadJoinOps{
+		claim: func(thread uint64) (uint64, kcall.Status) {
+			token, status := group.ClaimJoin(currentM, sched.TaskID(thread))
+			if status != nativethread.Waiting {
+				t.Fatalf("claim = %v", status)
+			}
+			return token, kcall.StatusOK
 		},
-		wait: func(interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int, deadline int64) (uint64, kcall.Status) {
-			waits++
-			want := sys.Interest{Handle: handle.ID(kcall.ThreadEndInterest(9)), Events: kcall.WaitCompleted}
-			if count != 1 || interests[0] != want || deadline != 0 {
-				t.Fatalf("wait interest=%v count=%d deadline=%d", interests[0], count, deadline)
+		collect: func(thread, token uint64) (uint64, kcall.Status) {
+			code, status := group.CollectJoin(sched.TaskID(thread), token)
+			if status == nativethread.Waiting {
+				return 0, kcall.StatusTimeout
 			}
-			// While this joiner parks, a second goroutine joiner is refused
-			// as a second native joiner is.
-			if code, status := joinThread(9, threadJoinOps{probe: func(uint64) (uint64, kcall.Status) { return 0, kcall.StatusTimeout }}); code != 0 || status != kcall.StatusAlreadyExists {
-				t.Fatalf("second joiner = %d, %v", code, status)
+			if status != nativethread.Joined {
+				t.Fatalf("collect = %v", status)
 			}
+			return code, kcall.StatusOK
+		},
+		release: func(thread, token uint64) kcall.Status {
+			if group.ReleaseJoin(sched.TaskID(thread), token) {
+				t.Fatal("successful collection retained its claim")
+			}
+			return kcall.StatusNotFound
+		},
+		wait: func(*[kcall.WaitAnyMaxObjects]sys.Interest, int, int64) (uint64, kcall.Status) {
+			if _, status := group.Join(secondM, target, true); status != nativethread.Busy {
+				t.Fatal("legacy native join bypassed a parked G's claim")
+			}
+			group.Leave(target, 42)
+			group.Ended(target, 0)
+			if _, status := group.Join(secondM, target, false); status != nativethread.Busy {
+				t.Fatal("legacy native poll stole the exit code")
+			}
+			if _, status := group.ClaimJoin(secondM, target); status != nativethread.Busy {
+				t.Fatal("another G stole the exit code")
+			}
+			group.Forget(firstM)
+			currentM = secondM
 			return 1, kcall.StatusOK
 		},
 	}
-	if code, status := joinThread(9, ops); code != 42 || status != kcall.StatusOK || probes != 3 || waits != 2 {
-		t.Fatalf("join = %d, %v; probes=%d waits=%d", code, status, probes, waits)
-	}
-	if claimJoin(9) != kcall.StatusOK {
-		t.Fatal("the claim outlived the join")
-	}
-	releaseJoin(9)
-}
-
-func TestThreadJoinReportsWaitAndLateJoinFailures(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		waitStatus kcall.Status
-		after      kcall.Status
-		want       kcall.Status
-	}{
-		{"wait refused", kcall.StatusNotFound, kcall.StatusOK, kcall.StatusNotFound},
-		{"native joiner first", kcall.StatusOK, kcall.StatusNotFound, kcall.StatusNotFound},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			probes := 0
-			ops := threadJoinOps{
-				probe: func(uint64) (uint64, kcall.Status) {
-					probes++
-					if probes == 1 {
-						return 0, kcall.StatusTimeout
-					}
-					return 0, tc.after
-				},
-				wait: func(*[kcall.WaitAnyMaxObjects]sys.Interest, int, int64) (uint64, kcall.Status) {
-					return 0, tc.waitStatus
-				},
-			}
-			if _, status := joinThread(11, ops); status != tc.want {
-				t.Fatalf("join = %v, want %v", status, tc.want)
-			}
-			if claimJoin(11) != kcall.StatusOK {
-				t.Fatal("a failed join left its claim")
-			}
-			releaseJoin(11)
-		})
-	}
-}
-
-func TestThreadJoinClaimsAreBounded(t *testing.T) {
-	for thread := uint64(1); thread <= kcall.ThreadSlots; thread++ {
-		if claimJoin(thread) != kcall.StatusOK {
-			t.Fatalf("claim %d", thread)
-		}
-	}
-	if claimJoin(kcall.ThreadSlots+1) != kcall.StatusResourceExhausted {
-		t.Fatal("a full claim table accepted another thread")
-	}
-	for thread := uint64(1); thread <= kcall.ThreadSlots; thread++ {
-		releaseJoin(thread)
+	if code, status := joinThread(uint64(target), ops); code != 42 || status != kcall.StatusOK || currentM != secondM {
+		t.Fatalf("migrated join = %d, %v", code, status)
 	}
 }

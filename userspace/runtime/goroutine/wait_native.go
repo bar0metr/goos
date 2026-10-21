@@ -116,12 +116,15 @@ func schedulerProcessWait(process handle.ID, timeout uint64) (uint64, kcall.Stat
 }
 
 // schedulerThreadJoin parks a goroutine joiner on the thread's end under the
-// same fallback policy. Its polls register no joiner with the kernel.
+// same fallback policy. Its reservation belongs to the G, not its M.
 func schedulerThreadJoin(thread uint64) (uint64, kcall.Status, bool) {
 	if !canParkNativeWait() {
 		return 0, kcall.StatusOK, false
 	}
-	code, status := joinThread(thread, threadJoinOps{probe: pollJoin, wait: waitReady})
+	code, status := joinThread(thread, threadJoinOps{
+		claim: sys.ThreadJoinClaim, collect: sys.ThreadJoinCollect,
+		release: sys.ThreadJoinRelease, wait: waitReady,
+	})
 	return code, status, true
 }
 
@@ -133,8 +136,6 @@ func schedulerIRQWait(irq handle.ID) (kcall.Status, bool) {
 	}
 	return waitForIRQ(irq, irqWaitOps{take: sys.IRQTake, wait: waitReady}), true
 }
-
-func pollJoin(thread uint64) (uint64, kcall.Status) { return sys.ThreadJoin(thread, true) }
 
 // waitReady parks on readiness that the caller then consumes or collects.
 func waitReady(interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int, deadline int64) (uint64, kcall.Status) {

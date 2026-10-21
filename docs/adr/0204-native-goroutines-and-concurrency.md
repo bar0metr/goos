@@ -146,15 +146,18 @@ StreamWaitWrite wait through WaitAny instead: they need the Read or Write
 right as well, and report peer closure as readiness, so the next read or
 write returns PeerDied. Utility's standard streams use them.
 
-ThreadJoin polls with JoinPoll, parks on a WaitAny interest in the thread's
-end and polls again for the code. The interest's handle is the thread's ID
-with kcall.WaitAnyThreadEnd set; it is ready once the thread no longer runs,
-and the kernel publishes it from the thread's teardown. A goroutine joiner
-registers no joiner task with the kernel. The runtime refuses a second
-goroutine joiner of one thread with AlreadyExists, as the kernel refuses a
-second native joiner, but a native joiner and a goroutine joiner of one
-thread do not exclude each other: the first to collect the end gets the code
-and the other gets NotFound.
+ThreadJoin claims a kernel reservation, polls with its token, parks on a
+WaitAny interest in the thread's end and polls again for the code. The
+interest's handle is the thread's ID with kcall.WaitAnyThreadEnd set; the
+kernel publishes it from the thread's teardown. The reservation belongs to
+the target's generation and a process-owned token, not the joining M, so a
+G can migrate without changing its right to collect. Legacy native joins,
+native polls and other token claims return AlreadyExists until the owner
+collects or releases, including after the target ends. The adapter defers
+release across wait failures and goroutine unwinding. Collection consumes
+the reservation; process teardown clears any remaining claims. The kernel
+never reuses a token within the process and returns ResourceExhausted if its
+64-bit token sequence runs out.
 
 WaitAnyCursor parks through its own hook. The poller always waits in the
 cursor format, so each registration keeps its log cursor and every other

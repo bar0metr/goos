@@ -791,5 +791,4 @@ CA-0952	goos/userspace/runtime/sys	irqWaitHandler	process	atomic	TestIRQWaitHand
 CA-0953	goos/userspace/runtime/goroutine	nativeThreadJoinHandler	process	immutable	goprobe waitsets
 CA-0954	goos/userspace/runtime/goroutine	nativeCursorWaitHandler	process	immutable	none
 CA-0955	goos/userspace/runtime/goroutine	nativeIRQWaitHandler	process	immutable	none
-CA-0956	goos/userspace/runtime/goroutine	joins	process	lock	TestThreadJoinParksOnTheEndThenCollects
 CA-0957	goos/userspace/bin/goprobe	joinGate	process	immutable	goprobe waitsets

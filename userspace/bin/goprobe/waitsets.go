@@ -116,6 +116,13 @@ func joinParked() {
 	goroutine.ReadStats(&baseline)
 	id, status := thread.Start(joinTarget, 0)
 	check(status == kcall.StatusOK, "start joined thread")
+	// Exercise the nonblocking reservation ABI before the adapter owns it.
+	token, status := sys.ThreadJoinClaim(uint64(id))
+	check(status == kcall.StatusOK && token != 0, "claim a native join")
+	_, status = sys.ThreadJoin(uint64(id), true)
+	check(status == kcall.StatusAlreadyExists, "a native poll bypassed the token claim")
+	check(sys.ThreadJoinRelease(uint64(id), token) == kcall.StatusOK, "release a native join claim")
+	check(sys.ThreadJoinRelease(uint64(id), token) == kcall.StatusNotFound, "a released token still owned the join")
 	type answer struct {
 		code   uint64
 		status kcall.Status
@@ -137,6 +144,8 @@ func joinParked() {
 	}
 	_, status = thread.Join(id)
 	check(status == kcall.StatusAlreadyExists, "a second joiner was not refused")
+	_, status = sys.ThreadJoin(uint64(id), true)
+	check(status == kcall.StatusAlreadyExists, "a native poll bypassed the parked joiner")
 	var spins atomic.Uint64
 	stop := make(chan struct{})
 	spun := make(chan struct{})
