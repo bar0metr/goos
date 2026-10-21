@@ -428,7 +428,14 @@ func IRQWait(irq handle.ID) kcall.Status {
 			return status
 		}
 	}
-	return status(irqWait(uint64(irq)))
+	return status(irqWait(uint64(irq), 0))
+}
+
+// IRQPoll consumes a pending IRQWait event without registering a waiter or
+// dispatching a scheduler hook. It keeps the native IRQWait capability and
+// line checks and returns NotFound when the line has no pending event.
+func IRQPoll(irq handle.ID) kcall.Status {
+	return status(irqWait(uint64(irq), kcall.IRQWaitPoll))
 }
 
 // IRQTake consumes the pending event of a line a WaitAny reported ready, or

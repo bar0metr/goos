@@ -163,14 +163,17 @@ WaitAnyCursor parks through its own hook. The poller always waits in the
 cursor format, so each registration keeps its log cursor and every other
 interest carries the zero cursor the kernel requires.
 
-IRQWait parks on the line's readiness and takes the event with IRQTake,
+IRQWait first probes through its native nonblocking mode, preserving the
+line-11-only capability check and consuming an already pending event. It
+then parks on the line's readiness and takes the event with IRQTake,
 waiting again when another taker got it first. The disk's line 11 is visible
 to WaitAny: with no IRQWait waiter its interrupt wakes the kernel loop, which
-publishes the pending event, and a native IRQWait waiter still takes the
-event before any WaitAny sees it. A zero-time WaitAny unmasks the lines it
+publishes the pending event. Its interrupt still wakes a native IRQWait
+waiter directly. WaitAny observes the pending flag without consuming it;
+IRQWait and IRQTake race to consume the event. A zero-time WaitAny unmasks the lines it
 names, so the polls of busy threads do not hold a parked goroutine's
-interrupt back until a thread idles. Through the adapter IRQWait also serves
-the network line, which the native call refuses.
+interrupt back until a thread idles. Both native and goroutine IRQWait refuse the network line, which remains
+available through WaitAny and IRQTake.
 
 Two goroutines that wait on the same log or line form an aliased aggregate,
 which the poller resolves with one-tick probes rather than one kernel wait.

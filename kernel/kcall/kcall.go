@@ -723,3 +723,11 @@ func ValidJoinFlags(flags uint64) bool {
 	}
 	return false
 }
+
+// IRQWaitPoll makes IRQWait consume a pending event without registering a
+// native waiter. It retains IRQWait's line-11 capability check and reports
+// NotFound when no event is pending.
+const IRQWaitPoll = uint64(1)
+
+// ValidIRQWaitFlags admits blocking and nonblocking IRQWait modes.
+func ValidIRQWaitFlags(flags uint64) bool { return flags == 0 || flags == IRQWaitPoll }

@@ -36,3 +36,12 @@ func TestJoinFlagsAreSeparateModes(t *testing.T) {
 		}
 	}
 }
+
+func TestIRQWaitFlagsKeepPollAndBlockingSeparate(t *testing.T) {
+	for flags := uint64(0); flags < 8; flags++ {
+		want := flags == 0 || flags == IRQWaitPoll
+		if ValidIRQWaitFlags(flags) != want {
+			t.Fatalf("IRQ wait flags %d valid=%v want=%v", flags, ValidIRQWaitFlags(flags), want)
+		}
+	}
+}

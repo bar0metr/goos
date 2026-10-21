@@ -11,7 +11,7 @@ import (
 func TestIRQWaitTakesPendingWithoutParking(t *testing.T) {
 	for _, want := range []kcall.Status{kcall.StatusOK, kcall.StatusPermissionDenied} {
 		ops := irqWaitOps{
-			take: func(irq handle.ID) kcall.Status {
+			probe: func(irq handle.ID) kcall.Status {
 				if irq != 5 {
 					t.Fatalf("take(%d)", irq)
 				}
@@ -47,6 +47,7 @@ func TestIRQWaitParksAndRetriesLostRaces(t *testing.T) {
 			return 1, kcall.StatusOK
 		},
 	}
+	ops.probe = ops.take
 	if status := waitForIRQ(5, ops); status != kcall.StatusOK || takes != 3 || waits != 2 {
 		t.Fatalf("IRQ wait = %v; takes=%d waits=%d", status, takes, waits)
 	}
@@ -54,12 +55,21 @@ func TestIRQWaitParksAndRetriesLostRaces(t *testing.T) {
 
 func TestIRQWaitReportsWaitFailure(t *testing.T) {
 	ops := irqWaitOps{
-		take: func(handle.ID) kcall.Status { return kcall.StatusNotFound },
+		probe: func(handle.ID) kcall.Status { return kcall.StatusNotFound },
 		wait: func(*[kcall.WaitAnyMaxObjects]sys.Interest, int, int64) (uint64, kcall.Status) {
 			return 0, kcall.StatusUnsupported
 		},
 	}
 	if status := waitForIRQ(5, ops); status != kcall.StatusUnsupported {
 		t.Fatalf("IRQ wait = %v", status)
+	}
+}
+
+func TestIRQWaitRejectsNetworkBeforeTakeOrPark(t *testing.T) {
+	// The native probe rejects an IRQ capability for the network line.
+	// WaitAny and IRQTake accept it, but the adapter must not reach them.
+	ops := irqWaitOps{probe: func(handle.ID) kcall.Status { return kcall.StatusPermissionDenied }}
+	if status := waitForIRQ(5, ops); status != kcall.StatusPermissionDenied {
+		t.Fatalf("IRQ wait widened the native contract: %v", status)
 	}
 }

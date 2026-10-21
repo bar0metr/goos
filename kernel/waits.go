@@ -132,8 +132,8 @@ func irqPending(object uint64) bool {
 	return false
 }
 
-func waitIRQ(handler nativeCallHandler, irqHandle uint64, task uint64) (kcall.Status, bool) {
-	if task >= sched.MaxTasks {
+func waitIRQ(handler nativeCallHandler, irqHandle, flags, task uint64) (kcall.Status, bool) {
+	if !kcall.ValidIRQWaitFlags(flags) || task >= sched.MaxTasks {
 		return kcall.StatusInvalidArgument, false
 	}
 	taskID := sched.TaskID(amd64.TaskIDForSlot(task))
@@ -151,6 +151,9 @@ func waitIRQ(handler nativeCallHandler, irqHandle uint64, task uint64) (kcall.St
 	if amd64.TakeIRQ11() {
 		return kcall.StatusOK, false
 	}
+	if flags == kcall.IRQWaitPoll {
+		return kcall.StatusNotFound, false
+	}
 	amd64.SetIRQ11Waiter(task + 1)
 	amd64.RearmIRQ11()
 	// Re-check after registering. An interrupt delivered between the check
@@ -164,12 +167,12 @@ func waitIRQ(handler nativeCallHandler, irqHandle uint64, task uint64) (kcall.St
 }
 
 //export goos_dispatch_irq_wait
-func dispatchIRQWait(irqHandle uint64, rootAndTask uint64) uint64 {
+func dispatchIRQWait(irqHandle, flags, rootAndTask uint64) uint64 {
 	call, ok := beginNativeCall(kcall.OperationIRQWait, 0, 0)
 	if !ok {
 		return uint64(kcall.ActionRetry) << 32
 	}
-	status, blocked := waitIRQ(nativeCallHandler{root: rootAndTask &^ 0xfff}, irqHandle, rootAndTask&0xfff)
+	status, blocked := waitIRQ(nativeCallHandler{root: rootAndTask &^ 0xfff}, irqHandle, flags, rootAndTask&0xfff)
 	action := kcall.ActionReturn
 	if blocked {
 		action = kcall.ActionBlock
@@ -383,7 +386,7 @@ func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent
 		// The network and disk lines are waitable. Readiness is the pending
 		// event, which the wait reports and IRQTake consumes. The disk's
 		// line also keeps its IRQWait waiter, which the interrupt wakes
-		// directly and which takes the event first.
+		// directly. Readiness does not reserve or consume the event.
 		if irqLine(authority.Object()) == device.IRQOther {
 			return kernelwait.Entry{}, kcall.StatusUnsupported, diag.DenyObject
 		}
@@ -545,8 +548,8 @@ func wakeConsoleWaiters() {
 // wakeIRQWaiters publishes the pending events of the network and disk
 // lines. Their interrupts wake the kernel loop, which runs this, so a
 // driver's wait completes on the same path as every other readiness without
-// a tick of delay. The disk's interrupt wakes the loop only when no IRQWait
-// waiter took the event.
+// a tick of delay. With an IRQWait waiter the disk interrupt wakes that
+// waiter directly instead; both consumption paths use the same pending flag.
 func wakeIRQWaiters() {
 	if object, routed := netIRQObject(); routed && amd64.NetIRQPending() {
 		publishWaitAny(kernelwait.Key{Kind: kernelwait.KindIRQ, Object: object}, kernelwait.Readable)

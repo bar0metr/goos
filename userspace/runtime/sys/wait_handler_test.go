@@ -216,6 +216,9 @@ func TestIRQWaitHandlerDispatch(t *testing.T) {
 	if status := IRQWait(5); status != kcall.StatusOK || calls != 1 {
 		t.Fatalf("IRQ wait = %v; calls=%d", status, calls)
 	}
+	if status := IRQPoll(5); status != want || calls != 1 {
+		t.Fatalf("IRQ poll dispatched the handler: %v; calls=%d", status, calls)
+	}
 	handler = func(handle.ID) (kcall.Status, bool) { return kcall.StatusOK, false }
 	InstallIRQWaitHandler(&handler)
 	if status := IRQWait(5); status != want {

@@ -134,7 +134,7 @@ func schedulerIRQWait(irq handle.ID) (kcall.Status, bool) {
 	if !canParkNativeWait() {
 		return kcall.StatusOK, false
 	}
-	return waitForIRQ(irq, irqWaitOps{take: sys.IRQTake, wait: waitReady}), true
+	return waitForIRQ(irq, irqWaitOps{probe: sys.IRQPoll, take: sys.IRQTake, wait: waitReady}), true
 }
 
 // waitReady parks on readiness that the caller then consumes or collects.

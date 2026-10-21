@@ -124,7 +124,7 @@ func portWrite(device uint64, specification uint64, value uint64) uint64
 func dmaAllocate(device uint64, virtual uint64, address unsafe.Pointer) uint64
 
 //go:linkname irqWait goos_irq_wait
-func irqWait(irq uint64) uint64
+func irqWait(irq, flags uint64) uint64
 
 //go:linkname irqTake goos_irq_take
 func irqTake(irq uint64) uint64
