@@ -129,7 +129,7 @@ func checkInstalledSystem() (supervisor.Stage, string, string) {
 }
 
 func checkInstalled(session handle.ID) (supervisor.Stage, string, string) {
-	if stat, ok := callSession(session, vfs.Request{Operation: vfs.OperationStat, Path: []byte(installedRoot)}); !ok || stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindDirectory {
+	if stat, ok := installedCall(session, installedRoot, "stat", vfs.Request{Operation: vfs.OperationStat, Path: []byte(installedRoot)}); !ok || stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindDirectory {
 		return supervisor.StageRecord, "/system", "no installed system on the volume"
 	}
 	size, status := readInstalled(session, installedRecord, releaseData[:])
@@ -173,7 +173,7 @@ func checkInstalled(session handle.ID) (supervisor.Stage, string, string) {
 
 // readInstalled reads a whole installed file, or says why it could not.
 func readInstalled(session handle.ID, path string, target []byte) (int, string) {
-	stat, ok := callSession(session, vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)})
+	stat, ok := installedCall(session, path, "stat", vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)})
 	switch {
 	case !ok:
 		return 0, "unreadable"
@@ -184,7 +184,7 @@ func readInstalled(session handle.ID, path string, target []byte) (int, string) 
 	case stat.Size > uint64(len(target)):
 		return 0, "too large"
 	}
-	size, read := readSessionFile(session, []byte(path), target)
+	size, read := readInstalledFile(session, path, target)
 	if !read {
 		return 0, "unreadable"
 	}
@@ -194,7 +194,7 @@ func readInstalled(session handle.ID, path string, target []byte) (int, string) 
 // checkImage requires a non-empty regular file that starts as a native image.
 // The loader validates the rest when the program is launched.
 func checkImage(session handle.ID, path string) string {
-	stat, ok := callSession(session, vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)})
+	stat, ok := installedCall(session, path, "stat", vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)})
 	switch {
 	case !ok:
 		return "unreadable"
@@ -203,12 +203,12 @@ func checkImage(session handle.ID, path string) string {
 	case stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindFile || stat.Size == 0:
 		return "not a file"
 	}
-	opened, ok := callSession(session, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte(path)})
+	opened, ok := installedCall(session, path, "open", vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte(path)})
 	if !ok || opened.Status != vfs.StatusOK {
 		return "unreadable"
 	}
-	header, ok := callSession(session, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 8})
-	callSession(session, vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+	header, ok := installedCall(session, path, "read", vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 8})
+	installedCall(session, path, "close", vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
 	if !ok || header.Status != vfs.StatusOK || supervisor.ClassifyExecutable(header.Data) != supervisor.ExecutableNative {
 		return "not a native image"
 	}

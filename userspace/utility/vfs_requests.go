@@ -29,6 +29,12 @@ func (v *VFSRequests) Call(channel handle.ID, request vfs.Request, attached hand
 	return v.client.callOn(channel, request, attached, correlation, budget)
 }
 
+// CallWithFailure is Call with a caller-owned failure snapshot. Validation
+// callers log it after a failure; normal requests need no diagnostic storage.
+func (v *VFSRequests) CallWithFailure(channel handle.ID, request vfs.Request, attached handle.ID, correlation, budget uint64, failure *VFSFailure) (vfs.Reply, bool) {
+	return v.client.callObserved(channel, request, attached, correlation, budget, failure)
+}
+
 // Reject releases an unacceptable decoded reply's handles and quarantines
 // its endpoint, including an asynchronously sent request. nil means the owner
 // abandoned the request without receiving a reply. It does not revoke peer

@@ -85,6 +85,10 @@ func (s *session[T]) abandon() {
 }
 
 func (s *session[T]) send(message *ipc.Message) bool {
+	return s.sendObserved(message, nil)
+}
+
+func (s *session[T]) sendObserved(message *ipc.Message, failure *VFSFailure) bool {
 	if s.bound() == 0 {
 		return false
 	}
@@ -92,7 +96,12 @@ func (s *session[T]) send(message *ipc.Message) bool {
 	if !ok {
 		return false
 	}
-	if s.io.send(s.bound(), s.wire[:size]) != kcall.StatusOK {
+	status := s.io.send(s.bound(), s.wire[:size])
+	if failure != nil {
+		failure.Phase, failure.Status = "send", status
+		failure.Sent = status == kcall.StatusOK
+	}
+	if status != kcall.StatusOK {
 		s.abandon()
 		return false
 	}
@@ -103,12 +112,20 @@ func (s *session[T]) send(message *ipc.Message) bool {
 // other failed wait or malformed wire abandons the endpoint. Clearing the wire
 // first prevents a short delivery from inheriting the previous reply's bytes.
 func (s *session[T]) receive(ticks uint64) (kcall.Status, bool) {
+	return s.receiveObserved(ticks, nil)
+}
+
+func (s *session[T]) receiveObserved(ticks uint64, failure *VFSFailure) (kcall.Status, bool) {
 	if s.bound() == 0 {
 		return kcall.StatusPeerDied, false
 	}
 	clear(s.wire[:])
 	s.incoming = ipc.Message{}
-	if status := s.io.waitReceive(s.bound(), s.wire[:], ticks); status != kcall.StatusOK {
+	status := s.io.waitReceive(s.bound(), s.wire[:], ticks)
+	if failure != nil {
+		failure.Phase, failure.Status = "receive", status
+	}
+	if status != kcall.StatusOK {
 		if status != kcall.StatusTimeout {
 			s.abandon()
 		}
@@ -116,6 +133,9 @@ func (s *session[T]) receive(ticks uint64) (kcall.Status, bool) {
 	}
 	valid := decodeIPC(s.wire[:], &s.incoming, s.io.close)
 	if !valid {
+		if failure != nil {
+			failure.Phase, failure.Status = "wire", kcall.StatusCorruptData
+		}
 		s.abandon()
 	}
 	return kcall.StatusOK, valid
@@ -193,6 +213,15 @@ func (s *vfsSession[T, P]) exchange(request vfs.Request, attached handle.ID, tic
 // exchangeDeadline uses an absolute budget when now is supplied. Neither a
 // spurious/late reply nor repeated waits can restart that budget.
 func (s *vfsSession[T, P]) exchangeDeadline(request vfs.Request, attached handle.ID, ticks uint64, attempts int, deadline uint64, now func() (uint64, kcall.Status)) (vfs.Reply, bool) {
+	return s.exchangeObserved(request, attached, ticks, attempts, deadline, now, nil)
+}
+
+// exchangeObserved captures the failing stage before reject/abandon clears
+// endpoint/reply state. It never changes timeout, retry or attachment policy.
+func (s *vfsSession[T, P]) exchangeObserved(request vfs.Request, attached handle.ID, ticks uint64, attempts int, deadline uint64, now func() (uint64, kcall.Status), failure *VFSFailure) (vfs.Reply, bool) {
+	if failure != nil {
+		failure.Phase, failure.Status = "bound", kcall.StatusPeerDied
+	}
 	usesPage := attached == 0
 	if s.bound() == 0 {
 		if attached != 0 {
@@ -202,6 +231,9 @@ func (s *vfsSession[T, P]) exchangeDeadline(request vfs.Request, attached handle
 	}
 	if usesPage {
 		var ok bool
+		if failure != nil {
+			failure.Phase, failure.Status = "prepare", kcall.StatusResourceExhausted
+		}
 		if attached, ok = s.paths.Prepare(&request); !ok {
 			return vfs.Reply{}, false
 		}
@@ -212,7 +244,13 @@ func (s *vfsSession[T, P]) exchangeDeadline(request vfs.Request, attached handle
 	if ok && attached != 0 {
 		s.outgoing.HandleCount, s.outgoing.Handles[0] = 1, attached
 	}
-	if !ok || now != nil && remaining(deadline, now) == 0 || !s.send(&s.outgoing) {
+	if failure != nil {
+		failure.Phase, failure.Status = "encode", kcall.StatusInvalidArgument
+		if ok {
+			failure.Phase, failure.Status = "deadline", kcall.StatusTimeout
+		}
+	}
+	if !ok || now != nil && remaining(deadline, now) == 0 || !s.sendObserved(&s.outgoing, failure) {
 		if attached != 0 {
 			s.io.close(attached)
 		}
@@ -222,10 +260,13 @@ func (s *vfsSession[T, P]) exchangeDeadline(request vfs.Request, attached handle
 		if now != nil {
 			ticks = remaining(deadline, now)
 			if ticks == 0 {
+				if failure != nil {
+					failure.Phase, failure.Status = "deadline", kcall.StatusTimeout
+				}
 				break
 			}
 		}
-		status, valid := s.receive(ticks)
+		status, valid := s.receiveObserved(ticks, failure)
 		if status == kcall.StatusTimeout {
 			continue
 		}
@@ -235,7 +276,15 @@ func (s *vfsSession[T, P]) exchangeDeadline(request vfs.Request, attached handle
 			if decoded && s.incoming.HandleCount == 0 && s.incoming.Correlation == correlation && reply.Operation == request.Operation &&
 				(reply.AttachedName == 0 || usesPage && request.NameReturn && reply.Status == vfs.StatusOK) &&
 				(!request.Operation.Bulk() || reply.Size <= uint64(request.Size)) {
+				if failure != nil {
+					failure.Phase, failure.Status = "complete", kcall.StatusOK
+				}
 				return reply, true
+			}
+			if failure != nil {
+				failure.Phase, failure.Status = "reply", kcall.StatusCorruptData
+				failure.ReplyCorrelation = s.incoming.Correlation
+				failure.ReplyOperation = reply.Operation
 			}
 			s.reject()
 		}

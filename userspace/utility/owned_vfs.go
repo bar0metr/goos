@@ -25,10 +25,37 @@ type ownedVFS[T clockTransport, P requestPaths] struct {
 }
 
 func (s *ownedVFS[T, P]) callOn(channel handle.ID, request vfs.Request, attached handle.ID, correlation, budget uint64) (vfs.Reply, bool) {
+	return s.callObserved(channel, request, attached, correlation, budget, nil)
+}
+
+// VFSFailure is a caller-owned diagnostic snapshot captured before quarantine.
+// Phase distinguishes send/receive/wire/reply/deadline failures; Status is the
+// raw syscall status except locally detected protocol/deadline failures.
+// Completed VFS error replies have Phase complete and Status OK.
+type VFSFailure struct {
+	Phase            string
+	Status           kcall.Status
+	Sent             bool
+	ReplyCorrelation uint64
+	ReplyOperation   vfs.Operation
+}
+
+func (s *ownedVFS[T, P]) callObserved(channel handle.ID, request vfs.Request, attached handle.ID, correlation, budget uint64, failure *VFSFailure) (vfs.Reply, bool) {
+	if failure != nil {
+		*failure = VFSFailure{Phase: "start", Status: kcall.StatusInvalidArgument}
+	}
 	s.hold()
 	defer s.end()
 	s.bindHeld(channel)
 	start, status := s.io.now()
+	if failure != nil {
+		switch {
+		case s.bound() == 0:
+			failure.Phase, failure.Status = "bound", kcall.StatusPeerDied
+		case status != kcall.StatusOK:
+			failure.Phase, failure.Status = "clock", status
+		}
+	}
 	if s.bound() == 0 || correlation == 0 || status != kcall.StatusOK || budget == 0 {
 		if attached != 0 {
 			s.io.close(attached)
@@ -44,10 +71,13 @@ func (s *ownedVFS[T, P]) callOn(channel handle.ID, request vfs.Request, attached
 	// The next correlation must match the caller's shared synchronous/async
 	// sequence; the owner skips zero before calling.
 	s.correlation = correlation - 1
-	reply, ok := s.exchangeDeadline(request, attached, budget, 1, deadline, s.io.now)
+	reply, ok := s.exchangeObserved(request, attached, budget, 1, deadline, s.io.now, failure)
 	if ok && reply.AttachedName != 0 {
 		name := s.paths.Name(int(reply.AttachedName))
 		if len(name) != int(reply.AttachedName) {
+			if failure != nil {
+				failure.Phase, failure.Status = "name", kcall.StatusCorruptData
+			}
 			s.abandon()
 			s.paths.Abandon()
 			return vfs.Reply{}, false
