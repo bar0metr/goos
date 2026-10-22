@@ -121,9 +121,15 @@ func resolveUserFaultEntry(root uint64, address uint64, errorCode uint64, rip ui
 // faultFrames bounds the frame-pointer chain a fault report follows.
 const faultFrames = 8
 
+// faultStackOffset is where the nonzero words at the faulting RSP are
+// copied in guardStack, above the frame records. A caller without a frame
+// pointer is found by the return address and saved registers there.
+const faultStackOffset = 256
+
 // reportFaultRegisters logs the arguments and callers of a fatal user fault.
 // RDI, RSI and RDX are a memmove's destination, source and length; RBP
-// starts the frame-pointer chain whose return addresses name its callers.
+// starts the frame-pointer chain whose return addresses name its callers,
+// and the words at RSP name callers that keep no frame pointer.
 // The thread is named by its task, FS base, and the slot and goroutine its
 // userspace control block records.
 func reportFaultRegisters(root, rip uint64, space *lock.RW, stop *uint64) {
@@ -164,6 +170,10 @@ func reportFaultRegisters(root, rip uint64, space *lock.RW, stop *uint64) {
 		}
 		frame = next
 	}
+	stackWords := 0
+	if registers.RSP%8 == 0 && vm.CopyIn(root, registers.RSP, local.guardStack[faultStackOffset:]) {
+		stackWords = (len(local.guardStack) - faultStackOffset) / 8
+	}
 	space.RUnlock()
 	kernelLogUints(logfmt.Warn, "user fault thread", "task", uint64(task), "fs", fsBase)
 	if blockRead {
@@ -173,6 +183,11 @@ func reportFaultRegisters(root, rip uint64, space *lock.RW, stop *uint64) {
 	for index := 0; index < frames; index++ {
 		kernelLogUints(logfmt.Warn, "user fault caller", "depth", uint64(index),
 			"return", binary.LittleEndian.Uint64(local.guardStack[72+index*16:]))
+	}
+	for index := 0; index < stackWords; index++ {
+		if word := binary.LittleEndian.Uint64(local.guardStack[faultStackOffset+index*8:]); word != 0 {
+			kernelLogUints(logfmt.Warn, "user fault stack", "offset", uint64(index*8), "value", word)
+		}
 	}
 }
 
