@@ -254,10 +254,65 @@ lock levels, and every native call records its number, including the wait
 paths entered from assembly. The next KVM run passed every check. One pass
 does not prove the race gone; TCG had not exposed it at all.
 
-The goroutine stack hooks remain experimental. Tests must still cover
-transitions during creation and completion, pending channel values, saved
-register roots, timer callbacks, mixed native threads, and failed rendezvous
-with parked goroutines. A passing channel or mutex test does not establish collector correctness.
+`goprobe gcstress N ROUNDS` checks lists during concurrent collections from
+N goroutines. The boot GC suite runs N=1 and N=4; pvelab runs N=1 and N=8
+through both goroutines and native-concurrency. ROUNDS defaults to eight.
+Each scenario requires completed collections and checks list values before
+following links:
+
+- Preemption: oversubscribed workers walk lists in a call-free loop or keep
+  lists across Gosched. The checked TinyGo output keeps the current cell in
+  RDI. The fixture waits for a preemption, with a 30-second bound.
+- Creation and completion: creators pass lists through go arguments;
+  children check them and send new lists through result channels.
+- Defers: workers return, panic/recover, or call Goexit with captured lists.
+  Deferred calls collect during return and panic unwinding. A panic also
+  carries a heap list through its value.
+- Channels: full buffers, blocked buffered and unbuffered senders, and select
+  senders hold lists. The fixture waits for blocked senders before an
+  explicit collection.
+- Timers: pending AfterFunc closures hold lists, then collect and check them
+  in callbacks. The fixture also stops far-future timers.
+- Stack transitions: workers hold lists across sleep, handle timeout waits,
+  Gosched, and native yields. Native thread.Start workers exchange lists
+  with goroutines and collect while holding received lists.
+- Failed rendezvous: channel and select waiters keep lists while a native
+  thread stops inside the validation region-transition hold. Five requests
+  must give up without advancing the collection count. After release, a
+  collection must finish before the waiters resume and check their lists.
+
+Validation builds poison swept slab slots with 0xa5 bytes and the first
+page of swept runs. Host tests check corruption of dead slots, survival of
+live slots, zeroing on reuse, and the poisoned-byte count. Other images
+compile out the poison calls. A normal `mem` ELF built before and after the
+poison change compared byte-for-byte equal. Each stress run samples dropped
+lists through inverted address tokens and requires at least half to change,
+plus a bounded final live heap. A collector that reclaims nothing fails.
+
+Validation-only snapshot classification counts accepted collections that
+hold a thread inside goos_g_swap or goos_preempt_entry. The targeted TCG
+SMP=4 suite recorded 12 and 24 preemption-entry holds for N=1 and N=4,
+with zero swap holds. Both runs checked eight scenarios without a lost
+list and reclaimed all 256 sampled list heads. Six final repeat runs passed
+in 51 seconds, with 1 to 6 preemptions, 10 to 34 preemption-entry holds,
+and 0 to 4 swap holds per run. All 224 to 256 sampled list heads changed.
+The fixture waits for a preemption rather than assuming a fixed wall time
+guarantees a user-time preemption. Temporary mutations that omitted parked or runnable
+G stacks made gcstress fail during preemption with process fault status 13;
+the mutations are not part of the runtime.
+
+The stack hooks remain experimental. These tests cover root lifetimes but
+do not force collections at each instruction of creation, completion,
+context save, or G/M switching. Preemption-entry hold counts include restore
+instructions; they do not establish a hold during each register save. Swap
+holds cover some runs but do not identify the individual save instruction.
+Compiler spills and
+conservative aliases can retain a list through another root. The tests do
+not isolate each XMM register, cover all timer cancellation races, or
+exercise kernel-induced rendezvous timeouts. The rejected region window
+covers bounded rendezvous failure with parked Gs. KVM has not run this
+stress fixture. A passing channel or mutex test alone does not establish
+collector correctness.
 
 ## Service integration and acceptance
 
