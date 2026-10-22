@@ -789,6 +789,8 @@ CA-0950	goos/userspace/runtime/sys	threadJoinHandler	process	atomic	TestThreadJo
 CA-0951	goos/userspace/runtime/sys	cursorWaitHandler	process	atomic	TestCursorWaitHandlerDispatchAndPolling
 CA-0952	goos/userspace/runtime/sys	irqWaitHandler	process	atomic	TestIRQWaitHandlerDispatch
 CA-0953	goos/userspace/runtime/goroutine	nativeThreadJoinHandler	process	immutable	goprobe waitsets
-CA-0954	goos/userspace/runtime/goroutine	nativeCursorWaitHandler	process	immutable	none
+CA-0954	goos/userspace/runtime/goroutine	nativeCursorWaitHandler	process	immutable	goprobe logwait
 CA-0955	goos/userspace/runtime/goroutine	nativeIRQWaitHandler	process	immutable	none
 CA-0957	goos/userspace/bin/goprobe	joinGate	process	immutable	goprobe waitsets
+CA-1011	goos/userspace/bin/goprobe	logBatch	process	lock	goprobe logwait
+CA-1012	goos/userspace/bin/goprobe	logBatchLock	process	lock	goprobe logwait

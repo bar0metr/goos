@@ -161,6 +161,10 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		tcpSession, _ = openTCPSession()
 	}
 	useTCP := tcpSession[0] != 0
+	// goprobe logwait parks goroutines on a log cursor and writes the record
+	// that wakes them. Only the validation build's system goprobe gets the log,
+	// by name, so the command index format stays as it is.
+	useLog := validation.Enabled && !linuxProcess && grantable && equalBytes(command, "goprobe")
 	if useBlockCheck && boot.Mode() != supervisor.ModeRecovery {
 		// The running system starts its programs from the volume, so the
 		// volume is never taken from it for a check (ADR 0175).
@@ -285,6 +289,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useTCP {
 		handles += len(tcpSession)
 	}
+	if useLog {
+		handles++
+	}
 	// A Linux program searches the Linux fixture directory, never the
 	// native one: its execve refuses native images.
 	addLinuxPath := linuxProcess && execproto.LinuxPathMissing(environment)
@@ -364,6 +371,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		writer.Handle([]byte("tcp-tx"), 0)
 		writer.Handle([]byte("tcp-rx"), 0)
 	}
+	if useLog {
+		writer.Handle([]byte("log"), 0)
+	}
 	// The request was validated when it arrived, so what does not fit is its
 	// size: its strings need more room in the startup object's tables.
 	startupData, ok := writer.Finish()
@@ -424,6 +434,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			supervisor.Capability{Name: "tcp", Handle: tcpSession[0], Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 			supervisor.Capability{Name: "tcp-tx", Handle: tcpSession[1], Type: handle.TypeMemory, Rights: capability.Read | capability.Write, Consume: true},
 			supervisor.Capability{Name: "tcp-rx", Handle: tcpSession[2], Type: handle.TypeMemory, Rights: capability.Read, Consume: true})
+	}
+	if useLog {
+		grants = append(grants, supervisor.Capability{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write})
 	}
 	profile := supervisor.ProfileNormal
 	if linuxProcess {

@@ -16,6 +16,7 @@
 //	gc N        roots of parked, sleeping, waiting, and migrating goroutines
 //	io          handle waits that park only the goroutine
 //	waitsets    duplicate-interest validation, overlapping waits, and a parked join
+//	logwait     goroutines parked on a kernel log cursor until a record arrives
 //	threads     thread.Start threads and goroutines together
 //	bench       scheduler, channel, timer, and CPU scaling measurements
 //	overflow    a goroutine that overflows its stack ends the process
@@ -47,7 +48,7 @@ import (
 var manifest = commands.Manifest{
 	Usage:   "goprobe mode [N]",
 	Summary: "goroutine checks",
-	Options: "modes: pool, smoke, chan, sync, timers, fair, panic, limit, gc, io, waitsets, threads, bench, overflow, deadlock",
+	Options: "modes: pool, smoke, chan, sync, timers, fair, panic, limit, gc, io, waitsets, logwait, threads, bench, overflow, deadlock",
 	MaxArgs: 3,
 }
 
@@ -98,6 +99,8 @@ func run(data startup.Data) {
 		waits()
 	case utility.Equal(mode, "waitsets"):
 		waitsets()
+	case utility.Equal(mode, "logwait"):
+		logwait(data)
 	case utility.Equal(mode, "threads"):
 		threads()
 	case utility.Equal(mode, "bench"):

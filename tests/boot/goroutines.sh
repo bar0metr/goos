@@ -4,8 +4,8 @@
 # processors at once, channels and select, the sync package, timers and
 # contexts, fairness on one permit, panics, the goroutine limit, the roots
 # of goroutines in every waiting state, handle waits, a goroutine that joins
-# a native thread, thread.Start threads with goroutines, and the faults that
-# end the process. Writes
+# a native thread, goroutines parked on a log cursor, thread.Start threads
+# with goroutines, and the faults that end the process. Writes
 # build/reports/goroutines-SUITE.txt.
 #
 # SUITE picks the checks: runtime (scheduling, channels, sync, timers,
@@ -162,6 +162,8 @@ else
 		probe io
 		probe waitsets
 		require '^GOPROBE_WAITSETS_JOIN spins=[1-9][0-9]*$' 'goprobe waitsets: a goroutine joined a native thread while another ran'
+		probe logwait
+		require '^GOPROBE_LOGWAIT sequence=[0-9]* waits=[2-9][0-9]* peer=[1-9][0-9]* polls=[0-9]*$' 'goprobe logwait: log waiters parked while a peer ran'
 	fi
 	if wants faults; then
 		# A goroutine that overflows its stack hits the guard below it and

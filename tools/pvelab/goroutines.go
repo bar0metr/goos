@@ -31,6 +31,7 @@ var goroutineChecks = []struct {
 	{"goprobe limit", "GOPROBE_LIMIT_OK", nil},
 	{"goprobe io", "GOPROBE_IO_OK", nil},
 	{"goprobe waitsets", "GOPROBE_WAITSETS_OK", []string{"GOPROBE_WAITSETS_JOIN"}},
+	{"goprobe logwait", "GOPROBE_LOGWAIT_OK", []string{"GOPROBE_LOGWAIT"}},
 	{"goprobe threads", "GOPROBE_THREADS_OK", nil},
 	{"goprobe gc 1", "GOPROBE_GC_OK", nil},
 	{"goprobe gc 8", "GOPROBE_GC_OK", nil},
