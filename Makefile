@@ -266,6 +266,10 @@ $(GOROUTINE_ROOT_STAMP): $(GOROUTINE_ROOT_SOURCES)
 	$(BUILD_ENV) go run ./tools/goroutineroot "$$(tinygo env TINYGOROOT)" $(GOROUTINE_ROOT) tinygo/goroutines
 GOROUTINE_BUILD = $(BUILD_ENV) TINYGOROOT=$(abspath $(GOROUTINE_ROOT)) tinygo build $(TINYGO_TAGS) -target=$(GOROUTINE_TARGET) -opt=$(OPT) -no-debug
 
+# Recipe changes must invalidate VFS images from older build trees, including
+# the ordinary tree that held a goroutine VFS before the serial default.
+$(VFS_ELF): Makefile
+
 ifeq ($(VFS_RUNTIME),serial)
 $(VFS_ELF): $(call go_deps,./userspace/cmd/vfs) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
