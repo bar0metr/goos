@@ -208,6 +208,19 @@ func gcStress(collectors, rounds int) {
 	step("gcstress rendezvous")
 	stressRendezvous(r)
 
+	// WaitGroup completion precedes scheduler retirement on another M.
+	// Retire workers before measuring their stacks and dropped heap roots.
+	retireDeadline := time.Now().Add(stressTimeout)
+	for {
+		var stats goroutine.Stats
+		goroutine.ReadStats(&stats)
+		if stats.Live == 1 {
+			break
+		}
+		check(time.Now().Before(retireDeadline), "gcstress: goroutines did not retire")
+		time.Sleep(time.Millisecond)
+	}
+
 	// Every list is garbage now. Most sampled ones must read changed:
 	// freed and poisoned, or freed and reused. Conservative scanning may
 	// keep a few through stale words.
