@@ -180,8 +180,17 @@ available through WaitAny and IRQTake.
 Two goroutines that wait on the same log or line form an aliased aggregate,
 which the poller resolves with one-tick probes rather than one kernel wait.
 The [caller audit](../development/native-concurrency-callers.md) covers the
-service-library ownership boundaries. Separate native G log-event and IRQ
-fixtures remain a validation gap: goprobe has neither capability.
+service-library ownership boundaries.
+
+Two guest fixtures cover these waits on one permit. In validation builds PID 1
+grants the system goprobe the log with Read and Write, by name, so the command
+index format stays unchanged. `goprobe logwait` parks two Gs on the same log
+cursor, writes a record once both have parked, and requires both to read it
+while a peer G counted. Validation builds run the virtio-blk driver on the
+goroutine runtime with GOMAXPROCS 1. Its first four interrupt waits that a
+peer G sees registered, and during which the peer advances, print
+`VIRTIO_BLK_G_IRQ_OK`. The driver keeps the disk line; no other process
+receives it. Normal builds keep the serial driver.
 
 ## Collector integration
 
