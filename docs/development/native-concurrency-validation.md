@@ -1,8 +1,8 @@
 # Native concurrency validation
 
-## Tested revision
+## Historical KVM revision
 
-The combined KVM run tested `da1da8ffb92f72dc513b3371b7f1e32d0f41dffb`
+The combined KVM run below tested `da1da8ffb92f72dc513b3371b7f1e32d0f41dffb`
 with no tracked changes. Run ID: `20261021T211333Z-6c7304d6`.
 
 Configuration: TinyGo 0.42.0, LLVM 22.1.4, Go 1.25.5, optimization level 2,
@@ -105,7 +105,7 @@ The test copies `TEST_DISK`; it does not modify the supplied disk.
 ## Benchmark samples
 
 These are short runtime smoke measurements, not performance acceptance for
-all services. The [benchmark implementation](../../userspace/bin/goprobe/main.go#L1163)
+all services. The [benchmark implementation](../../userspace/bin/goprobe/main.go#L1175)
 times 2,000 goroutine creations/exits, 5,000 channel round trips, 5,000
 four-channel selects, 10,000 mutex-protected increments and fifty 1 ms
 sleeps. CPU scaling divides a fixed `1 << 22` recurrence workload across
@@ -137,14 +137,81 @@ was not controlled, and three samples do not support a tail-latency claim.
 There is no measured concurrent VFS throughput or latency comparison here,
 and no Linux or stock Go baseline.
 
+## Follow-up validation on 2026-10-22
+
+The follow-up integrates log/IRQ guest fixtures, collector stress, read-copy
+checks and the serial VFS fallback. The implementation revision is
+`7e6f78875483d43efe0989a1f152a4f86ae8b69e`. The historical KVM run above
+does not cover these changes. No follow-up KVM result is available.
+
+On the combined source, `go test ./...`, `go test -race ./userspace/...`,
+`go vet ./...` and validation-tagged vet passed. Validation-tagged race tests
+also passed for VFS, arena, goroutine, shell and pvelab. The inventory covers
+805 package-level variables. Guest-only packages do not run in the host suite.
+Compiler/frame checks reported
+`GOCOMPILER_OK symbols=7 hooks=6 tls=fs overflow=recursive`;
+the largest goprobe frame used 2,872 of 65,400 bytes.
+
+One SMP=4 TCG guest passed pool, channels, sync, timers, fairness,
+panic/recover, mixed native threads, 500 I/O rounds, waitsets, logwait,
+GC at 1/4 and gcstress at 1/4. It used `VALIDATION=1 VFS_PROBE=1`.
+
+| Follow-up check | Observed result |
+|---|---|
+| Log cursor | Two Gs waited on one cursor, read the token-bearing record at sequence 122, and observed peer progress of 314. Registrations retired. |
+| Disk IRQ | The driver reported `VIRTIO_BLK_G_IRQ_OK` before and after replacement: four proved waits each, with peer progress of 8,897 and 7,148. The driver retained IRQ authority. |
+| GC stress, one collector | 1,275 collections; 256 sampled dropped lists changed; eight scenarios reported `lost=0`; one context-swap range hold and 19 preemption-range holds. |
+| GC stress, four collectors | 1,977 collections; 192 sampled dropped lists changed; eight scenarios reported `lost=0`; zero context-swap range holds and 27 preemption-range holds. |
+| Production VFS | The normal serial target compiled. Its ELF did not contain `VFS_COPY_INVALID`. |
+
+GC stress covers preemption/local roots, G creation and completion, deferred
+return/panic/Goexit cleanup, pending channel values, timer captures,
+G/M stack transitions, mixed native threads and a rejected region-window
+rendezvous followed by collection. Validation sweep poisoning gives a missed
+root a corruption signal; sampled dropped lists and a heap bound reject a
+collector that reclaims nothing. A bounded wait for scheduler retirement
+precedes final heap measurements, because WaitGroup completion alone does not
+mean another M has finished retiring its G.
+
+The context-save counters cover instruction ranges, including restore. These
+runs do not establish per-instruction coverage or isolate every XMM root.
+Conservative aliases can retain an object through another root. The rejected
+rendezvous uses a held region transition, not a kernel-induced timeout.
+
+Normal images now ship serial VFS; validation images default to the goroutine
+VFS. `VFS_RUNTIME` can select either. Makefile changes invalidate the VFS ELF,
+including an old normal build tree that still contains a goroutine image.
+`test-all` and `release-check` now include the serial boot gate, compiler,
+goroutine runtime, collector and scheduler-aware I/O suites. Wiring a target
+into those gates does not mean the complete gates passed in this follow-up.
+
+The serial boot gate has not passed. Earlier attempts exposed lost terminal
+input, a bulk-I/O timeout and an installed-service scan failure after FAT32
+reattachment. The last failure entered recovery with
+`stage=services path=/system/services/virtio-net reason=unreadable`.
+Its cause remains under investigation; host load alone does not establish it.
+Follow-up diagnostics record the failed installed-file phase, session,
+correlation, elapsed ticks, VFS status and raw transaction failure before
+quarantine. They also report a failed Close, which could otherwise make the
+next Stat appear to fail on the wrong path. A targeted serial/TCG boot with
+fresh init and shell over copied baseline storage binaries completed FAT32
+reattachment and the installed-system check without a failure record. That
+result does not reproduce or explain the earlier scan failure; it is not a
+complete serial boot gate.
+
+The harness now uses a validation-only shell acknowledgement after foreground
+completion rather than a child's stdout or a redrawn prompt. Host regressions
+cover stale tokens, missing output and bounded failure without sending the
+next command.
+
 ## Remaining evidence limits
 
-Goprobe has no log-reader or IRQ capability. Cursor registration, alias
-fallback and IRQ adapter races have host tests and source review; the guest
-exercises cursor-format aggregate waits and the real disk's legacy interrupt
-path. This run does not independently demonstrate a G receiving a log event
-or disk IRQ. Pins, regions, maximum-sized waits and scheduler-stack calls
-retain their documented native fallback.
+The historical KVM run did not give goprobe a log capability or run the disk
+driver on Gs. The follow-up TCG fixture now does both: validation PID 1 grants
+goprobe log Read/Write, while the disk driver keeps its IRQ and runs IRQWait
+through the G adapter. Normal builds keep the serial disk driver. Pins,
+regions, maximum-sized waits and scheduler-stack calls retain their documented
+native fallback. New KVM evidence is still required for the follow-up.
 
 One earlier isolated TCG run faulted in VFS memmove with a null source before
 waitsets printed output. Its cause remains unknown. The isolated retry and

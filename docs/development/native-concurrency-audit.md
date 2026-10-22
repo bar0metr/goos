@@ -409,11 +409,13 @@ native collector and scheduler tests.
 
 ## Programs
 
-The program rows describe their callers' ownership. Goprobe and the
-validation VFS select the goroutine target; a normal build ships the serial
-VFS (`VFS_RUNTIME`, ADR 0204). Threadprobe starts native threads. The other shipped
-programs use one service loop and do not start workers through `go` or
-`thread.Start`. The SSH backend uses a synchronous pump; its region scopes
+The program rows describe their callers' ownership. Goprobe, the validation
+VFS and the validation virtio-blk driver select the goroutine target. A normal
+build ships serial VFS (`VFS_RUNTIME`, ADR 0204) and a serial disk driver.
+The validation driver's peer G measures progress during IRQ waits; its serving
+G alone owns requests and DMA state. Threadprobe starts native threads. The
+other shipped programs use one service loop and do not start workers through
+`go` or `thread.Start`. The SSH backend uses a synchronous pump; its region scopes
 must not park or migrate. Linking a library into goprobe does not mean its
 stateful APIs run on workers.
 

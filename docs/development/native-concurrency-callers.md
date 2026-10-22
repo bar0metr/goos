@@ -96,10 +96,12 @@ as Finder traversal, remain valid.
 
 ## Program and test evidence
 
-Goprobe and the validation VFS select the goroutine target; a normal build
-ships the serial VFS (`VFS_RUNTIME`, ADR 0204). Threadprobe starts native
-threads. The other shipped programs do not start workers through `go` or
-`thread.Start`; the generated SSH backend uses its synchronous pump.
+Goprobe, validation VFS and the validation virtio-blk driver select the
+goroutine target. A normal build ships serial VFS (`VFS_RUNTIME`, ADR 0204)
+and a serial disk driver. The validation driver's serving G owns its requests
+and DMA state; a peer G measures progress during IRQ waits. Threadprobe starts
+native threads. The other shipped programs do not start workers through `go`
+or `thread.Start`; the generated SSH backend uses its synchronous pump.
 VFS's read workers call captured plans, while the completion bridge uses
 stream/syscall output. Stateful utility/exec/terminal APIs linked into
 goprobe are not thereby called by its workers.
