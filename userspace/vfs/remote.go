@@ -35,6 +35,9 @@ type Remote struct {
 	// pages indexes the file cache, the memory this backend shares with the
 	// service; every read and write moves its bytes there (ADR 0098).
 	pages PageCache
+	// copyFault, when set, checks each cached copy (SetCopyFault). It is
+	// set before any read and never changes, so workers may read it.
+	copyFault CopyFaultHandler
 }
 
 // AttachCache gives the backend the file-cache mapping it shares with its
@@ -244,7 +247,12 @@ func (remote *Remote) Read(id ramfs.NodeID, offset uint64, target []byte) (int, 
 		if within >= length {
 			break
 		}
-		copied := copy(target[total:], remote.pages.Slot(slot)[within:length])
+		source := remote.pages.Slot(slot)[within:length]
+		if remote.copyFault != nil && !copyValid(target[total:], source) {
+			remote.copyFault(CopyFault{Op: "cache", Src: sliceAddress(source), Dst: sliceAddress(target[total:]),
+				Len: min(len(source), len(target)-total), State: "cached", Worker: CopyWorkerUnknown})
+		}
+		copied := copy(target[total:], source)
 		total += copied
 		if length < fsproto.PageSize && within+uint64(copied) == length {
 			// The page ends the file, and the read has reached its end.

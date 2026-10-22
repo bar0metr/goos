@@ -25,6 +25,8 @@ type Service struct {
 	systemNode ramfs.NodeID
 	// published records that /system and /apps are mounted.
 	published bool
+	// copyFault, when set, checks read-path copies (SetCopyFault).
+	copyFault CopyFaultHandler
 }
 
 // MountBootstrap mounts the boot archive read-only at /bootstrap, the

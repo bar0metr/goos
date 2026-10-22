@@ -54,10 +54,11 @@ type queuedRead struct {
 }
 
 type readWork struct {
-	slot   int
-	ticket uint64
-	plan   ReadPlan
-	target []byte
+	slot    int
+	ticket  uint64
+	session ReadSession
+	plan    ReadPlan
+	target  []byte
 }
 
 type readResult struct {
@@ -93,6 +94,9 @@ type ReadPool struct {
 	running int
 	next    uint64
 	closed  bool
+	// copyFault is the Service's checked-build handler, fixed before the
+	// workers start.
+	copyFault CopyFaultHandler
 }
 
 // NewReadPool creates a fixed worker set. Construction is separate from the
@@ -107,17 +111,23 @@ func NewReadPool(service *Service, workers int) (*ReadPool, bool) {
 		jobs:    make(chan readWork, workers),
 		results: make(chan readResult, workers),
 		wake:    make(chan struct{}, 1),
+
+		copyFault: service.copyFault,
 	}
 	pool.joined.Add(workers)
 	for index := 0; index < workers; index++ {
-		go pool.worker()
+		go pool.worker(index)
 	}
 	return pool, true
 }
 
-func (pool *ReadPool) worker() {
+func (pool *ReadPool) worker(index int) {
 	defer pool.joined.Done()
 	for work := range pool.jobs {
+		if pool.copyFault != nil && !bufferValid(work.target) {
+			pool.copyFault(CopyFault{Op: "execute", Dst: sliceAddress(work.target), Len: len(work.target),
+				Session: work.session, Ticket: work.ticket, State: "running", Worker: index})
+		}
 		count, status := work.plan.Read(work.target)
 		pool.results <- readResult{slot: work.slot, ticket: work.ticket, count: count, status: status}
 		select {
@@ -267,11 +277,14 @@ func (pool *ReadPool) schedule() {
 			}
 			persistent = true
 		}
+		if pool.copyFault != nil && (!bufferValid(entry.target) || entry.completion.Ticket == 0) {
+			pool.reportEntry("dispatch", entry, nil, len(entry.target))
+		}
 		entry.state = readRunning
 		pool.running++
 		// At most workers jobs, including completed results not collected yet,
 		// are outstanding, so this bounded send cannot wait for a worker.
-		pool.jobs <- readWork{slot: slot, ticket: entry.completion.Ticket, plan: entry.plan, target: entry.target}
+		pool.jobs <- readWork{slot: slot, ticket: entry.completion.Ticket, session: entry.completion.Session, plan: entry.plan, target: entry.target}
 		if entry.plan.Lane() == ReadLaneSerial {
 			break
 		}
@@ -287,7 +300,13 @@ func (pool *ReadPool) Poll() (ReadCompletion, bool) {
 		case result := <-pool.results:
 			entry := &pool.slots[result.slot]
 			if entry.state != readRunning || entry.completion.Ticket != result.ticket {
+				if pool.copyFault != nil {
+					pool.reportEntry("collect", entry, nil, result.count)
+				}
 				panic("vfs read pool: stale worker result")
+			}
+			if pool.copyFault != nil && (result.count < 0 || result.count > len(entry.target) || !bufferValid(entry.target[:result.count])) {
+				pool.reportEntry("collect", entry, nil, result.count)
 			}
 			pool.running--
 			entry.completion.Count = result.count
@@ -299,6 +318,9 @@ func (pool *ReadPool) Poll() (ReadCompletion, bool) {
 			for index := 0; index < pool.count; index++ {
 				entry := &pool.slots[pool.order[index]]
 				if entry.state == readCompleted {
+					if pool.copyFault != nil && (!bufferValid(entry.completion.Data) || len(entry.completion.Data) != entry.completion.Count) {
+						pool.reportEntry("deliver", entry, entry.completion.Data, entry.completion.Count)
+					}
 					entry.state = readDelivered
 					return entry.completion, true
 				}
@@ -306,6 +328,28 @@ func (pool *ReadPool) Poll() (ReadCompletion, bool) {
 			return ReadCompletion{}, false
 		}
 	}
+}
+
+// reportEntry hands a refused owner-side copy to the checked-build handler.
+func (pool *ReadPool) reportEntry(op string, entry *queuedRead, source []byte, length int) {
+	pool.copyFault(CopyFault{Op: op, Src: sliceAddress(source), Dst: sliceAddress(entry.target), Len: length,
+		Session: entry.completion.Session, Ticket: entry.completion.Ticket, State: entry.state.String(), Worker: CopyWorkerOwner})
+}
+
+func (state readState) String() string {
+	switch state {
+	case readFree:
+		return "free"
+	case readQueued:
+		return "queued"
+	case readRunning:
+		return "running"
+	case readCompleted:
+		return "completed"
+	case readDelivered:
+		return "delivered"
+	}
+	return "invalid"
 }
 
 // Retire releases a delivered request after reply delivery or abandonment.
