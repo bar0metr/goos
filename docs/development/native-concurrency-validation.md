@@ -142,7 +142,9 @@ and no Linux or stock Go baseline.
 The follow-up integrates log/IRQ guest fixtures, collector stress, read-copy
 checks and the serial VFS fallback. The implementation revision is
 `7e6f78875483d43efe0989a1f152a4f86ae8b69e`. The historical KVM run above
-does not cover these changes. No follow-up KVM result is available.
+does not cover these changes. A later KVM run on `00d66e69c0606ce93c7169076919753ce3395490`
+failed during `goprobe panic`; see the fault analysis below. It is not a
+passing joint validation result.
 
 On the combined source, `go test ./...`, `go test -race ./userspace/...`,
 `go vet ./...` and validation-tagged vet passed. Validation-tagged race tests
@@ -185,19 +187,21 @@ including an old normal build tree that still contains a goroutine image.
 goroutine runtime, collector and scheduler-aware I/O suites. Wiring a target
 into those gates does not mean the complete gates passed in this follow-up.
 
-The serial boot gate has not passed. Earlier attempts exposed lost terminal
+The serial boot gate passed on 2026-10-22: `make test-vfs-serial` reported
+`PASS qemu-boot (471 checks)`, including FAT32 stall, stack overflow and
+poweroff. Earlier attempts exposed lost terminal
 input, a bulk-I/O timeout and an installed-service scan failure after FAT32
 reattachment. The last failure entered recovery with
 `stage=services path=/system/services/virtio-net reason=unreadable`.
-Its cause remains under investigation; host load alone does not establish it.
+Its cause was not established. The completed serial gate passed through the
+previous failure point with `SYSTEM_CHECK_OK` and `SYSTEM_REATTACHED_OK`.
 Follow-up diagnostics record the failed installed-file phase, session,
 correlation, elapsed ticks, VFS status and raw transaction failure before
 quarantine. They also report a failed Close, which could otherwise make the
 next Stat appear to fail on the wrong path. A targeted serial/TCG boot with
-fresh init and shell over copied baseline storage binaries completed FAT32
-reattachment and the installed-system check without a failure record. That
-result does not reproduce or explain the earlier scan failure; it is not a
-complete serial boot gate.
+fresh init and shell over copied baseline storage binaries also completed
+FAT32 reattachment and the installed-system check without a failure record.
+Neither pass explains the earlier scan failure.
 
 The harness now uses a validation-only shell acknowledgement after foreground
 completion rather than a child's stdout or a redrawn prompt. Host regressions
@@ -211,11 +215,27 @@ driver on Gs. The follow-up TCG fixture now does both: validation PID 1 grants
 goprobe log Read/Write, while the disk driver keeps its IRQ and runs IRQWait
 through the G adapter. Normal builds keep the serial disk driver. Pins,
 regions, maximum-sized waits and scheduler-stack calls retain their documented
-native fallback. New KVM evidence is still required for the follow-up.
+native fallback. The follow-up KVM run `20261022T185211Z-4c209fe6`
+passed log/IRQ delivery, collector stress at one and eight collectors, and
+the joint VFS recovery scenario on eight vCPUs. Its report records a dirty
+worktree based on `00d66e6`, so it does not identify a clean commit.
+
+The first diagnostic KVM retry, `20261022T184035Z-122c720f`, failed when
+`gcstress` had started eight scheduler workers and then requested two more
+native threads under the process's eight-task quota. The fixture now reserves
+two task slots before it creates workers. The next retry,
+`20261022T184411Z-aea417a0`, completed all eight root scenarios with
+`lost=0`, but its final `Live` value was `0xffffffff00006af0`. It had not
+checked whether its three final GC requests completed; an abandoned
+rendezvous can leave per-thread counts temporarily unfolded. The fixture now
+requires three completed collections with a deadline. One subsequent KVM
+run passed with `final_collections=3`, `reclaimed=256/256` and normal `Live`
+at both collector counts. The earlier counter anomaly is not proven solved
+until the same load is repeated and the accounting path is understood.
 
 One earlier isolated TCG run faulted in VFS memmove with a null source before
 waitsets printed output. Its cause remains unknown. The isolated retry and
-the final integrated TCG/KVM runs passed. They do not prove that the fault
+the historical integrated TCG/KVM runs passed. They do not prove that the fault
 cannot recur. The saved build manifest names `4200d8c`, an ancestor of
 `343df2e`. Rebuilding it reproduces the recorded `vfs.elf` SHA-256
 `11db0c5cf6397bd2da830e17c246aaf51642d16f9d8b50bb24d02e29d5e5e7be`.
@@ -225,6 +245,18 @@ ELF places RIP `0x400024a5` on memmove's forward source load
 the log lacks arguments and a return address, so it cannot identify the
 caller or establish a torn slice header as the cause. Safe Go cannot create
 a slice with a null array and a nonzero length.
+
+The follow-up KVM run `20261022T175206Z-c7ff3f23` reproduced a null-source
+memmove fault in the VFS process. Its ELF maps return address `0x4000f36f` to
+`ramfs.MakeName`, after the copy from the input name into a new `Name`. The
+fault had RSI=0, RDX=1024 and RCX=0. In this compiled function, `validName`
+reads the input through R12 before the copy; no ordinary call lies between
+its last read and the move from R12 into RSI. The evidence therefore points
+to a changed register or control state during asynchronous execution. It
+does not yet prove which preemption, context-switch or fault path caused the
+change. The run stopped before the GC stress and recovery checks. Validation
+fault reports now include RBX and R12-R15 so a repeat can distinguish a
+changed saved pointer from a changed argument register. The cause is open.
 Validation builds now check read-pool buffers and persistent-cache copies. The pool checks
 targets at dispatch, in the worker, at collection and at delivery; the remote
 backend checks each cached copy; the driver checks a delivered read against

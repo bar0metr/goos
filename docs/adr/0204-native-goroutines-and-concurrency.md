@@ -310,9 +310,13 @@ Compiler spills and
 conservative aliases can retain a list through another root. The tests do
 not isolate each XMM register, cover all timer cancellation races, or
 exercise kernel-induced rendezvous timeouts. The rejected region window
-covers bounded rendezvous failure with parked Gs. KVM has not run this
-stress fixture. A passing channel or mutex test alone does not establish
-collector correctness.
+covers bounded rendezvous failure with parked Gs. A later eight-vCPU KVM
+run passed this stress fixture at one and eight collectors after the fixture
+reserved task slots for its native threads and required three completed
+final collections. An earlier KVM retry reported an impossible `Live` count;
+the [validation report](../development/native-concurrency-validation.md)
+records both results. A passing channel or mutex test alone does not
+establish collector correctness.
 
 ## Service integration and acceptance
 

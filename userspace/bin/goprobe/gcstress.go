@@ -162,7 +162,9 @@ func (r *stressRun) scenario(name string, before arena.Stats, extra string, valu
 	after := arena.HeapStats()
 	l := record("GOPROBE_GCSTRESS_SCENARIO").text(" name=").text(name).
 		field("checked", r.checked.Load()).field("lost", uint64(r.lost.Load())).
-		field("collections", uint64(after.Collections-before.Collections))
+		field("collections", uint64(after.Collections-before.Collections)).
+		field("live", after.Live).field("objects", after.Objects).
+		field("mallocs", after.Mallocs).field("frees", after.Frees)
 	if extra != "" {
 		l.field(extra, value)
 	}
@@ -176,7 +178,7 @@ func (r *stressRun) scenario(name string, before arena.Stats, extra string, valu
 // collections.
 //
 //go:noinline
-func gcStress(collectors, rounds int) {
+func gcStress(collectors, rounds, taskLimit int) {
 	if collectors < 1 {
 		collectors = 1
 	}
@@ -184,6 +186,13 @@ func gcStress(collectors, rounds int) {
 		rounds = 8
 	}
 	check(collectors <= 8 && rounds <= 64, "gcstress: use N <= 8 and ROUNDS <= 64")
+	// This process keeps its scheduler workers until exit. Reserve native task
+	// slots before the first scenario creates them, so the later thread.Start
+	// workers can coexist with goroutines on the large-profile task quota.
+	check(taskLimit > len(stressLinks), "gcstress: task quota cannot hold native threads")
+	if maximum := taskLimit - len(stressLinks); runtime.GOMAXPROCS(0) > maximum {
+		runtime.GOMAXPROCS(maximum)
+	}
 	r := &stressRun{collectors: collectors, rounds: rounds}
 	baseline := arena.HeapStats()
 	poisoned := arena.PoisonedBytes()
@@ -224,8 +233,17 @@ func gcStress(collectors, rounds int) {
 	// Every list is garbage now. Most sampled ones must read changed:
 	// freed and poisoned, or freed and reused. Conservative scanning may
 	// keep a few through stale words.
-	for i := 0; i < 3; i++ {
+	beforeFinal := arena.HeapStats().Collections
+	finalDeadline := time.Now().Add(stressTimeout)
+	var after arena.Stats
+	for {
 		runtime.GC()
+		after = arena.HeapStats()
+		if after.Collections-beforeFinal >= 3 {
+			break
+		}
+		check(time.Now().Before(finalDeadline), "gcstress: final collections did not complete")
+		runtime.Gosched()
 	}
 	samples := int(min(r.sampled.Load(), stressSamples))
 	reclaimed := 0
@@ -234,17 +252,19 @@ func gcStress(collectors, rounds int) {
 			reclaimed++
 		}
 	}
-	after := arena.HeapStats()
 	var g1 goroutine.Stats
 	goroutine.ReadStats(&g1)
 	swap1, preempt1 := arena.SwitchHolds()
 	record("GOPROBE_GCSTRESS").field("collectors", uint64(collectors)).field("rounds", uint64(rounds)).
 		field("collections", uint64(after.Collections-baseline.Collections)).field("requests", r.collected.Load()).
+		field("final_collections", uint64(after.Collections-beforeFinal)).
 		field("sampled", uint64(samples)).field("reclaimed", uint64(reclaimed)).
 		field("poisoned", arena.PoisonedBytes()-poisoned).
 		field("preemptions", g1.Preemptions-g0.Preemptions).field("created", g1.Created-g0.Created).
 		field("swap_holds", swap1-swap0).field("preempt_holds", preempt1-preempt0).
-		field("live_before", baseline.Live).field("live_after", after.Live).end()
+		field("live_before", baseline.Live).field("live_after", after.Live).
+		field("objects", after.Objects).field("mallocs", after.Mallocs).
+		field("frees", after.Frees).end()
 	check(samples >= 64, "gcstress: too few dropped lists sampled")
 	check(2*reclaimed >= samples, "gcstress: dropped lists were not reclaimed")
 	check(arena.PoisonedBytes() > poisoned, "gcstress: sweep poisoned nothing in a validation image")
@@ -654,6 +674,9 @@ func stressThreads(r *stressRun) {
 		stressLinks[index].in = make(chan stressItem)
 		stressLinks[index].out = make(chan stressItem)
 		id, status := thread.Start(stressThread, uintptr(index))
+		if status != kcall.StatusOK {
+			record("GOPROBE_GCSTRESS_THREAD_START_FAILED").field("status", uint64(status)).field("index", uint64(index)).end()
+		}
 		check(status == kcall.StatusOK, "gcstress: thread start")
 		ids[index] = id
 	}

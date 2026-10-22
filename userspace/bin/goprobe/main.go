@@ -103,7 +103,7 @@ func run(data startup.Data) {
 	case utility.Equal(mode, "gc"):
 		roots(int(argument))
 	case utility.Equal(mode, "gcstress"):
-		gcStress(int(argument), int(rounds))
+		gcStress(int(argument), int(rounds), int(taskLimit))
 	case utility.Equal(mode, "io"):
 		waits()
 	case utility.Equal(mode, "waitsets"):

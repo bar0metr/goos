@@ -137,6 +137,9 @@ func reportFaultRegisters(root, rip uint64, space *lock.RW, stop *uint64) {
 	kernelLogUints(logfmt.Warn, "user fault registers", "rdx", registers.RDX, "rcx", registers.RCX)
 	kernelLogUints(logfmt.Warn, "user fault registers", "rax", registers.RAX, "rip", registers.RIP)
 	kernelLogUints(logfmt.Warn, "user fault registers", "rsp", registers.RSP, "rbp", registers.RBP)
+	kernelLogUints(logfmt.Warn, "user fault registers", "rbx", registers.RBX, "r12", registers.R12)
+	kernelLogUints(logfmt.Warn, "user fault registers", "r13", registers.R13, "r14", registers.R14)
+	kernelLogUints(logfmt.Warn, "user fault registers", "r15", registers.R15, "rflags", registers.RFlags)
 	local := thisCPU()
 	if !space.RLockUnless(stop) {
 		return
