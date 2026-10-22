@@ -135,6 +135,9 @@ func (h *heap) sweep() {
 				m.marked = false
 				page += m.count
 			} else {
+				if poisonFreed {
+					h.poison(h.pageAddress(page), pageBytes)
+				}
 				page = h.release(page, noPage)
 			}
 			continue
@@ -186,6 +189,9 @@ func (h *heap) sweepSlab(page uint32) uint32 {
 		return 0
 	}
 	size := uint64(classSizes[m.class])
+	if poisonFreed {
+		h.poisonSlots(page, uintptr(size))
+	}
 	h.liveBytes -= uint64(dead) * size
 	h.liveObjects -= uint64(dead)
 	h.frees += uint64(dead)
