@@ -18,6 +18,21 @@ func TestGoroutineMarkerRequiresOneCompletedFixture(t *testing.T) {
 	}
 }
 
+// native-concurrency delegates its runtime checks to goroutinesScenario.
+func TestGoroutineChecksIncludeCollectorStress(t *testing.T) {
+	for _, command := range []string{"goprobe gcstress 1", "goprobe gcstress 8"} {
+		found := false
+		for _, check := range goroutineChecks {
+			if check.command == command {
+				found = check.marker == "GOPROBE_GCSTRESS_OK" && len(check.records) == 1 && check.records[0] == "GOPROBE_GCSTRESS"
+			}
+		}
+		if !found {
+			t.Errorf("missing collector stress check: %s", command)
+		}
+	}
+}
+
 func TestGoroutineRecordRequiresOneNamedRecord(t *testing.T) {
 	name := "GOPROBE_WAITSETS_JOIN"
 	if err := goroutineRecord("GOPROBE_WAITSETS polls=3 mask=1\r\n"+name+" spins=40\r\nGOPROBE_WAITSETS_OK\r\n", name); err != nil {

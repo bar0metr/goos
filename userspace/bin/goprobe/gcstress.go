@@ -183,9 +183,11 @@ func gcStress(collectors, rounds int) {
 	if rounds < 1 {
 		rounds = 8
 	}
+	check(collectors <= 8 && rounds <= 64, "gcstress: use N <= 8 and ROUNDS <= 64")
 	r := &stressRun{collectors: collectors, rounds: rounds}
 	baseline := arena.HeapStats()
 	poisoned := arena.PoisonedBytes()
+	swap0, preempt0 := arena.SwitchHolds()
 	var g0 goroutine.Stats
 	goroutine.ReadStats(&g0)
 
@@ -222,11 +224,13 @@ func gcStress(collectors, rounds int) {
 	after := arena.HeapStats()
 	var g1 goroutine.Stats
 	goroutine.ReadStats(&g1)
+	swap1, preempt1 := arena.SwitchHolds()
 	record("GOPROBE_GCSTRESS").field("collectors", uint64(collectors)).field("rounds", uint64(rounds)).
 		field("collections", uint64(after.Collections-baseline.Collections)).field("requests", r.collected.Load()).
 		field("sampled", uint64(samples)).field("reclaimed", uint64(reclaimed)).
 		field("poisoned", arena.PoisonedBytes()-poisoned).
 		field("preemptions", g1.Preemptions-g0.Preemptions).field("created", g1.Created-g0.Created).
+		field("swap_holds", swap1-swap0).field("preempt_holds", preempt1-preempt0).
 		field("live_before", baseline.Live).field("live_after", after.Live).end()
 	check(samples >= 64, "gcstress: too few dropped lists sampled")
 	check(2*reclaimed >= samples, "gcstress: dropped lists were not reclaimed")
@@ -255,13 +259,25 @@ func stressPreempt(r *stressRun) {
 	p := r.startPressure()
 	spinners := 2*runtime.GOMAXPROCS(0) + 2
 	deadline := time.Now().Add(r.duration())
+	// Collections hold the threads for much of the run, and a thread is
+	// visited only after PreemptTicks of its own user time: the spinners
+	// run on until one was preempted, up to stressTimeout.
+	limit := time.Now().Add(stressTimeout)
+	preempted := func() bool {
+		var s goroutine.Stats
+		goroutine.ReadStats(&s)
+		return s.Preemptions > g0.Preemptions
+	}
 	var wg sync.WaitGroup
 	var mixed atomic.Uint64
 	for i := 0; i < spinners; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			for walks := 0; walks < 2 || time.Now().Before(deadline); walks++ {
+			for walks := 0; ; walks++ {
+				if walks >= 2 && !time.Now().Before(deadline) && (preempted() || !time.Now().Before(limit)) {
+					break
+				}
 				seed := r.nextSeed()
 				var ok bool
 				var mix uint64
@@ -478,6 +494,8 @@ func stressChannels(r *stressRun) {
 				}
 			}()
 		}
+		awaitParked(3 * senders)
+		runtime.GC()
 		time.Sleep(stressRound)
 		for k := 0; k < senders; k++ {
 			item := <-unbuffered
@@ -692,7 +710,11 @@ func stressRendezvous(r *stressRun) {
 			case 0:
 				<-gate
 			case 1:
-				time.Sleep(r.duration())
+				select {
+				case <-gate:
+				case <-time.After(time.Hour):
+					fail("gcstress: parked select timed out")
+				}
 			case 2:
 				pending <- stressItem{head, seed}
 				return
@@ -700,7 +722,7 @@ func stressRendezvous(r *stressRun) {
 			r.verify(head, seed)
 		}(k)
 	}
-	time.Sleep(stressRound)
+	awaitParked(parked)
 	var d0, d1 arena.Diagnostics
 	arena.ReadDiagnostics(&d0)
 	id, status := thread.Start(rendezvousMover, 0)
@@ -741,6 +763,22 @@ func stressRendezvous(r *stressRun) {
 	r.scenario("rendezvous", before, "rejected", rejected)
 }
 
+// awaitParked waits for count blocked goroutines. Pressure workers do not
+// park, so the channel and rendezvous fixtures reach their wait states
+// before the collector runs. The caller yields rather than adding a timer.
+func awaitParked(count int) {
+	deadline := now() + int64(stressTimeout)
+	for {
+		var s goroutine.Stats
+		goroutine.ReadStats(&s)
+		if s.Parked >= uint64(count) {
+			return
+		}
+		check(now() < deadline, "gcstress: goroutines did not park")
+		runtime.Gosched()
+	}
+}
+
 // rendezvousMover enters a region with the validation hold set, so it stops
 // inside the transition until ReleaseRegionTransition.
 func rendezvousMover(uintptr) {
@@ -750,4 +788,3 @@ func rendezvousMover(uintptr) {
 	scope.Leave()
 	region.Release()
 }
-

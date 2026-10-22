@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"goos/internal/cpuinfo"
+	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/userspace/runtime/arena"
@@ -160,7 +161,11 @@ func start() {
 	sched.peak = 1
 	sched.created = 1
 	initThread(m, 0, mWorker)
-	arena.SetStackRoots(arena.StackRoots{Current: currentStack, Plan: planCollection, Mark: markPlanned})
+	roots := arena.StackRoots{Current: currentStack, Plan: planCollection, Mark: markPlanned}
+	if validation.Enabled {
+		roots.Switch = switchAt
+	}
+	arena.SetStackRoots(roots)
 	sys.ThreadPreempt(preemptEntryAddress(), PreemptTicks)
 	sched.started.Store(true)
 }

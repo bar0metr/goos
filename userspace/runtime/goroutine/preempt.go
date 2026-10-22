@@ -12,6 +12,32 @@ import (
 //go:linkname preemptEntryAddress goos_preempt_entry_address
 func preemptEntryAddress() uintptr
 
+// The bounds of the context-save code in amd64.S.
+
+//go:extern goos_g_swap_start
+var swapStart [0]byte
+
+//go:extern goos_g_swap_end
+var swapEnd [0]byte
+
+//go:extern goos_preempt_entry_start
+var preemptStart [0]byte
+
+//go:extern goos_preempt_entry_end
+var preemptEnd [0]byte
+
+// switchAt is the collector's Switch hook: it names the context-save code
+// pc lies in.
+func switchAt(pc uintptr) int {
+	switch {
+	case pc >= uintptr(unsafe.Pointer(&swapStart)) && pc < uintptr(unsafe.Pointer(&swapEnd)):
+		return arena.SwitchSwap
+	case pc >= uintptr(unsafe.Pointer(&preemptStart)) && pc < uintptr(unsafe.Pointer(&preemptEnd)):
+		return arena.SwitchPreempt
+	}
+	return arena.SwitchNone
+}
+
 // preemptVisit runs on the interrupted stack each time the kernel diverts
 // a worker thread to goos_preempt_entry, every PreemptTicks ticks of user
 // time. It switches the goroutine out only at a point where that is safe:

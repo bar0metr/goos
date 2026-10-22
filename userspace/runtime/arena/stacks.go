@@ -2,7 +2,11 @@
 
 package arena
 
-import "goos/userspace/runtime/tls"
+import (
+	"sync/atomic"
+
+	"goos/userspace/runtime/tls"
+)
 
 // Stacks a goroutine runtime adds (ADR 0204). Without one, every thread runs
 // on the stack the kernel made for it, and a collection scans each held
@@ -32,6 +36,41 @@ type StackRoots struct {
 	// Mark marks every range Plan chose, except the stack the collector
 	// runs on, which markStack scans from its own frame up.
 	Mark func(mark func(from, to uintptr))
+	// Switch names the context-save code pc lies in: SwitchNone,
+	// SwitchSwap, or SwitchPreempt. Validation images count the held
+	// threads it names (SwitchHolds).
+	Switch func(pc uintptr) int
+}
+
+// The context-save code a held thread can be stopped in.
+const (
+	SwitchNone = iota
+	SwitchSwap
+	SwitchPreempt
+)
+
+// switchHolds counts, in validation images, the held threads of completed
+// rendezvous that stood in a goroutine switch or the preemption entry.
+var switchHolds [3]atomic.Uint64
+
+// SwitchHolds reports how many held threads a collection found inside
+// goos_g_swap and inside goos_preempt_entry: tests use it to show that
+// collections stopped threads while they saved a goroutine's registers.
+// Only validation images count.
+func SwitchHolds() (swap, preempt uint64) {
+	return switchHolds[SwitchSwap].Load(), switchHolds[SwitchPreempt].Load()
+}
+
+// noteSwitchHolds counts the held threads that stand in context-save code.
+func noteSwitchHolds() {
+	if stackRoots.Switch == nil {
+		return
+	}
+	for index := 0; index < snapshotCount; index++ {
+		if kind := stackRoots.Switch(uintptr(snapshotWord(index, 3))); kind > SwitchNone && kind < len(switchHolds) {
+			switchHolds[kind].Add(1)
+		}
+	}
 }
 
 var (

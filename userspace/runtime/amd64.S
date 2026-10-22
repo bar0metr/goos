@@ -782,6 +782,8 @@ goos_worker_entry_address:
 .global goos_g_swap
 .type goos_g_swap,@function
 goos_g_swap:
+.global goos_g_swap_start
+goos_g_swap_start:
     pushq %r15
     pushq %r14
     pushq %r13
@@ -797,6 +799,10 @@ goos_g_swap:
     popq %r14
     popq %r15
     ret
+// goos_g_swap_start and goos_g_swap_end bound the switch for the
+// collector's validation counts, as the preempt_entry labels bound the entry.
+.global goos_g_swap_end
+goos_g_swap_end:
 .size goos_g_swap, .-goos_g_swap
 
 // goos_g_entry is the first frame of a goroutine. Its first swap pops r12,
@@ -865,6 +871,8 @@ goos_g_stack_pointer:
 .global goos_preempt_entry
 .type goos_preempt_entry,@function
 goos_preempt_entry:
+.global goos_preempt_entry_start
+goos_preempt_entry_start:
     pushq $0
     pushfq
     pushq %rax
@@ -914,6 +922,8 @@ goos_preempt_entry:
     ret $128
 1:
     ud2
+.global goos_preempt_entry_end
+goos_preempt_entry_end:
 .size goos_preempt_entry, .-goos_preempt_entry
 
 .global goos_preempt_entry_address

@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"goos/internal/validation"
 	"goos/kernel/kcall"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/runtime/tls"
@@ -225,6 +226,9 @@ func collectThreaded(slot int) {
 		// known: nothing is marked or swept (ADR 0204).
 		planned := planStacks(slot, stackPointer())
 		if planned {
+			if validation.Enabled {
+				noteSwitchHolds()
+			}
 			base, _ := currentStack()
 			scrubStack(base)
 			collect()
