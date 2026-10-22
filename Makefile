@@ -138,6 +138,19 @@ ifneq ($(VALIDATION),1)
 $(error VFS_PROBE requires VALIDATION=1)
 endif
 endif
+# VFS_RUNTIME picks how the VFS service is built (ADR 0204): goroutines runs
+# its read pool on the native goroutine runtime, serial runs every request on
+# one thread. Until ADR 0204 accepts the runtime for production, a normal
+# build ships serial and a validation build tests goroutines; the acceptance
+# fixture needs goroutines.
+VFS_RUNTIME_DEFAULT := $(if $(filter 1,$(VALIDATION)),goroutines,serial)
+VFS_RUNTIME ?= $(VFS_RUNTIME_DEFAULT)
+ifeq ($(filter $(VFS_RUNTIME),goroutines serial),)
+$(error VFS_RUNTIME must be goroutines or serial)
+endif
+ifeq ($(VFS_PROBE)$(VFS_RUNTIME),1serial)
+$(error VFS_PROBE requires VFS_RUNTIME=goroutines)
+endif
 VALIDATION_CA_BUNDLE ?=
 ifneq ($(strip $(VALIDATION_CA_BUNDLE)),)
 ifneq ($(VALIDATION),1)
@@ -181,10 +194,10 @@ endif
 # written; the kernel banner, uname, and system.build.release all read it there.
 VERSION := $(shell sed -n 's/^[[:space:]]*Release[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' internal/version/version.go)
 # Each configuration builds into its own tree, so switching HZ, DIAG,
-# VALIDATION, VFS_PROBE, or OPT never mixes objects built for another configuration. The
-# level is always in the name, so a tree built before the default changed is
-# never taken for one built at the new default.
-OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)$(if $(filter 1,$(VFS_PROBE)),-vfsprobe)-opt$(OPT)
+# VALIDATION, VFS_PROBE, VFS_RUNTIME, or OPT never mixes objects built for
+# another configuration. The level is always in the name, so a tree built
+# before the default changed is never taken for one built at the new default.
+OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)$(if $(filter 1,$(VFS_PROBE)),-vfsprobe)$(if $(filter-out $(VFS_RUNTIME_DEFAULT),$(VFS_RUNTIME)),-vfs$(VFS_RUNTIME))-opt$(OPT)
 
 .DEFAULT_GOAL := all
 
@@ -253,9 +266,15 @@ $(GOROUTINE_ROOT_STAMP): $(GOROUTINE_ROOT_SOURCES)
 	$(BUILD_ENV) go run ./tools/goroutineroot "$$(tinygo env TINYGOROOT)" $(GOROUTINE_ROOT) tinygo/goroutines
 GOROUTINE_BUILD = $(BUILD_ENV) TINYGOROOT=$(abspath $(GOROUTINE_ROOT)) tinygo build $(TINYGO_TAGS) -target=$(GOROUTINE_TARGET) -opt=$(OPT) -no-debug
 
+ifeq ($(VFS_RUNTIME),serial)
+$(VFS_ELF): $(call go_deps,./userspace/cmd/vfs) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/vfs
+else
 $(VFS_ELF): $(call go_deps,./userspace/cmd/vfs,goos_goroutines) $(GOROUTINE_ROOT_STAMP) $(GOROUTINE_TARGET) userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(GOROUTINE_BUILD) -o $@ ./userspace/cmd/vfs
+endif
 
 $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,$(GOROUTINE_COMMANDS))): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) $(wildcard userspace/runtime/goroutine/*.go) $(GOROUTINE_ROOT_STAMP) $(GOROUTINE_TARGET) userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(COMMAND_ELF_DIR)
@@ -472,11 +491,16 @@ test-all:
 	$(MAKE) docs
 	$(MAKE) test-memory
 	$(MAKE) test-boot
+	$(MAKE) test-vfs-serial
 	$(MAKE) test-lscpu
 	$(MAKE) test-smp
 	$(MAKE) test-native-threads
 	$(MAKE) test-thread-gc
 	$(MAKE) test-thread-allocator
+	$(MAKE) test-goroutine-compiler
+	$(MAKE) test-goroutines
+	$(MAKE) test-goroutine-gc
+	$(MAKE) test-goroutine-io
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
@@ -500,11 +524,16 @@ release-check:
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-memory
 	$(MAKE) test-boot
+	$(MAKE) test-vfs-serial
 	$(MAKE) test-lscpu
 	$(MAKE) test-smp
 	$(MAKE) test-native-threads
 	$(MAKE) test-thread-gc
 	$(MAKE) test-thread-allocator
+	$(MAKE) test-goroutine-compiler
+	$(MAKE) test-goroutines
+	$(MAKE) test-goroutine-gc
+	$(MAKE) test-goroutine-io
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
@@ -560,6 +589,12 @@ test-boot:
 	@$(MAKE) --no-print-directory recovery-iso VALIDATION=1
 	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/boot-test-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
+
+# The serial VFS (VFS_RUNTIME=serial) is the fallback while the goroutine
+# runtime is experimental (ADR 0204), so every boot check runs against it too.
+.PHONY: test-vfs-serial
+test-vfs-serial:
+	@$(MAKE) --no-print-directory test-boot VFS_RUNTIME=serial
 
 # The reclaimable native heap (ADR 0201): the allocator and collector model on
 # the host, then one guest that runs memreclaim, a double free, heap
@@ -1129,6 +1164,8 @@ help:
 	  '  test-all        run the complete validation gate, including QEMU' \
 	  '  test-security   run capability, handle, and VM security tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
+	  '  test-vfs-serial run test-boot with the serial VFS fallback (VFS_RUNTIME=serial)' \
+	  '  test-goroutines/test-goroutine-gc/test-goroutine-io  goroutine runtime, collector and wait suites in QEMU' \
 	  '  test-memory     check the reclaimable native heap on the host and in QEMU' \
 	  '  test-smp        boot four processors and prove they run tasks at once' \
 	  '  test-native-threads  native threads: parallel run, joins, quota, faults' \

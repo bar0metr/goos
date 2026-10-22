@@ -252,8 +252,18 @@ with parked goroutines. A passing channel or mutex test does not establish colle
 
 ## Service integration and acceptance
 
-The VFS build now selects the goroutine target. Its ingress owner admits at
-most eight requests to two read workers. It plans canonical reads on the owner,
+`VFS_RUNTIME` selects the VFS build. A validation build defaults to
+`goroutines`, the read pool below. A normal build defaults to `serial`: the
+ordinary native target compiles `driver_serial.go`, which handles every request
+on one thread with the same barriers and recovery fence. The Status above keeps
+the runtime out of production services, so the image people install ships the
+serial VFS until this ADR records the decision to switch. `make
+test-vfs-serial` runs every boot check against the serial build, and `test-all`
+and `release-check` run it beside the goroutine suites. Either default can be
+overridden; a non-default runtime builds into its own variant tree.
+
+The goroutine VFS ingress owner admits at most eight requests to two read
+workers. It plans canonical reads on the owner,
 executes RAMFS/image backend work without a process-wide lock, commits cursors
 on completion, and retires each request after reply and mapping cleanup.
 Mutations, session close, namespace operations and control requests pass through

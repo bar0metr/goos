@@ -96,7 +96,8 @@ as Finder traversal, remain valid.
 
 ## Program and test evidence
 
-VFS and goprobe select the goroutine target. Threadprobe starts native
+Goprobe and the validation VFS select the goroutine target; a normal build
+ships the serial VFS (`VFS_RUNTIME`, ADR 0204). Threadprobe starts native
 threads. The other shipped programs do not start workers through `go` or
 `thread.Start`; the generated SSH backend uses its synchronous pump.
 VFS's read workers call captured plans, while the completion bridge uses

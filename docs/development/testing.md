@@ -58,7 +58,16 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   build-time stack frame check (`tools/stackframes`, ADR 0088).
 - `make test` runs the three fast targets above and does not start QEMU.
 - `make test-boot` builds the validation ISO (`VALIDATION=1`, ADR 0058) and
-  runs the two-phase QEMU boot and reboot persistence test.
+  runs the two-phase QEMU boot and reboot persistence test. Its VFS runs on
+  the goroutine runtime. `make test-vfs-serial` runs the same checks with
+  `VFS_RUNTIME=serial`, the VFS a normal build ships until ADR 0204 accepts
+  the runtime.
+- `make test-goroutines`, `make test-goroutine-gc`, and
+  `make test-goroutine-io` boot one validation guest with four processors
+  (`GOROUTINE_SMP`) and run the `goprobe` runtime, collector, and
+  scheduler-aware wait suites through `tests/boot/goroutines.sh`.
+  `make test-goroutine-compiler` checks the compiled goroutine transport.
+  `test-all` and `release-check` run all four.
 - `make test-native-threads`, `make test-thread-gc`, and
   `make test-thread-allocator` check native threads (ADR 0203), each in one
   validation guest with four processors (`THREAD_SMP`) driven by
