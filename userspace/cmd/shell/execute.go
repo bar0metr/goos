@@ -92,6 +92,19 @@ func executeCommand(line []byte) {
 		injectFault(invocation.Arguments[1])
 		return
 	}
+	// The validation harness appends this acknowledgement to a command
+	// sequence. All preceding foreground jobs have returned from awaitReply;
+	// unlike a child's stdout or a redrawn prompt, this proves the next line
+	// cannot be consumed as input for one of those jobs.
+	if validation.Enabled && !oneShot && count == 1 {
+		if token, ready := bootReadyToken(invocation); ready {
+			write("SHELL_READY token=")
+			writeBytes(token)
+			write("\n")
+			flushOutput()
+			return
+		}
+	}
 	if count != 1 || !shellcmd.IsBuiltin(invocation.Arguments[0]) {
 		executeExternal(line, false)
 		return

@@ -15,6 +15,8 @@ pid=
 checks=0
 monitor=${TMPDIR:-/tmp}/goos-boot-monitor.$$
 heap_first=
+shell_ready_sequence=0
+shell_ready_limit=600
 
 cleanup() {
 	if [ -n "$pid" ]; then
@@ -242,14 +244,27 @@ await_count() { # file pattern count
 	done
 }
 
-# send_after_done types one command line, then waits until the guest prints
-# done once more than before. A command that follows a service restart can
-# take as long as the restart; a fixed pause would type the next line while
-# this command still reads the terminal, and that line would be lost.
+# send_after_done requires both the command's output and a fresh acknowledgement
+# from the shell after the entire foreground sequence completes. Child stdout
+# precedes exit/reaping, and a prompt can be redrawn while a job still owns stdin;
+# neither proves that it is safe to type the next command. The validation-only
+# builtin runs in the shell, not in a child, and echoes our unique counter.
 send_after_done() { # line done-pattern
 	sent_before=$(log_count "$log" "$2")
-	printf '%s\n' "$1"
-	await_count "$log" "$2" "$((sent_before + 1))"
+	shell_ready_sequence=$((shell_ready_sequence + 1))
+	shell_ready_pattern="^SHELL_READY token=$shell_ready_sequence\$"
+	printf '%s; __boot_ready %s\n' "$1" "$shell_ready_sequence"
+	shell_ready_waited=0
+	while [ "$shell_ready_waited" -lt "$shell_ready_limit" ]; do
+		if [ "$(log_count "$log" "$2")" -gt "$sent_before" ] &&
+			log_lines "$log" | grep -q "$shell_ready_pattern"; then
+			return 0
+		fi
+		sleep 0.1
+		shell_ready_waited=$((shell_ready_waited + 1))
+	done
+	fail_check timeout.shell-ready "new '$2' and SHELL_READY token=$shell_ready_sequence" \
+		"no completed foreground sequence after $shell_ready_limit polls" "$log" "$1"
 }
 
 # guest_memory_mib prints the size a QEMU -m value names, in MiB. It accepts a

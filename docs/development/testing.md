@@ -58,7 +58,15 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   build-time stack frame check (`tools/stackframes`, ADR 0088).
 - `make test` runs the three fast targets above and does not start QEMU.
 - `make test-boot` builds the validation ISO (`VALIDATION=1`, ADR 0058) and
-  runs the two-phase QEMU boot and reboot persistence test. Its VFS runs on
+  runs the two-phase QEMU boot and reboot persistence test. After storage
+  faults, the harness appends a validation-only `__boot_ready N` builtin to
+  each foreground sequence. Its `SHELL_READY token=N` acknowledgement is
+  emitted by the interactive shell after preceding jobs finish; child stdout
+  and redrawn prompts do not establish that the shell owns the next input.
+  Both the expected output and a fresh acknowledgement are required within
+  600 polls (0.1 seconds between polls); a timeout stops command delivery.
+  Host regressions in `tests/boot/qemu_boot_test.sh` cover early stdout,
+  redraws, stale counters and missing output/completion. Its VFS runs on
   the goroutine runtime. `make test-vfs-serial` runs the same checks with
   `VFS_RUNTIME=serial`, the VFS a normal build ships until ADR 0204 accepts
   the runtime.
