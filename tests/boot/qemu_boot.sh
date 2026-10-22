@@ -133,6 +133,15 @@ window() {
 	log_lines "$1" | awk -v start="$2" -v stop="$3" 'seen && index($0, stop) { exit } seen { print } !seen && index($0, start) { seen = 1 }'
 }
 
+# window_closed reports whether a line containing $3 follows the first line
+# containing $2. Without it, window runs to the end of the log, where a later
+# command's output could satisfy a check meant for this one.
+window_closed() {
+	log_lines "$1" | awk -v start="$2" -v stop="$3" 'seen && index($0, stop) { found = 1; exit } !seen && index($0, start) { seen = 1 } END { exit !found }'
+}
+
+# require_window passes only for a closed window; NO_SUCH_LINE as the stop
+# reads to the end of the log on purpose.
 require_window() {
 	name=$1
 	pattern=$2
@@ -140,6 +149,9 @@ require_window() {
 	file=$4
 	start=$5
 	stop=$6
+	if [ "$stop" != NO_SUCH_LINE ] && ! window_closed "$file" "$start" "$stop"; then
+		fail_check "$name" "$expected" "no '$stop' after '$start'" "$file" "$start"
+	fi
 	window "$file" "$start" "$stop" | grep -q "$pattern" || fail_check "$name" "$expected" 'marker not found' "$file" "$start"
 	checks=$((checks + 1))
 }
@@ -228,6 +240,16 @@ await_count() { # file pattern count
 		sleep 0.1
 		waited=$((waited + 1))
 	done
+}
+
+# send_after_done types one command line, then waits until the guest prints
+# done once more than before. A command that follows a service restart can
+# take as long as the restart; a fixed pause would type the next line while
+# this command still reads the terminal, and that line would be lost.
+send_after_done() { # line done-pattern
+	sent_before=$(log_count "$log" "$2")
+	printf '%s\n' "$1"
+	await_count "$log" "$2" "$((sent_before + 1))"
 }
 
 # guest_memory_mib prints the size a QEMU -m value names, in MiB. It accepts a
@@ -715,20 +737,19 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	# serves the same volume under the mounts and handles the VFS kept.
 	printf 'fault fat32\n'
 	sleep 3
-	printf 'ls /tmp; echo after-fat32-fault\n'
+	send_after_done 'ls /tmp; echo after-fat32-fault' '^after-fat32-fault$'
+	send_after_done 'cat /home/demo/message.txt; echo after-fat32-restart' '^after-fat32-restart$'
 	sleep 1
-	printf 'cat /home/demo/message.txt; echo after-fat32-restart\n'
-	sleep 2
 	# The default CPU has no RDRAND. getrandom and AT_RANDOM still work, from
 	# the kernel's jitter-seeded generator: static glibc reads AT_RANDOM
 	# before main and faults without it (ADR 0185).
-	printf '/system/linux/abi-probe random\n'
-	sleep 2
+	send_after_done '/system/linux/abi-probe random' '^random: '
+	sleep 1
 	# The validation VFS answers one name late. A Linux program that opens
 	# it waits out the bridge's eight-second deadline, gets ETIMEDOUT, and on
 	# its next request must discard the late reply and carry on.
-	printf '/system/linux/abi-probe session-timeout\n'
-	sleep 11
+	send_after_done '/system/linux/abi-probe session-timeout' 'session timeout: '
+	sleep 1
 	# The VFS restarts too (ADR 0099): its clients are handed new sessions,
 	# the FAT32 service restarts behind it, and the shell keeps its jobs.
 	printf 'sleep 25 &\n'
@@ -742,10 +763,9 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'fault vfs\n'
 	sleep 5
-	printf 'ls /tmp; echo after-vfs-fault\n'
+	send_after_done 'ls /tmp; echo after-vfs-fault' '^after-vfs-fault$'
+	send_after_done 'cat /home/demo/message.txt; echo after-vfs-restart' '^after-vfs-restart$'
 	sleep 1
-	printf 'cat /home/demo/message.txt; echo after-vfs-restart\n'
-	sleep 2
 	printf 'jobs\n'
 	sleep 1
 	printf 'echo before-vfs-ps; ps; echo after-vfs-ps\n'
@@ -774,22 +794,19 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	# log service are handed new configuration sessions.
 	printf 'fault config\n'
 	sleep 3
-	printf 'config get user.name\n'
-	sleep 1
-	printf 'config set user.name boot-test\n'
-	sleep 1
+	send_after_done 'config get user.name' 'CONFIG_GET_OK$'
+	send_after_done 'config set user.name boot-test' 'CONFIG_SET_OK$'
 	printf 'fault log\n'
 	sleep 3
-	printf 'echo after-log-restart\n'
-	sleep 2
+	send_after_done 'echo after-log-restart' '^after-log-restart$'
+	sleep 1
 	# The block service restarts too (ADR 0101): the driver and the FAT32
 	# service start again behind it, and the volume is read and written.
 	printf 'fault block\n'
 	sleep 5
-	printf 'cat /home/demo/message.txt; echo after-block-restart\n'
-	sleep 2
-	printf 'write /home/demo/after-block.txt block-restart-write; cat /home/demo/after-block.txt\n'
-	sleep 3
+	send_after_done 'cat /home/demo/message.txt; echo after-block-restart' '^after-block-restart$'
+	send_after_done 'write /home/demo/after-block.txt block-restart-write; cat /home/demo/after-block.txt; echo after-block-write' '^after-block-write$'
+	sleep 1
 	printf 'cd /system\n'
 	sleep 1
 	printf 'uptime\n'
@@ -953,7 +970,7 @@ require_regex storage.fsck-busy 'volume in use by the running system' 'the exclu
 forbid_regex storage.fsck-not-run '^FSCK_FAT_CHECK_OK$' 'no check against the live volume' "$log" 'fsck-fat --check auto'
 require_window storage.fsck-busy-mounted '^persistent$' 'the volume still mounted after the refusal' "$log" 'goos> cat /home/demo/message.txt; echo after-fsck-busy' 'after-fsck-busy'
 require_regex storage.fat32-rest-of-namespace '^after-fat32-fault$' 'the shell and /tmp working after the fault' "$log" 'fault fat32'
-require_window storage.fat32-volume-served-again '^persistent$' 'the volume read through the restarted service' "$log" 'goos> cat /home/demo/message.txt; echo after-fat32-restart' 'after-fat32-restart'
+require_window storage.fat32-volume-served-again '^persistent$' 'the volume read through the restarted service' "$log" 'cat /home/demo/message.txt; echo after-fat32-restart' 'after-fat32-restart'
 # File data moves between the VFS and the FAT32 service through the file cache
 # they share, not through messages (ADR 0098).
 require_marker storage.file-cache FILE_CACHE_OK "$log"
@@ -1215,9 +1232,10 @@ require_count vfs-restart.service-started-twice '^VFS_SERVICE_OK$' 2 "$log" 'fau
 require_marker vfs-restart.config-session CONFIG_SESSION_RENEWED_OK "$log" 'fault vfs'
 require_marker vfs-restart.log-session LOG_SESSION_RENEWED_OK "$log" 'fault vfs'
 require_min_count vfs-restart.fat32-restarted '^FAT32_RESTARTED_OK$' 2 "$log" 'fault vfs'
-require_regex vfs-restart.namespace '^after-vfs-fault$' 'the shell using the namespace after the restart' "$log" 'goos> ls /tmp; echo after-vfs-fault'
-forbid_window vfs-restart.tmp-empty '^redirected.txt$' 'an empty /tmp in the new VFS' "$log" 'goos> ls /tmp; echo after-vfs-fault' 'after-vfs-fault'
-require_window vfs-restart.volume '^persistent$' 'the volume read through the new VFS' "$log" 'goos> cat /home/demo/message.txt; echo after-vfs-restart' 'after-vfs-restart'
+require_regex vfs-restart.namespace '^after-vfs-fault$' 'the shell using the namespace after the restart' "$log" 'ls /tmp; echo after-vfs-fault'
+require_window vfs-restart.tmp-listed '^after-vfs-fault$' 'the /tmp listing after the restart' "$log" 'ls /tmp; echo after-vfs-fault' 'echo after-vfs-restart'
+forbid_window vfs-restart.tmp-empty '^redirected.txt$' 'an empty /tmp in the new VFS' "$log" 'ls /tmp; echo after-vfs-fault' 'after-vfs-fault'
+require_window vfs-restart.volume '^persistent$' 'the volume read through the new VFS' "$log" 'cat /home/demo/message.txt; echo after-vfs-restart' 'after-vfs-restart'
 require_regex vfs-restart.linux-random '^random: available$' 'getrandom and AT_RANDOM without RDRAND' "$log" 'goos> /system/linux/abi-probe random'
 require_regex vfs-restart.linux-timeout 'session timeout: ETIMEDOUT, then ok$' 'a Linux open gives up on a silent VFS and the session survives' "$log" 'goos> /system/linux/abi-probe session-timeout'
 forbid_regex vfs-restart.linux-no-reconnect 'session kept: ' 'a Linux process was not given a new session' "$log" 'goos> fault vfs'
@@ -1259,7 +1277,7 @@ pass_group vfs-restart
 # log service resumes after the last record its predecessor wrote.
 require_marker service-restart.config-injected CONFIG_FAULT_INJECTED "$log" 'fault config'
 require_marker service-restart.config-restarted CONFIG_RESTARTED_OK "$log" 'fault config'
-require_count service-restart.config-started-twice '^CONFIG_SERVICE_OK$' 2 "$log" 'fault config'
+require_count service-restart.config-started-twice 'CONFIG_SERVICE_OK$' 2 "$log" 'fault config'
 require_marker service-restart.shell-config SHELL_CONFIG_RENEWED_OK "$log" 'fault config'
 require_marker service-restart.log-config LOG_CONFIG_RENEWED_OK "$log" 'fault config'
 require_window service-restart.config-read '^boot-test$' 'a setting read back from the restarted service' "$log" 'goos> fault config' 'goos> fault log'

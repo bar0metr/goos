@@ -1,5 +1,5 @@
 #!/bin/sh
-# Check the stalled-filesystem read assertion without booting a guest.
+# Check the boot script's window assertions without booting a guest.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -42,6 +42,14 @@ done
 printf 'persistent\r\nafter-fat32-stall\r\n' >"$work/serial"
 if attempt; then
 	echo 'FAIL boot recovery assertion: missing command accepted' >&2
+	exit 1
+fi
+
+# A command the guest never ran leaves its window open; a later read must not
+# close it.
+printf '%s\r\nls /tmp\r\npersistent\r\n' "$command" >"$work/serial"
+if attempt; then
+	echo 'FAIL boot recovery assertion: open window accepted' >&2
 	exit 1
 fi
 
