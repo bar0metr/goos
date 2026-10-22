@@ -109,10 +109,63 @@ func resolveUserFaultEntry(root uint64, address uint64, errorCode uint64, rip ui
 		kind = faultInvalid
 	}
 	kernelLogUints(logfmt.Warn, userFaultReason(kind), "address", address, "rip", rip)
-	if validation.Enabled && kind == faultGuard {
-		reportGuardStack(root, address, space, stop)
+	if validation.Enabled {
+		reportFaultRegisters(root, rip, space, stop)
+		if kind == faultGuard {
+			reportGuardStack(root, address, space, stop)
+		}
 	}
 	return 0
+}
+
+// faultFrames bounds the frame-pointer chain a fault report follows.
+const faultFrames = 8
+
+// reportFaultRegisters logs the arguments and callers of a fatal user fault.
+// RDI, RSI and RDX are a memmove's destination, source and length; RBP
+// starts the frame-pointer chain whose return addresses name its callers.
+// The thread is named by its task, FS base, and the slot and goroutine its
+// userspace control block records.
+func reportFaultRegisters(root, rip uint64, space *lock.RW, stop *uint64) {
+	registers, found := amd64.UserFaultRegisters(rip)
+	if !found {
+		return
+	}
+	task := amd64.CurrentTask()
+	fsBase, _ := amd64.TaskFSBase(task)
+	kernelLogUints(logfmt.Warn, "user fault registers", "rdi", registers.RDI, "rsi", registers.RSI)
+	kernelLogUints(logfmt.Warn, "user fault registers", "rdx", registers.RDX, "rcx", registers.RCX)
+	kernelLogUints(logfmt.Warn, "user fault registers", "rsp", registers.RSP, "rbp", registers.RBP)
+	local := thisCPU()
+	if !space.RLockUnless(stop) {
+		return
+	}
+	// The control block's first six words are Self, Slot, Magic, M, Pins
+	// and G (userspace/runtime/tls.Block).
+	blockRead := fsBase != 0 && vm.CopyIn(root, fsBase, local.guardStack[:48])
+	frames := 0
+	for frame := registers.RBP; frames < faultFrames && frame != 0 && frame%8 == 0; frames++ {
+		record := local.guardStack[64+frames*16 : 80+frames*16]
+		if !vm.CopyIn(root, frame, record) {
+			break
+		}
+		next := binary.LittleEndian.Uint64(record)
+		if next <= frame {
+			frames++
+			break
+		}
+		frame = next
+	}
+	space.RUnlock()
+	kernelLogUints(logfmt.Warn, "user fault thread", "task", uint64(task), "fs", fsBase)
+	if blockRead {
+		kernelLogUints(logfmt.Warn, "user fault thread", "slot", binary.LittleEndian.Uint64(local.guardStack[8:]),
+			"g", binary.LittleEndian.Uint64(local.guardStack[40:]))
+	}
+	for index := 0; index < frames; index++ {
+		kernelLogUints(logfmt.Warn, "user fault caller", "depth", uint64(index),
+			"return", binary.LittleEndian.Uint64(local.guardStack[72+index*16:]))
+	}
 }
 
 // reportGuardStack logs the words just above a stack guard fault that look
