@@ -149,7 +149,20 @@ retain their documented native fallback.
 One earlier isolated TCG run faulted in VFS memmove with a null source before
 waitsets printed output. Its cause remains unknown. The isolated retry and
 the final integrated TCG/KVM runs passed. They do not prove that the fault
-cannot recur. Another early region test retained inner heads in LLVM spills;
+cannot recur. A rebuild of that wip commit reproduces its `vfs.elf` byte for
+byte and places the fault on the first source load of memmove's forward
+loop: the source array was null, the length nonzero, and the first byte not
+yet copied. The report named no caller, so the copy site is unknown. Safe Go
+cannot build such a slice; a torn slice header or corrupted state can.
+Validation builds now check the read path before each copy. The pool checks
+targets at dispatch, in the worker, at collection and at delivery; the remote
+backend checks each cached copy; the driver checks a delivered read against
+its session, generation and buffer before the reply. A violation prints one
+`VFS_COPY_INVALID` line naming the check, addresses, length, session,
+generation, plan ticket, plan state and worker, and the service exits without
+the copy. A fatal user fault also logs RDI, RSI, RDX, RCX, RSP and RBP, the
+task, its FS base, TLS slot and goroutine, and up to eight frame-pointer
+return addresses. Another early region test retained inner heads in LLVM spills;
 the fixture now retires those frames before measuring reclamation.
 
 The branch remains experimental as described in
