@@ -149,21 +149,40 @@ retain their documented native fallback.
 One earlier isolated TCG run faulted in VFS memmove with a null source before
 waitsets printed output. Its cause remains unknown. The isolated retry and
 the final integrated TCG/KVM runs passed. They do not prove that the fault
-cannot recur. A rebuild of that wip commit reproduces its `vfs.elf` byte for
-byte and places the fault on the first source load of memmove's forward
-loop: the source array was null, the length nonzero, and the first byte not
-yet copied. The report named no caller, so the copy site is unknown. Safe Go
-cannot build such a slice; a torn slice header or corrupted state can.
-Validation builds now check the read path before each copy. The pool checks
+cannot recur. The saved build manifest names `4200d8c`, an ancestor of
+`343df2e`. Rebuilding it reproduces the recorded `vfs.elf` SHA-256
+`11db0c5cf6397bd2da830e17c246aaf51642d16f9d8b50bb24d02e29d5e5e7be`.
+The original ELF in the wip build directory has since changed. The matching
+ELF places RIP `0x400024a5` on memmove's forward source load
+`movb (%rsi,%rcx), %dil`. The zero fault address supports a null source;
+the log lacks arguments and a return address, so it cannot identify the
+caller or establish a torn slice header as the cause. Safe Go cannot create
+a slice with a null array and a nonzero length.
+Validation builds now check read-pool buffers and persistent-cache copies. The pool checks
 targets at dispatch, in the worker, at collection and at delivery; the remote
 backend checks each cached copy; the driver checks a delivered read against
 its session, generation and buffer before the reply. A violation prints one
 `VFS_COPY_INVALID` line naming the check, addresses, length, session,
 generation, plan ticket, plan state and worker, and the service exits without
-the copy. A fatal user fault also logs RDI, RSI, RDX, RCX, RSP and RBP, the
-task, its FS base, TLS slot and goroutine, and up to eight frame-pointer
-return addresses. Another early region test retained inner heads in LLVM spills;
-the fixture now retires those frames before measuring reclamation.
+the copy. Persistent workers carry the captured session and ticket into
+the cache check. Drained serial reads carry the owner's session generation.
+A fatal user fault also logs RAX, RDI, RSI, RDX, RCX, RSP and RBP, the task,
+its FS base, TLS slot and goroutine, and up to eight frame-pointer return
+addresses when the program retains frame pointers. The kernel checks the
+native TLS self pointer and magic before reading its slot and goroutine.
+
+The diagnostic branch passed host race tests with and without
+`goos_validation`, `go vet ./...` and `make test-concurrency-audit`.
+`make test-goroutine-io` passed on TCG with four processors, including
+`goprobe waitsets`. Two extra fault-suite boots printed the new register and
+TLS fields after the expected overflow; both then timed out at the next
+deadlock scenario. Follow-up checks passed host race tests and TinyGo
+validation VFS/kernel compilation without another guest boot. These runs do
+not reproduce the original VFS fault. RAMFS/image internals and IPC/name
+copies still rely on the kernel fault report to identify their copy caller.
+
+Another early region test retained inner heads in LLVM spills; the fixture
+now retires those frames before measuring reclamation.
 
 The branch remains experimental as described in
 [ADR 0204](../adr/0204-native-goroutines-and-concurrency.md). These results do

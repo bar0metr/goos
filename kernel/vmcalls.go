@@ -135,6 +135,7 @@ func reportFaultRegisters(root, rip uint64, space *lock.RW, stop *uint64) {
 	fsBase, _ := amd64.TaskFSBase(task)
 	kernelLogUints(logfmt.Warn, "user fault registers", "rdi", registers.RDI, "rsi", registers.RSI)
 	kernelLogUints(logfmt.Warn, "user fault registers", "rdx", registers.RDX, "rcx", registers.RCX)
+	kernelLogUints(logfmt.Warn, "user fault registers", "rax", registers.RAX, "rip", registers.RIP)
 	kernelLogUints(logfmt.Warn, "user fault registers", "rsp", registers.RSP, "rbp", registers.RBP)
 	local := thisCPU()
 	if !space.RLockUnless(stop) {
@@ -143,6 +144,10 @@ func reportFaultRegisters(root, rip uint64, space *lock.RW, stop *uint64) {
 	// The control block's first six words are Self, Slot, Magic, M, Pins
 	// and G (userspace/runtime/tls.Block).
 	blockRead := fsBase != 0 && vm.CopyIn(root, fsBase, local.guardStack[:48])
+	// Verify the native TLS ABI before interpreting the block. Linux FS
+	// bases can name unrelated data.
+	blockRead = blockRead && binary.LittleEndian.Uint64(local.guardStack[:]) == fsBase &&
+		binary.LittleEndian.Uint64(local.guardStack[16:]) == 0x31424354534f4f47
 	frames := 0
 	for frame := registers.RBP; frames < faultFrames && frame != 0 && frame%8 == 0; frames++ {
 		record := local.guardStack[64+frames*16 : 80+frames*16]
