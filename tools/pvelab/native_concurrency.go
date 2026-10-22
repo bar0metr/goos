@@ -7,8 +7,9 @@ import (
 	"strings"
 )
 
-// nativeConcurrencyScenario checks the runtime, region rendezvous and fenced
-// filesystem recovery in one validation image with VFS_PROBE=1.
+// nativeConcurrencyScenario checks the runtime, the storage driver's
+// goroutine interrupt waits, region rendezvous and fenced filesystem recovery
+// in one validation image with VFS_PROBE=1.
 type nativeConcurrencyScenario struct{}
 
 func (nativeConcurrencyScenario) Name() string { return "native-concurrency" }
@@ -26,6 +27,10 @@ func (nativeConcurrencyScenario) Run(ctx context.Context, s *Session) (Result, e
 		}
 	}
 	g.pass("vfs-readpool")
+	if err := driverIRQMarker(boot); err != nil {
+		return "", fail(ClassScenario, "driver-irq-wait", err)
+	}
+	g.pass("driver-irq-wait")
 	if result, err := (goroutinesScenario{}).Run(ctx, s); err != nil || result != ResultPass {
 		return result, err
 	}
@@ -146,6 +151,39 @@ func nativeRegionMarker(out string, rounds uint64) error {
 	}
 	if matches != 1 {
 		return fmt.Errorf("expected one region-window marker, got %d", matches)
+	}
+	return nil
+}
+
+// driverIRQMarker checks the validation driver's proof that its serving
+// goroutine parked on disk interrupts while a peer ran. A driver replaced
+// after the injected fault may print it again; every copy must be whole.
+func driverIRQMarker(boot string) error {
+	matches := 0
+	for _, line := range strings.Split(strings.ReplaceAll(boot, "\r", ""), "\n") {
+		const prefix = "VIRTIO_BLK_G_IRQ_OK "
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		matches++
+		values := map[string]uint64{}
+		for _, field := range strings.Fields(strings.TrimPrefix(line, prefix)) {
+			key, text, ok := strings.Cut(field, "=")
+			value, err := strconv.ParseUint(text, 10, 64)
+			if !ok || err != nil {
+				return fmt.Errorf("invalid driver interrupt field %q", field)
+			}
+			if _, duplicate := values[key]; duplicate {
+				return fmt.Errorf("duplicate driver interrupt field %q", key)
+			}
+			values[key] = value
+		}
+		if len(values) != 3 || values["waits"] != 4 || values["tries"] < values["waits"] || values["peer"] == 0 {
+			return fmt.Errorf("incomplete driver interrupt evidence: %s", line)
+		}
+	}
+	if matches == 0 {
+		return fmt.Errorf("no driver interrupt-wait marker")
 	}
 	return nil
 }

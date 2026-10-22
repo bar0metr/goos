@@ -46,3 +46,25 @@ func TestNativeRegionRequiresCompletedRendezvousCounts(t *testing.T) {
 		}
 	}
 }
+
+func TestDriverIRQRequiresParkedWaitsWithPeerProgress(t *testing.T) {
+	valid := "VIRTIO_BLK_G_IRQ_OK waits=4 tries=6 peer=120"
+	for _, boot := range []string{valid + "\r\n", valid + "\n" + valid + "\n"} {
+		if err := driverIRQMarker(boot); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, bad := range []string{
+		"", "prefix " + valid, "VIRTIO_BLK_IRQ_OK",
+		strings.ReplaceAll(valid, "waits=4", "waits=3"),
+		strings.ReplaceAll(valid, "tries=6", "tries=3"),
+		strings.ReplaceAll(valid, "peer=120", "peer=0"),
+		strings.ReplaceAll(valid, " peer=120", ""),
+		valid + " peer=1", valid + " extra=1", valid + " malformed",
+		valid + "\n" + strings.ReplaceAll(valid, "peer=120", "peer=0"),
+	} {
+		if err := driverIRQMarker(bad); err == nil {
+			t.Fatalf("accepted %q", bad)
+		}
+	}
+}

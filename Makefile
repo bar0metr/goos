@@ -308,9 +308,17 @@ $(BLOCK_IMAGE): $(BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go ke
 	@$(STACKFRAMES) $(BLOCK_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(BLOCK_ELF) $@
 
+# The validation build runs the storage driver on the goroutine runtime, so
+# its interrupt waits park a goroutine on real disk interrupts (ADR 0204).
+ifeq ($(VALIDATION),1)
+$(VIRTIO_BLOCK_ELF): $(call go_deps,./userspace/cmd/virtio-blk,goos_goroutines) $(GOROUTINE_ROOT_STAMP) $(GOROUTINE_TARGET) userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(GOROUTINE_BUILD) -o $@ ./userspace/cmd/virtio-blk
+else
 $(VIRTIO_BLOCK_ELF): $(call go_deps,./userspace/cmd/virtio-blk) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/virtio-blk
+endif
 
 $(VIRTIO_BLOCK_IMAGE): $(VIRTIO_BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(VIRTIO_BLOCK_ELF)
