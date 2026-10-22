@@ -186,6 +186,12 @@ including an old normal build tree that still contains a goroutine image.
 `test-all` and `release-check` now include the serial boot gate, compiler,
 goroutine runtime, collector and scheduler-aware I/O suites. Wiring a target
 into those gates does not mean the complete gates passed in this follow-up.
+The panic-report suite is also wired into both gates. Its direct guest
+`panicreport` check printed the panic text and exited; the earlier full
+fault suite then timed out on its separate deadlock scenario. A later
+`test-goroutine-panic` attempt did not reach a prompt because the VFS fault
+above stopped the service during boot. The new suite therefore has no
+complete passing target run yet.
 
 The serial boot gate passed on 2026-10-22: `make test-vfs-serial` reported
 `PASS qemu-boot (471 checks)`, including FAT32 stall, stack overflow and
@@ -233,6 +239,19 @@ run passed with `final_collections=3`, `reclaimed=256/256` and normal `Live`
 at both collector counts. The earlier counter anomaly is not proven solved
 until the same load is repeated and the accounting path is understood.
 
+A clean-HEAD KVM retry at `3eb909e` failed in `gcstress 8` with a G stack
+guard fault while reporting an allocator panic. The goroutine runtime's
+`putchar` called `startup.Read` for every byte, allocating while the
+allocator was already panicking. The native panic writer now reads the GST4
+handle table directly and writes through an assembly syscall without a Go
+allocation. The next KVM run, `20261022T193025Z-33147d12`, exposed the
+original panic: `arena: slab count does not match its bitmap` in the channel
+scenario of `gcstress 8`. `gcstress 1` passed all eight scenarios in that
+boot. The panic writer is fixed; the allocator or its rendezvous still has
+an unresolved concurrency failure. This run used a dirty worktree. A fatal
+slab check now prints its page, class, owner, bitmap count, recorded count
+and collection number before the panic to narrow the next reproduction.
+
 One earlier isolated TCG run faulted in VFS memmove with a null source before
 waitsets printed output. Its cause remains unknown. The isolated retry and
 the historical integrated TCG/KVM runs passed. They do not prove that the fault
@@ -269,6 +288,12 @@ A fatal user fault also logs RAX, RDI, RSI, RDX, RCX, RSP and RBP, the task,
 its FS base, TLS slot and goroutine, and up to eight frame-pointer return
 addresses when the program retains frame pointers. The kernel checks the
 native TLS self pointer and magic before reading its slot and goroutine.
+
+Another TCG boot on the uncommitted panic-writer tree reproduced the VFS
+fault before the first prompt. RSI and R12 were both zero, RDX was 1024,
+and the return address again identified `ramfs.MakeName`. No
+`VFS_COPY_INVALID` record preceded it. The fault is reproducible under the
+current validation load; its cause remains unidentified.
 
 The diagnostic branch passed host race tests with and without
 `goos_validation`, `go vet ./...` and `make test-concurrency-audit`.

@@ -513,6 +513,7 @@ test-all:
 	$(MAKE) test-goroutines
 	$(MAKE) test-goroutine-gc
 	$(MAKE) test-goroutine-io
+	$(MAKE) test-goroutine-panic
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
@@ -546,6 +547,7 @@ release-check:
 	$(MAKE) test-goroutines
 	$(MAKE) test-goroutine-gc
 	$(MAKE) test-goroutine-io
+	$(MAKE) test-goroutine-panic
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
@@ -1177,7 +1179,7 @@ help:
 	  '  test-security   run capability, handle, and VM security tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
 	  '  test-vfs-serial run test-boot with the serial VFS fallback (VFS_RUNTIME=serial)' \
-	  '  test-goroutines/test-goroutine-gc/test-goroutine-io  goroutine runtime, collector and wait suites in QEMU' \
+	  '  test-goroutines/test-goroutine-gc/test-goroutine-io/test-goroutine-panic  goroutine suites in QEMU' \
 	  '  test-memory     check the reclaimable native heap on the host and in QEMU' \
 	  '  test-smp        boot four processors and prove they run tasks at once' \
 	  '  test-native-threads  native threads: parallel run, joins, quota, faults' \
@@ -1233,7 +1235,7 @@ test-goroutine-compiler: $(GOROUTINE_ROOT_STAMP) $(INIT_RUNTIME)
 	sh tests/boot/goroutine_compiler.sh $(OUT_DIR)/goroutine-compiler/fixture.elf $(OUT_DIR)/goroutine-compiler/fixture.ll $(OUT_DIR)/goroutine-compiler/evidence
 
 GOROUTINE_SMP ?= 4
-.PHONY: goroutine-test-images test-goroutines test-goroutine-gc test-goroutine-io bench-goroutines test-pve-goroutines
+.PHONY: goroutine-test-images test-goroutines test-goroutine-gc test-goroutine-io test-goroutine-panic bench-goroutines test-pve-goroutines
 goroutine-test-images:
 	@$(MAKE) --no-print-directory command-index VALIDATION=1
 	@$(MAKE) --no-print-directory -j8 iso VALIDATION=1
@@ -1247,6 +1249,9 @@ test-goroutine-gc: goroutine-test-images
 
 test-goroutine-io: goroutine-test-images
 	@SUITE=io SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
+
+test-goroutine-panic: goroutine-test-images
+	@SUITE=panic SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
 
 # This named, explicit variant is the end-to-end acceptance fixture for the
 # real two-worker goroutine VFS. It is intentionally not part of ordinary

@@ -50,7 +50,7 @@ import (
 var manifest = commands.Manifest{
 	Usage:   "goprobe mode [N [ROUNDS]]",
 	Summary: "goroutine checks",
-	Options: "modes: pool, smoke, chan, sync, timers, fair, panic, limit, gc, gcstress, io, waitsets, logwait, threads, bench, overflow, deadlock",
+	Options: "modes: pool, smoke, chan, sync, timers, fair, panic, panicreport, limit, gc, gcstress, io, waitsets, logwait, threads, bench, overflow, deadlock",
 	MaxArgs: 3,
 }
 
@@ -98,6 +98,8 @@ func run(data startup.Data) {
 		fair()
 	case utility.Equal(mode, "panic"):
 		panics()
+	case utility.Equal(mode, "panicreport"):
+		panic("GOPROBE_PANIC_REPORT")
 	case utility.Equal(mode, "limit"):
 		limit()
 	case utility.Equal(mode, "gc"):

@@ -10,7 +10,7 @@
 # build/reports/goroutines-SUITE.txt.
 #
 # SUITE picks the checks: runtime (scheduling, channels, sync, timers,
-# fairness, panics, limit, threads), gc, io, faults, or all, the default.
+# fairness, panics, limit, threads), gc, io, panic, faults, or all, the default.
 # SUITE=bench runs goprobe bench BENCH_RUNS times and writes
 # build/reports/goroutines-bench.txt. CHECKS, when set, replaces the suite
 # with a space-separated list of goprobe modes, for a quick look at one.
@@ -173,6 +173,12 @@ else
 		tr -d '\r' <"$log" | grep '^VIRTIO_BLK_G_IRQ_OK ' >"$work/driver-irq" || fail 'virtio-blk: no goroutine interrupt-wait marker'
 		grep -vq '^VIRTIO_BLK_G_IRQ_OK waits=4 tries=[1-9][0-9]* peer=[1-9][0-9]*$' "$work/driver-irq" && fail 'virtio-blk: malformed goroutine interrupt-wait marker'
 		cat "$work/driver-irq" >>"$work/summary"
+	fi
+	if wants panic; then
+		# The native panic writer must report without allocating recursively.
+		run 'goprobe panicreport'
+		require '^panic: GOPROBE_PANIC_REPORT$' 'native panic text was not reported'
+		probe pool
 	fi
 	if wants faults; then
 		# A goroutine that overflows its stack hits the guard below it and

@@ -344,6 +344,25 @@ goos_stream_write:
     ret
 .size goos_stream_write, .-goos_stream_write
 
+// Panic reporting writes one byte without Go heap allocations or M-local
+// syscall scratch. RDI is the stderr stream handle and SIL is the byte.
+.global goos_panic_write_byte
+.type goos_panic_write_byte,@function
+goos_panic_write_byte:
+    subq $40, %rsp
+    movb %sil, 24(%rsp)
+    leaq 24(%rsp), %rax
+    movq %rax, 0(%rsp)
+    movq $1, 8(%rsp)
+    movq $0, 16(%rsp)
+    movq %rsp, %rsi
+    movl $24, %edx
+    movl $20, %eax
+    int $0x80
+    addq $40, %rsp
+    ret
+.size goos_panic_write_byte, .-goos_panic_write_byte
+
 .global goos_stream_wait
 .type goos_stream_wait,@function
 goos_stream_wait:

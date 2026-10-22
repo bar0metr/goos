@@ -396,6 +396,16 @@ the stack guard stops the process. The process still dies, but without the
 panic text. Validation kernels now log the code addresses found just above a
 stack guard fault, which names a recursion's functions.
 
+The goroutine target had a second panic-reporting recursion: its `putchar`
+decoded the GST4 startup object on every byte, allocating inside an
+allocator panic. It now reads the mapped startup handle table and writes to
+stderr without a Go allocation. This exposed `arena: slab count does not
+match its bitmap` during eight-collector KVM stress. A subsequent TCG boot
+again faulted in VFS `ramfs.MakeName` with a null source register. Both
+failures remain open. Normal images retain the serial VFS; validation images
+exercise the goroutine VFS, and its successful fixtures do not establish
+production readiness.
+
 The final branch must include the userspace API audit, compiler evidence,
 complete runtime and collector tests, scheduler-aware I/O, the real service
 pool, and controlled KVM measurements. No version change, release note, or

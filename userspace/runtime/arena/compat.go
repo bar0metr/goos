@@ -5,9 +5,10 @@ package arena
 import (
 	"goos/internal/timekeeping"
 	"goos/kernel/kcall"
+	"goos/kernel/mm/vm"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
-	_ "unsafe"
+	"unsafe"
 )
 
 //go:linkname initializePackages goos_runtime_init_packages
@@ -22,19 +23,57 @@ func InitPackages() {
 
 // These hooks serve the opt-in native runtime overlay. They do not replace
 // the kernel's UEFI runtime or call firmware from a native process.
+
+//go:linkname panicWriteByte goos_panic_write_byte
+func panicWriteByte(stream uint64, value byte)
+
 //
 //go:linkname nativePutchar goos_runtime_putchar
 func nativePutchar(c byte) {
-	data, ok := startup.Read()
-	if !ok {
-		return
-	}
-	stderr, ok := data.Handle("stderr")
-	if ok {
-		buffer := [1]byte{c}
-		sys.StreamWrite(stderr, buffer[:])
+	if stream := panicStderr(); stream != 0 {
+		panicWriteByte(stream, c)
 	}
 }
+
+// panicStderr reads the validated startup mapping directly. Panic output
+// must not allocate: an allocator panic would otherwise recurse through
+// startup.Read's escaping header and exhaust the goroutine stack.
+func panicStderr() uint64 {
+	base := uintptr(vm.UserStartupAddress)
+	if panicRead32(base) != 0x34545347 || panicRead16(base+4) != startup.Version {
+		return 0
+	}
+	size := uint64(panicRead32(base + 8))
+	if size < startup.HeaderSize || size > startup.MaxSize {
+		return 0
+	}
+	arguments, environment := uint64(panicRead32(base+12)), uint64(panicRead32(base+16))
+	handles := uint64(panicRead16(base + 6))
+	if arguments > size || environment > size || handles > startup.MaxHandles {
+		return 0
+	}
+	table := uint64(startup.HeaderSize) + (2+arguments+environment)*8
+	strings := table + handles*16
+	if strings > size || uint64(panicRead32(base+20)) != strings {
+		return 0
+	}
+	for index := uint64(0); index < handles; index++ {
+		entry := uintptr(table + index*16)
+		offset, length := uint64(panicRead32(base+entry)), panicRead32(base+entry+4)
+		if length != 6 || offset < strings || offset+6 > size {
+			continue
+		}
+		if panicRead32(base+uintptr(offset)) == 0x65647473 &&
+			panicRead16(base+uintptr(offset)+4) == 0x7272 {
+			return panicRead64(base + entry + 8)
+		}
+	}
+	return 0
+}
+
+func panicRead16(address uintptr) uint16 { return *(*uint16)(unsafe.Pointer(address)) }
+func panicRead32(address uintptr) uint32 { return *(*uint32)(unsafe.Pointer(address)) }
+func panicRead64(address uintptr) uint64 { return *(*uint64)(unsafe.Pointer(address)) }
 
 //go:linkname nativeExit goos_runtime_exit
 func nativeExit(code int) { sys.Exit(uint64(code)) }

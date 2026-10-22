@@ -178,6 +178,8 @@ func (h *heap) sweepSlab(page uint32) uint32 {
 		live += bits.OnesCount64(m.alloc[word])
 	}
 	if live != int(m.used) {
+		println("arena: slab mismatch page", page, "class", m.class, "owner", m.owner,
+			"bitmap", live, "used", m.used, "gc", h.collections)
 		panic("arena: slab count does not match its bitmap")
 	}
 	dead := 0
