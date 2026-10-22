@@ -1,6 +1,16 @@
 package vfsservice
 
-import "goos/kernel/vfs"
+import (
+	"goos/internal/validation"
+	"goos/kernel/vfs"
+)
+
+// ReadSession identifies a session lifetime, not only its reusable owner slot.
+// A driver must drain and retire its requests before closing the session.
+type ReadSession struct {
+	Owner      vfs.Owner
+	Generation uint64
+}
 
 // ReadLane describes which existing backend owns a read. Local file reads
 // may overlap. Persistent reads serialize the entire Remote.Read, including
@@ -17,9 +27,10 @@ const (
 // ReadPlan is an authorized file read with an execution lane. Its Read method
 // may run on a worker. Planning and finishing stay on the service's owner.
 type ReadPlan struct {
-	plan vfs.ReadPlan
-	lane ReadLane
-	gate validationReadGate
+	plan   vfs.ReadPlan
+	lane   ReadLane
+	gate   validationReadGate
+	remote *Remote
 }
 
 // BeginRead reserves the file cursor. The caller must drain all plans before
@@ -36,7 +47,11 @@ func (service *Service) BeginRead(owner vfs.Owner, file vfs.Handle) (ReadPlan, v
 	case plan.BackendIs(&service.persistent):
 		lane = ReadLanePersistent
 	}
-	return ReadPlan{plan: plan, lane: lane, gate: service.validationReadGate(owner, file, lane)}, vfs.StatusOK
+	result := ReadPlan{plan: plan, lane: lane, gate: service.validationReadGate(owner, file, lane)}
+	if validation.Enabled && lane == ReadLanePersistent {
+		result.remote = &service.persistent
+	}
+	return result, vfs.StatusOK
 }
 
 func (plan ReadPlan) Lane() ReadLane { return plan.lane }

@@ -4,10 +4,13 @@ package vfsservice
 
 import (
 	"runtime"
+	"strings"
 	"testing"
 	"unsafe"
 
+	"goos/internal/validation"
 	"goos/kernel/vfs"
+	"goos/userspace/fsproto"
 )
 
 // tornSlice builds the header a torn or corrupted read leaves: no array and
@@ -52,18 +55,9 @@ func TestCopyFaultMarkerIsOneStructuredLine(t *testing.T) {
 		t.Fatalf("marker = %q", got)
 	}
 	fault.Worker, fault.Len = CopyWorkerOwner, -1
-	if got := string(fault.AppendMarker(nil)); got[len(got)-14:] != " worker=owner\n" || !contains(got, " len=-1 ") {
+	if got := string(fault.AppendMarker(nil)); got[len(got)-14:] != " worker=owner\n" || !strings.Contains(got, " len=-1 ") {
 		t.Fatalf("owner marker = %q", got)
 	}
-}
-
-func contains(text, part string) bool {
-	for index := 0; index+len(part) <= len(text); index++ {
-		if text[index:index+len(part)] == part {
-			return true
-		}
-	}
-	return false
 }
 
 type copyFaultStop struct{ fault CopyFault }
@@ -71,6 +65,9 @@ type copyFaultStop struct{ fault CopyFault }
 // The owner refuses to hand a worker a target without an array, before the
 // worker's backend copy would fault in memmove.
 func TestReadPoolCopyCheckStopsTornTargetBeforeDispatch(t *testing.T) {
+	if !validation.Enabled {
+		t.Skip("validation checks")
+	}
 	service, _, first, _ := poolFixture(t, 2)
 	service.SetCopyFault(func(fault CopyFault) { panic(copyFaultStop{fault}) })
 	pool, ok := NewReadPool(service, 2)
@@ -106,6 +103,9 @@ func TestReadPoolCopyCheckStopsTornTargetBeforeDispatch(t *testing.T) {
 // A worker checks the captured target again, so a header torn after
 // dispatch is reported with its worker index instead of faulting.
 func TestReadPoolWorkerCopyCheckNamesWorker(t *testing.T) {
+	if !validation.Enabled {
+		t.Skip("validation checks")
+	}
 	service := startedService(t, nil)
 	faults := make(chan CopyFault, 1)
 	service.SetCopyFault(func(fault CopyFault) {
@@ -131,6 +131,9 @@ func TestReadPoolWorkerCopyCheckNamesWorker(t *testing.T) {
 // Delivered completions keep Data inside the slot's target; a mismatch is a
 // plan-state fault, reported before the owner copies Data into a reply.
 func TestReadPoolDeliveryCheckRejectsMismatchedData(t *testing.T) {
+	if !validation.Enabled {
+		t.Skip("validation checks")
+	}
 	service := startedService(t, nil)
 	service.SetCopyFault(func(fault CopyFault) { panic(copyFaultStop{fault}) })
 	pool, ok := NewReadPool(service, 1)
@@ -166,4 +169,27 @@ func TestReadPoolDeliveryCheckRejectsMismatchedData(t *testing.T) {
 	if completion, ok := pool.Poll(); !ok || completion.Ticket != ticket || !pool.Retire(ticket) || !pool.Close() {
 		t.Fatalf("drain = %+v", completion)
 	}
+}
+
+func TestRemoteCopyCheckRejectsTornCacheBeforeSlicing(t *testing.T) {
+	if !validation.Enabled {
+		t.Skip("validation checks")
+	}
+	remote := &Remote{}
+	remote.pages.memory = tornSlice(fsproto.CacheSize)
+	remote.pages.Fill(0, 17, 0, fsproto.PageSize)
+	remote.copyContext = CopyFault{Session: ReadSession{Owner: 2, Generation: 9}, Current: 9, Ticket: 31, State: "running", Worker: 1}
+	remote.copyFault = func(fault CopyFault) { panic(copyFaultStop{fault}) }
+	defer func() {
+		stop, ok := recover().(copyFaultStop)
+		if !ok {
+			t.Fatal("torn cache reached copy")
+		}
+		fault := stop.fault
+		if fault.Op != "cache" || fault.Src != 0 || fault.Ticket != 31 || fault.Session.Generation != 9 || fault.Worker != 1 {
+			t.Fatalf("fault = %+v", fault)
+		}
+	}()
+	var target [8]byte
+	remote.Read(17, 0, target[:])
 }

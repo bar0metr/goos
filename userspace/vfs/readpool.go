@@ -3,6 +3,7 @@
 package vfsservice
 
 import (
+	"goos/internal/validation"
 	"goos/kernel/vfs"
 	"sync"
 )
@@ -13,13 +14,6 @@ const (
 	ReadQueueCapacity = 8
 	MaxReadWorkers    = 4
 )
-
-// ReadSession identifies a session lifetime, not only its reusable owner slot.
-// A driver must drain and retire its requests before closing the session.
-type ReadSession struct {
-	Owner      vfs.Owner
-	Generation uint64
-}
 
 // ReadCompletion borrows Data until Retire. The owner encodes/sends the reply
 // (or executes a Barrier) before retiring it. Workers never send client IPC.
@@ -50,6 +44,7 @@ type queuedRead struct {
 	planned    bool
 	state      readState
 	target     []byte
+	bulk       bool
 	inline     [vfs.MaxReplyData]byte
 }
 
@@ -124,9 +119,13 @@ func NewReadPool(service *Service, workers int) (*ReadPool, bool) {
 func (pool *ReadPool) worker(index int) {
 	defer pool.joined.Done()
 	for work := range pool.jobs {
-		if pool.copyFault != nil && !bufferValid(work.target) {
+		if validation.Enabled && pool.copyFault != nil && !bufferValid(work.target) {
 			pool.copyFault(CopyFault{Op: "execute", Dst: sliceAddress(work.target), Len: len(work.target),
 				Session: work.session, Ticket: work.ticket, State: "running", Worker: index})
+		}
+		if validation.Enabled && work.plan.remote != nil {
+			work.plan.remote.copyContext = CopyFault{Session: work.session, Current: work.session.Generation,
+				Ticket: work.ticket, State: "running", Worker: index}
 		}
 		count, status := work.plan.Read(work.target)
 		pool.results <- readResult{slot: work.slot, ticket: work.ticket, count: count, status: status}
@@ -187,7 +186,7 @@ func (pool *ReadPool) AdmitReadInto(session ReadSession, correlation uint64, fil
 		return 0, status
 	}
 	entry := &pool.slots[slot]
-	entry.file, entry.target = file, target
+	entry.file, entry.target, entry.bulk = file, target, true
 	pool.schedule()
 	return entry.completion.Ticket, vfs.StatusOK
 }
@@ -277,7 +276,7 @@ func (pool *ReadPool) schedule() {
 			}
 			persistent = true
 		}
-		if pool.copyFault != nil && (!bufferValid(entry.target) || entry.completion.Ticket == 0) {
+		if validation.Enabled && pool.copyFault != nil && (!bufferValid(entry.target) || !entry.bulk && len(entry.target) != 0 && sliceAddress(entry.target) != sliceAddress(entry.inline[:]) || entry.completion.Ticket == 0) {
 			pool.reportEntry("dispatch", entry, nil, len(entry.target))
 		}
 		entry.state = readRunning
@@ -300,12 +299,12 @@ func (pool *ReadPool) Poll() (ReadCompletion, bool) {
 		case result := <-pool.results:
 			entry := &pool.slots[result.slot]
 			if entry.state != readRunning || entry.completion.Ticket != result.ticket {
-				if pool.copyFault != nil {
+				if validation.Enabled && pool.copyFault != nil {
 					pool.reportEntry("collect", entry, nil, result.count)
 				}
 				panic("vfs read pool: stale worker result")
 			}
-			if pool.copyFault != nil && (result.count < 0 || result.count > len(entry.target) || !bufferValid(entry.target[:result.count])) {
+			if validation.Enabled && pool.copyFault != nil && (result.count < 0 || result.count > len(entry.target) || !bufferValid(entry.target[:result.count])) {
 				pool.reportEntry("collect", entry, nil, result.count)
 			}
 			pool.running--
@@ -318,7 +317,7 @@ func (pool *ReadPool) Poll() (ReadCompletion, bool) {
 			for index := 0; index < pool.count; index++ {
 				entry := &pool.slots[pool.order[index]]
 				if entry.state == readCompleted {
-					if pool.copyFault != nil && (!bufferValid(entry.completion.Data) || len(entry.completion.Data) != entry.completion.Count) {
+					if validation.Enabled && pool.copyFault != nil && (!bufferValid(entry.completion.Data) || len(entry.completion.Data) != entry.completion.Count || entry.completion.Count != 0 && sliceAddress(entry.completion.Data) != sliceAddress(entry.target)) {
 						pool.reportEntry("deliver", entry, entry.completion.Data, entry.completion.Count)
 					}
 					entry.state = readDelivered

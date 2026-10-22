@@ -300,6 +300,9 @@ func beginServing(owner vfs.Owner, session uint64) {
 }
 
 func serve(owner vfs.Owner, session uint64, message ipc.Message) {
+	if validation.Enabled {
+		service.SetCopyContext(vfsservice.ReadSession{Owner: owner, Generation: sessionGenerations[int(owner)-1]}, 0)
+	}
 	beginServing(owner, session)
 	request, ok := vfs.DecodeRequest(message)
 	// A bulk operation, and a request whose paths or listed name travel in

@@ -55,8 +55,10 @@ func tornBytes(length int) []byte {
 // consistent stale completion, which is valid: its reply is dropped.
 func TestReadCompletionFaultChecksSessionAndBuffer(t *testing.T) {
 	var inline [8]byte
+	var bulk [4096]byte
 	read := &driverRequest{ticket: 4, kind: driverRead, index: 1, session: 9, generation: 3, operation: vfs.OperationRead}
-	into := &driverRequest{ticket: 5, kind: driverRead, index: 1, session: 9, generation: 3, operation: vfs.OperationReadInto, mapBase: 0x5000, mapSize: 4096}
+	into := &driverRequest{ticket: 5, kind: driverRead, index: 1, session: 9, generation: 3, operation: vfs.OperationReadInto, mapBase: uint64(uintptr(unsafe.Pointer(&bulk[0]))), mapSize: 4096}
+	into.message, _ = vfs.EncodeRequest(vfs.Request{Operation: vfs.OperationReadInto, Handle: 1, Size: 4096}, 1)
 	session := vfsservice.ReadSession{Owner: 2, Generation: 3}
 	cases := []struct {
 		name       string
@@ -68,7 +70,7 @@ func TestReadCompletionFaultChecksSessionAndBuffer(t *testing.T) {
 		{"inline", read, vfsservice.ReadCompletion{Ticket: 4, Session: session, Count: 8, Data: inline[:]}, 3, false},
 		{"stale session, consistent", read, vfsservice.ReadCompletion{Ticket: 4, Session: session, Count: 8, Data: inline[:]}, 4, false},
 		{"failed read", read, vfsservice.ReadCompletion{Ticket: 4, Session: session, Status: vfs.StatusBusy}, 3, false},
-		{"bulk", into, vfsservice.ReadCompletion{Ticket: 5, Session: session, Count: 4096}, 3, false},
+		{"bulk", into, vfsservice.ReadCompletion{Ticket: 5, Session: session, Count: 4096, Data: bulk[:]}, 3, false},
 		{"torn data", read, vfsservice.ReadCompletion{Ticket: 4, Session: session, Count: 8, Data: tornBytes(8)}, 3, true},
 		{"count past data", read, vfsservice.ReadCompletion{Ticket: 4, Session: session, Count: 9, Data: inline[:]}, 3, true},
 		{"other generation", read, vfsservice.ReadCompletion{Ticket: 4, Session: vfsservice.ReadSession{Owner: 2, Generation: 4}, Count: 8, Data: inline[:]}, 4, true},

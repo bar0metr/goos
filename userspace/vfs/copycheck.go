@@ -1,6 +1,9 @@
 package vfsservice
 
-import "unsafe"
+import (
+	"goos/internal/validation"
+	"unsafe"
+)
 
 // CopyFault describes a read-path copy that a checked build refused to run.
 // A slice with a nil array and a nonzero length cannot come from safe Go; it
@@ -37,8 +40,18 @@ type CopyFaultHandler func(CopyFault)
 // before NewReadPool starts workers and before any read, so workers read an
 // immutable handler.
 func (service *Service) SetCopyFault(handler CopyFaultHandler) {
-	service.copyFault = handler
-	service.persistent.copyFault = handler
+	if validation.Enabled {
+		service.copyFault = handler
+		service.persistent.copyFault = handler
+	}
+}
+
+// SetCopyContext labels owner-side reads at a drained serial barrier.
+// Workers replace the context only while they own the persistent lane.
+func (service *Service) SetCopyContext(session ReadSession, ticket uint64) {
+	if validation.Enabled {
+		service.persistent.copyContext = CopyFault{Session: session, Current: session.Generation, Ticket: ticket, State: "serial", Worker: CopyWorkerOwner}
+	}
 }
 
 // sliceAddress is the array address of a slice, zero for a nil array.

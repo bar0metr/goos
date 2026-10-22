@@ -75,14 +75,18 @@ func (requests *driverRequests) release(ticket uint64) bool {
 // slot's owner, current its live generation; a stale but consistent
 // completion is valid and its reply is dropped.
 func readCompletionFault(request *driverRequest, completion vfsservice.ReadCompletion, owner vfs.Owner, current uint64) (vfsservice.CopyFault, bool) {
-	valid := completion.Session.Owner == owner && completion.Session.Generation == request.generation && !completion.Barrier
+	valid := completion.Ticket == request.ticket && completion.Session.Owner == owner && completion.Session.Generation == request.generation && !completion.Barrier
 	data := completion.Data
 	switch request.operation {
 	case vfs.OperationRead:
 		valid = valid && len(data) == completion.Count && completion.Count <= vfs.MaxReplyData &&
 			(len(data) == 0 || unsafe.SliceData(data) != nil)
 	case vfs.OperationReadInto:
-		valid = valid && completion.Count >= 0 && uint64(completion.Count) <= request.mapSize
+		decoded, decodedOK := vfs.DecodeRequest(request.message)
+		end, windowOK := bulkReadWindow(request.mapSize, decoded.Offset, decoded.Size)
+		valid = valid && decodedOK && windowOK && end >= decoded.Offset && request.mapBase != 0 &&
+			completion.Count >= 0 && uint64(completion.Count) <= uint64(decoded.Size) && len(data) == completion.Count &&
+			(completion.Count == 0 || uintptr(unsafe.Pointer(unsafe.SliceData(data))) == uintptr(request.mapBase+decoded.Offset))
 	default:
 		valid = false
 	}

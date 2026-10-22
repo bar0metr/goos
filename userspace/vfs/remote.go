@@ -1,6 +1,7 @@
 package vfsservice
 
 import (
+	"goos/internal/validation"
 	"goos/kernel/ramfs"
 	"goos/userspace/fsproto"
 )
@@ -37,7 +38,8 @@ type Remote struct {
 	pages PageCache
 	// copyFault, when set, checks each cached copy (SetCopyFault). It is
 	// set before any read and never changes, so workers may read it.
-	copyFault CopyFaultHandler
+	copyFault   CopyFaultHandler
+	copyContext CopyFault
 }
 
 // AttachCache gives the backend the file-cache mapping it shares with its
@@ -221,6 +223,10 @@ func (remote *Remote) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Sta
 // Read serves target from the file cache, asking the service for each page it
 // does not hold. A page shorter than a page is the end of the file.
 func (remote *Remote) Read(id ramfs.NodeID, offset uint64, target []byte) (int, ramfs.Status) {
+	if validation.Enabled && remote.copyFault != nil && (!bufferValid(remote.pages.memory) || !bufferValid(target)) {
+		remote.reportCacheFault(remote.pages.memory, target, len(target))
+	}
+
 	// A read that starts at or past the end of a regular file of known size
 	// is the end of the file, and needs no exchange to find that out.
 	if stat, known := remote.cached(id); known && stat.Kind == ramfs.KindFile && offset >= stat.Size {
@@ -247,10 +253,13 @@ func (remote *Remote) Read(id ramfs.NodeID, offset uint64, target []byte) (int, 
 		if within >= length {
 			break
 		}
+		if validation.Enabled && remote.copyFault != nil &&
+			(slot < 0 || slot >= scratchSlot || length > fsproto.PageSize || !bufferValid(remote.pages.memory) || !bufferValid(target)) {
+			remote.reportCacheFault(remote.pages.memory, target, len(target)-total)
+		}
 		source := remote.pages.Slot(slot)[within:length]
-		if remote.copyFault != nil && !copyValid(target[total:], source) {
-			remote.copyFault(CopyFault{Op: "cache", Src: sliceAddress(source), Dst: sliceAddress(target[total:]),
-				Len: min(len(source), len(target)-total), State: "cached", Worker: CopyWorkerUnknown})
+		if validation.Enabled && remote.copyFault != nil && !copyValid(target[total:], source) {
+			remote.reportCacheFault(source, target[total:], min(len(source), len(target)-total))
 		}
 		copied := copy(target[total:], source)
 		total += copied
@@ -474,4 +483,10 @@ func statOf(reply fsproto.Reply) ramfs.Stat {
 	return ramfs.Stat{ID: reply.Node, Kind: reply.Kind, Size: reply.Value,
 		Created: reply.Created, Modified: reply.Modified, Attributes: reply.Attributes,
 		AttributesAvailable: reply.AttributesAvailable}
+}
+
+func (remote *Remote) reportCacheFault(source, target []byte, length int) {
+	fault := remote.copyContext
+	fault.Op, fault.Src, fault.Dst, fault.Len = "cache", sliceAddress(source), sliceAddress(target), length
+	remote.copyFault(fault)
 }
