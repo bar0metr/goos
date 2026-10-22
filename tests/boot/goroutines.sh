@@ -3,10 +3,10 @@
 # (ADR 0204) with goprobe: the worker pool, goroutines on several
 # processors at once, channels and select, the sync package, timers and
 # contexts, fairness on one permit, panics, the goroutine limit, the roots
-# of goroutines in every waiting state, handle waits, a goroutine that joins
-# a native thread, goroutines parked on a log cursor, the storage driver's
-# goroutine parked on disk interrupts, thread.Start threads with goroutines,
-# and the faults that end the process. Writes
+# of goroutines in waiting states, collector stress, handle waits, a goroutine
+# joining a native thread, log cursor waits, the storage driver's goroutine
+# waiting on disk interrupts, mixed native threads and goroutines, and the
+# faults that end the process. Writes
 # build/reports/goroutines-SUITE.txt.
 #
 # SUITE picks the checks: runtime (scheduling, channels, sync, timers,
@@ -157,6 +157,9 @@ else
 	if wants gc; then
 		for count in 1 $cpus; do
 			probe "gc $count"
+		done
+		for count in 1 $cpus; do
+			probe "gcstress $count"
 		done
 	fi
 	if wants io; then

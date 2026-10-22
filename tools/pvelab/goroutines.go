@@ -35,6 +35,8 @@ var goroutineChecks = []struct {
 	{"goprobe threads", "GOPROBE_THREADS_OK", nil},
 	{"goprobe gc 1", "GOPROBE_GC_OK", nil},
 	{"goprobe gc 8", "GOPROBE_GC_OK", nil},
+	{"goprobe gcstress 1", "GOPROBE_GCSTRESS_OK", []string{"GOPROBE_GCSTRESS"}},
+	{"goprobe gcstress 8", "GOPROBE_GCSTRESS_OK", []string{"GOPROBE_GCSTRESS"}},
 }
 
 func goroutineMarker(out, marker string) error {

@@ -14,6 +14,8 @@
 //	panic       panics, defers, and recover inside goroutines
 //	limit       the goroutine limit stops a go statement in its creator
 //	gc N        roots of parked, sleeping, waiting, and migrating goroutines
+//	gcstress N ROUNDS  roots of every runtime root class under N collecting
+//	            goroutines (gcstress.go)
 //	io          handle waits that park only the goroutine
 //	waitsets    duplicate-interest validation, overlapping waits, and a parked join
 //	logwait     goroutines parked on a kernel log cursor until a record arrives
@@ -46,9 +48,9 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "goprobe mode [N]",
+	Usage:   "goprobe mode [N [ROUNDS]]",
 	Summary: "goroutine checks",
-	Options: "modes: pool, smoke, chan, sync, timers, fair, panic, limit, gc, io, waitsets, logwait, threads, bench, overflow, deadlock",
+	Options: "modes: pool, smoke, chan, sync, timers, fair, panic, limit, gc, gcstress, io, waitsets, logwait, threads, bench, overflow, deadlock",
 	MaxArgs: 3,
 }
 
@@ -76,6 +78,11 @@ func run(data startup.Data) {
 		value, _ := data.Arg(2)
 		argument = parse(value)
 	}
+	rounds := uint64(0)
+	if data.ArgCount() >= 3 {
+		value, _ := data.Arg(3)
+		rounds = parse(value)
+	}
 	switch {
 	case utility.Equal(mode, "pool"):
 		pool()
@@ -95,6 +102,8 @@ func run(data startup.Data) {
 		limit()
 	case utility.Equal(mode, "gc"):
 		roots(int(argument))
+	case utility.Equal(mode, "gcstress"):
+		gcStress(int(argument), int(rounds))
 	case utility.Equal(mode, "io"):
 		waits()
 	case utility.Equal(mode, "waitsets"):

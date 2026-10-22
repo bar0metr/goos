@@ -801,3 +801,5 @@ CA-1016	goos/userspace/cmd/virtio-blk	irqSpins	process	atomic	test-goroutine-io
 CA-1017	goos/userspace/cmd/virtio-blk	irqTries	process	owned	test-goroutine-io
 CA-1018	goos/userspace/cmd/virtio-blk	irqProven	process	owned	test-goroutine-io
 CA-1019	goos/userspace/cmd/virtio-blk	irqCounted	process	owned	test-goroutine-io
+CA-1020	goos/userspace/bin/goprobe	stressLinks	process	immutable	goprobe gcstress
+CA-1021	goos/userspace/runtime/arena	poisonedBytes	process	atomic	runtime/arena tests
