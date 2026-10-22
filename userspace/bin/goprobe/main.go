@@ -10,7 +10,8 @@
 //	chan        channels and select, closing, nil channels, panics
 //	sync        Mutex, RWMutex, WaitGroup, Once, Cond, atomics
 //	timers      time.Sleep, timers, tickers, and context deadlines
-//	fair        a goroutine in a loop without calls cannot starve another
+//	fair        a goroutine in a loop without calls cannot starve another,
+//	            and preemption keeps its SSE registers
 //	panic       panics, defers, and recover inside goroutines
 //	limit       the goroutine limit stops a go statement in its creator
 //	gc N        roots of parked, sleeping, waiting, and migrating goroutines
@@ -669,6 +670,11 @@ func fair() {
 		sink.Store(spinWork(&stop))
 		close(done)
 	}()
+	// A second loop without calls holds live SSE registers across every
+	// preemption that interrupts it.
+	var vectorStop uint32
+	vectorLost := make(chan uint64, 1)
+	go func() { vectorLost <- vectorSpin(&vectorStop) }()
 	runtime.Gosched()
 	started := now()
 	var firstProgress int64
@@ -686,11 +692,14 @@ func fair() {
 	}
 	stop.Store(true)
 	<-done
+	atomic.StoreUint32(&vectorStop, 1)
+	lost := <-vectorLost
 	var s goroutine.Stats
 	goroutine.ReadStats(&s)
 	record("GOPROBE_FAIR").field("progress", uint64(progress.Load())).field("first_ns", uint64(firstProgress)).
-		field("elapsed_ns", uint64(now()-started)).field("preemptions", s.Preemptions).end()
+		field("elapsed_ns", uint64(now()-started)).field("preemptions", s.Preemptions).field("vector_lost", lost).end()
 	check(progress.Load() == 50, "a looping goroutine starved another")
+	check(lost == 0, "a preemption lost the SSE registers of the code it interrupted")
 	check(s.Preemptions > 0, "no goroutine was preempted")
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	ok("GOPROBE_FAIR_OK")

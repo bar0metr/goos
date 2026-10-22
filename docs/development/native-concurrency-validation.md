@@ -301,6 +301,44 @@ and the return address again identified `ramfs.MakeName`. No
 `VFS_COPY_INVALID` record preceded it. The fault is reproducible under the
 current validation load; its cause remains unidentified.
 
+### Cause of the VFS null-slice fault
+
+The preemption entry lost the interrupted code's SSE registers. A fatal
+user fault in a validation build now also logs the nonzero words of the 256
+bytes at RSP, which name callers that keep no frame pointer. Two TCG
+`test-goroutine-panic` reproductions out of eight boots on `27f7e70` showed
+the same chain: `ramfs.MakeName` returned to `(*vfsservice.Remote).call`,
+which returned to the persistent backend's `Read`, inlined into its
+interface thunk. The `Request` arguments on the stack held `Name` as pointer
+0, length -1 and capacity -1. The thunk writes length and capacity from
+XMM0, which it zeroes with `xorps` before a loop with no call. Below the
+frame lay a finished `goos_preempt_entry` frame at the thunk's stack pointer
+with a `goos_g_preempt` switch-out, and its FXSAVE image held XMM0 as all
+ones. The register had changed before the entry saved it.
+
+`goos_preempt_entry` ran `int $0x80` (ThreadPreemptTake) before `fxsave64`.
+The native call entry keeps only the general-purpose registers, and the
+kernel's code uses SSE. A call-site wrapper can lose XMM registers because
+the ABI makes them caller-saved. The asynchronous entry cannot, so the
+kernel call overwrote live vector state of the interrupted code. The entry now
+saves the FPU and SSE state before the call. Bad slice headers built from
+vector registers also explain the length of -1 that `validName` skipped and
+the signed `MaxName` check accepted.
+
+`TestPreemptEntrySavesVectorsBeforeKernelCall` in
+`userspace/runtime/goroutine` fails on the old instruction order. `goprobe
+fair` also runs `goos_probe_vector_spin`, a loop without calls that holds a
+pattern in XMM0 to XMM14 and counts losses. With the old entry,
+`CHECKS=fair make test-goroutines` failed with `preemptions=102
+vector_lost=159`. With the fix it reported `vector_lost=0`.
+
+Before the fix, three of eight `test-goroutine-panic` boots failed: two with
+the null-slice fault and one where init refused `goprobe` as not a valid
+executable, which may be the same corruption on a read path. After the fix,
+six of six boots passed with no null-source fault. Lost vector state could
+also corrupt allocator data; the `gcstress 8` slab mismatch has not been
+retested with this fix.
+
 The diagnostic branch passed host race tests with and without
 `goos_validation`, `go vet ./...` and `make test-concurrency-audit`.
 `make test-goroutine-io` passed on TCG with four processors, including

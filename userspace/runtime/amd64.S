@@ -881,7 +881,9 @@ goos_g_stack_pointer:
 // lowered by the 128-byte red zone. It saves the flags, the fifteen
 // general-purpose registers, and the FPU and SSE state on that stack, takes
 // the interrupted RIP from the kernel into the slot above them, and calls
-// goos_g_preempt with the direction flag clear. Restoring everything and
+// goos_g_preempt with the direction flag clear. The SSE state is saved before
+// the take: a native call keeps only the general-purpose registers, and the
+// interrupted code may hold live XMM values. Restoring everything and
 // returning through the slot with RET 128 resumes the interrupted code with
 // its stack pointer and red zone as they were. goos_g_preempt may switch
 // goroutines; the frame stays on this stack until the goroutine runs again.
@@ -910,14 +912,14 @@ goos_preempt_entry_start:
     pushq %r14
     pushq %r15
     movq %rsp, %rbx
-    leaq 128(%rsp), %rdi
+    subq $512, %rsp
+    andq $-16, %rsp
+    fxsave64 (%rsp)
+    leaq 128(%rbx), %rdi
     movl $68, %eax
     int $0x80
     testq %rax, %rax
     jnz 1f
-    subq $512, %rsp
-    andq $-16, %rsp
-    fxsave64 (%rsp)
     cld
     call goos_g_preempt
     fxrstor64 (%rsp)
@@ -960,6 +962,44 @@ goos_thread_entry_address:
     leaq goos_thread_entry(%rip), %rax
     ret
 .size goos_thread_entry_address, .-goos_thread_entry_address
+
+// goos_probe_vector_spin(stop *uint32) uint64 fills XMM0 to XMM14 with a
+// pattern and loops without calls until *stop is nonzero. It returns how
+// many times a register was found without the pattern, which it then puts
+// back. Only goprobe calls it, to check that a preemption keeps the SSE
+// state of the code it interrupts.
+.section .text.goos_probe_vector_spin,"ax",@progbits
+.global goos_probe_vector_spin
+.type goos_probe_vector_spin,@function
+goos_probe_vector_spin:
+    subq $24, %rsp
+    movabsq $0x5a3c96e1c3a5f00f, %rax
+    movq %rax, 0(%rsp)
+    notq %rax
+    movq %rax, 8(%rsp)
+    xorl %ecx, %ecx
+.irp reg, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
+    movdqu (%rsp), %xmm\reg
+.endr
+1:
+    cmpl $0, (%rdi)
+    jne 3f
+.irp reg, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
+    movdqu (%rsp), %xmm15
+    pcmpeqb %xmm\reg, %xmm15
+    pmovmskb %xmm15, %eax
+    cmpl $0xffff, %eax
+    je 2f
+    incq %rcx
+    movdqu (%rsp), %xmm\reg
+2:
+.endr
+    jmp 1b
+3:
+    movq %rcx, %rax
+    addq $24, %rsp
+    ret
+.size goos_probe_vector_spin, .-goos_probe_vector_spin
 
 // goos_stack_pointer() uintptr returns its caller's stack pointer, which
 // names the caller's thread (userspace/runtime/tls).

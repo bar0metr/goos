@@ -311,13 +311,14 @@ const swapFrame = 6 * 8
 // preemptInstructions is goos_preempt_entry (ADR 0204). The kernel enters
 // it 128 bytes below the interrupted stack pointer; it pushes the return
 // slot, the flags, and fifteen registers, keeps that depth in BX, and below
-// it an aligned 512-byte FXSAVE area and the call into the runtime.
+// it an aligned 512-byte FXSAVE area, filled before the kernel call, and the
+// call into the runtime.
 var preemptInstructions = []string{
 	"PUSHL $0x0", "PUSHFQ",
 	"PUSHQ AX", "PUSHQ BX", "PUSHQ CX", "PUSHQ DX", "PUSHQ SI", "PUSHQ DI", "PUSHQ BP",
 	"PUSHQ R8", "PUSHQ R9", "PUSHQ R10", "PUSHQ R11", "PUSHQ R12", "PUSHQ R13", "PUSHQ R14", "PUSHQ R15",
-	"MOVQ SP, BX", "LEAQ 0x80(SP), DI", "MOVL $0x44, AX", "INT $0x80", "TESTQ AX, AX", "JNE",
-	"SUBQ $0x200, SP", "ANDQ $-0x10, SP", "FXSAVE64 0(SP)", "CLD", "CALL",
+	"MOVQ SP, BX", "SUBQ $0x200, SP", "ANDQ $-0x10, SP", "FXSAVE64 0(SP)",
+	"LEAQ 0x80(BX), DI", "MOVL $0x44, AX", "INT $0x80", "TESTQ AX, AX", "JNE", "CLD", "CALL",
 	"FXRSTOR64 0(SP)", "MOVQ BX, SP",
 	"POPQ R15", "POPQ R14", "POPQ R13", "POPQ R12", "POPQ R11", "POPQ R10", "POPQ R9", "POPQ R8",
 	"POPQ BP", "POPQ DI", "POPQ SI", "POPQ DX", "POPQ CX", "POPQ BX", "POPQ AX", "POPFQ",
