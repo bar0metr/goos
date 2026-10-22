@@ -405,6 +405,9 @@ again faulted in VFS `ramfs.MakeName` with a null source register. Both
 failures remain open. Normal images retain the serial VFS; validation images
 exercise the goroutine VFS, and its successful fixtures do not establish
 production readiness.
+The joint KVM scenario passed on clean commit `1045a07` with eight vCPUs,
+including log/IRQ delivery, GC stress and VFS recovery. This pass follows
+the reproduced failures; it does not remove them from the release gate.
 
 The final branch must include the userspace API audit, compiler evidence,
 complete runtime and collector tests, scheduler-aware I/O, the real service

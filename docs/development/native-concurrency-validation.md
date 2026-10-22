@@ -251,6 +251,12 @@ boot. The panic writer is fixed; the allocator or its rendezvous still has
 an unresolved concurrency failure. This run used a dirty worktree. A fatal
 slab check now prints its page, class, owner, bitmap count, recorded count
 and collection number before the panic to narrow the next reproduction.
+The diagnostic rerun `20261022T194909Z-9c4fab09` passed all 27 checks but
+recorded a dirty worktree. The same joint KVM scenario then passed on clean
+commit `1045a07` as `20261022T195111Z-ccdf2849` (`dirty=false`), including
+log/IRQ delivery, both collector counts and VFS recovery. Neither passing
+run reproduced the slab mismatch. These two passes do not clear the earlier
+reproduced allocator and VFS faults.
 
 One earlier isolated TCG run faulted in VFS memmove with a null source before
 waitsets printed output. Its cause remains unknown. The isolated retry and
