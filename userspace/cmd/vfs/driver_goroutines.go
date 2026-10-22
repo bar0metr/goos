@@ -3,6 +3,7 @@
 package main
 
 import (
+	"goos/internal/validation"
 	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -260,6 +261,11 @@ func (driver *concurrentDriver) complete() {
 		}
 		switch request.kind {
 		case driverRead:
+			if validation.Enabled {
+				if fault, invalid := readCompletionFault(request, completion, sessionOwner(request.index), sessionGenerations[request.index]); invalid {
+					reportCopyFault(fault)
+				}
+			}
 			if current {
 				answer := vfs.Reply{Operation: request.operation, Status: completion.Status, Size: uint64(completion.Count)}
 				if request.operation == vfs.OperationRead {

@@ -149,6 +149,9 @@ func userspaceMain() {
 	mark("VFS_SERVICE_OK\n")
 	mark("SYSTEM_IMAGE_MOUNT_OK\n")
 	syslog.Info("mounted", syslog.Str("fs", "image"), syslog.Str("path", vfsservice.BootstrapPath))
+	if validation.Enabled {
+		service.SetCopyFault(reportCopyFault)
+	}
 	runService()
 }
 

@@ -3,6 +3,8 @@
 package main
 
 import (
+	"unsafe"
+
 	"goos/kernel/ipc"
 	"goos/kernel/vfs"
 	vfsservice "goos/userspace/vfs"
@@ -65,4 +67,30 @@ func (requests *driverRequests) release(ticket uint64) bool {
 		return true
 	}
 	return false
+}
+
+// readCompletionFault checks a delivered read before its reply copies Data:
+// the pool's completion must belong to the request's session lifetime, and
+// its bytes must lie in the buffer the request owns. owner is the session
+// slot's owner, current its live generation; a stale but consistent
+// completion is valid and its reply is dropped.
+func readCompletionFault(request *driverRequest, completion vfsservice.ReadCompletion, owner vfs.Owner, current uint64) (vfsservice.CopyFault, bool) {
+	valid := completion.Session.Owner == owner && completion.Session.Generation == request.generation && !completion.Barrier
+	data := completion.Data
+	switch request.operation {
+	case vfs.OperationRead:
+		valid = valid && len(data) == completion.Count && completion.Count <= vfs.MaxReplyData &&
+			(len(data) == 0 || unsafe.SliceData(data) != nil)
+	case vfs.OperationReadInto:
+		valid = valid && completion.Count >= 0 && uint64(completion.Count) <= request.mapSize
+	default:
+		valid = false
+	}
+	if valid {
+		return vfsservice.CopyFault{}, false
+	}
+	return vfsservice.CopyFault{
+		Op: "reply", Src: uintptr(unsafe.Pointer(unsafe.SliceData(data))), Dst: uintptr(request.mapBase), Len: completion.Count,
+		Session: completion.Session, Current: current, Ticket: completion.Ticket, State: "delivered", Worker: vfsservice.CopyWorkerOwner,
+	}, true
 }
