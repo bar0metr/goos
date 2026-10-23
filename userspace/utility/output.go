@@ -61,25 +61,37 @@ func (o *output[W]) tryRecord(target uint64, record []byte, write func(uint64, [
 }
 
 // appendLine is shared by Line.Print and host tests. Empty storage is an
-// unbuffered line: every append is a record, rather than an infinite copy loop.
+// unbuffered line: every append is written at once, in records of at most
+// unbufferedChunk bytes, rather than an infinite copy loop.
+//
+// value must stay uncaptured, or TinyGo moves every caller's local buffer,
+// such as PrintUint's digits, to the heap on every call. So value never
+// reaches write, and the loops advance an offset: a value resliced in a loop
+// becomes an aggregate LLVM treats as captured.
 func appendLine(storage []byte, size int, value []byte, write func([]byte)) int {
 	if len(storage) == 0 {
-		if len(value) != 0 {
-			write(value)
+		var chunk [unbufferedChunk]byte
+		for offset := 0; offset < len(value); {
+			copied := copy(chunk[:], value[offset:])
+			write(chunk[:copied])
+			offset += copied
 		}
 		return 0
 	}
-	for len(value) != 0 {
+	for offset := 0; offset < len(value); {
 		if size == len(storage) {
 			write(storage[:size])
 			size = 0
 		}
-		copied := copy(storage[size:], value)
+		copied := copy(storage[size:], value[offset:])
 		size += copied
-		value = value[copied:]
+		offset += copied
 	}
 	return size
 }
+
+// unbufferedChunk bounds one record of a line without storage.
+const unbufferedChunk = 256
 
 // errorTarget is standard error, or standard output when there is none.
 func (o *output[W]) errorTarget() uint64 {

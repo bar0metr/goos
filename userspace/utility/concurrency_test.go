@@ -308,6 +308,34 @@ func TestEmptyLineStorageWritesWithoutLooping(t *testing.T) {
 	}
 }
 
+// An unbuffered line writes copies of a long value in bounded records and
+// never hands the caller's buffer to write; TinyGo would otherwise move
+// every caller's local buffer to the heap.
+func TestUnbufferedLineWritesCopiesInChunks(t *testing.T) {
+	value := make([]byte, 3*unbufferedChunk+17)
+	for index := range value {
+		value[index] = byte(index)
+	}
+	var written []byte
+	records := 0
+	write := func(record []byte) {
+		if len(record) == 0 || len(record) > unbufferedChunk {
+			t.Fatalf("record of %d bytes", len(record))
+		}
+		if &record[0] == &value[0] {
+			t.Fatal("the caller's buffer reached write")
+		}
+		written = append(written, record...)
+		records++
+	}
+	if size := appendLine(nil, 0, value, write); size != 0 {
+		t.Fatalf("unbuffered line kept %d bytes", size)
+	}
+	if string(written) != string(value) || records != 4 {
+		t.Fatalf("wrote %d bytes in %d records", len(written), records)
+	}
+}
+
 func TestFatalOutputDropsRecordWhenWriterCannotProgress(t *testing.T) {
 	var o output[chunkSink]
 	calls := 0
