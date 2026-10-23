@@ -180,8 +180,9 @@ runs do not establish per-instruction coverage or isolate every XMM root.
 Conservative aliases can retain an object through another root. The rejected
 rendezvous uses a held region transition, not a kernel-induced timeout.
 
-Normal images now ship serial VFS; validation images default to the goroutine
-VFS. `VFS_RUNTIME` can select either. Makefile changes invalidate the VFS ELF,
+At this point normal images shipped serial VFS and validation images defaulted
+to the goroutine VFS; `VFS_RUNTIME` selects either. Since `test-all` passed on
+`main` at `39c7036`, every image defaults to the goroutine VFS (ADR 0204). Makefile changes invalidate the VFS ELF,
 including an old normal build tree that still contains a goroutine image.
 `test-all` and `release-check` now include the serial boot gate, compiler,
 goroutine runtime, collector and scheduler-aware I/O suites. Wiring a target
@@ -262,6 +263,15 @@ The gates found five defects, all fixed:
   frame, LLVM turned the recursion into a loop. The probe now keeps a stack
   frame and a recursion LLVM cannot remove (`ee42adc`, `a30c049`,
   `213ea93`).
+
+## Production switch
+
+After the merge, a complete `make -j8 test-all` from a clean start passed on
+`main` at `39c7036`: `test-boot` with the goroutine VFS reported 470 checks
+and `test-vfs-serial` 471. The goroutine VFS then became the default for
+every build. `VFS_RUNTIME=serial` still builds the serial VFS, and
+`test-vfs-serial` keeps it under every boot check. Normal images keep the
+serial disk driver.
 
 ## Remaining evidence limits
 
@@ -431,6 +441,7 @@ copies still rely on the kernel fault report to identify their copy caller.
 Another early region test retained inner heads in LLVM spills; the fixture
 now retires those frames before measuring reclamation.
 
-The branch remains experimental as described in
-[ADR 0204](../adr/0204-native-goroutines-and-concurrency.md). These results do
-not establish complete GC/preemption correctness or production readiness.
+[ADR 0204](../adr/0204-native-goroutines-and-concurrency.md) accepts the
+goroutine VFS for production on this evidence. The tests do not prove the
+collector or preemption correct at every instruction; the limits above
+remain, and `VFS_RUNTIME=serial` stays available as the fallback.

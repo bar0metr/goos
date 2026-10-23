@@ -140,10 +140,9 @@ endif
 endif
 # VFS_RUNTIME picks how the VFS service is built (ADR 0204): goroutines runs
 # its read pool on the native goroutine runtime, serial runs every request on
-# one thread. Until ADR 0204 accepts the runtime for production, a normal
-# build ships serial and a validation build tests goroutines; the acceptance
-# fixture needs goroutines.
-VFS_RUNTIME_DEFAULT := $(if $(filter 1,$(VALIDATION)),goroutines,serial)
+# one thread. Every build defaults to goroutines; serial is the fallback, and
+# the acceptance fixture needs goroutines.
+VFS_RUNTIME_DEFAULT := goroutines
 VFS_RUNTIME ?= $(VFS_RUNTIME_DEFAULT)
 ifeq ($(filter $(VFS_RUNTIME),goroutines serial),)
 $(error VFS_RUNTIME must be goroutines or serial)
@@ -267,7 +266,7 @@ $(GOROUTINE_ROOT_STAMP): $(GOROUTINE_ROOT_SOURCES)
 GOROUTINE_BUILD = $(BUILD_ENV) TINYGOROOT=$(abspath $(GOROUTINE_ROOT)) tinygo build $(TINYGO_TAGS) -target=$(GOROUTINE_TARGET) -opt=$(OPT) -no-debug
 
 # Recipe changes must invalidate VFS images from older build trees, including
-# the ordinary tree that held a goroutine VFS before the serial default.
+# an ordinary tree that holds a VFS of the runtime a former default chose.
 $(VFS_ELF): Makefile
 
 ifeq ($(VFS_RUNTIME),serial)
@@ -604,8 +603,8 @@ test-boot:
 	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/boot-test-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
 
-# The serial VFS (VFS_RUNTIME=serial) is the fallback while the goroutine
-# runtime is experimental (ADR 0204), so every boot check runs against it too.
+# The serial VFS (VFS_RUNTIME=serial) is the fallback for the goroutine VFS
+# (ADR 0204), so every boot check runs against it too.
 .PHONY: test-vfs-serial
 test-vfs-serial:
 	@$(MAKE) --no-print-directory test-boot VFS_RUNTIME=serial

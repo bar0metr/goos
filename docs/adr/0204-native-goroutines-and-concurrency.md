@@ -2,10 +2,12 @@
 
 ## Status
 
-Experimental implementation on `feature/native-userspace-concurrency`, based on
-`d0c8d5f`. This branch does not meet the feature's acceptance criteria yet.
-Do not enable this runtime in production services until the collector, native
-I/O adapters, failure tests, and KVM validation pass together.
+Accepted. The goroutine runtime ships in production images, where it runs
+the VFS service. The collector, native I/O adapters, failure tests and KVM
+validation passed together; the
+[validation report](../development/native-concurrency-validation.md) records
+the evidence and its limits. The serial VFS remains available with
+`VFS_RUNTIME=serial`, and `test-vfs-serial` keeps it under every boot check.
 
 ## Decision
 
@@ -15,8 +17,8 @@ M stacks, identify each M through FS, and integrate G roots into the existing
 stop-the-world collection. Runtime pins protect M-owned state; scheduler-aware
 wait adapters release a G's execution permit while it waits. The VFS owner
 orders namespace and control operations and sends bounded read plans to
-workers. Production acceptance requires joint native failure, GC and KVM
-evidence; the experimental branch status remains unchanged until then.
+workers. Production acceptance required joint native failure, GC and KVM
+evidence, recorded under Service integration and acceptance.
 
 ## Toolchain findings
 
@@ -98,10 +100,10 @@ main thread participates as a worker. Task-quota refusal reduces the available
 workers; it must not discard runnable Gs. A fixed descriptor table bounds Gs;
 creation past the configured limit must panic in the creator.
 
-The experimental preemption path registers a native user entry. On a timer
+The preemption path registers a native user entry. On a timer
 tick the kernel changes only the calling task's saved user RIP and RSP. The
 entry preserves the interrupted flags, integer registers, FPU and XMM state,
-and the red zone before consulting the scheduler. A pin prevents switching
+and the red zone before its kernel call and before consulting the scheduler. A pin prevents switching
 while syscall scratch, allocator state, or runtime locks belong to an M.
 
 This path requires further review: the complete entry/exit nesting protocol,
@@ -301,7 +303,7 @@ guarantees a user-time preemption. Temporary mutations that omitted parked or ru
 G stacks made gcstress fail during preemption with process fault status 13;
 the mutations are not part of the runtime.
 
-The stack hooks remain experimental. These tests cover root lifetimes but
+These tests cover root lifetimes but
 do not force collections at each instruction of creation, completion,
 context save, or G/M switching. Preemption-entry hold counts include restore
 instructions; they do not establish a hold during each register save. Swap
@@ -320,15 +322,14 @@ establish collector correctness.
 
 ## Service integration and acceptance
 
-`VFS_RUNTIME` selects the VFS build. A validation build defaults to
-`goroutines`, the read pool below. A normal build defaults to `serial`: the
-ordinary native target compiles `driver_serial.go`, which handles every request
-on one thread with the same barriers and recovery fence. The Status above keeps
-the runtime out of production services, so the image people install ships the
-serial VFS until this ADR records the decision to switch. `make
-test-vfs-serial` runs every boot check against the serial build, and `test-all`
-and `release-check` run it beside the goroutine suites. Either default can be
-overridden; a non-default runtime builds into its own variant tree.
+`VFS_RUNTIME` selects the VFS build. Normal and validation builds default to
+`goroutines`, the read pool below. `serial` builds the VFS with the ordinary
+native target, which compiles `driver_serial.go`: every request runs on one
+thread with the same barriers and recovery fence. `make test-vfs-serial` runs
+every boot check against that build, and `test-all` and `release-check` run it
+beside the goroutine suites. A non-default runtime builds into its own variant
+tree. The disk driver keeps the serial target in normal builds; validation
+builds run it on goroutines to prove interrupt waits.
 
 The goroutine VFS ingress owner admits at most eight requests to two read
 workers. It plans canonical reads on the owner,
@@ -402,14 +403,18 @@ allocator panic. It now reads the mapped startup handle table and writes to
 stderr without a Go allocation. This exposed `arena: slab count does not
 match its bitmap` during eight-collector KVM stress. A subsequent TCG boot
 again faulted in VFS `ramfs.MakeName` with a null source register. Both
-failures remain open. Normal images retain the serial VFS; validation images
-exercise the goroutine VFS, and its successful fixtures do not establish
-production readiness.
-The joint KVM scenario passed on clean commit `1045a07` with eight vCPUs,
-including log/IRQ delivery, GC stress and VFS recovery. This pass follows
-the reproduced failures; it does not remove them from the release gate.
+failures had one cause. `goos_preempt_entry` made its kernel call before it
+saved the SSE state, and the native call path keeps only the general-purpose
+registers, so a preemption could change the interrupted code's XMM
+registers. TinyGo built the `MakeName` slice header from XMM0, and the
+collector's SSE2 popcount kept its masks in XMM3 to XMM6 across the sweep.
+The entry now saves the SSE state before the call.
 
-The final branch must include the userspace API audit, compiler evidence,
-complete runtime and collector tests, scheduler-aware I/O, the real service
-pool, and controlled KVM measurements. No version change, release note, or
-merge belongs to this implementation.
+After the fix, ten consecutive joint KVM runs on eight vCPUs, 20 TCG panic
+boots and 20 TCG `gcstress 8` runs passed with no lost vector state, slab
+mismatch or null-source fault. A complete `test-all` then passed on `main`
+at `39c7036`, including `test-boot` with the goroutine VFS and
+`test-vfs-serial`. On that evidence the goroutine VFS became the production
+default. The remaining evidence limits in the validation report still apply:
+collector stress does not cover every context-save instruction or isolate
+each XMM root.

@@ -409,9 +409,10 @@ native collector and scheduler tests.
 
 ## Programs
 
-The program rows describe their callers' ownership. Goprobe, the validation
-VFS and the validation virtio-blk driver select the goroutine target. A normal
-build ships serial VFS (`VFS_RUNTIME`, ADR 0204) and a serial disk driver.
+The program rows describe their callers' ownership. Goprobe, the VFS and the
+validation virtio-blk driver select the goroutine target. `VFS_RUNTIME=serial`
+builds the serial VFS fallback (ADR 0204); a normal build keeps a serial disk
+driver.
 The validation driver's peer G measures progress during IRQ waits; its serving
 G alone owns requests and DMA state. Threadprobe starts native threads. The
 other shipped programs use one service loop and do not start workers through

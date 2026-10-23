@@ -68,8 +68,7 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   Host regressions in `tests/boot/qemu_boot_test.sh` cover early stdout,
   redraws, stale counters and missing output/completion. Its VFS runs on
   the goroutine runtime. `make test-vfs-serial` runs the same checks with
-  `VFS_RUNTIME=serial`, the VFS a normal build ships until ADR 0204 accepts
-  the runtime.
+  `VFS_RUNTIME=serial`, the fallback VFS (ADR 0204).
 - `make test-goroutines`, `make test-goroutine-gc`, and
   `make test-goroutine-io` boot one validation guest with four processors
   (`GOROUTINE_SMP`) and run the `goprobe` runtime, collector, and

@@ -96,9 +96,9 @@ as Finder traversal, remain valid.
 
 ## Program and test evidence
 
-Goprobe, validation VFS and the validation virtio-blk driver select the
-goroutine target. A normal build ships serial VFS (`VFS_RUNTIME`, ADR 0204)
-and a serial disk driver. The validation driver's serving G owns its requests
+Goprobe, the VFS and the validation virtio-blk driver select the goroutine
+target. `VFS_RUNTIME=serial` builds the serial VFS fallback (ADR 0204); a
+normal build keeps a serial disk driver. The validation driver's serving G owns its requests
 and DMA state; a peer G measures progress during IRQ waits. Threadprobe starts
 native threads. The other shipped programs do not start workers through `go`
 or `thread.Start`; the generated SSH backend uses its synchronous pump.
