@@ -335,9 +335,30 @@ vector_lost=159`. With the fix it reported `vector_lost=0`.
 Before the fix, three of eight `test-goroutine-panic` boots failed: two with
 the null-slice fault and one where init refused `goprobe` as not a valid
 executable, which may be the same corruption on a read path. After the fix,
-six of six boots passed with no null-source fault. Lost vector state could
-also corrupt allocator data; the `gcstress 8` slab mismatch has not been
-retested with this fix.
+six of six boots passed with no null-source fault. On the integrated branch,
+three more boots passed with no null-source fault, and `goprobe fair`
+reported `preemptions=102 vector_lost=0`.
+
+### Cause of the slab count mismatch
+
+The same entry defect explains `arena: slab count does not match its bitmap`.
+The check compares the popcount of a slab's allocation bitmap with its
+`used` count. The target has no POPCNT, so LLVM lowers `bits.OnesCount64`
+in the collector's sweep to SSE2 code. In `arena.collect` of the goprobe
+image, the inlined sweep loads the masks `0x5555…`, `0x3333…` and
+`0x0f0f…` into XMM3 to XMM5 and a zero into XMM6 once, after its
+`givePages` call. It then reuses them for every slab until it compares the
+sum with `used` (`movzwl 0x4(%rdi)`). The collector runs on a worker thread
+that receives preemption entries. `preemptVisit` returns early because the
+collector holds a pin, but the old entry had already made its kernel call and
+lost the vector registers. A changed mask gives a wrong popcount, and the
+check panics while the bitmap and `used` still agree. The fix that saves the
+SSE state before the kernel call covers this path too.
+
+After the fix, six `gcstress 8` runs on TCG with eight processors passed. Each
+run reported `final_collections=3`, every sampled dropped list was reclaimed,
+and no run printed a slab mismatch. The original mismatch appeared only under
+KVM, so TCG passes alone do not confirm the fix.
 
 The diagnostic branch passed host race tests with and without
 `goos_validation`, `go vet ./...` and `make test-concurrency-audit`.
