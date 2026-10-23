@@ -360,6 +360,15 @@ run reported `final_collections=3`, every sampled dropped list was reclaimed,
 and no run printed a slab mismatch. The original mismatch appeared only under
 KVM, so TCG passes alone do not confirm the fix.
 
+Two consecutive joint KVM runs on clean `3f4436f`, eight vCPUs,
+`20261023T093313Z-399c938f` and `20261023T093453Z-b451ae0d`, passed. Both
+reported `vector_lost=0` at 102 preemptions, `gcstress 1` and `gcstress 8`
+with 256 of 256 sampled lists reclaimed and no slab mismatch, two drivers'
+`VIRTIO_BLK_G_IRQ_OK`, logwait, panic recovery and `FILE_CACHE_RECOVERED_OK`.
+Neither run had a null-source fault. Before the fix, KVM runs both failed
+and passed with these faults, so two passes do not exclude a remaining
+intermittent fault.
+
 The diagnostic branch passed host race tests with and without
 `goos_validation`, `go vet ./...` and `make test-concurrency-audit`.
 `make test-goroutine-io` passed on TCG with four processors, including
