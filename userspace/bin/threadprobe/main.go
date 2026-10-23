@@ -583,7 +583,7 @@ func faultWorker(uintptr) {
 
 // overflowWorker recurses past its stack into the guard below it.
 func overflowWorker(uintptr) {
-	crashSink.Store(uint64(recurse(1 << 20)))
+	crashSink.Store(uint64(recurse(1 << 30)))
 }
 
 // recurse keeps its frame on the stack: TinyGo moves a local array larger
