@@ -249,9 +249,14 @@ The gates found five defects, all fixed:
   shell's acknowledgement (`089f1bb`).
 - `test-smp`: multithreaded validation services reach the processor count
   for one process's tasks inside the kernel at boot, so the Linux probe could
-  not raise the global peak. Validation kernels now print
-  `PROCESS_THREAD_PEAK` for each exiting process with two or more such tasks;
-  the probe reported 4 (`fb224d5`).
+  not raise the global peak. Validation kernels now log a `process thread
+  peak` record for each exiting process with two or more such tasks; the
+  probe reported 4 (`fb224d5`). The first version wrote that record to the
+  console at the exit, where it landed inside another program's output line:
+  a later `test-all` on `main` failed `test-thread-allocator` on
+  `local_allocs=79995PROCESS_THREAD_PEAK`. The record now goes to the log
+  ring at Info, below the console threshold, and `test-smp` reads it with
+  `log` after the probe exits.
 - `test-native-threads`: the overflow probe's 16 KiB frame went to the heap,
   so the page quota ended the worker before its stack guard. With a small
   frame, LLVM turned the recursion into a loop. The probe now keeps a stack

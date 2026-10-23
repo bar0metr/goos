@@ -228,23 +228,21 @@ func reportKernelParallelPeak() {
 	reportPeak("KERNEL_THREAD_PEAK ", amd64.KernelThreadPeak(), &kernelThreadReported)
 }
 
-// reportProcessThreadPeak prints, in validation builds, how many tasks of an
-// exited process were inside the kernel at once, when two or more were. A
+// reportProcessThreadPeak records, in validation builds, how many tasks of
+// an exited process were inside the kernel at once, when two or more were. A
 // boot test reads it for the program it ran: the global KERNEL_THREAD_PEAK
-// may already be at the processor count from multithreaded services.
+// may already be at the processor count from multithreaded services. The
+// record goes to the log ring at Info, below the console threshold: a
+// console line written at an exit would land inside other programs' output.
 func reportProcessThreadPeak(pid process.ID, linux bool, peak uint64) {
 	if peak < 2 {
 		return
 	}
-	console := kernelconsole.New()
-	console.WriteString("PROCESS_THREAD_PEAK pid=")
-	console.WriteUint(uint64(pid))
+	message := "process thread peak"
 	if linux {
-		console.WriteString(" linux=1")
+		message = "linux process thread peak"
 	}
-	console.WriteString(" peak=")
-	console.WriteUint(peak)
-	console.WriteString("\n")
+	kernelLogUints(logfmt.Info, message, "pid", uint64(pid), "peak", peak)
 }
 
 func reportPeak(marker string, peak uint64, reported *uint64) {

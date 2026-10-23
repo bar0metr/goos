@@ -117,19 +117,20 @@ refuse '^Off-line CPU(s) list:' 'lscpu offline list'
 # processors at once. The kernel prints each new peak of processors inside
 # calls together. Multithreaded services may already have the most tasks of
 # one process inside calls at the processor count, so the probe's own
-# overlap comes from the record the kernel prints when a process with two or
-# more such tasks exits.
+# overlap comes from the record the kernel logs when a process with two or
+# more such tasks exits. The record stays in the log ring, off the console,
+# and the probe is the first Linux program here, so the last such record is
+# the probe's.
 peaks() {
 	tr -d '\r' <"$log" | grep -o "$1 [0-9]*" | sed 's/.* //' | sort -n | tail -n 1
 }
-probe_line=$(wc -l <"$log")
 run '/system/linux/abi-probe kernel'
 expect '^kernel ok$' 'kernel: calls beside each other'
 # Housekeeping prints the parallel peak on its next tick; one more command
 # gives it that tick, and lets the probe's exit be recorded.
 run uptime
-threads=$(tail -n "+$((probe_line + 1))" "$log" | tr -d '\r' |
-	sed -n 's/.*PROCESS_THREAD_PEAK pid=[0-9]* linux=1 peak=\([0-9]*\).*/\1/p' | sort -n | tail -n 1)
+run log
+threads=$(sed -n 's/.*linux process thread peak pid=[0-9]* peak=\([0-9]*\).*/\1/p' "$work/output" | tail -n 1)
 peak=$(peaks KERNEL_PARALLEL_PEAK)
 if [ "$cpus" -gt 1 ]; then
 	[ "${threads:-0}" -ge 2 ] ||
