@@ -586,16 +586,18 @@ func overflowWorker(uintptr) {
 	crashSink.Store(uint64(recurse(1 << 20)))
 }
 
+// recurse keeps its frame on the stack: TinyGo moves a local array larger
+// than 256 bytes to the heap, and such frames would exhaust the page quota
+// before the stack reached its guard.
+//
 //go:noinline
 func recurse(depth int) int {
-	var frame [16 << 10]byte
-	for index := 0; index < len(frame); index += 4096 {
-		frame[index] = byte(depth)
-	}
+	var frame [256]byte
+	frame[0], frame[len(frame)-1] = byte(depth), byte(depth>>8)
 	if depth <= 1 {
 		return int(frame[0])
 	}
-	return recurse(depth-1) + int(frame[len(frame)-4096]) - depth + 1
+	return recurse(depth-1) + int(frame[len(frame)-1]) - depth + 1
 }
 
 // crash starts a worker that faults. The fault ends the whole process, so
