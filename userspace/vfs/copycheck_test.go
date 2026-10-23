@@ -6,22 +6,16 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"unsafe"
 
 	"goos/internal/validation"
 	"goos/kernel/vfs"
 	"goos/userspace/fsproto"
+	"goos/userspace/runtime/memory"
 )
 
 // tornSlice builds the header a torn or corrupted read leaves: no array and
 // a nonzero length. Safe Go cannot produce it.
-func tornSlice(length int) []byte {
-	header := struct {
-		data     unsafe.Pointer
-		len, cap int
-	}{nil, length, length}
-	return *(*[]byte)(unsafe.Pointer(&header))
-}
+func tornSlice(length int) []byte { return memory.Bytes(0, length) }
 
 func TestCopyChecksRejectOnlyArraylessBytes(t *testing.T) {
 	var buffer [8]byte

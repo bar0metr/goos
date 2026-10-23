@@ -104,6 +104,12 @@ func ThreadPreempt(entry uintptr, ticks uint64) kcall.Status {
 	return status(threadPreempt(entry, ticks))
 }
 
+// ProbeVectorSpin fills XMM0 to XMM14 with a pattern and loops without
+// calls until *stop is nonzero. It returns how many times a register had
+// lost the pattern: a preemption that does not keep the SSE state of the code
+// it interrupts shows up here. Only goprobe calls it.
+func ProbeVectorSpin(stop *uint32) uint64 { return probeVectorSpin(stop) }
+
 // ThreadWake sets the wake flag of a thread of the calling process: a
 // WaitAny of that thread with an interest in kcall.WaitAnyThread returns
 // (ADR 0204).

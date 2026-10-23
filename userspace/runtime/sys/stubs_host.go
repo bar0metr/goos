@@ -39,6 +39,8 @@ func threadSetBase(base uintptr) uint64 { return unsupported }
 
 func threadPreempt(entry uintptr, ticks uint64) uint64 { return unsupported }
 
+func probeVectorSpin(stop *uint32) uint64 { return 0 }
+
 func threadWake(thread uint64) uint64 { return unsupported }
 
 func threadWakeTake() uint64 { return unsupported }

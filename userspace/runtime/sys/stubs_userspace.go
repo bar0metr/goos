@@ -45,6 +45,9 @@ func threadSetBase(base uintptr) uint64
 //go:linkname threadPreempt goos_thread_preempt
 func threadPreempt(entry uintptr, ticks uint64) uint64
 
+//go:linkname probeVectorSpin goos_probe_vector_spin
+func probeVectorSpin(stop *uint32) uint64
+
 //go:linkname threadWake goos_thread_wake
 func threadWake(thread uint64) uint64
 

@@ -3,10 +3,9 @@
 package main
 
 import (
-	"unsafe"
-
 	"goos/kernel/ipc"
 	"goos/kernel/vfs"
+	"goos/userspace/runtime/memory"
 	vfsservice "goos/userspace/vfs"
 )
 
@@ -80,13 +79,13 @@ func readCompletionFault(request *driverRequest, completion vfsservice.ReadCompl
 	switch request.operation {
 	case vfs.OperationRead:
 		valid = valid && len(data) == completion.Count && completion.Count <= vfs.MaxReplyData &&
-			(len(data) == 0 || unsafe.SliceData(data) != nil)
+			(len(data) == 0 || memory.SliceAddress(data) != 0)
 	case vfs.OperationReadInto:
 		decoded, decodedOK := vfs.DecodeRequest(request.message)
 		end, windowOK := bulkReadWindow(request.mapSize, decoded.Offset, decoded.Size)
 		valid = valid && decodedOK && windowOK && end >= decoded.Offset && request.mapBase != 0 &&
 			completion.Count >= 0 && uint64(completion.Count) <= uint64(decoded.Size) && len(data) == completion.Count &&
-			(completion.Count == 0 || uintptr(unsafe.Pointer(unsafe.SliceData(data))) == uintptr(request.mapBase+decoded.Offset))
+			(completion.Count == 0 || memory.SliceAddress(data) == uintptr(request.mapBase+decoded.Offset))
 	default:
 		valid = false
 	}
@@ -94,7 +93,7 @@ func readCompletionFault(request *driverRequest, completion vfsservice.ReadCompl
 		return vfsservice.CopyFault{}, false
 	}
 	return vfsservice.CopyFault{
-		Op: "reply", Src: uintptr(unsafe.Pointer(unsafe.SliceData(data))), Dst: uintptr(request.mapBase), Len: completion.Count,
+		Op: "reply", Src: memory.SliceAddress(data), Dst: uintptr(request.mapBase), Len: completion.Count,
 		Session: completion.Session, Current: current, Ticket: completion.Ticket, State: "delivered", Worker: vfsservice.CopyWorkerOwner,
 	}, true
 }

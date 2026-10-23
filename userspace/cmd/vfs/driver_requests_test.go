@@ -4,10 +4,10 @@ package main
 
 import (
 	"testing"
-	"unsafe"
 
 	"goos/kernel/handle"
 	"goos/kernel/vfs"
+	"goos/userspace/runtime/memory"
 	vfsservice "goos/userspace/vfs"
 )
 
@@ -42,13 +42,7 @@ func TestDriverRequestsAreBoundedLikePoolIngress(t *testing.T) {
 	}
 }
 
-func tornBytes(length int) []byte {
-	header := struct {
-		data     unsafe.Pointer
-		len, cap int
-	}{nil, length, length}
-	return *(*[]byte)(unsafe.Pointer(&header))
-}
+func tornBytes(length int) []byte { return memory.Bytes(0, length) }
 
 // A completion is checked against the request that holds its ticket before
 // the reply copies its bytes. A session that closed and reopened leaves a
@@ -57,7 +51,7 @@ func TestReadCompletionFaultChecksSessionAndBuffer(t *testing.T) {
 	var inline [8]byte
 	var bulk [4096]byte
 	read := &driverRequest{ticket: 4, kind: driverRead, index: 1, session: 9, generation: 3, operation: vfs.OperationRead}
-	into := &driverRequest{ticket: 5, kind: driverRead, index: 1, session: 9, generation: 3, operation: vfs.OperationReadInto, mapBase: uint64(uintptr(unsafe.Pointer(&bulk[0]))), mapSize: 4096}
+	into := &driverRequest{ticket: 5, kind: driverRead, index: 1, session: 9, generation: 3, operation: vfs.OperationReadInto, mapBase: uint64(memory.SliceAddress(bulk[:])), mapSize: 4096}
 	into.message, _ = vfs.EncodeRequest(vfs.Request{Operation: vfs.OperationReadInto, Handle: 1, Size: 4096}, 1)
 	session := vfsservice.ReadSession{Owner: 2, Generation: 3}
 	cases := []struct {

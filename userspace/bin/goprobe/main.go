@@ -674,7 +674,7 @@ func fair() {
 	// preemption that interrupts it.
 	var vectorStop uint32
 	vectorLost := make(chan uint64, 1)
-	go func() { vectorLost <- vectorSpin(&vectorStop) }()
+	go func() { vectorLost <- sys.ProbeVectorSpin(&vectorStop) }()
 	runtime.Gosched()
 	started := now()
 	var firstProgress int64

@@ -2,7 +2,7 @@ package vfsservice
 
 import (
 	"goos/internal/validation"
-	"unsafe"
+	"goos/userspace/runtime/memory"
 )
 
 // CopyFault describes a read-path copy that a checked build refused to run.
@@ -55,7 +55,7 @@ func (service *Service) SetCopyContext(session ReadSession, ticket uint64) {
 }
 
 // sliceAddress is the array address of a slice, zero for a nil array.
-func sliceAddress(data []byte) uintptr { return uintptr(unsafe.Pointer(unsafe.SliceData(data))) }
+func sliceAddress(data []byte) uintptr { return memory.SliceAddress(data) }
 
 // copyValid reports whether copy(dst, src) can run: when it moves bytes,
 // both sides have an array.

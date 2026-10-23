@@ -7,12 +7,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/goroutine"
+	"goos/userspace/runtime/memory"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/runtime/thread"
 )
@@ -278,9 +278,11 @@ func gcStress(collectors, rounds, taskLimit int) {
 //
 //go:noinline
 func peekValue(token uint64) uint64 {
-	address := uintptr(^token) + unsafe.Offsetof(cell{}.value)
-	return *(*uint64)(*(*unsafe.Pointer)(unsafe.Pointer(&address)))
+	return memory.Word(uintptr(^token) + cellValueOffset)
 }
+
+// cellValueOffset is where cell.value lies: after the next pointer.
+const cellValueOffset = 8
 
 // stressPreempt runs more spinning goroutines than permits, so preemption
 // switches them while their list is only in registers, and goroutines that
