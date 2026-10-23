@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/binary"
+	"sync/atomic"
 
 	"goos/kernel/arch/amd64"
 	"goos/kernel/kcall"
@@ -16,6 +17,7 @@ import (
 	"goos/kernel/nativethread"
 	"goos/kernel/process"
 	"goos/kernel/sched"
+	kernelwait "goos/kernel/wait"
 )
 
 // threadCaller returns the caller's process and its thread group, with the
@@ -133,7 +135,39 @@ func (handler nativeCallHandler) ThreadJoin(thread uint64, flags uint64, address
 	if !vm.ValidateUserRange(address, 8) || !vm.CanCopyOut(handler.root, address, 8) {
 		return kcall.StatusInvalidArgument, false
 	}
-	code, status := group.Join(caller, sched.TaskID(thread), flags&kcall.JoinPoll == 0)
+	if !kcall.ValidJoinFlags(flags) {
+		return kcall.StatusInvalidArgument, false
+	}
+	target := sched.TaskID(thread)
+	var code uint64
+	var status nativethread.JoinStatus
+	switch flags {
+	case kcall.JoinClaim:
+		code, status = group.ClaimJoin(caller, target)
+		if status == nativethread.Waiting {
+			// The output range was validated before reserving the join.
+			binary.LittleEndian.PutUint64(local.threadCodeWire[:], code)
+			if !vm.CopyOut(handler.root, address, local.threadCodeWire[:]) {
+				group.ReleaseJoin(target, code)
+				return kcall.StatusInvalidArgument, false
+			}
+			return kcall.StatusOK, false
+		}
+	case kcall.JoinCollect, kcall.JoinRelease:
+		if !vm.CopyIn(handler.root, address, local.threadCodeWire[:]) {
+			return kcall.StatusInvalidArgument, false
+		}
+		token := binary.LittleEndian.Uint64(local.threadCodeWire[:])
+		if flags == kcall.JoinRelease {
+			if !group.ReleaseJoin(target, token) {
+				return kcall.StatusNotFound, false
+			}
+			return kcall.StatusOK, false
+		}
+		code, status = group.CollectJoin(target, token)
+	default:
+		code, status = group.Join(caller, target, flags == 0)
+	}
 	switch status {
 	case nativethread.Joined:
 		binary.LittleEndian.PutUint64(local.threadCodeWire[:], code)
@@ -142,7 +176,7 @@ func (handler nativeCallHandler) ThreadJoin(thread uint64, flags uint64, address
 		}
 		return kcall.StatusOK, false
 	case nativethread.Waiting:
-		if flags&kcall.JoinPoll != 0 {
+		if flags != 0 {
 			return kcall.StatusTimeout, false
 		}
 		return kcall.StatusOK, true
@@ -150,6 +184,8 @@ func (handler nativeCallHandler) ThreadJoin(thread uint64, flags uint64, address
 		return kcall.StatusAlreadyExists, false
 	case nativethread.Self:
 		return kcall.StatusInvalidArgument, false
+	case nativethread.Exhausted:
+		return kcall.StatusResourceExhausted, false
 	}
 	return kcall.StatusNotFound, false
 }
@@ -290,6 +326,12 @@ func nativeThreadEnding(owner *process.Process, task sched.TaskID, code uint64) 
 	if found && !ending.Leaving {
 		group.SetExitCode(code)
 	}
+	if found {
+		// The group already records the end, under the registry's write
+		// lock, so a waiter's recheck sees it or this finds its
+		// registration.
+		publishWaitAny(kernelwait.Key{Kind: kernelwait.KindThreadEnd, Object: uint64(task)}, kernelwait.Exited)
+	}
 	if recorded, set := group.ExitCode(); set {
 		return ending, found, recorded
 	}
@@ -323,4 +365,107 @@ func nativeThreadEnded(owner *process.Process, task sched.TaskID, ending nativet
 		cancelTaskWaits(other)
 		amd64.TerminateTask(uint64(other), kcall.ExitKilled)
 	}
+}
+
+// ThreadSetBase sets the calling thread's FS base. The native runtime points
+// it at the thread's control block (ADR 0204). Any canonical user address or
+// zero is accepted: the base only changes what the thread's own FS-relative
+// loads read, and a load through an unmapped base faults in that thread.
+func (handler nativeCallHandler) ThreadSetBase(base uint64) kcall.Status {
+	_, _, caller, found := handler.threadCaller()
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	if base != 0 && !vm.ValidateUserRange(base, 8) {
+		return kcall.StatusInvalidArgument
+	}
+	if !amd64.SetTaskFSBase(caller, base) {
+		return kcall.StatusNotFound
+	}
+	return kcall.StatusOK
+}
+
+// ThreadPreempt registers the calling thread's preemption entry, delivered
+// after every ticks ticks of user time, or turns delivery off with a zero
+// entry. The entry must lie in code, as a thread's start does.
+func (handler nativeCallHandler) ThreadPreempt(entry uint64, ticks uint64) kcall.Status {
+	owner, _, caller, found := handler.threadCaller()
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	if entry != 0 && !executableEntry(owner, entry) {
+		return kcall.StatusInvalidArgument
+	}
+	if !amd64.SetTaskPreempt(caller, entry, ticks) {
+		return kcall.StatusNotFound
+	}
+	return kcall.StatusOK
+}
+
+// ThreadPreemptTake writes the instruction pointer the last delivery
+// interrupted and allows the next one. NotFound means no delivery waits.
+func (handler nativeCallHandler) ThreadPreemptTake(address uint64) kcall.Status {
+	local := thisCPU()
+	_, _, caller, found := handler.threadCaller()
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	if !vm.ValidateUserRange(address, 8) || !vm.CanCopyOut(handler.root, address, 8) {
+		return kcall.StatusInvalidArgument
+	}
+	rip, taken := amd64.TakeTaskPreempt(caller)
+	if !taken {
+		return kcall.StatusNotFound
+	}
+	binary.LittleEndian.PutUint64(local.threadCodeWire[:], rip)
+	if !vm.CopyOut(handler.root, address, local.threadCodeWire[:]) {
+		panicSerial("validated preemption result write failed")
+	}
+	return kcall.StatusOK
+}
+
+// threadWakes holds, per task slot, the task ID of a thread whose wake flag
+// is set. Holding the ID rather than a bit makes a flag left by a thread that
+// ended mean nothing to the next task in its slot.
+var threadWakes [sched.MaxTasks]atomic.Uint64
+
+// ThreadWake sets the wake flag of a thread of the caller's process and
+// completes a WaitAny of that thread on WaitAnyThread (ADR 0204). It
+// confers nothing: the flag only ends a wait.
+func (handler nativeCallHandler) ThreadWake(thread uint64) kcall.Status {
+	_, group, _, found := handler.threadCaller()
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	target := sched.TaskID(thread)
+	slot, _, valid := target.Parts()
+	if !valid {
+		return kcall.StatusNotFound
+	}
+	if _, live := group.SlotOf(target); !live {
+		return kcall.StatusNotFound
+	}
+	threadWakes[slot].Store(thread)
+	publishWaitAny(kernelwait.Key{Kind: kernelwait.KindThread, Object: thread}, kernelwait.Readable)
+	return kcall.StatusOK
+}
+
+// ThreadWakeTake clears the caller's wake flag. It answers NotFound when the
+// flag was not set.
+func (handler nativeCallHandler) ThreadWakeTake() kcall.Status {
+	_, _, caller, found := handler.threadCaller()
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	slot, _, valid := caller.Parts()
+	if !valid || !threadWakes[slot].CompareAndSwap(uint64(caller), 0) {
+		return kcall.StatusNotFound
+	}
+	return kcall.StatusOK
+}
+
+// threadWakeSet reports whether the wake flag of task is set.
+func threadWakeSet(task uint64) bool {
+	slot, _, valid := sched.TaskID(task).Parts()
+	return valid && threadWakes[slot].Load() == task
 }

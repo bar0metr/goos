@@ -1980,12 +1980,15 @@ goos_irq_11:
     movq $1, goos_irq_11_pending(%rip)
     xorl %ecx, %ecx
     xchgq %rcx, goos_irq_11_waiter(%rip)
+    // An IRQWait waiter takes the event itself. Without one, slot 0, the
+    // kernel loop, wakes and publishes the pending event to WaitAny.
     testq %rcx, %rcx
-    jz .irq_11_eoi
+    jz .irq_11_wake
+    decq %rcx
+.irq_11_wake:
     // The waiter may run on another processor; the scheduler wakes it there.
     // The wake is Go, which may use the SSE registers the interrupted task
     // has live.
-    decq %rcx
     GOOS_CPU %rbx, %ebx
     movq GOOS_CPU_CURRENT(%rbx), %r12
     shlq $GOOS_FPU_AREA_SHIFT, %r12
@@ -1994,7 +1997,6 @@ goos_irq_11:
     fxsave64 (%r12)
     GOOS_CALL goos_wake_slot
     fxrstor64 (%r12)
-.irq_11_eoi:
     movl $0, GOOS_LAPIC_EOI
     movb $0x20, %al
     outb %al, $0xa0
@@ -2472,6 +2474,13 @@ goos_enable_console_interrupt:
 goos_take_irq_11:
     xorl %eax, %eax
     xchgq %rax, goos_irq_11_pending(%rip)
+    retq
+
+// goos_irq_11_is_pending reports the disk line's pending event without
+// consuming it, for WaitAny readiness; IRQTake or IRQWait consumes it.
+.global goos_irq_11_is_pending
+goos_irq_11_is_pending:
+    movq goos_irq_11_pending(%rip), %rax
     retq
 
 .global goos_set_irq_11_waiter

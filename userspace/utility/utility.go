@@ -5,6 +5,13 @@
 // manifest; this package binds the startup handles, answers --help, checks the
 // arguments, and provides the output, diagnostic and filesystem helpers the
 // commands have in common.
+//
+// After Run initializes startup state, output and synchronous service calls
+// serialize callers; failed transactions disable their endpoint. These functions
+// may be used from any goroutine or thread of the command. The current output line (Print through
+// EndLine), the buffers Path, Target and Resolve return, and the TCP and UDP
+// sessions belong to one goroutine at a time. The full contract is in
+// docs/development/native-concurrency-audit.md.
 package utility
 
 import (
@@ -12,40 +19,58 @@ import (
 	"goos/internal/validation"
 	"goos/kernel/clock"
 	"goos/kernel/handle"
-	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	"goos/userspace/commands"
 	"goos/userspace/pathpage"
 	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/lock"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/shell"
 	"goos/userspace/startup"
 	"goos/userspace/terminal"
 )
 
-var wire [ipc.WireMaxSize]byte
+// pathBuffer and targetBuffer are where Path, Resolve and Target put the
+// paths they return. They belong to the goroutine that runs main.
 var pathBuffer [shell.MaxPath]byte
 var targetBuffer [shell.MaxPath]byte
-var correlation uint64
-var stdoutHandle uint64
-var stderrHandle uint64
+
+// stdinHandle is standard input. Run sets it before main, and nothing
+// changes it afterwards.
 var stdinHandle uint64
-var vfsHandle uint64
-var inputByte [1]byte
+
+// standard is standard output and standard error.
+var standard output[nativeStream]
+
+// files is the command's filesystem session.
+var files vfsSession[nativeIPC, nativePaths]
 
 // current is the running command's manifest, and commandName the name it was
-// started under; usage errors and diagnostics are written from them.
+// started under; usage errors and diagnostics are written from them. Run
+// sets both before main, and nothing changes them afterwards.
 var (
 	current     commands.Manifest
 	commandName []byte
-	// errorBuffer holds a message that names a path of up to PathMax bytes.
+)
+
+// failure is tried by a goroutine ending the command with a diagnostic and
+// never released. A concurrent/recursive failure exits without a diagnostic
+// rather than waiting for a possibly held lock. The holder owns errorBuffer,
+// which holds a message naming a path of up to PathMax bytes and is too
+// large for a goroutine stack.
+var (
+	failure     lock.Mutex
 	errorBuffer [shell.MaxPath + 256]byte
 )
 
-// BindVFS selects a service's already-granted filesystem endpoint. The caller
-// must finish outstanding filesystem requests before replacing it.
-func BindVFS(channel handle.ID) { vfsHandle = uint64(channel) }
+// BindVFS selects a service's already-granted filesystem endpoint. A request
+// in flight on the old endpoint finishes first. The endpoint is borrowed and
+// is not closed on rebind or failure. A quarantined ID cannot be rebound;
+// recovery requires a different, fresh endpoint, not another handle alias of
+// the same channel. Bind and dependent multi-call operations require external
+// sequencing if they must stay on one authority.
+func BindVFS(channel handle.ID) { files.bind(channel) }
 
 // Run starts the command described by manifest and calls main with its startup
 // data. A command that returns from main exits with status 0.
@@ -65,11 +90,15 @@ func Run(manifest commands.Manifest, main func(startup.Data)) {
 	stdout, stdoutFound := data.Handle("stdout")
 	stderr, stderrFound := data.Handle("stderr")
 	vfsEndpoint, vfsFound := data.Handle("vfs")
-	stdinHandle, stdoutHandle, stderrHandle, vfsHandle = uint64(stdin), uint64(stdout), uint64(stderr), uint64(vfsEndpoint)
-	launchHandle, _ = data.Handle("launch")
+	stdinHandle, standard.stdout, standard.stderr = uint64(stdin), uint64(stdout), uint64(stderr)
+	files.bind(vfsEndpoint)
+	launchChannel, _ := data.Handle("launch")
+	launcher.bind(launchChannel)
 	bindResize(data)
-	networkHandle, _ = data.Handle("net")
-	resolverHandle, _ = data.Handle("resolve")
+	networkChannel, _ := data.Handle("net")
+	networkSession.bind(networkChannel)
+	resolverChannel, _ := data.Handle("resolve")
+	resolverSession.bind(resolverChannel)
 	commandName, current = data.Command(), manifest
 	if !stdinFound || !stdoutFound || !stderrFound {
 		finish(1, "startup handles unavailable\n")
@@ -97,12 +126,12 @@ func Run(manifest commands.Manifest, main func(startup.Data)) {
 	if manifest.Grants&commands.GrantVFS != 0 && !vfsFound {
 		Fail(nil, "filesystem session not granted")
 	}
-	if manifest.Grants&(commands.GrantNetworkPing|commands.GrantNetworkAdmin) != 0 && networkHandle == 0 {
+	if manifest.Grants&(commands.GrantNetworkPing|commands.GrantNetworkAdmin) != 0 && networkSession.bound() == 0 {
 		Fail(nil, "network service unavailable")
 	}
 	// A resolver session is required only of commands that need nothing
 	// else; ping keeps working on numeric addresses without one.
-	if manifest.Grants&commands.GrantResolveAdmin != 0 && resolverHandle == 0 {
+	if manifest.Grants&commands.GrantResolveAdmin != 0 && resolverSession.bound() == 0 {
 		Fail(nil, "resolver service unavailable")
 	}
 	main(data)
@@ -114,37 +143,24 @@ func Exit(code uint64) { finish(code, "") }
 
 // Usage ends a malformed invocation with the command's synopsis.
 func Usage() {
-	size := copy(errorBuffer[:], "usage: ")
-	size += copy(errorBuffer[size:len(errorBuffer)-1], current.Usage)
-	errorBuffer[size] = '\n'
-	writeErrorBytes(errorBuffer[:size+1])
+	if failure.TryLock() {
+		standard.tryRecord(standard.errorTarget(), appendUsage(errorBuffer[:], current.Usage), fatalWrite)
+	}
 	finish(2, "")
 }
 
 // Fail ends the command with "command: path: reason", or "command: reason"
-// when path is nil, and status 2. The line is written at once so it cannot
-// interleave.
+// when path is nil, and status 2. The line is one record, so it cannot
+// interleave with other output of the process. If output or the diagnostic
+// buffer is busy, exit without a diagnostic; racing exit statuses are unspecified.
 func Fail(path []byte, reason string) { FailStatus(2, path, reason) }
 
 // FailStatus is Fail with another exit status.
 func FailStatus(code uint64, path []byte, reason string) {
-	// Every copy stops one byte short so the newline always fits.
-	limit := len(errorBuffer) - 1
-	size := copy(errorBuffer[:limit], commandName)
-	size += copy(errorBuffer[size:limit], ": ")
-	if path != nil {
-		// The path may have come from a directory listing: its controls are
-		// shown, not sent.
-		for index := 0; index < len(path) && size < limit; {
-			var character []byte
-			character, index = terminal.Printable(path, index)
-			size += copy(errorBuffer[size:limit], character)
-		}
-		size += copy(errorBuffer[size:limit], ": ")
+	if failure.TryLock() {
+		// A concurrent or recursive fatal path must still be able to exit.
+		standard.tryRecord(standard.errorTarget(), appendFailure(errorBuffer[:], commandName, path, reason), fatalWrite)
 	}
-	size += copy(errorBuffer[size:limit], reason)
-	errorBuffer[size] = '\n'
-	writeErrorBytes(errorBuffer[:size+1])
 	finish(code, "")
 }
 
@@ -178,22 +194,26 @@ func Path(data startup.Data, index int) []byte {
 }
 
 // Target resolves argument index into a second buffer, so a command with two
-// paths keeps the first.
+// paths keeps the first. Path, Target and Resolve return package buffers
+// that belong to the goroutine running main; other goroutines use
+// ResolveInto.
 func Target(data startup.Data, index int) []byte {
 	argument, found := data.Arg(index)
 	if !found {
 		Usage()
 	}
-	path, ok := shell.ResolvePath(data.CWD(), argument, &targetBuffer)
-	if !ok {
-		failPath(argument)
-	}
-	return path
+	return ResolveInto(data, argument, &targetBuffer)
 }
 
 // Resolve makes argument absolute against the working directory.
 func Resolve(data startup.Data, argument []byte) []byte {
-	path, ok := shell.ResolvePath(data.CWD(), argument, &pathBuffer)
+	return ResolveInto(data, argument, &pathBuffer)
+}
+
+// ResolveInto makes argument absolute against the working directory in
+// target, which the caller owns, and returns the path.
+func ResolveInto(data startup.Data, argument []byte, target *[shell.MaxPath]byte) []byte {
+	path, ok := shell.ResolvePath(data.CWD(), argument, target)
 	if !ok {
 		failPath(argument)
 	}
@@ -268,13 +288,19 @@ func Equal(value []byte, expected string) bool { return equal(value, expected) }
 
 // ReadByte reads one byte of standard input; the status is as for ReadInput.
 func ReadByte() (byte, uint64) {
-	status, _ := ReadInput(inputByte[:])
-	return inputByte[0], status
+	var value [1]byte
+	status, _ := ReadInput(value[:])
+	return value[0], status
 }
 
 // ReadInput reads what standard input has available into target.
 // StatusNotFound and StatusResourceExhausted mean nothing arrived yet and the
 // caller should retry; StatusPeerDied means end of input.
+//
+// Each call is one native read, so goroutines reading standard input at once
+// get different bytes and no byte twice. Which goroutine gets which bytes is
+// not defined: a program that reads lines or keystrokes reads them from one
+// goroutine.
 func ReadInput(target []byte) (uint64, int) {
 	return ReadInputWithin(target, streamWaitDeadline)
 }
@@ -284,7 +310,8 @@ func ReadInput(target []byte) (uint64, int) {
 func ReadInputWithin(target []byte, deadline uint64) (uint64, int) {
 	count, status := sys.StreamRead(handle.ID(stdinHandle), target)
 	if status == kcall.StatusResourceExhausted {
-		waitStatus := sys.StreamWait(handle.ID(stdinHandle), deadline)
+		// Peer closure counts as ready; the next read reports PeerDied.
+		waitStatus := sys.StreamWaitRead(handle.ID(stdinHandle), deadline)
 		if waitStatus == kcall.StatusTimeout {
 			return uint64(kcall.StatusResourceExhausted), 0
 		}
@@ -336,123 +363,81 @@ const (
 // CallVFS sends one request on the command's filesystem session and waits,
 // bounded, for its reply. Paths too long for a message go in the path page,
 // and a listed name too long for the reply is asked for again with the page
-// attached to receive it (ADR 0110).
+// attached to receive it (ADR 0110). Such a name is copied out of the page
+// before CallVFS returns, so the whole reply belongs to the caller.
+//
+// Concurrent callers take turns: the session has one request outstanding,
+// and the session and the path page stay held until the reply is in.
 func CallVFS(request vfs.Request) (vfs.Reply, bool) {
-	reply, ok := callVFS(request, 0)
-	if ok && (request.Operation == vfs.OperationReadDir || request.Operation == vfs.OperationReadMount) && reply.Status == vfs.StatusNameTooLong {
-		request.NameReturn = true
-		reply, ok = callVFS(request, 0)
-	}
-	if ok && reply.AttachedName != 0 {
-		reply.Name = pathpage.Name(int(reply.AttachedName))
-	}
-	return reply, ok
+	return files.call(request, vfsReplyDeadline, vfsReplyAttempts)
 }
 
-// callVFS is CallVFS with a handle attached, for the bulk operations; the
-// handle moves to the VFS with the request.
-func callVFS(request vfs.Request, attached handle.ID) (vfs.Reply, bool) {
-	if attached == 0 {
-		var ok bool
-		if attached, ok = pathpage.Prepare(&request); !ok {
-			return vfs.Reply{}, false
-		}
-	}
-	correlation++
-	message, ok := vfs.EncodeRequest(request, correlation)
-	if ok && attached != 0 {
-		message.HandleCount, message.Handles[0] = 1, attached
-	}
-	size := 0
-	if ok {
-		size, ok = ipc.Encode(message, wire[:])
-	}
-	if !ok || sys.IPCSend(handle.ID(vfsHandle), wire[:size]) != 0 {
-		if attached != 0 {
-			sys.HandleClose(attached)
-		}
-		return vfs.Reply{}, false
-	}
-	// Bound the wait: a service that never answers must surface an error rather
-	// than freeze the utility, and with it the shell, indefinitely.
-	for attempt := 0; attempt < vfsReplyAttempts; attempt++ {
-		status := sys.IPCWaitReceive(handle.ID(vfsHandle), wire[:], vfsReplyDeadline)
-		if status == ipc.StatusTimeout {
-			continue
-		}
-		if status != 0 {
-			return vfs.Reply{}, false
-		}
-		payloadSize := int(wire[24]) | int(wire[25])<<8
-		size := ipc.WireHeaderSize + payloadSize + int(wire[26])*8
-		received, valid := ipc.Decode(wire[:size])
-		if !valid || received.Correlation != correlation {
-			return vfs.Reply{}, false
-		}
-		reply, valid := vfs.DecodeReply(received)
-		return reply, valid && reply.Operation == request.Operation
-	}
-	return vfs.Reply{}, false
+// attachedVFS transfers a bulk staging handle, never caller-visible memory.
+func attachedVFS(request vfs.Request, attached handle.ID) (vfs.Reply, bool) {
+	return files.callAttached(request, attached, vfsReplyDeadline, vfsReplyAttempts)
 }
 
+type nativePaths struct{}
+
+func (nativePaths) Hold()                                          { pathpage.Hold() }
+func (nativePaths) Release()                                       { pathpage.Release() }
+func (nativePaths) Prepare(request *vfs.Request) (handle.ID, bool) { return pathpage.Prepare(request) }
+func (nativePaths) Name(size int) []byte                           { return pathpage.Name(size) }
+func (nativePaths) Abandon()                                       { pathpage.Abandon() }
+
+// finish best-effort writes message and exits without waiting for a held
+// lock: OOM may happen while this goroutine owns output or a session.
 func finish(code uint64, message string) {
 	if message != "" {
+		target := standard.errorTarget()
 		if code == 0 {
-			write(message)
-		} else {
-			writeError(message)
+			target = standard.stdout
 		}
+		standard.tryRecord(target, sys.Bytes(message), fatalWrite)
 	}
-	if vfsHandle != 0 {
-		sys.HandleClose(handle.ID(vfsHandle))
-	}
+	// Exit tears down process handles. Do not acquire any session/failure lock
+	// or explicitly close a borrowed endpoint which another owner may use.
 	sys.Exit(code)
 	for {
 	}
 }
 
-// Output lines are assembled in one buffer and written once. Processes share
-// the console, so a line split across several writes can interleave with
-// another process's output and arrive as one unreadable line. The buffer
-// holds the longest line the terminal accepts; a longer one, which only many
-// arguments make, goes out a buffer at a time.
-var (
-	lineBuffer [shell.MaxLine]byte
-	lineSize   int
-)
-
-// Print appends value to the current output line.
-func Print(value []byte) {
-	for len(value) != 0 {
-		if lineSize == len(lineBuffer) {
-			writeHandle(stdoutHandle, lineBuffer[:lineSize])
-			lineSize = 0
-		}
-		copied := copy(lineBuffer[lineSize:], value)
-		lineSize += copied
-		value = value[copied:]
-	}
+// Line assembles one line of standard output in storage the caller owns and
+// writes it as one record. A goroutine other than the one running main prints
+// through its own Line. A line longer than its storage goes out a buffer at a
+// time, and then only each buffer is one record. A Line belongs to one
+// goroutine at a time.
+type Line struct {
+	buffer []byte
+	size   int
 }
+
+// NewLine returns a Line that assembles in storage. Empty storage writes
+// each append directly as a separate record.
+func NewLine(storage []byte) Line { return Line{buffer: storage} }
+
+// Print appends value.
+func (line *Line) Print(value []byte) {
+	line.size = appendLine(line.buffer, line.size, value, Write)
+}
+
+// PrintText appends value.
+func (line *Line) PrintText(value string) { line.Print(sys.Bytes(value)) }
 
 // PrintName appends a name that came from a filesystem, a path or a label,
 // with every character a terminal could obey shown as '?'
 // (terminal.Printable). File names are data and must not reach the terminal
 // as commands.
-func PrintName(value []byte) {
+func (line *Line) PrintName(value []byte) {
 	for index := 0; index < len(value); {
 		var character []byte
 		character, index = terminal.Printable(value, index)
-		Print(character)
+		line.Print(character)
 	}
 }
 
-// PrintText appends value to the current output line.
-func PrintText(value string) {
-	Print(sys.Bytes(value))
-}
-
 // PrintUint appends value in decimal and returns how many digits it took.
-func PrintUint(value uint64) int {
+func (line *Line) PrintUint(value uint64) int {
 	var digits [20]byte
 	position := len(digits)
 	for {
@@ -463,38 +448,67 @@ func PrintUint(value uint64) int {
 			break
 		}
 	}
-	Print(digits[position:])
+	line.Print(digits[position:])
 	return len(digits) - position
 }
+
+// Pad appends spaces from column until width.
+func (line *Line) Pad(column int, width int) {
+	for ; column < width; column++ {
+		line.PrintText(" ")
+	}
+}
+
+// End ends the line and writes it to standard output as one record.
+func (line *Line) End() {
+	line.PrintText("\n")
+	standard.writeRecord(standard.stdout, line.buffer[:line.size])
+	line.size = 0
+}
+
+// The current output line. Processes share the console, so a line split
+// across several writes could interleave with another process's output and
+// arrive as one unreadable line; the line is assembled here and written
+// once. The buffer holds the longest line the terminal accepts. Print,
+// PrintText, PrintName, PrintUint, Pad, Arguments and EndLine all work on
+// this one line, so they belong to one goroutine: the one running main,
+// unless the program hands the line over.
+var (
+	lineBuffer  [shell.MaxLine]byte
+	currentLine = Line{buffer: lineBuffer[:]}
+)
+
+// Print appends value to the current output line.
+func Print(value []byte) { currentLine.Print(value) }
+
+// PrintName appends a name to the current output line as Line.PrintName
+// does.
+func PrintName(value []byte) { currentLine.PrintName(value) }
+
+// PrintText appends value to the current output line.
+func PrintText(value string) { currentLine.PrintText(value) }
+
+// PrintUint appends value in decimal and returns how many digits it took.
+func PrintUint(value uint64) int { return currentLine.PrintUint(value) }
 
 // AppendUint appends value in decimal without allocating.
 func AppendUint(target []byte, value uint64) []byte { return appendUint(target, value) }
 
 // Pad appends spaces from column until width.
-func Pad(column int, width int) {
-	for ; column < width; column++ {
-		PrintText(" ")
-	}
-}
+func Pad(column int, width int) { currentLine.Pad(column, width) }
 
 // EndLine ends the current line and writes it to standard output.
-func EndLine() {
-	PrintText("\n")
-	writeHandle(stdoutHandle, lineBuffer[:lineSize])
-	lineSize = 0
-}
+func EndLine() { currentLine.End() }
 
-// Write sends value to standard output as it is, outside the line buffer.
-func Write(value []byte) {
-	writeHandle(stdoutHandle, value)
-}
+// Write sends value to standard output as it is, outside the line buffer, as
+// one record.
+func Write(value []byte) { standard.writeRecord(standard.stdout, value) }
 
-// WriteError sends already escaped diagnostic bytes to standard error.
+// WriteError sends already escaped diagnostic bytes to standard error as one
+// record.
 func WriteError(value []byte) { writeErrorBytes(value) }
 
-func write(message string) {
-	writeHandle(stdoutHandle, sys.Bytes(message))
-}
+func write(message string) { Write(sys.Bytes(message)) }
 
 // Mark writes a validation marker; normal builds print nothing.
 func Mark(message string) {
@@ -508,26 +522,29 @@ func writeError(message string) {
 }
 
 func writeErrorBytes(message []byte) {
-	target := stderrHandle
-	if target == 0 {
-		target = stdoutHandle
-	}
-	writeHandle(target, message)
+	standard.writeRecord(standard.errorTarget(), message)
 }
 
-func writeHandle(target uint64, value []byte) {
-	for len(value) != 0 {
-		size := len(value)
-		if size > int(kcall.MaxStreamIO) {
-			size = int(kcall.MaxStreamIO)
-		}
+// nativeStream writes the standard streams with the kernel.
+type nativeStream struct{}
+
+// write moves a prefix of value, one native stream write, waiting while the
+// stream is full. A console handle takes the whole value at once. A stream
+// that fails or stays full ends the process with status 2.
+func (nativeStream) write(target uint64, value []byte) int {
+	size := len(value)
+	if size > int(kcall.MaxStreamIO) {
+		size = int(kcall.MaxStreamIO)
+	}
+	for {
 		written, status := sys.StreamWrite(handle.ID(target), value[:size])
 		if status == kcall.StatusPermissionDenied {
 			sys.ConsoleWrite(handle.ID(target), value)
-			return
+			return len(value)
 		}
 		if status == kcall.StatusResourceExhausted {
-			if sys.StreamWait(handle.ID(target), streamWaitDeadline) != kcall.StatusOK {
+			// Peer closure counts as ready; the next write reports PeerDied.
+			if sys.StreamWaitWrite(handle.ID(target), streamWaitDeadline) != kcall.StatusOK {
 				sys.Exit(2)
 			}
 			continue
@@ -535,6 +552,39 @@ func writeHandle(target uint64, value []byte) {
 		if status != kcall.StatusOK || written == 0 || written > size {
 			sys.Exit(2)
 		}
-		value = value[written:]
+		return written
 	}
 }
+
+// fatalWrite is one best-effort native write, with no StreamWait or retries.
+// A full/broken stream loses the remaining diagnostic but cannot prevent Exit.
+func fatalWrite(target uint64, value []byte) int {
+	size := len(value)
+	if size > int(kcall.MaxStreamIO) {
+		size = int(kcall.MaxStreamIO)
+	}
+	written, status := sys.StreamWrite(handle.ID(target), value[:size])
+	if status == kcall.StatusPermissionDenied {
+		if sys.ConsoleWrite(handle.ID(target), value) == kcall.StatusOK {
+			return len(value)
+		}
+		return 0
+	}
+	if status != kcall.StatusOK || written < 0 || written > size {
+		return 0
+	}
+	return written
+}
+
+// nativeIPC sends and receives service messages with the kernel.
+type nativeIPC struct{}
+
+func (nativeIPC) send(channel handle.ID, wire []byte) kcall.Status {
+	return sys.IPCSend(channel, wire)
+}
+
+func (nativeIPC) waitReceive(channel handle.ID, wire []byte, ticks uint64) kcall.Status {
+	return sys.IPCWaitReceive(channel, wire, ticks)
+}
+
+func (nativeIPC) close(id handle.ID) { sys.HandleClose(id) }

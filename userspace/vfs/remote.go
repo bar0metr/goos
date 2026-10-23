@@ -1,6 +1,7 @@
 package vfsservice
 
 import (
+	"goos/internal/validation"
 	"goos/kernel/ramfs"
 	"goos/userspace/fsproto"
 )
@@ -35,6 +36,10 @@ type Remote struct {
 	// pages indexes the file cache, the memory this backend shares with the
 	// service; every read and write moves its bytes there (ADR 0098).
 	pages PageCache
+	// copyFault, when set, checks each cached copy (SetCopyFault). It is
+	// set before any read and never changes, so workers may read it.
+	copyFault   CopyFaultHandler
+	copyContext CopyFault
 }
 
 // AttachCache gives the backend the file-cache mapping it shares with its
@@ -218,6 +223,10 @@ func (remote *Remote) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Sta
 // Read serves target from the file cache, asking the service for each page it
 // does not hold. A page shorter than a page is the end of the file.
 func (remote *Remote) Read(id ramfs.NodeID, offset uint64, target []byte) (int, ramfs.Status) {
+	if validation.Enabled && remote.copyFault != nil && (!bufferValid(remote.pages.memory) || !bufferValid(target)) {
+		remote.reportCacheFault(remote.pages.memory, target, len(target))
+	}
+
 	// A read that starts at or past the end of a regular file of known size
 	// is the end of the file, and needs no exchange to find that out.
 	if stat, known := remote.cached(id); known && stat.Kind == ramfs.KindFile && offset >= stat.Size {
@@ -244,7 +253,15 @@ func (remote *Remote) Read(id ramfs.NodeID, offset uint64, target []byte) (int, 
 		if within >= length {
 			break
 		}
-		copied := copy(target[total:], remote.pages.Slot(slot)[within:length])
+		if validation.Enabled && remote.copyFault != nil &&
+			(slot < 0 || slot >= scratchSlot || length > fsproto.PageSize || !bufferValid(remote.pages.memory) || !bufferValid(target)) {
+			remote.reportCacheFault(remote.pages.memory, target, len(target)-total)
+		}
+		source := remote.pages.Slot(slot)[within:length]
+		if validation.Enabled && remote.copyFault != nil && !copyValid(target[total:], source) {
+			remote.reportCacheFault(source, target[total:], min(len(source), len(target)-total))
+		}
+		copied := copy(target[total:], source)
 		total += copied
 		if length < fsproto.PageSize && within+uint64(copied) == length {
 			// The page ends the file, and the read has reached its end.
@@ -313,6 +330,13 @@ func (remote *Remote) page(id ramfs.NodeID, page uint64) (int, uint64, ramfs.Sta
 func (remote *Remote) Write(id ramfs.NodeID, offset uint64, data []byte) (int, ramfs.Status) {
 	if !remote.pages.Ready() {
 		return 0, ramfs.StatusIOError
+	}
+	if remote.transport == nil && len(data) != 0 {
+		// An unanswered request may still consume shared cache bytes. The
+		// owner detaches before allowing another mutation; fail before a
+		// scratch/cached slot is overwritten, not only in call below.
+		remote.forgetAll()
+		return 0, ramfs.StatusPeerDied
 	}
 	total := 0
 	for total < len(data) {
@@ -459,4 +483,10 @@ func statOf(reply fsproto.Reply) ramfs.Stat {
 	return ramfs.Stat{ID: reply.Node, Kind: reply.Kind, Size: reply.Value,
 		Created: reply.Created, Modified: reply.Modified, Attributes: reply.Attributes,
 		AttributesAvailable: reply.AttributesAvailable}
+}
+
+func (remote *Remote) reportCacheFault(source, target []byte, length int) {
+	fault := remote.copyContext
+	fault.Op, fault.Src, fault.Dst, fault.Len = "cache", sliceAddress(source), sliceAddress(target), length
+	remote.copyFault(fault)
 }

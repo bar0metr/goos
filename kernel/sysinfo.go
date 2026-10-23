@@ -46,15 +46,18 @@ func (handler nativeCallHandler) HandleInfo(slot uint64, address uint64) kcall.S
 // what a process list already shows.
 func (handler nativeCallHandler) ProcessInfo(index uint64, address uint64) kcall.Status {
 	local := thisCPU()
-	if _, found := handler.self(); !found {
+	target, found := handler.self()
+	if !found {
 		return kcall.StatusPermissionDenied
 	}
-	if index >= process.MaxProcesses {
-		return kcall.StatusNotFound
-	}
-	target, found := processRegistry.At(int(index))
-	if !found {
-		return kcall.StatusNotFound
+	if index != kcall.ProcessInfoSelf {
+		if index >= process.MaxProcesses {
+			return kcall.StatusNotFound
+		}
+		target, found = processRegistry.At(int(index))
+		if !found {
+			return kcall.StatusNotFound
+		}
 	}
 	state := amd64.ReadSchedulerState()
 	status := kcall.ProcessWaiting

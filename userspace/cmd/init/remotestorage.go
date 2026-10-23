@@ -207,12 +207,11 @@ func installRemoteScope(index int) bool {
 	}
 	correlation++
 	request, ok := vfs.InstallScopeRequest(uint8(index), scope.path[:scope.size], scope.subtree, scope.denied, 0, correlation)
-	if !ok || !sendMessage(vfsControlHandle, request) {
+	if !ok {
 		return false
 	}
-	message, status := receive(vfsControlHandle, vfsSessionDeadline)
-	result, ok := vfs.DecodeAddSessionReply(message)
-	scope.installed = status == ipc.StatusOK && ok && result == vfs.StatusOK && message.Correlation == correlation
+	result, status, _ := filesystemRequests.Control(handle.ID(vfsControlHandle), &request, vfsSessionDeadline)
+	scope.installed = status == ipc.StatusOK && result == vfs.StatusOK
 	return scope.installed
 }
 
@@ -330,13 +329,16 @@ func openRemoteAuthoritySession(authority vfs.Authority) (handle.ID, string) {
 	}
 	correlation++
 	request, ok := vfs.AddSessionWithAuthorityRequest(handle.ID(pair[1]), authority, correlation)
-	if !ok || !sendMessage(vfsControlHandle, request) {
+	if !ok {
 		closePair(pair)
 		return 0, "REMOTE_AUTHORITY_SEND_FAILED"
 	}
-	message, status := receive(vfsControlHandle, vfsSessionDeadline)
-	result, ok := vfs.DecodeAddSessionReply(message)
-	if status != ipc.StatusOK || !ok || result != vfs.StatusOK || message.Correlation != correlation {
+	result, status, sent := filesystemRequests.Control(handle.ID(vfsControlHandle), &request, vfsSessionDeadline)
+	if !sent {
+		closePair(pair)
+		return 0, "REMOTE_AUTHORITY_SEND_FAILED"
+	}
+	if status != ipc.StatusOK || result != vfs.StatusOK {
 		closeOpen(handle.ID(pair[0]))
 		return 0, "REMOTE_AUTHORITY_REFUSED"
 	}

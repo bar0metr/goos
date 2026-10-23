@@ -47,13 +47,35 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   into private trees and records source hashes. See [the SSH
   overlay](../../tools/sshcompat/README.md).
 - `make test-unit` runs all host-side Go tests.
+- `make test-concurrency-audit` checks that every package-level variable under
+  `userspace/` has a row in the
+  [native concurrency audit](native-concurrency-audit.md);
+  `make test-userspace-libs` runs the userspace libraries' concurrency tests,
+  2, 4 and 8 goroutines each, under the race detector.
 - `make test-integration` builds and validates the UEFI kernel artifact.
 - `make test-security` runs the capability, handle, IPC, VM, filesystem, and
   userspace security-focused host tests explicitly, and those of the
   build-time stack frame check (`tools/stackframes`, ADR 0088).
 - `make test` runs the three fast targets above and does not start QEMU.
 - `make test-boot` builds the validation ISO (`VALIDATION=1`, ADR 0058) and
-  runs the two-phase QEMU boot and reboot persistence test.
+  runs the two-phase QEMU boot and reboot persistence test. After storage
+  faults, the harness appends a validation-only `__boot_ready N` builtin to
+  each foreground sequence. Its `SHELL_READY token=N` acknowledgement is
+  emitted by the interactive shell after preceding jobs finish; child stdout
+  and redrawn prompts do not establish that the shell owns the next input.
+  Both the expected output and a fresh acknowledgement are required within
+  600 polls (0.1 seconds between polls); a timeout stops command delivery.
+  Host regressions in `tests/boot/qemu_boot_test.sh` cover early stdout,
+  redraws, stale counters and missing output/completion. Its VFS runs on
+  the goroutine runtime. `make test-vfs-serial` runs the same checks with
+  `VFS_RUNTIME=serial`, the VFS a normal build ships until ADR 0204 accepts
+  the runtime.
+- `make test-goroutines`, `make test-goroutine-gc`, and
+  `make test-goroutine-io` boot one validation guest with four processors
+  (`GOROUTINE_SMP`) and run the `goprobe` runtime, collector, and
+  scheduler-aware wait suites through `tests/boot/goroutines.sh`.
+  `make test-goroutine-compiler` checks the compiled goroutine transport.
+  `test-all` and `release-check` run all four.
 - `make test-native-threads`, `make test-thread-gc`, and
   `make test-thread-allocator` check native threads (ADR 0203), each in one
   validation guest with four processors (`THREAD_SMP`) driven by

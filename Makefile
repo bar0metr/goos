@@ -21,7 +21,10 @@ VFS_ELF = $(OUT_DIR)/userspace/vfs.elf
 # shell read is generated from the manifests the commands declare (ADR 0080).
 # The boot archive carries the recovery subset tools/initramfs names
 # (ADR 0175).
-VALIDATION_COMMANDS := cryptoprobe trustprobe memreclaim threadprobe
+VALIDATION_COMMANDS := cryptoprobe trustprobe memreclaim threadprobe goprobe
+# Commands built with the goroutine runtime (ADR 0204): the TinyGo root
+# tools/goroutineroot prepares and the goroutine target.
+GOROUTINE_COMMANDS := goprobe
 COMMANDS = $(filter-out $(if $(filter 0,$(VALIDATION)),$(VALIDATION_COMMANDS)),$(sort $(notdir $(wildcard userspace/bin/*))))
 COMMAND_DIR = $(OUT_DIR)/userspace/bin
 COMMAND_ELF_DIR = $(OUT_DIR)/userspace/bin-elf
@@ -30,7 +33,7 @@ COMMAND_ELFS = $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,$(COMMANDS)))
 COMMAND_INDEX = $(OUT_DIR)/userspace/commands
 # Every command is rebuilt when any package a command imports changes; the
 # commands share nearly all of them.
-COMMAND_LIBRARY = $(call go_deps,./userspace/bin/...)
+COMMAND_LIBRARY = $(call go_deps,$(addprefix ./userspace/bin/,$(filter-out $(GOROUTINE_COMMANDS),$(COMMANDS))))
 BLOCK_IMAGE = $(OUT_DIR)/userspace/block
 BLOCK_ELF = $(OUT_DIR)/userspace/block.elf
 VIRTIO_BLOCK_IMAGE = $(OUT_DIR)/userspace/virtio-blk
@@ -123,6 +126,31 @@ VALIDATION ?= 0
 ifeq ($(filter $(VALIDATION),0 1),)
 $(error VALIDATION must be 0 or 1)
 endif
+# VFS_PROBE builds the explicit native goroutine VFS acceptance fixture. It is
+# deliberately a separate validation variant so ordinary validation boots do
+# not run its 4,096-read memory plateau workload.
+VFS_PROBE ?= 0
+ifeq ($(filter $(VFS_PROBE),0 1),)
+$(error VFS_PROBE must be 0 or 1)
+endif
+ifeq ($(VFS_PROBE),1)
+ifneq ($(VALIDATION),1)
+$(error VFS_PROBE requires VALIDATION=1)
+endif
+endif
+# VFS_RUNTIME picks how the VFS service is built (ADR 0204): goroutines runs
+# its read pool on the native goroutine runtime, serial runs every request on
+# one thread. Until ADR 0204 accepts the runtime for production, a normal
+# build ships serial and a validation build tests goroutines; the acceptance
+# fixture needs goroutines.
+VFS_RUNTIME_DEFAULT := $(if $(filter 1,$(VALIDATION)),goroutines,serial)
+VFS_RUNTIME ?= $(VFS_RUNTIME_DEFAULT)
+ifeq ($(filter $(VFS_RUNTIME),goroutines serial),)
+$(error VFS_RUNTIME must be goroutines or serial)
+endif
+ifeq ($(VFS_PROBE)$(VFS_RUNTIME),1serial)
+$(error VFS_PROBE requires VFS_RUNTIME=goroutines)
+endif
 VALIDATION_CA_BUNDLE ?=
 ifneq ($(strip $(VALIDATION_CA_BUNDLE)),)
 ifneq ($(VALIDATION),1)
@@ -145,13 +173,16 @@ endif
 ifeq ($(VALIDATION),1)
 BUILD_TAGS += goos_validation
 endif
+ifeq ($(VFS_PROBE),1)
+BUILD_TAGS += goos_vfs_probe
+endif
 TINYGO_TAGS := -tags "$(BUILD_TAGS)"
 # go_deps lists the Go and assembly files of every project package a userspace
 # program imports, as go list sees them under the userspace target's tags, so
 # editing any of them rebuilds the program. If go list fails the target is
 # forced, and TinyGo reports the error.
 USERSPACE_TAGS := uefi baremetal linux amd64 tinygo goos_userspace $(BUILD_TAGS)
-go_deps = $(shell $(BUILD_ENV) GOOS=linux GOARCH=amd64 go list -tags "$(USERSPACE_TAGS)" -deps -f '{{if not .Standard}}{{$$d := .Dir}}{{range .GoFiles}}{{$$d}}/{{.}} {{end}}{{range .SFiles}}{{$$d}}/{{.}} {{end}}{{end}}' $(1) 2>/dev/null || echo FORCE)
+go_deps = $(shell $(BUILD_ENV) GOOS=linux GOARCH=amd64 go list -tags "$(USERSPACE_TAGS) $(2)" -deps -f '{{if not .Standard}}{{$$d := .Dir}}{{range .GoFiles}}{{$$d}}/{{.}} {{end}}{{range .SFiles}}{{$$d}}/{{.}} {{end}}{{end}}' $(1) 2>/dev/null || echo FORCE)
 # OPT is TinyGo's optimisation level for the kernel and every userspace image.
 # TinyGo accepts 0, 1, 2, s, and z; 2 is its highest speed level (there is no 3).
 # 2 is the default, measured faster than z (the smallest) in ADR 0090.
@@ -163,10 +194,10 @@ endif
 # written; the kernel banner, uname, and system.build.release all read it there.
 VERSION := $(shell sed -n 's/^[[:space:]]*Release[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' internal/version/version.go)
 # Each configuration builds into its own tree, so switching HZ, DIAG,
-# VALIDATION, or OPT never mixes objects built for another configuration. The
-# level is always in the name, so a tree built before the default changed is
-# never taken for one built at the new default.
-OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)-opt$(OPT)
+# VALIDATION, VFS_PROBE, VFS_RUNTIME, or OPT never mixes objects built for
+# another configuration. The level is always in the name, so a tree built
+# before the default changed is never taken for one built at the new default.
+OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)$(if $(filter 1,$(VFS_PROBE)),-vfsprobe)$(if $(filter-out $(VFS_RUNTIME_DEFAULT),$(VFS_RUNTIME)),-vfs$(VFS_RUNTIME))-opt$(OPT)
 
 .DEFAULT_GOAL := all
 
@@ -214,18 +245,44 @@ $(SHELL_IMAGE): $(SHELL_ELF) tools/elf2native/main.go kernel/loader/native.go ke
 	@$(STACKFRAMES) $(SHELL_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(SHELL_ELF) $@
 
-$(VFS_ELF): $(call go_deps,./userspace/cmd/vfs) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
-	@mkdir -p $(OUT_DIR)/userspace
-	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/vfs
-
 $(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(VFS_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(VFS_ELF) $@
 
 .SECONDEXPANSION:
-$(filter-out $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust)),$(COMMAND_ELFS)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(filter-out $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust $(GOROUTINE_COMMANDS))),$(COMMAND_ELFS)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/bin/$*
+
+GOROUTINE_ROOT := $(BUILD_DIR)/toolchains/goroutines
+GOROUTINE_ROOT_STAMP := $(GOROUTINE_ROOT)/goroutineroot.json
+GOROUTINE_TARGET := tinygo/targets/goos-userspace-goroutines-amd64.json
+GOROUTINE_ROOT_SOURCES := $(wildcard tools/goroutineroot/*.go tools/internal/compatroot/*.go internal/repobuild/*.go tinygo/goroutines/*.txt) tinygo/runtime/native.go.txt
+# The root is a copy-on-write mirror of the installed TinyGo with the
+# scheduler files replaced; it is made again whenever an input changes.
+$(GOROUTINE_ROOT_STAMP): $(GOROUTINE_ROOT_SOURCES)
+	rm -rf $(GOROUTINE_ROOT)
+	mkdir -p $(GOROUTINE_ROOT)
+	$(BUILD_ENV) go run ./tools/goroutineroot "$$(tinygo env TINYGOROOT)" $(GOROUTINE_ROOT) tinygo/goroutines
+GOROUTINE_BUILD = $(BUILD_ENV) TINYGOROOT=$(abspath $(GOROUTINE_ROOT)) tinygo build $(TINYGO_TAGS) -target=$(GOROUTINE_TARGET) -opt=$(OPT) -no-debug
+
+# Recipe changes must invalidate VFS images from older build trees, including
+# the ordinary tree that held a goroutine VFS before the serial default.
+$(VFS_ELF): Makefile
+
+ifeq ($(VFS_RUNTIME),serial)
+$(VFS_ELF): $(call go_deps,./userspace/cmd/vfs) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/vfs
+else
+$(VFS_ELF): $(call go_deps,./userspace/cmd/vfs,goos_goroutines) $(GOROUTINE_ROOT_STAMP) $(GOROUTINE_TARGET) userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(GOROUTINE_BUILD) -o $@ ./userspace/cmd/vfs
+endif
+
+$(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,$(GOROUTINE_COMMANDS))): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) $(wildcard userspace/runtime/goroutine/*.go) $(GOROUTINE_ROOT_STAMP) $(GOROUTINE_TARGET) userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(COMMAND_ELF_DIR)
+	$(GOROUTINE_BUILD) -o $@ ./userspace/bin/$*
 
 TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tools/internal/compatroot/*.go internal/repobuild/*.go tools/scratch/*.go tinygo/runtime/*.txt) tools/build-tls.sh
 $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) $(TLS_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
@@ -236,6 +293,9 @@ $(COMMAND_IMAGES): $(COMMAND_DIR)/%: $(COMMAND_ELF_DIR)/%.elf tools/elf2native/m
 	@mkdir -p $(COMMAND_DIR)
 	@$(STACKFRAMES) $<
 	$(BUILD_ENV) go run ./tools/elf2native $< $@
+
+.PHONY: command-index
+command-index: $(COMMAND_INDEX)
 
 # The directory itself is a prerequisite: removing a command changes no source
 # file, only the listing, and the index must drop it.
@@ -252,9 +312,17 @@ $(BLOCK_IMAGE): $(BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go ke
 	@$(STACKFRAMES) $(BLOCK_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(BLOCK_ELF) $@
 
+# The validation build runs the storage driver on the goroutine runtime, so
+# its interrupt waits park a goroutine on real disk interrupts (ADR 0204).
+ifeq ($(VALIDATION),1)
+$(VIRTIO_BLOCK_ELF): $(call go_deps,./userspace/cmd/virtio-blk,goos_goroutines) $(GOROUTINE_ROOT_STAMP) $(GOROUTINE_TARGET) userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(GOROUTINE_BUILD) -o $@ ./userspace/cmd/virtio-blk
+else
 $(VIRTIO_BLOCK_ELF): $(call go_deps,./userspace/cmd/virtio-blk) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/virtio-blk
+endif
 
 $(VIRTIO_BLOCK_IMAGE): $(VIRTIO_BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(VIRTIO_BLOCK_ELF)
@@ -435,11 +503,17 @@ test-all:
 	$(MAKE) docs
 	$(MAKE) test-memory
 	$(MAKE) test-boot
+	$(MAKE) test-vfs-serial
 	$(MAKE) test-lscpu
 	$(MAKE) test-smp
 	$(MAKE) test-native-threads
 	$(MAKE) test-thread-gc
 	$(MAKE) test-thread-allocator
+	$(MAKE) test-goroutine-compiler
+	$(MAKE) test-goroutines
+	$(MAKE) test-goroutine-gc
+	$(MAKE) test-goroutine-io
+	$(MAKE) test-goroutine-panic
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
@@ -463,11 +537,17 @@ release-check:
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-memory
 	$(MAKE) test-boot
+	$(MAKE) test-vfs-serial
 	$(MAKE) test-lscpu
 	$(MAKE) test-smp
 	$(MAKE) test-native-threads
 	$(MAKE) test-thread-gc
 	$(MAKE) test-thread-allocator
+	$(MAKE) test-goroutine-compiler
+	$(MAKE) test-goroutines
+	$(MAKE) test-goroutine-gc
+	$(MAKE) test-goroutine-io
+	$(MAKE) test-goroutine-panic
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
@@ -518,10 +598,17 @@ test-fat32-stress:
 	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -timeout 60m ./userspace/fat32
 
 test-boot:
+	@sh tests/boot/qemu_boot_test.sh
 	@$(MAKE) --no-print-directory iso VALIDATION=1
 	@$(MAKE) --no-print-directory recovery-iso VALIDATION=1
 	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/boot-test-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
+
+# The serial VFS (VFS_RUNTIME=serial) is the fallback while the goroutine
+# runtime is experimental (ADR 0204), so every boot check runs against it too.
+.PHONY: test-vfs-serial
+test-vfs-serial:
+	@$(MAKE) --no-print-directory test-boot VFS_RUNTIME=serial
 
 # The reclaimable native heap (ADR 0201): the allocator and collector model on
 # the host, then one guest that runs memreclaim, a double free, heap
@@ -597,8 +684,9 @@ test-smp:
 
 # Native threads (ADR 0203), one validation guest with four processors each:
 # test-native-threads checks threads, joins, exit codes, the task quota, and
-# faults; test-thread-gc the roots of every thread and collections they ask
-# for at once; test-thread-allocator the thread-owned slabs, with their host
+# faults; test-thread-gc the roots of every thread, collections they ask
+# for at once, and collections while a thread is held inside a region
+# transition; test-thread-allocator the thread-owned slabs, with their host
 # model and race tests. bench-thread-allocator only measures: allocation with
 # the heap lock alone and with owned slabs on 1, 2, 4, and 8 threads, on
 # eight processors, into build/reports/thread-allocator.md.
@@ -1090,6 +1178,8 @@ help:
 	  '  test-all        run the complete validation gate, including QEMU' \
 	  '  test-security   run capability, handle, and VM security tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
+	  '  test-vfs-serial run test-boot with the serial VFS fallback (VFS_RUNTIME=serial)' \
+	  '  test-goroutines/test-goroutine-gc/test-goroutine-io/test-goroutine-panic  goroutine suites in QEMU' \
 	  '  test-memory     check the reclaimable native heap on the host and in QEMU' \
 	  '  test-smp        boot four processors and prove they run tasks at once' \
 	  '  test-native-threads  native threads: parallel run, joins, quota, faults' \
@@ -1133,3 +1223,69 @@ trust-update:
 test-trust-update:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1 VALIDATION_CA_BUNDLE=tools/tlsfixture/testdata/root-cert.pem VALIDATION_TRUST_UPDATE_URL=https://tls.test/update
 	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) sh tests/boot/trust-update.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation-opt$(OPT)/system
+
+.PHONY: test-goroutine-compiler test-vfs-goroutine-acceptance
+# Compile the real fixture and inspect its linked transport and LLVM lowering.
+test-goroutine-compiler: $(GOROUTINE_ROOT_STAMP) $(INIT_RUNTIME)
+	$(BUILD_ENV) go test ./tools/goroutineroot ./tools/stackframes
+	@mkdir -p $(OUT_DIR)/goroutine-compiler
+	$(GOROUTINE_BUILD) -o $(OUT_DIR)/goroutine-compiler/fixture.elf ./userspace/bin/goprobe
+	$(GOROUTINE_BUILD) -o $(OUT_DIR)/goroutine-compiler/fixture.ll ./userspace/bin/goprobe
+	@$(STACKFRAMES) $(OUT_DIR)/goroutine-compiler/fixture.elf
+	sh tests/boot/goroutine_compiler.sh $(OUT_DIR)/goroutine-compiler/fixture.elf $(OUT_DIR)/goroutine-compiler/fixture.ll $(OUT_DIR)/goroutine-compiler/evidence
+
+GOROUTINE_SMP ?= 4
+.PHONY: goroutine-test-images test-goroutines test-goroutine-gc test-goroutine-io test-goroutine-panic bench-goroutines test-pve-goroutines
+goroutine-test-images:
+	@$(MAKE) --no-print-directory command-index VALIDATION=1
+	@$(MAKE) --no-print-directory -j8 iso VALIDATION=1
+	@$(MAKE) --no-print-directory -j8 test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/goroutines-test.img
+
+test-goroutines: goroutine-test-images
+	@SUITE=runtime SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
+
+test-goroutine-gc: goroutine-test-images
+	@SUITE=gc SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
+
+test-goroutine-io: goroutine-test-images
+	@SUITE=io SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
+
+test-goroutine-panic: goroutine-test-images
+	@SUITE=panic SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
+
+# This named, explicit variant is the end-to-end acceptance fixture for the
+# real two-worker goroutine VFS. It is intentionally not part of ordinary
+# validation boots or test-all: the fixture also gathers a memory plateau.
+test-vfs-goroutine-acceptance: VFS_PROBE=1
+test-vfs-goroutine-acceptance: VALIDATION=1
+test-vfs-goroutine-acceptance:
+	@$(MAKE) --no-print-directory command-index VALIDATION=1 VFS_PROBE=1
+	@$(MAKE) --no-print-directory -j8 iso VALIDATION=1 VFS_PROBE=1
+	@$(MAKE) --no-print-directory -j8 test-disk VALIDATION=1 VFS_PROBE=1 TEST_DISK=$(BUILD_DIR)/vfs-goroutine-acceptance.img
+	@VFSPROBE=1 SUITE=runtime SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/vfs-goroutine-acceptance.img
+
+bench-goroutines: goroutine-test-images
+	@SUITE=bench SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
+
+test-pve-goroutines:
+	@$(MAKE) --no-print-directory -j8 pve-artifacts VALIDATION=1
+	@$(PVELAB) run --scenario goroutines --cpu host --sockets 1 --cores 8 $(PVE_RUN_FLAGS)
+
+.PHONY: test-pve-native-concurrency
+# Runtime, region rendezvous and fenced VFS recovery in one validation guest.
+test-pve-native-concurrency:
+	@$(MAKE) --no-print-directory -j8 pve-artifacts VALIDATION=1 VFS_PROBE=1
+	@$(PVELAB) run --scenario native-concurrency --cpu host --sockets 1 --cores 8 $(PVE_RUN_FLAGS)
+
+# Native concurrency contracts (docs/development/native-concurrency-audit.md).
+# test-concurrency-audit checks that every package-level variable under
+# userspace/ has an audit row; test-userspace-libs runs the libraries'
+# concurrency tests with the race detector.
+USERSPACE_LIB_PACKAGES := ./userspace/runtime/lock ./userspace/runtime/pages ./userspace/utility ./userspace/pathpage ./userspace/log ./userspace/startup ./userspace/fsproto ./userspace/terminal
+.PHONY: test-concurrency-audit test-userspace-libs
+test-concurrency-audit:
+	$(BUILD_ENV) go test -count=1 ./tools/concurrencyaudit
+	$(BUILD_ENV) go run ./tools/concurrencyaudit
+
+test-userspace-libs:
+	$(BUILD_ENV) go test -race -count=1 $(USERSPACE_LIB_PACKAGES)

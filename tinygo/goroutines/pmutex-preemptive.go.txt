@@ -1,0 +1,13 @@
+//go:build !tinygo.unicore
+
+package task
+
+// PMutex protects short runtime transitions, including channel queues.
+// Holding it pins the goroutine to its M. A timer callback on that M's
+// scheduler stack must not wait for a channel lock held by a G the same M
+// switched out. User sync.Mutex still uses the parking futex.
+type PMutex struct{ held uint32 }
+
+func (m *PMutex) Lock() { goosLock(&m.held) }
+
+func (m *PMutex) Unlock() { goosUnlock(&m.held) }

@@ -163,6 +163,9 @@ type cpuScratch struct {
 	// the native operation, 'l' and the Linux number, or zero.
 	callKind   byte
 	callNumber uint64
+	// guardStack holds the user words a validation build reports after a
+	// stack guard fault.
+	guardStack [512]byte
 	// linuxReleased collects descriptions the Linux tables let go of, for
 	// release once the tables are no longer held.
 	linuxReleased linuxcompat.Released
@@ -225,6 +228,25 @@ func reportKernelParallelPeak() {
 	reportPeak("KERNEL_THREAD_PEAK ", amd64.KernelThreadPeak(), &kernelThreadReported)
 }
 
+// reportProcessThreadPeak prints, in validation builds, how many tasks of an
+// exited process were inside the kernel at once, when two or more were. A
+// boot test reads it for the program it ran: the global KERNEL_THREAD_PEAK
+// may already be at the processor count from multithreaded services.
+func reportProcessThreadPeak(pid process.ID, linux bool, peak uint64) {
+	if peak < 2 {
+		return
+	}
+	console := kernelconsole.New()
+	console.WriteString("PROCESS_THREAD_PEAK pid=")
+	console.WriteUint(uint64(pid))
+	if linux {
+		console.WriteString(" linux=1")
+	}
+	console.WriteString(" peak=")
+	console.WriteUint(peak)
+	console.WriteString("\n")
+}
+
 func reportPeak(marker string, peak uint64, reported *uint64) {
 	if peak <= *reported {
 		return
@@ -256,6 +278,53 @@ func reportStuckLock(level lock.Level, holder uint32) {
 	}
 	console.WriteString("\n")
 	if validation.Enabled {
+		reportProcessorLocks()
 		panicSerial("lock watchdog: a spin outlasted the watchdog")
+	}
+}
+
+// reportProcessorLocks prints, for each started processor, the task slot it
+// runs, whether that task is in the kernel, its last call, and the lock
+// levels it holds. A reader of an RW lock records no owner, so this is how a
+// report names the processors that keep a writer waiting. The fields are
+// read without locks while the processors run on.
+func reportProcessorLocks() {
+	console := kernelconsole.New()
+	for cpu, local := range cpuScratches {
+		if local == nil {
+			continue
+		}
+		slot, inKernel := amd64.ProcessorActivity(cpu)
+		console.WriteString("LOCK_CPU cpu=")
+		console.WriteUint(uint64(cpu))
+		console.WriteString(" slot=")
+		console.WriteUint(slot)
+		console.WriteString(" kernel=")
+		if inKernel {
+			console.WriteString("1")
+		} else {
+			console.WriteString("0")
+		}
+		if local.callKind != 0 {
+			console.WriteString(" call=")
+			console.WriteByte(local.callKind)
+			console.WriteUint(local.callNumber)
+		}
+		console.WriteString(" held=")
+		levels := lock.HeldLevelsOf(cpu)
+		if levels == 0 {
+			console.WriteString("none")
+		}
+		for level, first := lock.Level(1), true; int(level) < lock.Levels; level++ {
+			if levels&(uint32(1)<<level) == 0 {
+				continue
+			}
+			if !first {
+				console.WriteString(",")
+			}
+			console.WriteString(level.String())
+			first = false
+		}
+		console.WriteString("\n")
 	}
 }

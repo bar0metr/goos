@@ -1,6 +1,11 @@
 // Package log emits structured events to the system log. The kernel stamps
 // each record with the time and the caller's process ID; warnings and errors
 // are also echoed to the console.
+//
+// Every event is assembled in buffers on the caller's stack and handed to the
+// kernel in one write, so events from different goroutines or threads of a
+// process are each whole, in whatever order they arrive. Init runs once,
+// before the process starts a second goroutine or thread.
 package log
 
 import (
@@ -22,11 +27,10 @@ const (
 	kindUint
 )
 
+// console and component are set by Init and only read afterwards.
 var (
 	console   handle.ID
 	component string
-	wire      [logfmt.MaxWire]byte
-	fields    [logfmt.MaxFields]byte
 )
 
 // Init names the calling component and the console device that authorizes
@@ -48,6 +52,14 @@ func Warn(message string, values ...Field) bool  { return emit(logfmt.Warn, mess
 func Error(message string, values ...Field) bool { return emit(logfmt.Error, message, values) }
 
 func emit(level logfmt.Level, message string, values []Field) bool {
+	var wire [logfmt.MaxWire]byte
+	size, ok := encode(level, component, message, values, &wire)
+	return ok && sys.LogWrite(console, wire[:size]) == kcall.StatusOK
+}
+
+// encode builds one event's wire record in wire and returns its size.
+func encode(level logfmt.Level, name, message string, values []Field, wire *[logfmt.MaxWire]byte) (int, bool) {
+	var fields [logfmt.MaxFields]byte
 	encoded := fields[:0]
 	for _, field := range values {
 		var digits [20]byte
@@ -57,9 +69,8 @@ func emit(level logfmt.Level, message string, values []Field) bool {
 		}
 		var ok bool
 		if encoded, ok = logfmt.AppendField(encoded, field.Key, value); !ok {
-			return false
+			return 0, false
 		}
 	}
-	size, ok := logfmt.Encode(level, sys.Bytes(component), sys.Bytes(message), encoded, wire[:])
-	return ok && sys.LogWrite(console, wire[:size]) == kcall.StatusOK
+	return logfmt.Encode(level, sys.Bytes(name), sys.Bytes(message), encoded, wire[:])
 }

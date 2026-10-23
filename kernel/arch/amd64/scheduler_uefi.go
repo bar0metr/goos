@@ -228,6 +228,7 @@ func installUserTask(context uint64, pageTable uint64, kernelStackTop uint64) ui
 		taskContexts[slot] = context
 		taskRoots[slot] = pageTable
 		taskFSBases[slot] = 0
+		clearPreempt(uint64(slot))
 		taskExitCodes[slot] = 0
 		userCallBaselines[slot] = 0
 		atomic.StoreUint64(&taskRSP0[slot], kernelStackTop)

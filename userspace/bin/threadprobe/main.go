@@ -6,8 +6,9 @@
 // IDs, joins, exit codes, and the task quota; "gc N ROUNDS" has N threads
 // allocate, share, and drop objects across collections; "roots" checks the
 // roots of threads that run, wait in a call, or allocate in a region while
-// another collects; "storm N ROUNDS" has N threads ask for collections at
-// once; "fault" and "overflow" end a worker with a fault, which ends the
+// another collects; "region-window N ROUNDS" stops a thread inside region
+// transitions while another collects (region_window.go); "storm N ROUNDS"
+// has N threads ask for collections at once; "fault" and "overflow" end a worker with a fault, which ends the
 // process; "bench N OPS MODE" times N threads that allocate, with the heap
 // lock alone (lock), with thread-owned slabs (cache), or with owned slabs
 // and 256 free pages retained (retain), and prints the allocator profile. Only the main thread prints. It is built only into validation
@@ -29,7 +30,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "threadprobe smoke N|lifecycle|gc N R|roots|storm N R|fault|overflow|bench N OPS MODE",
+	Usage:   "threadprobe smoke|lifecycle|gc|roots|region-window|storm|fault|overflow|bench [ARGS...]",
 	Summary: "native thread checks",
 	MaxArgs: 4,
 }
@@ -63,6 +64,10 @@ func run(data startup.Data) {
 		collect(int(parse(count)), int(parse(rounds)))
 	case utility.Equal(mode, "roots"):
 		roots()
+	case utility.Equal(mode, "region-window") && data.ArgCount() == 3:
+		count, _ := data.Arg(2)
+		rounds, _ := data.Arg(3)
+		regionWindow(int(parse(count)), int(parse(rounds)))
 	case utility.Equal(mode, "storm") && data.ArgCount() == 3:
 		count, _ := data.Arg(2)
 		rounds, _ := data.Arg(3)
@@ -578,19 +583,23 @@ func faultWorker(uintptr) {
 
 // overflowWorker recurses past its stack into the guard below it.
 func overflowWorker(uintptr) {
-	crashSink.Store(uint64(recurse(1 << 20)))
+	crashSink.Store(uint64(recurse(1 << 30)))
 }
 
+// recurse keeps its frame on the stack: TinyGo moves a local array larger
+// than 256 bytes to the heap, and such frames would exhaust the page quota
+// before the stack reached its guard. Its result feeds the return twice, so
+// LLVM cannot turn the recursion into a loop with an accumulator.
+//
 //go:noinline
 func recurse(depth int) int {
-	var frame [16 << 10]byte
-	for index := 0; index < len(frame); index += 4096 {
-		frame[index] = byte(depth)
-	}
+	var frame [256]byte
+	frame[0], frame[len(frame)-1] = byte(depth), byte(depth>>8)
 	if depth <= 1 {
 		return int(frame[0])
 	}
-	return recurse(depth-1) + int(frame[len(frame)-4096]) - depth + 1
+	result := recurse(depth - 1)
+	return result ^ result>>3 ^ int(frame[len(frame)-1])
 }
 
 // crash starts a worker that faults. The fault ends the whole process, so

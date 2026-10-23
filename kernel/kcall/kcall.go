@@ -105,6 +105,23 @@ const (
 	OperationThreadYield
 	OperationThreadSuspend
 	OperationThreadResume
+	// ThreadSetBase sets the calling thread's FS base, which the native
+	// runtime points at the thread's control block. ThreadPreempt registers
+	// the runtime's preemption entry for the calling thread, and
+	// ThreadPreemptTake hands that entry the instruction pointer it
+	// interrupted (ADR 0204).
+	OperationThreadSetBase
+	OperationThreadPreempt
+	OperationThreadPreemptTake
+	// ThreadWake sets the wake flag of a thread of the caller's process,
+	// which a WaitAny interest on WaitAnyThread reports, and
+	// ThreadWakeTake clears the caller's own (ADR 0204).
+	OperationThreadWake
+	OperationThreadWakeTake
+	// OperationIRQPoll consumes a pending IRQWait event without blocking.
+	// It keeps IRQWait's line-11-only authority; the separate opcode leaves
+	// legacy IRQWait's unused arguments unchanged.
+	OperationIRQPoll
 )
 
 // Native thread layout (ADR 0203). A process has ThreadSlots thread slots.
@@ -122,6 +139,24 @@ const (
 	ThreadInfoSize = uint64(16)
 	// JoinPoll makes ThreadJoin answer Timeout rather than wait.
 	JoinPoll = uint64(1)
+	// JoinClaim reserves a join for a goroutine and writes a nonzero token
+	// to the 8-byte result word, without blocking or collecting the code.
+	// JoinCollect polls a claimed join: the word supplies its token on input
+	// and receives the code on success. JoinRelease drops the claim using
+	// the token in the word. The token belongs to the process and target
+	// thread generation, not to the calling native thread, so a goroutine
+	// can migrate between claim, collect and release. These modes exclude
+	// legacy joins and each other, including after the target ends.
+	JoinClaim   = uint64(2)
+	JoinCollect = uint64(4)
+	JoinRelease = uint64(8)
+	// MaxPreemptTicks bounds the interval ThreadPreempt takes, in ticks of
+	// the processor's preemption timer.
+	MaxPreemptTicks = uint64(1000)
+	// PreemptRedZone is how far below the interrupted stack pointer a
+	// preemption entry starts: the 128 bytes a leaf function may use below
+	// its stack pointer stay untouched.
+	PreemptRedZone = uint64(128)
 )
 
 // ThreadStackTop returns the stack top of thread slot k, 1 to ThreadSlots-1.
@@ -242,6 +277,7 @@ type Handler interface {
 	CPURuntime(index uint64, address uint64) Status
 	TaskAffinity(process uint64, mask uint64, address uint64) Status
 	IRQTake(irq uint64) Status
+	IRQPoll(irq uint64) Status
 	RandomRead(address uint64, length uint64) Status
 	ValidationFault(device uint64) Status
 	SystemPowerOff(device uint64) Status
@@ -267,6 +303,11 @@ type Handler interface {
 	ThreadYield() Status
 	ThreadSuspend(address uint64, capacity uint64, count uint64) Status
 	ThreadResume() Status
+	ThreadSetBase(base uint64) Status
+	ThreadPreempt(entry uint64, ticks uint64) Status
+	ThreadPreemptTake(address uint64) Status
+	ThreadWake(thread uint64) Status
+	ThreadWakeTake() Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -389,6 +430,8 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.TaskAffinity(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationIRQTake:
 		return Result{Status: handler.IRQTake(request.Arg0)}
+	case OperationIRQPoll:
+		return Result{Status: handler.IRQPoll(request.Arg0)}
 	case OperationRandomRead:
 		if request.Arg1 == 0 || request.Arg1 > MaxRandomRead {
 			return Result{Status: StatusInvalidArgument}
@@ -410,7 +453,8 @@ func Dispatch(request Request, handler Handler) Result {
 	case OperationExecutableSource:
 		return Result{Status: handler.ExecutableSource(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationVMMap:
-		if request.Arg1&^VMProtectionMask != 0 || request.Arg2&^VMMapFixed != 0 {
+		if request.Arg1&^VMProtectionMask != 0 || request.Arg2&^(VMMapFixed|VMMapStacks) != 0 ||
+			request.Arg2&VMMapStacks != 0 && request.Arg1 != VMRead|VMWrite {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.VMMap(request.Arg0, request.Arg1, request.Arg2)}
@@ -449,7 +493,7 @@ func Dispatch(request Request, handler Handler) Result {
 	case OperationThreadExit:
 		return Result{Status: handler.ThreadExit(request.Arg0), Action: ActionExit}
 	case OperationThreadJoin:
-		if request.Arg1&^JoinPoll != 0 {
+		if !ValidJoinFlags(request.Arg1) {
 			return Result{Status: StatusInvalidArgument}
 		}
 		status, blocked := handler.ThreadJoin(request.Arg0, request.Arg1, request.Arg2)
@@ -468,6 +512,19 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.ThreadSuspend(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationThreadResume:
 		return Result{Status: handler.ThreadResume()}
+	case OperationThreadSetBase:
+		return Result{Status: handler.ThreadSetBase(request.Arg0)}
+	case OperationThreadPreempt:
+		if request.Arg1 > MaxPreemptTicks || (request.Arg0 == 0) != (request.Arg1 == 0) {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.ThreadPreempt(request.Arg0, request.Arg1)}
+	case OperationThreadPreemptTake:
+		return Result{Status: handler.ThreadPreemptTake(request.Arg0)}
+	case OperationThreadWake:
+		return Result{Status: handler.ThreadWake(request.Arg0)}
+	case OperationThreadWakeTake:
+		return Result{Status: handler.ThreadWakeTake()}
 	default:
 		return Result{Status: StatusUnsupported}
 	}
@@ -516,6 +573,8 @@ const ClockTimeSize = uint64(16)
 const (
 	HandleInfoSize  = uint64(16)
 	ProcessInfoSize = uint64(80)
+	// ProcessInfoSelf selects the caller without enumerating other processes.
+	ProcessInfoSelf = ^uint64(0)
 	MaxProcessName  = 16
 	// ProcessResources is the number of counters in each of the held and limit
 	// arrays of a ProcessInfo record.
@@ -574,6 +633,9 @@ const (
 	VMExecute        = uint64(4)
 	VMProtectionMask = VMRead | VMWrite | VMExecute
 	VMMapFixed       = uint64(1)
+	// VMMapStacks reserves repeated 64 KiB guards and 256 KiB stacks in
+	// one anonymous region. Its length must be a multiple of 320 KiB.
+	VMMapStacks      = uint64(2)
 	VMDescriptorSize = uint64(16)
 )
 
@@ -611,7 +673,33 @@ const (
 	WaitAnyCursorInterestSize = uint64(24)
 	WaitAnyResultSize         = uint64(16)
 	WaitAnyInfiniteTimeout    = ^uint64(0)
+	// WaitAnyThread is the handle of an interest in the calling thread's
+	// own wake flag, with WaitReadable; it names no handle-table entry.
+	WaitAnyThread = ^uint64(0)
+	// WaitAnyThreadEnd marks the handle of an interest in the end of a
+	// native thread of the caller's process, with WaitCompleted: the handle
+	// is the thread's ID with this bit set (ThreadEndInterest). The bit lies
+	// in the index half of a handle ID, above every handle table and task
+	// slot, so the encoding names no handle-table entry, and the ID's
+	// generation keeps a later thread in the same slot from matching. The
+	// interest is ready once the thread has ended, joined or not; ThreadJoin
+	// then collects its code. A thread may name its own end, which is never
+	// ready while it waits.
+	WaitAnyThreadEnd = uint64(1) << 31
 )
+
+// ThreadEndInterest returns the WaitAny handle of an interest in the end of
+// thread.
+func ThreadEndInterest(thread uint64) uint64 { return thread | WaitAnyThreadEnd }
+
+// ThreadEndTarget returns the thread a WaitAny handle names through
+// WaitAnyThreadEnd, and false for any other handle.
+func ThreadEndTarget(handle uint64) (uint64, bool) {
+	if handle == WaitAnyThread || handle&WaitAnyThreadEnd == 0 {
+		return 0, false
+	}
+	return handle &^ WaitAnyThreadEnd, true
+}
 
 type WaitEvent uint64
 
@@ -632,3 +720,13 @@ const (
 	LogReadRecordSize = 208
 	LogReadSize       = LogReadHeader + LogReadMax*LogReadRecordSize
 )
+
+// ValidJoinFlags admits one ThreadJoin mode. Claim, collect and release are
+// nonblocking modes; none may combine with the legacy poll bit.
+func ValidJoinFlags(flags uint64) bool {
+	switch flags {
+	case 0, JoinPoll, JoinClaim, JoinCollect, JoinRelease:
+		return true
+	}
+	return false
+}

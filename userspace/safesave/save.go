@@ -6,11 +6,22 @@ package safesave
 import (
 	"goos/internal/limits"
 	"goos/kernel/vfs"
+	"sync/atomic"
 )
 
-// Suffix ends the name of the temporary file a save writes. The name also
-// starts with a dot, so listings that hide such names hide it too.
+// Suffix ends the deterministic temporary-file prefix. Save appends a candidate
+// ID to this prefix; names start with a dot so ordinary listings hide them.
 const Suffix = ".~save"
+
+const (
+	temporaryAttempts = 32
+	temporaryIDBytes  = 1 + 16 // dot followed by a fixed-width hexadecimal uint64
+)
+
+// temporarySequence never wraps or reuses an ID within this process. It only
+// proposes names: exclusive Create, not the counter, establishes ownership
+// across processes. Existing candidates are skipped without being changed.
+var temporarySequence atomic.Uint64
 
 // Stage says which step of a save failed.
 type Stage uint8
@@ -26,6 +37,8 @@ const (
 
 // Files is the part of the VFS a save uses.
 type Files interface {
+	// Create atomically creates a file only if path is absent. An existing
+	// file is left unchanged and reports StatusAlreadyExists.
 	Create(path []byte) vfs.Status
 	Unlink(path []byte) vfs.Status
 	OpenWrite(path []byte) (vfs.Handle, vfs.Status)
@@ -42,9 +55,9 @@ type Source interface {
 	Fill(buffer []byte) int
 }
 
-// TemporaryPath writes into out the path a save of target writes first:
-// "." + name + Suffix in target's own directory, so the replacement stays
-// within one filesystem and the name cannot leave the directory.
+// TemporaryPath writes the deterministic prefix for Save's candidate names:
+// "." + name + Suffix in target's own directory. Save adds its candidate ID
+// and checks the resulting path and component lengths before creating a file.
 func TemporaryPath(target []byte, out *[limits.PathMax]byte) ([]byte, vfs.Status) {
 	if len(target) < 2 || target[0] != '/' || target[len(target)-1] == '/' {
 		return nil, vfs.StatusInvalidArgument
@@ -73,25 +86,74 @@ func TemporaryPath(target []byte, out *[limits.PathMax]byte) ([]byte, vfs.Status
 	return out[:size], vfs.StatusOK
 }
 
-// Save writes what source produces to the temporary file beside target,
-// through buffer, and then replaces target with it. A temporary file left by
-// an earlier, interrupted save is removed first. On any failure the temporary
-// file is removed, best effort, and target is as it was; the status says why
-// and the stage where.
+func nextTemporaryID(sequence *atomic.Uint64) (uint64, bool) {
+	for attempt := 0; attempt < temporaryAttempts; attempt++ {
+		previous := sequence.Load()
+		if previous == ^uint64(0) {
+			return 0, false
+		}
+		if sequence.CompareAndSwap(previous, previous+1) {
+			return previous + 1, true
+		}
+	}
+	return 0, false
+}
+
+func reserveTemporary(files Files, target []byte, temp *[limits.PathMax]byte, sequence *atomic.Uint64) ([]byte, vfs.Status) {
+	prefix, status := TemporaryPath(target, temp)
+	if status != vfs.StatusOK {
+		return nil, status
+	}
+	nameStart := len(prefix) - 1
+	for prefix[nameStart] != '/' {
+		nameStart--
+	}
+	if len(prefix)+temporaryIDBytes > limits.PathMax || len(prefix)-nameStart-1+temporaryIDBytes > limits.NameMax {
+		return nil, vfs.StatusNameTooLong
+	}
+	path := temp[:len(prefix)+temporaryIDBytes]
+	path[len(prefix)] = '.'
+	const hex = "0123456789abcdef"
+	for attempt := 0; attempt < temporaryAttempts; attempt++ {
+		id, available := nextTemporaryID(sequence)
+		if !available {
+			return nil, vfs.StatusBusy
+		}
+		for digit := len(path) - 1; digit > len(prefix); digit-- {
+			path[digit] = hex[id&15]
+			id >>= 4
+		}
+		status = files.Create(path)
+		if status == vfs.StatusAlreadyExists {
+			continue
+		}
+		return path, status
+	}
+	return nil, vfs.StatusBusy
+}
+
+// Save writes what source produces beside target, through buffer, and then
+// atomically replaces target. It reserves a request-owned candidate name by
+// exclusive Create; existing candidates (including stale files) are never
+// opened, removed, or changed. They remain for explicit owner cleanup. After
+// bounded collisions, counter exhaustion, or contention it reports StatusBusy
+// at StageTemporary without consuming source.
+//
+// Before Replace, failures remove only this save's file best effort and leave
+// target unchanged. A Replace error may follow a committed rename, so neither
+// pathname is touched afterward and the caller must reconcile the result. A
+// retry uses another candidate even if an earlier file remains. Concurrent
+// callers need separate buffer, source, and temp workspaces and must not modify
+// another save's file.
 func Save(files Files, target []byte, buffer []byte, source Source, temp *[limits.PathMax]byte) (vfs.Status, Stage) {
+	return saveWithSequence(files, target, buffer, source, temp, &temporarySequence)
+}
+
+func saveWithSequence(files Files, target []byte, buffer []byte, source Source, temp *[limits.PathMax]byte, sequence *atomic.Uint64) (vfs.Status, Stage) {
 	if len(buffer) == 0 {
 		return vfs.StatusInvalidArgument, StageWrite
 	}
-	path, status := TemporaryPath(target, temp)
-	if status != vfs.StatusOK {
-		return status, StageTemporary
-	}
-	status = files.Create(path)
-	if status == vfs.StatusAlreadyExists {
-		if status = files.Unlink(path); status == vfs.StatusOK {
-			status = files.Create(path)
-		}
-	}
+	path, status := reserveTemporary(files, target, temp, sequence)
 	if status != vfs.StatusOK {
 		return status, StageTemporary
 	}
@@ -109,7 +171,8 @@ func Save(files Files, target []byte, buffer []byte, source Source, temp *[limit
 		return status, StageWrite
 	}
 	if status = files.Replace(path, target); status != vfs.StatusOK {
-		files.Unlink(path)
+		// Replace may already have moved the file. Another process can then
+		// own path, so path-only cleanup could delete its temporary file.
 		return status, StageReplace
 	}
 	return vfs.StatusOK, 0

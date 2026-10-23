@@ -136,6 +136,12 @@ func (lock *RW) writeUnless(first *RW, stop *uint64) bool {
 				continue
 			}
 			if stop != nil && atomic.LoadUint64(stop) != 0 {
+				// A writer that gives up takes its pending mark with it, or
+				// new readers would wait for a writer that never comes.
+				// Another waiting writer marks the lock again next round.
+				for state&rwPending != 0 && !lock.state.CompareAndSwap(state, state&^rwPending) {
+					state = lock.state.Load()
+				}
 				wait.end()
 				return false
 			}

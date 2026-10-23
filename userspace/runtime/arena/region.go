@@ -5,8 +5,10 @@ package arena
 import (
 	"sync/atomic"
 
+	"goos/internal/validation"
 	"goos/kernel/kcall"
 	"goos/userspace/runtime/sys"
+	"goos/userspace/runtime/tls"
 	"unsafe"
 )
 
@@ -83,7 +85,11 @@ func NewRegion(size uint32) *Region {
 
 // Enter makes the region the target of every allocation until Leave.
 func (r *Region) Enter() Scope {
+	tls.Pin()
+	defer tls.Unpin()
 	t := self()
+	t.beginRegionChange()
+	defer t.endRegionChange()
 	if !r.enteredBy.CompareAndSwap(0, int32(selfSlot()+1)) {
 		panic("arena: region entered by another thread")
 	}
@@ -94,6 +100,9 @@ func (r *Region) Enter() Scope {
 	}
 	current, scope := enterRegion(t.cursor, &r.state, &t.regions)
 	t.cursor = current
+	if validation.Enabled {
+		holdTransition(t)
+	}
 	outer := t.innermost
 	t.innermost = r
 	return Scope{state: scope, outer: outer}
@@ -101,9 +110,16 @@ func (r *Region) Enter() Scope {
 
 // Leave returns allocation to whatever was entered before.
 func (s Scope) Leave() {
+	tls.Pin()
+	defer tls.Unpin()
 	t := self()
+	t.beginRegionChange()
+	defer t.endRegionChange()
 	region := t.innermost
 	t.cursor = leaveRegion(t.cursor, s.state, &t.regions)
+	if validation.Enabled {
+		holdTransition(t)
+	}
 	t.innermost = s.outer
 	if region != nil {
 		region.enteredBy.Store(0)

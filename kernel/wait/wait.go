@@ -24,6 +24,17 @@ const (
 	// of polling the device.
 	KindConsole
 	KindLog
+	// KindThread is a native thread's wake flag (ADR 0204). Its object is
+	// the thread's task ID, so a wake never reaches a later thread in the
+	// same slot.
+	KindThread
+	// KindThreadEnd is the end of a native thread of the waiter's process
+	// (kcall.WaitAnyThreadEnd). Its object is the thread's task ID and its
+	// event Exited.
+	KindThreadEnd
+
+	// lastKind is the highest valid kind; validKey bounds keys by it.
+	lastKind = KindThreadEnd
 )
 
 type Event uint8
@@ -107,18 +118,8 @@ func (set *Table) take() {
 
 func (table *Table) beginHeld(task sched.TaskID, entries []Entry, deadline uint64) bool {
 	slot, _, valid := task.Parts()
-	if !valid || len(entries) > MaxObjects || len(entries) == 0 && deadline == 0 {
+	if !valid || !ValidEntries(entries) || len(entries) == 0 && deadline == 0 {
 		return false
-	}
-	for index, entry := range entries {
-		if !validEntry(entry) {
-			return false
-		}
-		for previous := 0; previous < index; previous++ {
-			if entries[previous].Key == entry.Key {
-				return false
-			}
-		}
 	}
 
 	op := &table.operations[slot]
@@ -265,13 +266,33 @@ func (table *Table) countHeld() int { return table.active }
 
 func (table *Table) registrationCountHeld() int { return table.registered }
 
+// ValidEntries checks the resolved object keys before either polling or
+// registering a wait. Different handles to one object are duplicate keys.
+// Empty entries are valid; the caller separately validates the deadline.
+func ValidEntries(entries []Entry) bool {
+	if len(entries) > MaxObjects {
+		return false
+	}
+	for index, entry := range entries {
+		if !validEntry(entry) {
+			return false
+		}
+		for previous := 0; previous < index; previous++ {
+			if entries[previous].Key == entry.Key {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func validEntry(entry Entry) bool {
 	return validKey(entry.Key) && entry.Events != 0 && entry.Events&^allEvents == 0 &&
 		(entry.Key.Kind == KindLog && entry.Events == Readable || entry.Key.Kind != KindLog && entry.Cursor == 0)
 }
 
 func validKey(key Key) bool {
-	if key.Object == 0 || key.Kind < KindChannel || key.Kind > KindLog {
+	if key.Object == 0 || key.Kind < KindChannel || key.Kind > lastKind {
 		return false
 	}
 	if (key.Kind == KindChannel || key.Kind == KindStream) && key.Side > 1 {

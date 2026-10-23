@@ -184,9 +184,10 @@ func releaseExitedProcess(event process.ExitEvent) *process.Process {
 	}
 	exited, found := processRegistry.ByID(event.Process)
 	// PID 1 holds no handle to a forked Linux process and is not told it ended.
-	forked := false
+	forked, linux := false, false
 	if found {
-		state, linux := linuxcompat.FindProcess(exited.AddressSpace().Root)
+		var state *linuxcompat.ProcessState
+		state, linux = linuxcompat.FindProcess(exited.AddressSpace().Root)
 		forked = linux && state.Forked
 	}
 	if lifecycleChannel != nil && !forked {
@@ -196,6 +197,9 @@ func releaseExitedProcess(event process.ExitEvent) *process.Process {
 		}
 	}
 	if found {
+		if validation.Enabled {
+			reportProcessThreadPeak(event.Process, linux, amd64.TakeRootThreadPeak(exited.AddressSpace().Root))
+		}
 		exitLinuxProcess(exited, event.Code)
 		releaseProcessHandles(exited)
 		releasingProcess = exited.ID()

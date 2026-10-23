@@ -15,7 +15,7 @@ import (
 func (a *Adapter) ConnectTLS(address network.IPv4, port uint16, host []byte) (fetch.Connection, error) {
 	if a.roots == nil {
 		before := arena.HeapStats().TotalAlloc
-		roots, err := tlsclient.LoadSystemRoots(&bulk)
+		roots, err := tlsclient.LoadSystemRoots(&a.bulk)
 		if err != nil {
 			return nil, err
 		}

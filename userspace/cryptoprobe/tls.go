@@ -3,7 +3,6 @@
 package cryptoprobe
 
 import (
-	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"io"
@@ -21,9 +20,6 @@ func (e tlsUnsupported) Error() string {
 
 func Run() error {
 	reader := tlsProbeReader()
-	previous := rand.Reader
-	rand.Reader = reader
-	defer func() { rand.Reader = previous }()
 	wire := &tlsProbeConn{}
 	client := tls.Client(wire, &tls.Config{
 		Rand:             reader,

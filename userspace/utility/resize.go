@@ -5,54 +5,72 @@ package utility
 import (
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
+	"goos/userspace/runtime/lock"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 	"goos/userspace/tty"
 	userwait "goos/userspace/wait"
 )
 
-var resizeHandle handle.ID
-var resizeSnapshot tty.Snapshot
-var resizeWire [tty.ResizeFrameSize]byte
+// resize is the terminal's resize endpoint and the newest geometry read from
+// it. Its lock covers the endpoint, the snapshot and the frame buffer, and is
+// never held across a wait.
+var resize struct {
+	mu       lock.Mutex
+	endpoint handle.ID
+	snapshot tty.Snapshot
+	frame    [tty.ResizeFrameSize]byte
+}
 
 func bindResize(data startup.Data) {
-	resizeHandle, _ = data.Handle(tty.ResizeRole)
+	resize.mu.Lock()
+	resize.endpoint, _ = data.Handle(tty.ResizeRole)
 	if geometry, valid := TerminalGeometry(data); valid {
-		resizeSnapshot.Apply(geometry)
+		resize.snapshot.Apply(geometry)
 	}
+	resize.mu.Unlock()
 }
 
 func replaceResize(endpoint handle.ID) {
-	if resizeHandle != 0 {
-		sys.HandleClose(resizeHandle)
+	resize.mu.Lock()
+	replaceResizeLocked(endpoint)
+	resize.mu.Unlock()
+}
+
+func replaceResizeLocked(endpoint handle.ID) {
+	if resize.endpoint != 0 {
+		sys.HandleClose(resize.endpoint)
 	}
-	resizeHandle = endpoint
+	resize.endpoint = endpoint
 }
 
 // TakeResize drains a bounded batch and applies only its newest sequence.
 // The snapshot survives endpoint replacement and late startup snapshots.
 func TakeResize() (tty.Geometry, bool) {
+	resize.mu.Lock()
+	defer resize.mu.Unlock()
 	changed := false
-	for budget := 0; resizeHandle != 0 && budget < 8; budget++ {
-		count, status := sys.StreamRead(resizeHandle, resizeWire[:])
+	for budget := 0; resize.endpoint != 0 && budget < 8; budget++ {
+		count, status := sys.StreamRead(resize.endpoint, resize.frame[:])
 		if status == kcall.StatusResourceExhausted {
 			break
 		}
-		if status != kcall.StatusOK || count != len(resizeWire) {
-			replaceResize(0)
+		if status != kcall.StatusOK || count != len(resize.frame) {
+			replaceResizeLocked(0)
 			break
 		}
-		geometry, valid := tty.DecodeResizeFrame(resizeWire[:])
-		if valid && geometry.Authoritative && geometry.ValidRemote() && resizeSnapshot.Apply(geometry) {
+		geometry, valid := tty.DecodeResizeFrame(resize.frame[:])
+		if valid && geometry.Authoritative && geometry.ValidRemote() && resize.snapshot.Apply(geometry) {
 			changed = true
 		}
 	}
-	geometry, _ := resizeSnapshot.Current()
+	geometry, _ := resize.snapshot.Current()
 	return geometry, changed
 }
 
 // ReadTerminalWithin waits for input or resize in one native WaitAny. Remote
 // callers use an infinite deadline; serial callers keep cursor-position probes.
+// The terminal has one reader: a program calls this from one goroutine.
 func ReadTerminalWithin(target []byte, deadline uint64) (uint64, int, tty.Geometry, bool) {
 	for {
 		geometry, changed := TakeResize()
@@ -69,10 +87,12 @@ func ReadTerminalWithin(target []byte, deadline uint64) (uint64, int, tty.Geomet
 		var interests [userwait.MaxObjects]userwait.Interest
 		interests[0] = userwait.Interest{Handle: handle.ID(stdinHandle), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 		count = 1
-		if resizeHandle != 0 {
-			interests[count] = userwait.Interest{Handle: resizeHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		resize.mu.Lock()
+		if resize.endpoint != 0 {
+			interests[count] = userwait.Interest{Handle: resize.endpoint, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 			count++
 		}
+		resize.mu.Unlock()
 		if _, status := userwait.Any(&interests, count, deadline); status != kcall.StatusOK {
 			if status == kcall.StatusTimeout {
 				status = kcall.StatusResourceExhausted

@@ -371,3 +371,60 @@ func TestConstantLEAQMovesTheStackPointer(t *testing.T) {
 		t.Fatalf("frame = %#x, problems = %v", frame, problems)
 	}
 }
+
+// TestGoroutineSwitchesAcceptOnlyPinnedSequences checks the goroutine
+// runtime's two stack switches: accepted exactly as reviewed, rejected
+// under another name or with a changed instruction.
+func TestGoroutineSwitchesAcceptOnlyPinnedSequences(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		body  []string
+		frame int64
+	}{
+		{"goos_g_swap", swapInstructions, swapFrame},
+		{"goos_preempt_entry", preemptInstructions, preemptFrame},
+	} {
+		body := append([]string(nil), c.body...)
+		for index, text := range body {
+			if text == "JNE" {
+				body[index] = "JNE 0x1000"
+			}
+			if text == "CALL" {
+				body[index] = "CALL goos_g_preempt(SB)"
+			}
+		}
+		if frame, problems := analyzeListing(t, listing(c.name, 0x1000, body...)); frame != c.frame || len(problems) != 0 {
+			t.Fatalf("%s = %d, %v", c.name, frame, problems)
+		}
+		if _, problems := analyzeListing(t, listing("other_switch", 0x1000, body...)); len(problems) == 0 {
+			t.Fatalf("%s accepted under another name", c.name)
+		}
+		if c.name == "goos_preempt_entry" {
+			for _, call := range []string{"CALL AX", "CALL 0x1234", "CALL another_runtime(SB)"} {
+				changed := append([]string(nil), body...)
+				for index, text := range changed {
+					if text == "CALL goos_g_preempt(SB)" {
+						changed[index] = call
+					}
+				}
+				if _, problems := analyzeListing(t, listing(c.name, 0x1000, changed...)); len(problems) == 0 {
+					t.Fatalf("preempt entry accepted an unpinned runtime target: %s", call)
+				}
+			}
+			legacy := append([]string(nil), body...)
+			for index, text := range legacy {
+				if text == "CALL goos_g_preempt(SB)" {
+					legacy[index] = "CALL 0x0"
+				}
+			}
+			if frame, problems := analyzeListing(t, listing(c.name, 0x1000, legacy...)); frame != c.frame || len(problems) != 0 {
+				t.Fatalf("legacy unused preempt entry: %d, %v", frame, problems)
+			}
+		}
+		changed := append([]string(nil), body...)
+		changed[0] = "PUSHQ AX"
+		if _, problems := analyzeListing(t, listing(c.name, 0x1000, changed...)); len(problems) == 0 {
+			t.Fatalf("%s accepted with a changed instruction", c.name)
+		}
+	}
+}

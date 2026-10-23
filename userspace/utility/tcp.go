@@ -4,18 +4,21 @@ package utility
 
 import (
 	"goos/kernel/clock"
-	"goos/kernel/handle"
-	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 	"goos/userspace/tcpapi"
 )
 
+// The command's TCP session. Like the UDP session it writes through TX slot
+// 0 and takes whatever reply arrives next, so it belongs to one goroutine at
+// a time. The lock protects codec storage, not the TX/RX slices exposed to
+// callers: concurrent use can race payload memory and take another caller's
+// reply. A failed wait disables the endpoint but does not revoke old slices.
+// tcpTX and tcpRX are set once by OpenTCP, before any use.
 var (
-	tcpHandle               handle.ID
-	tcpTX, tcpRX            []byte
-	tcpMessage, tcpIncoming ipc.Message
+	tcpSession   session[nativeIPC]
+	tcpTX, tcpRX []byte
 )
 
 const tcpWait = 35 * clock.TicksPerSecond
@@ -33,7 +36,8 @@ func OpenTCP(data startup.Data) bool {
 	if txStatus != kcall.StatusOK || rxStatus != kcall.StatusOK || txSize < txPool || rxSize < rxPool {
 		return false
 	}
-	tcpHandle, tcpTX, tcpRX = channel, sys.Window(txBase, txPool), sys.Window(rxBase, rxPool)
+	tcpTX, tcpRX = sys.Window(txBase, txPool), sys.Window(rxBase, rxPool)
+	tcpSession.bind(channel)
 	return true
 }
 
@@ -60,33 +64,21 @@ func TCPCall(request *tcpapi.Request, ticks uint64, reply *tcpapi.Reply) bool {
 }
 
 func TCPStart(request *tcpapi.Request) (uint64, bool) {
-	if tcpHandle == 0 {
+	if tcpSession.bound() == 0 {
 		return 0, false
 	}
-	correlation++
-	if correlation == 0 {
-		correlation++
-	}
-	if !tcpapi.EncodeRequest(request, correlation, &tcpMessage) || !tcpSend() {
+	correlation := tcpSession.begin()
+	defer tcpSession.end()
+	if !tcpapi.EncodeRequest(request, correlation, &tcpSession.outgoing) || !tcpSession.send(&tcpSession.outgoing) {
 		return 0, false
 	}
 	return correlation, true
 }
 
 func TCPWait(ticks uint64, reply *tcpapi.Reply) (uint64, bool) {
-	if sys.IPCWaitReceive(tcpHandle, wire[:], ticks) != kcall.StatusOK {
-		return 0, false
-	}
-	payloadSize := int(wire[24]) | int(wire[25])<<8
-	if !ipc.DecodeInto(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8], &tcpIncoming) {
-		return 0, false
-	}
-	return tcpapi.DecodeReply(&tcpIncoming, reply)
-}
-
-func tcpSend() bool {
-	size, ok := ipc.EncodeFrom(&tcpMessage, wire[:])
-	return ok && sys.IPCSend(tcpHandle, wire[:size]) == kcall.StatusOK
+	tcpSession.hold()
+	defer tcpSession.end()
+	return receiveProtocol(&tcpSession, ticks, reply, tcpapi.DecodeReply)
 }
 
 func TCPPayload() []byte { return tcpTX[:tcpapi.SlotSize] }
@@ -98,7 +90,9 @@ func TCPReceived(reply *tcpapi.Reply) []byte {
 
 func TCPRelease(slot uint8) {
 	release := tcpapi.Request{Opcode: tcpapi.OpRelease, Slot: slot}
-	if tcpapi.EncodeRequest(&release, 0, &tcpMessage) {
-		tcpSend()
+	tcpSession.hold()
+	if tcpapi.EncodeRequest(&release, 0, &tcpSession.outgoing) {
+		tcpSession.send(&tcpSession.outgoing)
 	}
+	tcpSession.end()
 }

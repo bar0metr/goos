@@ -40,11 +40,15 @@ func startServices(ticks uint64) {
 		fatal("INIT_FILESYSTEM_CHANNEL_FAILED\n")
 	}
 	filesystemClient = handle.ID(filesystemPair[0])
+	if !createChannel(&vfsRecovery) {
+		fatal("INIT_VFS_RECOVERY_CHANNEL_FAILED\n")
+	}
 	if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/bootstrap/vfs",
 		Capabilities: []supervisor.Capability{
 			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 			{Name: "session", Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 			{Name: "control", Handle: vfsControlServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			{Name: "recovery", Handle: handle.ID(vfsRecovery[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 			// PID 1 keeps its own copy, with Execute, to launch from the
 			// image; the filesystem service may only read it (ADR 0093).
 			{Name: "image", Handle: systemImageHandle, Type: handle.TypeDevice, Rights: capability.Read},
@@ -116,6 +120,9 @@ func startServices(ticks uint64) {
 		mark("LINUX_PID1_LAUNCH_OK\n")
 	}
 	chooseMode()
+	if validation.Enabled && boot.Mode() == supervisor.ModeNormal && !probeVFSReadPool() {
+		fatal("VFS_READPOOL_FAILED\n")
+	}
 	if validation.Enabled && boot.Mode() == supervisor.ModeNormal {
 		// The musl probe is a Linux fixture of the installed system.
 		if !probeLinuxMusl() {

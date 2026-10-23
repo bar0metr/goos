@@ -1,0 +1,19 @@
+//go:build scheduler.cores
+
+// GoOS native goroutines (ADR 0204): replaces TinyGo's
+// internal/task/task_stack_multicore.go in the goroutine toolchain root.
+
+package task
+
+// Current returns the running goroutine's task, or nil on a thread's
+// scheduler stack.
+//
+//go:linkname Current goos_g_current_task
+func Current() *Task
+
+// Pause parks the current goroutine until a call to the runtime's
+// scheduleTask makes it runnable. A wake that comes before the goroutine has
+// parked is kept: Pause then returns at once.
+//
+//go:linkname Pause goos_g_park
+func Pause()

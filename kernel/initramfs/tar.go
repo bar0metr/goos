@@ -15,7 +15,7 @@ const (
 // to locate the bootstrap program; every other launch names its image by
 // extent (Extent) and the kernel resolves no path for it (ADR 0093).
 func Find(archive []byte, path []byte) ([]byte, bool) {
-	entry, ok := find(archive, path, 0)
+	entry, ok := find(archive, memberName{head: path}, 0)
 	return entry.data, ok
 }
 
@@ -26,6 +26,17 @@ func Find(archive []byte, path []byte) ([]byte, bool) {
 // in the immutable image rather than by a path the kernel would have to
 // resolve.
 func Extent(archive []byte, path []byte) (int, int, bool) {
+	return extent(archive, memberName{head: path})
+}
+
+// ExtentUnder is Extent for the member named prefix followed by rest. A
+// caller that maps a mount point to an archive directory looks the member up
+// without joining the two into a buffer of its own.
+func ExtentUnder(archive []byte, prefix []byte, rest []byte) (int, int, bool) {
+	return extent(archive, memberName{head: prefix, tail: rest})
+}
+
+func extent(archive []byte, path memberName) (int, int, bool) {
 	entry, ok := find(archive, path, 0)
 	if !ok {
 		return 0, 0, false
@@ -33,7 +44,19 @@ func Extent(archive []byte, path []byte) (int, int, bool) {
 	return entry.offset + blockSize, len(entry.data), true
 }
 
-func find(archive []byte, path []byte, depth uint8) (member, bool) {
+// memberName is a member path in two parts, head then tail.
+type memberName struct{ head, tail []byte }
+
+func (path memberName) size() int { return len(path.head) + len(path.tail) }
+
+func (path memberName) at(index int) byte {
+	if index < len(path.head) {
+		return path.head[index]
+	}
+	return path.tail[index-len(path.head)]
+}
+
+func find(archive []byte, path memberName, depth uint8) (member, bool) {
 	if !validPath(path) {
 		return member{}, false
 	}
@@ -42,13 +65,13 @@ func find(archive []byte, path []byte, depth uint8) (member, bool) {
 		if !ok {
 			return member{}, false
 		}
-		if entry.typeFlag == typeLink && equalName(entry.name, path) {
+		if entry.typeFlag == typeLink && equalMember(entry.name, path) {
 			if depth >= maxLinkDepth || len(entry.link) == 0 {
 				return member{}, false
 			}
-			return find(archive, entry.link, depth+1)
+			return find(archive, memberName{head: entry.link}, depth+1)
 		}
-		if entry.typeFlag != typeDirectory && equalName(entry.name, path) {
+		if entry.typeFlag != typeDirectory && equalMember(entry.name, path) {
 			return entry, true
 		}
 		offset = next
@@ -158,36 +181,42 @@ func zero(block []byte) bool {
 }
 
 func equalName(value []byte, expected []byte) bool {
-	if len(value) != len(expected) {
+	return equalMember(value, memberName{head: expected})
+}
+
+func equalMember(value []byte, expected memberName) bool {
+	if len(value) != expected.size() {
 		return false
 	}
 	for index := range value {
-		if value[index] != expected[index] {
+		if value[index] != expected.at(index) {
 			return false
 		}
 	}
 	return true
 }
 
-func validPath(path []byte) bool {
-	if len(path) == 0 || path[0] == '/' {
+func validPath(path memberName) bool {
+	size := path.size()
+	if size == 0 || path.at(0) == '/' {
 		return false
 	}
 	componentStart := 0
-	for index, value := range path {
-		if value == 0 || index != 0 && value == '/' && path[index-1] == '/' {
+	for index := 0; index < size; index++ {
+		value := path.at(index)
+		if value == 0 || index != 0 && value == '/' && path.at(index-1) == '/' {
 			return false
 		}
 		if value == '/' {
-			if parentComponent(path[componentStart:index]) {
+			if parentComponent(path, componentStart, index) {
 				return false
 			}
 			componentStart = index + 1
 		}
 	}
-	return componentStart < len(path) && !parentComponent(path[componentStart:])
+	return componentStart < size && !parentComponent(path, componentStart, size)
 }
 
-func parentComponent(component []byte) bool {
-	return len(component) == 2 && component[0] == '.' && component[1] == '.'
+func parentComponent(path memberName, start int, end int) bool {
+	return end-start == 2 && path.at(start) == '.' && path.at(start+1) == '.'
 }

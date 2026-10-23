@@ -276,7 +276,6 @@ func dispatchKernelCall(number uint64, arg0 uint64, arg1 uint64, root uint64) ui
 	local := thisCPU()
 	arg2 := amd64.KernelCallArg2()
 	peer, extra := process.ID(0), lockSet(0)
-	local.callKind, local.callNumber = 'n', number
 	for attempt := 0; ; attempt++ {
 		call, ok := beginNativeCall(kcall.Operation(number), peer, extra)
 		if !ok {
@@ -316,6 +315,7 @@ type nativeCall struct {
 // false, holding nothing, when the task is being stopped.
 func beginNativeCall(operation kcall.Operation, peer process.ID, extra lockSet) (*nativeCall, bool) {
 	local := thisCPU()
+	local.callKind, local.callNumber = 'n', uint64(operation)
 	call := &local.nativeCall
 	owner, _ := callerSpace()
 	call.held = heldLocks{set: nativeCallLocks(operation) | extra, owner: owner, peerID: peer}

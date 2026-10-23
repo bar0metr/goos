@@ -4,6 +4,7 @@ import (
 	"goos/internal/capability"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
+	"goos/userspace/runtime/tls"
 	"unsafe"
 )
 
@@ -23,6 +24,7 @@ type Region struct {
 // Nothing is allocated until a page is touched.
 func VMReserve(length uint64, protection uint64) (uint64, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.vmDescriptor[0], w.vmDescriptor[1] = 0, length
 	result := status(vmMap(unsafe.Pointer(&w.vmDescriptor[0]), protection, 0))
 	if result != kcall.StatusOK {
@@ -31,9 +33,25 @@ func VMReserve(length uint64, protection uint64) (uint64, kcall.Status) {
 	return w.vmDescriptor[0], kcall.StatusOK
 }
 
+// VMReserveStacks reserves slots guarded stacks in one region. Each slot
+// starts with a 64 KiB guard followed by 256 KiB of demand-zero stack.
+// Callers may discard individual stacks, but must unmap the batch whole.
+func VMReserveStacks(slots uint64) (uint64, kcall.Status) {
+	const stride = uint64(320 << 10)
+	if slots == 0 || slots > 1024 {
+		return 0, kcall.StatusInvalidArgument
+	}
+	w := current()
+	defer tls.Unpin()
+	w.vmDescriptor[0], w.vmDescriptor[1] = 0, slots*stride
+	result := status(vmMap(unsafe.Pointer(&w.vmDescriptor[0]), kcall.VMRead|kcall.VMWrite, kcall.VMMapStacks))
+	return w.vmDescriptor[0], result
+}
+
 // VMReserveAt is VMReserve at a fixed address, which must be free.
 func VMReserveAt(address uint64, length uint64, protection uint64) kcall.Status {
 	w := current()
+	defer tls.Unpin()
 	w.vmDescriptor[0], w.vmDescriptor[1] = address, length
 	return status(vmMap(unsafe.Pointer(&w.vmDescriptor[0]), protection, kcall.VMMapFixed))
 }
@@ -53,6 +71,7 @@ func VMDiscard(address uint64, length uint64) kcall.Status { return status(vmDis
 // VMQuery describes the region containing address.
 func VMQuery(address uint64) (Region, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.vmRecord = [kcall.VMRecordSize]byte{}
 	result := status(vmQuery(address, unsafe.Pointer(&w.vmRecord[0])))
 	if result != kcall.StatusOK {
@@ -78,6 +97,7 @@ func le64(data []byte) uint64 {
 // (ADR 0107).
 func MemoryCreate(pages uint64) (handle.ID, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.valueWire = 0
 	if result := status(memoryCreate(pages, unsafe.Pointer(&w.valueWire))); result != kcall.StatusOK {
 		return 0, result
@@ -89,6 +109,7 @@ func MemoryCreate(pages uint64) (handle.ID, kcall.Status) {
 // of its rights. The caller retains its original handle.
 func HandleDuplicate(id handle.ID, rights capability.Rights) (handle.ID, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.valueWire = 0
 	if result := status(handleDuplicate(uint64(id), uint64(rights), unsafe.Pointer(&w.valueWire))); result != kcall.StatusOK {
 		return 0, result

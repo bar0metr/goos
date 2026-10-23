@@ -6,16 +6,19 @@ package main
 // calls that reserve, release, reprotect, discard, and describe regions.
 
 import (
+	"encoding/binary"
 	"sync/atomic"
 
 	"goos/internal/capability"
 	"goos/internal/logfmt"
+	"goos/internal/validation"
 	"goos/kernel/arch/amd64"
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/executable"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/loader"
+	"goos/kernel/lock"
 	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
@@ -106,7 +109,110 @@ func resolveUserFaultEntry(root uint64, address uint64, errorCode uint64, rip ui
 		kind = faultInvalid
 	}
 	kernelLogUints(logfmt.Warn, userFaultReason(kind), "address", address, "rip", rip)
+	if validation.Enabled {
+		reportFaultRegisters(root, rip, space, stop)
+		if kind == faultGuard {
+			reportGuardStack(root, address, space, stop)
+		}
+	}
 	return 0
+}
+
+// faultFrames bounds the frame-pointer chain a fault report follows.
+const faultFrames = 8
+
+// faultStackOffset is where the nonzero words at the faulting RSP are
+// copied in guardStack, above the frame records. A caller without a frame
+// pointer is found by the return address and saved registers there.
+const faultStackOffset = 256
+
+// reportFaultRegisters logs the arguments and callers of a fatal user fault.
+// RDI, RSI and RDX are a memmove's destination, source and length; RBP
+// starts the frame-pointer chain whose return addresses name its callers,
+// and the words at RSP name callers that keep no frame pointer.
+// The thread is named by its task, FS base, and the slot and goroutine its
+// userspace control block records.
+func reportFaultRegisters(root, rip uint64, space *lock.RW, stop *uint64) {
+	registers, found := amd64.UserFaultRegisters(rip)
+	if !found {
+		return
+	}
+	task := amd64.CurrentTask()
+	fsBase, _ := amd64.TaskFSBase(task)
+	kernelLogUints(logfmt.Warn, "user fault registers", "rdi", registers.RDI, "rsi", registers.RSI)
+	kernelLogUints(logfmt.Warn, "user fault registers", "rdx", registers.RDX, "rcx", registers.RCX)
+	kernelLogUints(logfmt.Warn, "user fault registers", "rax", registers.RAX, "rip", registers.RIP)
+	kernelLogUints(logfmt.Warn, "user fault registers", "rsp", registers.RSP, "rbp", registers.RBP)
+	kernelLogUints(logfmt.Warn, "user fault registers", "rbx", registers.RBX, "r12", registers.R12)
+	kernelLogUints(logfmt.Warn, "user fault registers", "r13", registers.R13, "r14", registers.R14)
+	kernelLogUints(logfmt.Warn, "user fault registers", "r15", registers.R15, "rflags", registers.RFlags)
+	local := thisCPU()
+	if !space.RLockUnless(stop) {
+		return
+	}
+	// The control block's first six words are Self, Slot, Magic, M, Pins
+	// and G (userspace/runtime/tls.Block).
+	blockRead := fsBase != 0 && vm.CopyIn(root, fsBase, local.guardStack[:48])
+	// Verify the native TLS ABI before interpreting the block. Linux FS
+	// bases can name unrelated data.
+	blockRead = blockRead && binary.LittleEndian.Uint64(local.guardStack[:]) == fsBase &&
+		binary.LittleEndian.Uint64(local.guardStack[16:]) == 0x31424354534f4f47
+	frames := 0
+	for frame := registers.RBP; frames < faultFrames && frame != 0 && frame%8 == 0; frames++ {
+		record := local.guardStack[64+frames*16 : 80+frames*16]
+		if !vm.CopyIn(root, frame, record) {
+			break
+		}
+		next := binary.LittleEndian.Uint64(record)
+		if next <= frame {
+			frames++
+			break
+		}
+		frame = next
+	}
+	stackWords := 0
+	if registers.RSP%8 == 0 && vm.CopyIn(root, registers.RSP, local.guardStack[faultStackOffset:]) {
+		stackWords = (len(local.guardStack) - faultStackOffset) / 8
+	}
+	space.RUnlock()
+	kernelLogUints(logfmt.Warn, "user fault thread", "task", uint64(task), "fs", fsBase)
+	if blockRead {
+		kernelLogUints(logfmt.Warn, "user fault thread", "slot", binary.LittleEndian.Uint64(local.guardStack[8:]),
+			"g", binary.LittleEndian.Uint64(local.guardStack[40:]))
+	}
+	for index := 0; index < frames; index++ {
+		kernelLogUints(logfmt.Warn, "user fault caller", "depth", uint64(index),
+			"return", binary.LittleEndian.Uint64(local.guardStack[72+index*16:]))
+	}
+	for index := 0; index < stackWords; index++ {
+		if word := binary.LittleEndian.Uint64(local.guardStack[faultStackOffset+index*8:]); word != 0 {
+			kernelLogUints(logfmt.Warn, "user fault stack", "offset", uint64(index*8), "value", word)
+		}
+	}
+}
+
+// reportGuardStack logs the words just above a stack guard fault that look
+// like addresses in a native image's code. A runaway recursion leaves its
+// return addresses there, which names the function that recursed.
+func reportGuardStack(root, address uint64, space *lock.RW, stop *uint64) {
+	local := thisCPU()
+	if !space.RLockUnless(stop) {
+		return
+	}
+	copied := vm.CopyIn(root, address+8, local.guardStack[:])
+	space.RUnlock()
+	if !copied {
+		return
+	}
+	reported := 0
+	for offset := 0; offset+8 <= len(local.guardStack) && reported < 12; offset += 8 {
+		word := binary.LittleEndian.Uint64(local.guardStack[offset:])
+		if word < 0x40000000 || word >= 0x41000000 {
+			continue
+		}
+		kernelLogUints(logfmt.Warn, "guard stack word", "offset", uint64(offset+8), "value", word)
+		reported++
+	}
 }
 
 func userFaultReason(kind uint64) string {
@@ -176,7 +282,7 @@ func demandRegion(owner *process.Process, root uint64, page uint64, write bool, 
 	if !ok {
 		return region.Region{}, faultInvalid
 	}
-	if entry.Backing == region.Guard {
+	if entry.GuardedAt(page) {
 		return region.Region{}, faultGuard
 	}
 	need := region.Read
@@ -302,7 +408,14 @@ func (handler nativeCallHandler) VMMap(descriptor uint64, protection uint64, fla
 		}
 		address = base
 	}
-	switch regions.Insert(region.Region{Base: address, Length: length, Protection: region.Protection(protection), Backing: region.Anonymous}) {
+	regionFlags := region.Flags(0)
+	if flags&kcall.VMMapStacks != 0 {
+		if length%region.StackStride != 0 || protection != kcall.VMRead|kcall.VMWrite {
+			return kcall.StatusInvalidArgument
+		}
+		regionFlags = region.StackBatch
+	}
+	switch regions.Insert(region.Region{Base: address, Length: length, Protection: region.Protection(protection), Backing: region.Anonymous, Flags: regionFlags}) {
 	case region.OK:
 	case region.Overlap:
 		return kcall.StatusAlreadyExists
@@ -399,6 +512,12 @@ func (handler nativeCallHandler) VMProtect(address uint64, length uint64, protec
 	}
 	if status := regionStatus(regions.Protect(address, length, requested)); status != kcall.StatusOK {
 		return status
+	}
+	if requested == 0 {
+		if !vm.RevokeUserRange(handler.root, address, length) {
+			return kcall.StatusInvalidArgument
+		}
+		return kcall.StatusOK
 	}
 	if !vm.ProtectUserRange(handler.root, address, length, regionPermissions(requested)) {
 		return kcall.StatusInvalidArgument

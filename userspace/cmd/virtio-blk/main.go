@@ -65,7 +65,7 @@ func portOut(offset uint16, width uint8, value uint32) bool {
 
 //export userspaceMain
 func userspaceMain() {
-	arena.InitService()
+	initRuntime()
 	arena.OnExhausted(func() { fatal("VIRTIO_BLK_OUT_OF_MEMORY\n") })
 	data, ok := startup.Read()
 	if !ok {
@@ -327,7 +327,7 @@ func transfer(operation uint32, sector uint64, sectors uint16) bool {
 	current := get16(usedOffset + 2)
 	acknowledged := false
 	for current == usedIndex {
-		if sys.IRQWait(irqHandle) != kcall.StatusOK {
+		if irqWait(irqHandle) != kcall.StatusOK {
 			return false
 		}
 		if _, ok := portIn(19, 1); !ok {

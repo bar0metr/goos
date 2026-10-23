@@ -40,13 +40,17 @@ type Thread struct {
 	Code    uint64
 	// Joiner is the task waiting to join the thread, or zero.
 	Joiner sched.TaskID
+	// JoinToken reserves the join for a goroutine independently of its M.
+	// The reservation remains until collection, release or process teardown.
+	JoinToken uint64
 }
 
 // Group is a process's thread slots and the state they share.
 type Group struct {
-	threads  [Slots]Thread
-	exitCode uint64
-	exitSet  bool
+	threads      [Slots]Thread
+	joinSequence uint64
+	exitCode     uint64
+	exitSet      bool
 	// suspender is the task whose ThreadSuspend holds held[:heldCount].
 	suspender sched.TaskID
 	held      [Slots]sched.TaskID
@@ -59,7 +63,7 @@ func (group *Group) Reset() {
 	for index := range group.threads {
 		group.threads[index] = Thread{}
 	}
-	group.exitCode, group.exitSet = 0, false
+	group.exitCode, group.exitSet, group.joinSequence = 0, false, 0
 	group.suspender, group.heldCount = 0, 0
 	for index := range group.held {
 		group.held[index] = 0
@@ -158,7 +162,7 @@ func (group *Group) Ended(task sched.TaskID, code uint64) (Ending, bool) {
 		thread.Code = code
 	}
 	ending := Ending{Slot: slot, Leaving: thread.Leaving, Code: thread.Code, Joiner: thread.Joiner}
-	thread.State, thread.Joiner = Exited, 0
+	thread.State = Exited
 	if slot == 0 {
 		// Nobody joins the main thread; its slot keeps it from being
 		// adopted again.
@@ -181,6 +185,8 @@ const (
 	NotFound
 	// Self: a thread cannot join itself.
 	Self
+	// Exhausted: the group has used its last join token.
+	Exhausted
 )
 
 // Join claims the end of thread for caller. A caller that registers as the
@@ -197,15 +203,15 @@ func (group *Group) Join(caller, thread sched.TaskID, register bool) (uint64, Jo
 		if entry.Task != thread {
 			continue
 		}
+		if entry.JoinToken != 0 || entry.Joiner != 0 && entry.Joiner != caller {
+			return 0, Busy
+		}
 		switch entry.State {
 		case Exited:
 			code := entry.Code
 			*entry = Thread{}
 			return code, Joined
 		case Running:
-			if entry.Joiner != 0 && entry.Joiner != caller {
-				return 0, Busy
-			}
 			if register {
 				entry.Joiner = caller
 			}
@@ -213,6 +219,15 @@ func (group *Group) Join(caller, thread sched.TaskID, register bool) (uint64, Jo
 		}
 	}
 	return 0, NotFound
+}
+
+// Find returns the state of a thread that Join can name: a running thread or
+// one that ended and was not joined. The main thread is never found.
+func (group *Group) Find(thread sched.TaskID) (State, bool) {
+	if entry := group.joinTarget(thread); entry != nil {
+		return entry.State, true
+	}
+	return Free, false
 }
 
 // Forget drops caller as joiner wherever it waits, when it ends.
@@ -285,4 +300,66 @@ func (group *Group) EndSuspend(suspender sched.TaskID, into []sched.TaskID) (int
 		group.held[index] = 0
 	}
 	return count, true
+}
+
+// ClaimJoin reserves the join of thread for a goroutine. The group issues
+// each token once; an old token cannot collect or release a later claim.
+// No native task owns the token, so ending an M does not revoke a migrated
+// goroutine's reservation. The runtime releases it when that G stops waiting;
+// Reset clears reservations when the process ends.
+func (group *Group) ClaimJoin(caller, thread sched.TaskID) (uint64, JoinStatus) {
+	if thread == caller && thread != 0 {
+		return 0, Self
+	}
+	entry := group.joinTarget(thread)
+	if entry == nil {
+		return 0, NotFound
+	}
+	if entry.JoinToken != 0 || entry.Joiner != 0 {
+		return 0, Busy
+	}
+	if group.joinSequence == ^uint64(0) {
+		return 0, Exhausted
+	}
+	group.joinSequence++
+	entry.JoinToken = group.joinSequence
+	return entry.JoinToken, Waiting
+}
+
+// CollectJoin polls a claimed join without registering a task waiter.
+func (group *Group) CollectJoin(thread sched.TaskID, token uint64) (uint64, JoinStatus) {
+	entry := group.joinTarget(thread)
+	if entry == nil || token == 0 || entry.JoinToken != token {
+		return 0, NotFound
+	}
+	if entry.State == Running {
+		return 0, Waiting
+	}
+	code := entry.Code
+	*entry = Thread{}
+	return code, Joined
+}
+
+// ReleaseJoin relinquishes a claim, including one whose target has ended.
+// The caller may then join the target through either native or token calls.
+func (group *Group) ReleaseJoin(thread sched.TaskID, token uint64) bool {
+	entry := group.joinTarget(thread)
+	if entry == nil || token == 0 || entry.JoinToken != token {
+		return false
+	}
+	entry.JoinToken = 0
+	return true
+}
+
+func (group *Group) joinTarget(thread sched.TaskID) *Thread {
+	if thread == 0 {
+		return nil
+	}
+	for slot := 1; slot < Slots; slot++ {
+		entry := &group.threads[slot]
+		if entry.Task == thread && (entry.State == Running || entry.State == Exited) {
+			return entry
+		}
+	}
+	return nil
 }

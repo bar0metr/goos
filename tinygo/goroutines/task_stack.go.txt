@@ -1,0 +1,49 @@
+//go:build scheduler.cores
+
+// GoOS native goroutines (ADR 0204). This file replaces TinyGo's
+// internal/task/task_stack.go in the goroutine toolchain root. A task's
+// stack, saved context, and scheduling state belong to the GoOS runtime
+// (goos/userspace/runtime/goroutine), which the functions below call by
+// symbol; the task records only which goroutine it is.
+
+package task
+
+import "unsafe"
+
+// state names the GoOS goroutine record of a task.
+type state struct {
+	g uintptr
+}
+
+// start creates a goroutine that runs fn(args) and makes it runnable.
+// stackSize is the compiler's request; the GoOS runtime reserves at least
+// that much.
+func start(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
+	t := &Task{}
+	goosStart(t, fn, args, stackSize)
+}
+
+//go:linkname goosStart goos_g_start
+func goosStart(t *Task, fn uintptr, args unsafe.Pointer, stackSize uintptr)
+
+// OnSystemStack reports whether the caller runs on a thread's scheduler
+// stack rather than a goroutine's.
+func OnSystemStack() bool { return Current() == nil }
+
+// goosTasks are the tasks of code that does not run as a started
+// goroutine: index k below 16 is the scheduler stack of thread slot k, 16
+// is the main function, and 17+k the thread.Start function of slot k. They
+// exist from the start, so TinyGo's defer frames and channel operations
+// have a task before the GoOS runtime has set anything up.
+var goosTasks [33]Task
+
+//export goos_task_static
+func goosTaskStatic(index int) *Task { return &goosTasks[index] }
+
+// goosTaskG and goosTaskSetG read and write the goroutine record of t.
+//
+//export goos_task_g
+func goosTaskG(t *Task) uintptr { return t.state.g }
+
+//export goos_task_set_g
+func goosTaskSetG(t *Task, g uintptr) { t.state.g = g }

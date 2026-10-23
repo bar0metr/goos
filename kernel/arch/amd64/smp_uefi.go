@@ -159,13 +159,17 @@ func unlockScheduler(flags uint64) {
 func schedSwitch(action uint64) uint64 {
 	cpu := CPUIndex()
 	schedulerLock.Lock()
-	if action == switchTick {
+	tick := action == switchTick
+	if tick {
 		if cpu == sched.Housekeeping {
 			runState.Tick()
 		}
 		action = switchPreempt
 	}
 	previous := runState.Current(cpu)
+	if tick && previous != sched.Idle {
+		notePreemptTick(uint64(previous))
+	}
 	if runState.Killed(cpu) && previous != sched.Idle {
 		taskExitCodes[previous] = killCodes[previous]
 	}
@@ -292,6 +296,43 @@ func noteKernelEntry() {
 		}
 	}
 	raisePeak(&threadPeak, same)
+	if validation.Enabled && same >= 2 {
+		raiseRootPeak(root, same)
+	}
+}
+
+// rootPeaks holds, in validation builds, the most tasks of each address
+// space inside the kernel at once, keyed by root. The global threadPeak
+// cannot tell which program raised it once multithreaded services reach
+// every processor at boot. Only overlaps of two or more are recorded, so a
+// single-threaded call does not search the table; a full table drops new
+// roots.
+var rootPeaks [64]struct{ root, peak atomic.Uint64 }
+
+func raiseRootPeak(root, count uint64) {
+	for index := range rootPeaks {
+		entry := &rootPeaks[index]
+		if current := entry.root.Load(); current == root || current == 0 && entry.root.CompareAndSwap(0, root) {
+			raisePeak(&entry.peak, count)
+			return
+		}
+	}
+}
+
+// TakeRootThreadPeak returns the most tasks of root's address space that
+// were inside the kernel at once, zero when fewer than two ever were, and
+// forgets root. The caller passes the root of a process that has exited,
+// before the root can be reused.
+func TakeRootThreadPeak(root uint64) uint64 {
+	for index := range rootPeaks {
+		entry := &rootPeaks[index]
+		if entry.root.Load() == root {
+			peak := entry.peak.Swap(0)
+			entry.root.Store(0)
+			return peak
+		}
+	}
+	return 0
 }
 
 func raisePeak(peak *atomic.Uint64, count uint64) {
@@ -320,6 +361,16 @@ func currentSlot() int {
 		return sched.Idle
 	}
 	return int(slot)
+}
+
+// ProcessorActivity reads, without a lock, the task slot processor cpu runs
+// and whether that task is inside a system call or fault. A stuck-lock
+// report uses it: the lock the reporter waits for may be the scheduler's.
+func ProcessorActivity(cpu int) (slot uint64, inKernel bool) {
+	if cpu < 0 || cpu >= MaxCPUs {
+		return 0, false
+	}
+	return atomic.LoadUint64(&cpuData[cpu][cpuCurrent]), atomic.LoadUint64(&cpuData[cpu][cpuKernelRoot]) != 0
 }
 
 // CurrentTask returns the task the calling processor runs, or zero.

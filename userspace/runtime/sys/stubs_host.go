@@ -33,6 +33,18 @@ func threadResume() uint64 { return unsupported }
 
 func threadEntryAddress() uintptr { return 0 }
 
+func workerEntryAddress() uintptr { return 0 }
+
+func threadSetBase(base uintptr) uint64 { return unsupported }
+
+func threadPreempt(entry uintptr, ticks uint64) uint64 { return unsupported }
+
+func probeVectorSpin(stop *uint32) uint64 { return 0 }
+
+func threadWake(thread uint64) uint64 { return unsupported }
+
+func threadWakeTake() uint64 { return unsupported }
+
 func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64 { return unsupported }
 
 func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64 { return unsupported }
@@ -155,3 +167,5 @@ func handleDuplicate(handle uint64, rights uint64, address unsafe.Pointer) uint6
 }
 
 func logReadSequence(device uint64, cursor uint64, address unsafe.Pointer) uint64 { return unsupported }
+
+func irqPoll(irq uint64) uint64 { return unsupported }

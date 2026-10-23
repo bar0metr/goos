@@ -1,0 +1,193 @@
+//go:build scheduler.cores
+
+// GoOS native goroutines (ADR 0204). This file replaces TinyGo's
+// runtime/scheduler_cores.go in the goroutine toolchain root. Goroutines run
+// on native threads of the process under the GoOS scheduler
+// (goos/userspace/runtime/goroutine), which these functions call by symbol.
+// What stays here is what needs the runtime's own types: the queue of
+// time.Timer and time.AfterFunc timers, run on a thread's scheduler stack
+// when the GoOS scheduler finds them due.
+
+package runtime
+
+import (
+	"internal/task"
+	"runtime/interrupt"
+)
+
+const hasScheduler = true
+
+const hasParallelism = true
+
+//go:linkname goosReady goos_g_ready
+func goosReady(t *task.Task)
+
+//go:linkname goosYield goos_g_yield
+func goosYield()
+
+//go:linkname goosSleep goos_g_sleep
+func goosSleep(duration int64)
+
+//go:linkname goosParkForever goos_g_park_forever
+func goosParkForever()
+
+//go:linkname goosNumCPU goos_g_num_cpu
+func goosNumCPU() int
+
+//go:linkname goosMaxProcs goos_g_max_procs
+func goosMaxProcs(n int) int
+
+//go:linkname goosGoroutines goos_g_count
+func goosGoroutines() int
+
+//go:linkname goosTimerAdded goos_g_timer_added
+func goosTimerAdded(when int64)
+
+//go:linkname goosLock goos_g_lock
+func goosLock(lock *uint32)
+
+//go:linkname goosUnlock goos_g_unlock
+func goosUnlock(lock *uint32)
+
+// deadlock parks the goroutine for good: an operation on a nil channel, or
+// a select with no cases.
+func deadlock() {
+	goosParkForever()
+	trap()
+}
+
+func goexit() {
+	task.Exit()
+}
+
+// scheduleTask makes t runnable. A task that has not parked yet runs on
+// when it does.
+func scheduleTask(t *task.Task) {
+	goosReady(t)
+}
+
+// Gosched lets other goroutines run.
+func Gosched() {
+	goosYield()
+}
+
+// NumCPU returns the number of processors the kernel runs.
+func NumCPU() int {
+	return goosNumCPU()
+}
+
+func currentTask() *task.Task {
+	return task.Current()
+}
+
+// Pause the current goroutine for at least duration nanoseconds.
+//
+//go:linkname sleep time.Sleep
+func sleep(duration int64) {
+	if duration <= 0 {
+		return
+	}
+	goosSleep(duration)
+}
+
+// timerLock guards timerQueue and firingTimers.
+var timerLock uint32
+
+func addTimer(tn *timerNode) {
+	goosLock(&timerLock)
+	timerQueueAdd(tn)
+	when := int64(tn.whenTicks())
+	goosUnlock(&timerLock)
+	goosTimerAdded(when)
+}
+
+// reAddTimer advances and re-adds a periodic timer after its callback ran,
+// unless it was stopped or reset meanwhile.
+func reAddTimer(tn *timerNode) {
+	goosLock(&timerLock)
+	firingTimersRemove(tn)
+	if tn.stopped {
+		goosUnlock(&timerLock)
+		return
+	}
+	tn.timer.when += tn.timer.period
+	timerQueueAdd(tn)
+	when := int64(tn.whenTicks())
+	goosUnlock(&timerLock)
+	goosTimerAdded(when)
+}
+
+func removeTimer(t *timer) *timerNode {
+	goosLock(&timerLock)
+	n := timerQueueRemove(t)
+	if n == nil {
+		firingTimerStop(t)
+	}
+	goosUnlock(&timerLock)
+	return n
+}
+
+// goosTimerNext returns when the first timer is due, in nanoseconds of the
+// monotonic clock, or the largest int64 when none waits.
+//
+//export goos_runtime_timer_next
+func goosTimerNext() int64 {
+	goosLock(&timerLock)
+	when := int64(^uint64(0) >> 1)
+	if timerQueue != nil {
+		when = int64(timerQueue.whenTicks())
+	}
+	goosUnlock(&timerLock)
+	return when
+}
+
+// goosTimerRun runs the callback of every timer due at now. It runs on a
+// thread's scheduler stack; the callbacks send on channels or start
+// goroutines and never block.
+//
+//export goos_runtime_timer_run
+func goosTimerRun(now int64) {
+	for {
+		goosLock(&timerLock)
+		tn := timerQueue
+		if tn == nil || int64(tn.whenTicks()) > now {
+			goosUnlock(&timerLock)
+			return
+		}
+		delay := ticksToNanoseconds(timeUnit(now) - tn.whenTicks())
+		timerQueue = tn.next
+		tn.next = nil
+		firingTimersAdd(tn)
+		goosUnlock(&timerLock)
+		tn.callback(tn, delay)
+		goosLock(&timerLock)
+		if tn.timer.period == 0 {
+			firingTimersRemove(tn)
+		}
+		goosUnlock(&timerLock)
+	}
+}
+
+// atomicsLock guards task queues and stacks (internal/task/queue.go) for
+// the few instructions a push or pop takes.
+var atomicsLock uint32
+
+func lockAtomics() interrupt.State {
+	goosLock(&atomicsLock)
+	return 0
+}
+
+func unlockAtomics(mask interrupt.State) {
+	goosUnlock(&atomicsLock)
+}
+
+// printLock keeps one print or println call's output together.
+var printLock uint32
+
+func printlock() {
+	goosLock(&printLock)
+}
+
+func printunlock() {
+	goosUnlock(&printLock)
+}

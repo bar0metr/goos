@@ -1,12 +1,7 @@
-//go:build goos_userspace
-
-// Package pathpage carries a VFS request's paths when they are too long for
-// the message, and receives a listed name too long for the reply (ADR 0110).
-//
-// A process that needs it creates one shared-memory object of two pages, a
-// path and a target of PathMax bytes each, and keeps it mapped. Each request
-// that uses it attaches a new handle to it, with only the rights the VFS
-// needs; the VFS copies the paths out before it looks at them.
+// Package pathpage carries VFS paths and returned names too long for inline
+// messages (ADR 0110). Hold covers Prepare, the entire exchange, and copying
+// Name. If a sent exchange is abandoned, call Abandon before Release: a late
+// server access must never reach the page of another request.
 package pathpage
 
 import (
@@ -15,26 +10,51 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
+	"goos/userspace/runtime/lock"
 	"goos/userspace/runtime/sys"
 )
 
 const pages = 2 * limits.PathMax / 4096
 
-var (
-	object handle.ID
-	memory []byte
-)
+type memoryTransport interface {
+	create() (handle.ID, uint64, []byte, bool)
+	duplicate(handle.ID, capability.Rights) (handle.ID, bool)
+	retire(handle.ID, uint64, uint64)
+}
 
-// Prepare readies request to be sent. When its paths fit the message and it
-// asks for no name, there is nothing to attach and the handle is zero.
-// Otherwise the paths are written to the page, the request is marked, and the
-// handle returned is to be attached; it moves to the VFS with the request.
-func Prepare(request *vfs.Request) (handle.ID, bool) {
+// pageState's memory is reusable only after a completed exchange. Retiring
+// the local mapping does not revoke a server mapping; the old object stays
+// distinct and cannot affect the fresh object allocated by the next Prepare.
+type pageState[T memoryTransport] struct {
+	mu     lock.Mutex
+	object handle.ID
+	base   uint64
+	memory []byte
+	io     T
+}
+
+var page pageState[nativeMemory]
+
+func Hold()    { page.mu.Lock() }
+func Release() { page.mu.Unlock() }
+
+// Prepare attaches the paths or space for a returned name. The caller holds
+// the page, and closes the returned handle itself if the send fails.
+func Prepare(request *vfs.Request) (handle.ID, bool) { return page.prepare(request) }
+
+// Name aliases the page until Release. Copy it before releasing the page.
+func Name(size int) []byte { return page.name(size) }
+
+// Abandon permanently detaches this object from future requests. The caller
+// holds the page and must not subsequently access its previous Name slice.
+func Abandon() { page.abandon() }
+
+func (p *pageState[T]) prepare(request *vfs.Request) (handle.ID, bool) {
 	inline := vfs.FitsInline(*request)
 	if inline && !request.NameReturn {
 		return 0, true
 	}
-	if len(request.Path)+len(request.Target) > 2*limits.PathMax || !ensure() {
+	if len(request.Path) > limits.PathMax || len(request.Target) > limits.PathMax || !p.ensure() {
 		return 0, false
 	}
 	rights := capability.Read | capability.Transfer
@@ -42,38 +62,66 @@ func Prepare(request *vfs.Request) (handle.ID, bool) {
 		rights |= capability.Write
 	}
 	if !inline {
-		copy(memory, request.Path)
-		copy(memory[len(request.Path):], request.Target)
+		copy(p.memory, request.Path)
+		copy(p.memory[len(request.Path):], request.Target)
 		request.PathsAttached = true
 	}
-	attached, status := sys.HandleDuplicate(object, rights)
-	if status != kcall.StatusOK {
-		return 0, false
-	}
-	return attached, true
+	return p.io.duplicate(p.object, rights)
 }
 
-// Name returns the listed name the VFS wrote to the page, size bytes long.
-func Name(size int) []byte {
-	if size > len(memory) {
+func (p *pageState[T]) name(size int) []byte {
+	if size < 0 || size > len(p.memory) {
 		return nil
 	}
-	return memory[:size]
+	return p.memory[:size]
 }
 
-func ensure() bool {
-	if object != 0 {
+func (p *pageState[T]) ensure() bool {
+	if p.object != 0 {
 		return true
 	}
-	created, status := sys.MemoryCreate(pages)
-	if status != kcall.StatusOK {
+	object, base, memory, ok := p.io.create()
+	if !ok {
 		return false
 	}
-	base, size, status := sys.MemoryMapAnywhere(created, true)
-	if status != kcall.StatusOK {
-		sys.HandleClose(created)
-		return false
-	}
-	object, memory = created, sys.MappedAtStart(base, size)
+	p.object, p.base, p.memory = object, base, memory
 	return true
+}
+
+func (p *pageState[T]) abandon() {
+	object, base, size := p.object, p.base, uint64(len(p.memory))
+	p.object, p.base, p.memory = 0, 0, nil
+	if object != 0 {
+		p.io.retire(object, base, size)
+	}
+}
+
+type nativeMemory struct{}
+
+func (nativeMemory) create() (handle.ID, uint64, []byte, bool) {
+	object, status := sys.MemoryCreate(pages)
+	if status != kcall.StatusOK {
+		return 0, 0, nil, false
+	}
+	base, size, status := sys.MemoryMapAnywhere(object, true)
+	if status != kcall.StatusOK {
+		sys.HandleClose(object)
+		return 0, 0, nil, false
+	}
+	if size < 2*limits.PathMax {
+		sys.VMUnmap(base, size)
+		sys.HandleClose(object)
+		return 0, 0, nil, false
+	}
+	return object, base, sys.Window(base, size), true
+}
+
+func (nativeMemory) duplicate(object handle.ID, rights capability.Rights) (handle.ID, bool) {
+	attached, status := sys.HandleDuplicate(object, rights)
+	return attached, status == kcall.StatusOK
+}
+
+func (nativeMemory) retire(object handle.ID, base, size uint64) {
+	sys.VMUnmap(base, size)
+	sys.HandleClose(object)
 }

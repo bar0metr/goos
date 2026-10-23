@@ -14,17 +14,11 @@ import (
 // interactive program shows the error and carries on (ADR 0124). A request
 // the filesystem service never answered is reported as vfs.StatusPeerDied.
 
-// replyName holds the name of the last reply that carried one, so what the
-// exchange allocated can be freed before the caller looks at it.
-var replyName [limits.NameMax]byte
-
-// Request sends one VFS request and returns its status and reply, freeing
-// what the exchange allocated, so a long-running program can make any number
-// of them. The reply's Name is only valid until the next request; it carries
-// no Data.
+// Request sends one VFS request and returns its status and reply. The reply
+// carries no Data, so a long-running program that makes any number of them
+// keeps no file data alive; its Name belongs to the caller.
 func Request(request vfs.Request) (vfs.Reply, vfs.Status) {
 	reply, received := CallVFS(request)
-	reply.Name = replyName[:copy(replyName[:], reply.Name)]
 	reply.Data = nil
 	if !received {
 		return vfs.Reply{}, vfs.StatusPeerDied
@@ -106,14 +100,17 @@ func Replace(source, target []byte) vfs.Status {
 	return status
 }
 
-// savePath holds the temporary path of the save in progress.
-var savePath [limits.PathMax]byte
-
 // SaveFile replaces target with what source produces, writing it through bulk
 // to a temporary file beside target first, so target keeps its old contents
-// until the new ones are complete (ADR 0129).
+// until the new ones are complete (ADR 0129). Each concurrent save needs its
+// own Bulk and Source. Atomic Create reserves a separate temporary filename;
+// collisions and stale candidates are skipped without being changed. A Replace
+// error may follow a committed rename; retry uses a fresh candidate.
 func SaveFile(target []byte, bulk *Bulk, source safesave.Source) (vfs.Status, safesave.Stage) {
-	return safesave.Save(saveFiles{bulk}, target, bulk.Memory, source, &savePath)
+	if bulk.temporary == nil {
+		bulk.temporary = new([limits.PathMax]byte)
+	}
+	return safesave.Save(saveFiles{bulk}, target, bulk.Memory, source, bulk.temporary)
 }
 
 // saveFiles is the VFS a save goes through. Save fills bulk's memory, so a

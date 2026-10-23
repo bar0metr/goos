@@ -276,7 +276,7 @@ incomplete.
 | Target | What it runs |
 |---|---|
 | `test-native-threads` | `smoke` (threads of one process on several processors at once), `lifecycle` (IDs, joins, exit codes, the task quota, slot reuse), `fault` and `overflow` (a worker's fault or stack overflow into its guard ends the process, after which threads start again) |
-| `test-thread-gc` | `gc` (threads share and drop lists across collections), `roots` (lists held only by a thread that loops without calls, one that sleeps in a call, and one inside a region), `storm` (every thread asks for collections at once) |
+| `test-thread-gc` | `gc` (threads share and drop lists across collections), `roots` (lists held only by a thread that loops without calls, one that sleeps in a call, and one inside a region), `region-window` (a thread held inside region Enter and Leave while the main thread or another worker collects), `storm` (every thread asks for collections at once) |
 | `test-thread-allocator` | the host model and race tests of `cache.go`, then `bench` with the heap lock and with owned slabs, checking the profile's counters, and `gc` and `storm` over owned slabs |
 | `bench-thread-allocator` | the benchmark only, on 1, 2, 4, and 8 threads, under TCG |
 | `test-pve-threads` | the checks and the benchmark under KVM on eight processors |
@@ -322,7 +322,7 @@ shows a speedup of 1.25x at four and eight threads.
   are started with `thread.Start` and joined with `thread.Join`.
 - A collection pauses every thread of the process. Suspension cost grows with
   the number of threads; the pauses are reported.
-- Only `sys` keeps its scratch per thread. `utility` and the other packages
-  with package-level buffers (`utility`'s message wire and path buffers,
-  `pages`) are not safe from two threads at once: a threaded program prints
-  and calls services from one thread.
+- Only `sys` keeps its scratch per thread. The other libraries keep their
+  state in sessions, caller buffers or objects with their own
+  `runtime/lock` mutex; which of their calls may run from two threads at once
+  is listed in docs/development/native-concurrency-audit.md.

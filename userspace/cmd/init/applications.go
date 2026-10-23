@@ -7,8 +7,10 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
+	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	blockproto "goos/userspace/block"
 	"goos/userspace/commands"
@@ -18,11 +20,11 @@ import (
 	syslog "goos/userspace/log"
 	"goos/userspace/netapi"
 	"goos/userspace/partition"
-	"goos/userspace/pathpage"
 	"goos/userspace/runtime/sys"
 	shellcmd "goos/userspace/shell"
 	"goos/userspace/startup"
 	"goos/userspace/tty"
+	"goos/userspace/utility"
 )
 
 // openVFSSession asks VFS for a new session and returns the client endpoint the
@@ -39,19 +41,22 @@ func openVFSSession() (handle.ID, string) {
 	}
 	correlation++
 	control, ok := vfs.AddSessionRequest(handle.ID(pair[1]), correlation)
-	if !ok || !sendMessage(vfsControlHandle, control) {
+	if !ok {
 		closePair(pair)
 		return 0, "APP_VFS_REQUEST_FAILED"
 	}
-	controlReply, status := receive(vfsControlHandle, vfsSessionDeadline)
-	vfsStatus, valid := vfs.DecodeAddSessionReply(controlReply)
-	if status != ipc.StatusOK || !valid || vfsStatus != vfs.StatusOK {
+	vfsStatus, status, sent := filesystemRequests.Control(handle.ID(vfsControlHandle), &control, vfsSessionDeadline)
+	if !sent {
+		closePair(pair)
+		return 0, "APP_VFS_REQUEST_FAILED"
+	}
+	if status != ipc.StatusOK || vfsStatus != vfs.StatusOK {
 		sys.HandleClose(handle.ID(pair[0]))
+		if status == kcall.StatusCorruptData {
+			return 0, "APP_VFS_REPLY_INVALID"
+		}
 		if status != ipc.StatusOK {
 			return 0, "APP_VFS_RECEIVE_STATUS"
-		}
-		if !valid {
-			return 0, "APP_VFS_REPLY_INVALID"
 		}
 		return 0, "APP_VFS_RESOURCE_EXHAUSTED"
 	}
@@ -156,6 +161,10 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		tcpSession, _ = openTCPSession()
 	}
 	useTCP := tcpSession[0] != 0
+	// goprobe logwait parks goroutines on a log cursor and writes the record
+	// that wakes them. Only the validation build's system goprobe gets the log,
+	// by name, so the command index format stays as it is.
+	useLog := validation.Enabled && !linuxProcess && grantable && equalBytes(command, "goprobe")
 	if useBlockCheck && boot.Mode() != supervisor.ModeRecovery {
 		// The running system starts its programs from the volume, so the
 		// volume is never taken from it for a check (ADR 0175).
@@ -280,6 +289,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useTCP {
 		handles += len(tcpSession)
 	}
+	if useLog {
+		handles++
+	}
 	// A Linux program searches the Linux fixture directory, never the
 	// native one: its execve refuses native images.
 	addLinuxPath := linuxProcess && execproto.LinuxPathMissing(environment)
@@ -359,6 +371,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		writer.Handle([]byte("tcp-tx"), 0)
 		writer.Handle([]byte("tcp-rx"), 0)
 	}
+	if useLog {
+		writer.Handle([]byte("log"), 0)
+	}
 	// The request was validated when it arrived, so what does not fit is its
 	// size: its strings need more room in the startup object's tables.
 	startupData, ok := writer.Finish()
@@ -420,6 +435,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			supervisor.Capability{Name: "tcp-tx", Handle: tcpSession[1], Type: handle.TypeMemory, Rights: capability.Read | capability.Write, Consume: true},
 			supervisor.Capability{Name: "tcp-rx", Handle: tcpSession[2], Type: handle.TypeMemory, Rights: capability.Read, Consume: true})
 	}
+	if useLog {
+		grants = append(grants, supervisor.Capability{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write})
+	}
 	profile := supervisor.ProfileNormal
 	if linuxProcess {
 		profile = supervisor.ProfileLarge
@@ -427,9 +445,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if !linuxProcess && grantable && equalBytes(command, "quota") {
 		profile = supervisor.ProfileTiny
 	}
-	// threadprobe runs up to eight threads, the large profile's task quota
-	// (ADR 0203).
-	if !linuxProcess && grantable && (equalBytes(command, "fsck-fat") || equalBytes(command, "vmprobe") || equalBytes(command, "threadprobe")) {
+	// The concurrency probes exercise eight native tasks, the large
+	// profile's task quota (ADR 0203, ADR 0204).
+	if !linuxProcess && grantable && (equalBytes(command, "fsck-fat") || equalBytes(command, "vmprobe") || equalBytes(command, "threadprobe") || validation.Enabled && equalBytes(command, "goprobe")) {
 		profile = supervisor.ProfileLarge
 	}
 	event, launched := requestLaunch(executable, processName, grants, profile, slot, uint32(len(startupData)))
@@ -489,13 +507,12 @@ func openCheckBlock() (handle.ID, string) {
 	}
 	correlation++
 	request, ok := vfs.UnmountRequest(correlation)
-	if !ok || !sendMessage(vfsControlHandle, request) {
+	if !ok {
 		manager.CancelStop(filesystemName)
 		return 0, "APP_FSCK_UNMOUNT_SEND_FAILED"
 	}
-	reply, received := receive(vfsControlHandle, vfsSessionDeadline)
-	status, valid := vfs.DecodeAddSessionReply(reply)
-	if received != ipc.StatusOK || !valid || status != vfs.StatusOK {
+	status, received, _ := filesystemRequests.Control(handle.ID(vfsControlHandle), &request, vfsSessionDeadline)
+	if received != ipc.StatusOK || status != vfs.StatusOK {
 		manager.CancelStop(filesystemName)
 		return 0, "APP_FSCK_UNMOUNT_REFUSED"
 	}
@@ -551,39 +568,16 @@ func callSession(session handle.ID, request vfs.Request) (vfs.Reply, bool) {
 	return callSessionAttached(session, request, 0, vfsSessionDeadline)
 }
 
+var filesystemRequests utility.VFSRequests
+
 // callSessionAttached is callSession with a handle moved to the VFS with the
 // request and a deadline of the caller's choosing.
 func callSessionAttached(session handle.ID, request vfs.Request, attached handle.ID, deadline uint64) (vfs.Reply, bool) {
-	// A program path too long for a message goes in the path page (ADR 0110).
-	if attached == 0 {
-		var ok bool
-		if attached, ok = pathpage.Prepare(&request); !ok {
-			return vfs.Reply{}, false
-		}
-	}
 	correlation++
-	message, ok := vfs.EncodeRequest(request, correlation)
-	if !ok {
-		if attached != 0 {
-			sys.HandleClose(attached)
-		}
-		return vfs.Reply{}, false
+	if correlation == 0 {
+		correlation++
 	}
-	if attached != 0 {
-		message.HandleCount, message.Handles[0] = 1, attached
-	}
-	if !sendMessage(uint64(session), message) {
-		if attached != 0 {
-			sys.HandleClose(attached)
-		}
-		return vfs.Reply{}, false
-	}
-	reply, status := receive(uint64(session), deadline)
-	if status != ipc.StatusOK || reply.Correlation != correlation {
-		return vfs.Reply{}, false
-	}
-	decoded, ok := vfs.DecodeReply(reply)
-	return decoded, ok && decoded.Operation == request.Operation
+	return filesystemRequests.Call(session, request, attached, correlation, deadline)
 }
 
 // streamGrant grants one standard-stream endpoint. A pipeline's own streams are

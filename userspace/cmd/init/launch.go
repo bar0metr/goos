@@ -147,11 +147,12 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	// The validation build keeps the storage services' process handles so it
 	// can inject the faults that prove each is replaced. The services that
 	// run from the volume are kept in every build: leaving normal mode stops
-	// them. Every other handle is closed: PID 1 supervises through lifecycle
-	// events, not handles.
+	// them. So is the filesystem service: PID 1 ends it when it stalls with
+	// the file cache mapped. Every other handle is closed: PID 1 supervises
+	// through lifecycle events, not handles.
 	session, tty, interactive := sessionOfService(name)
-	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || interactive || name == filesystemName || name == "vfs" || name == "block") ||
-		diskService(name) || networkService(name) || remoteListener
+	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || interactive || name == "vfs" || name == "block") ||
+		name == filesystemName || diskService(name) || networkService(name) || remoteListener
 	if keep && launched == supervisor.LaunchOK {
 		switch {
 		case interactive && tty:
@@ -233,7 +234,7 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	}
 	if name == filesystemName {
 		restarted := filesystemStarted
-		attachFilesystem()
+		attachFilesystem(cacheFence.launched(event.Process))
 		filesystemStarted = true
 		if restarted {
 			restoreSystem()

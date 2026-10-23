@@ -185,14 +185,16 @@ type Scenario interface {
 }
 
 var scenarios = map[string]Scenario{
-	"smoke":        smokeScenario{},
-	"lscpu":        lscpuScenario{},
-	"smp":          smpScenario{},
-	"linux":        linuxScenario{},
-	"7zip":         sevenZipScenario{},
-	"network":      networkScenario{},
-	"remote-admin": remoteAdminScenario{},
-	"threads":      threadsScenario{},
+	"smoke":              smokeScenario{},
+	"lscpu":              lscpuScenario{},
+	"smp":                smpScenario{},
+	"linux":              linuxScenario{},
+	"7zip":               sevenZipScenario{},
+	"network":            networkScenario{},
+	"remote-admin":       remoteAdminScenario{},
+	"threads":            threadsScenario{},
+	"goroutines":         goroutinesScenario{},
+	"native-concurrency": nativeConcurrencyScenario{},
 }
 
 func scenarioNames() string {

@@ -51,6 +51,20 @@ func renewVFSChannels(spec *supervisor.LaunchSpec) bool {
 		syslog.Error("vfs session unavailable")
 		return false
 	}
+	var recovery [2]uint64
+	if !createChannel(&recovery) {
+		closePair(control)
+		closePair(session)
+		return false
+	}
+	if !renewGrant(spec, "vfs", "recovery", handle.ID(recovery[1])) {
+		closePair(control)
+		closePair(session)
+		closePair(recovery)
+		return false
+	}
+	sys.HandleClose(handle.ID(vfsRecovery[0]))
+	vfsRecovery = recovery
 	if !renewGrant(spec, "vfs", "control", handle.ID(control[1])) || !renewGrant(spec, "vfs", "session", handle.ID(session[1])) {
 		closePair(control)
 		closePair(session)

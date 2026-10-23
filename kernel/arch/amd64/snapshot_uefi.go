@@ -61,3 +61,34 @@ func snapshotLocked(task sched.TaskID, into *UserSnapshot) bool {
 	}
 	return true
 }
+
+// userFaultFrameWords is what a user page fault leaves below its task's
+// kernel-entry top: the fifteen registers .user_fault pushes, RAX lowest,
+// the vector, and the error code and IRETQ frame the processor pushed.
+const userFaultFrameWords = 22
+
+// UserFaultRegisters returns the registers the current task saved on entry
+// to the user page fault it is resolving at rip. The frame is checked
+// against the page-fault vector, the user code selector and rip, and the
+// call answers false when any differs. A validation build reports them.
+func UserFaultRegisters(rip uint64) (UserRegisters, bool) {
+	slot := currentSlot()
+	if slot == sched.Idle {
+		return UserRegisters{}, false
+	}
+	top := TaskStackTop(uint64(slot))
+	if top == 0 || top%16 != 0 {
+		return UserRegisters{}, false
+	}
+	// SAFETY: the current task runs on its own kernel stack, which is mapped
+	// for its whole life; a user page fault entered at its top.
+	frame := (*[userFaultFrameWords]uint64)(unsafe.Pointer(uintptr(top - userFaultFrameWords*8)))
+	if frame[15] != 14 || frame[17] != rip || frame[18] != uint64(userCodeSelector) {
+		return UserRegisters{}, false
+	}
+	return UserRegisters{
+		RAX: frame[0], RCX: frame[1], RDX: frame[2], RBX: frame[3], RBP: frame[4], RSI: frame[5], RDI: frame[6],
+		R8: frame[7], R9: frame[8], R10: frame[9], R11: frame[10], R12: frame[11], R13: frame[12], R14: frame[13], R15: frame[14],
+		RIP: frame[17], RFlags: frame[19], RSP: frame[20],
+	}, true
+}

@@ -22,125 +22,19 @@ import (
 	userwait "goos/userspace/wait"
 )
 
-// maxSessions bounds the clients served at once: one WaitAny names the
-// control channel and every session (ADR 0111).
-const maxSessions = userwait.MaxObjects - 1
-
 var (
 	service              vfsservice.Service
 	consoleHandle        handle.ID
 	initialSessionHandle handle.ID
 	controlHandle        handle.ID
+	recoveryHandle       handle.ID
 	wire                 [ipc.WireMaxSize]byte
 	sessions             [maxSessions]uint64
-	correlation          uint64
+	sessionGenerations   [maxSessions]uint64
 	waitInterests        *[userwait.MaxObjects]userwait.Interest
 	waitCount            int
 	liveSessions         int
 )
-
-// filesystem is the channel to the persistent filesystem service, or zero
-// while there is none (ADR 0096). PID 1 hands it over when that service starts
-// and again after every restart.
-var (
-	filesystem        handle.ID
-	filesystemWire    [ipc.WireMaxSize]byte
-	filesystemRequest ipc.Message
-	filesystemReply   ipc.Message
-	// filesystemName holds a name a reply carried in the file cache.
-	filesystemName [ramfs.MaxName]byte
-	// fileCache is the file cache mapping, once PID 1 has handed it over.
-	fileCache []byte
-)
-
-// filesystemTransport carries backend calls to the filesystem service. Each
-// exchange is bounded by the protocol deadline; a service that has died is
-// forgotten at once, so later calls fail without waiting.
-type filesystemTransport struct{}
-
-func (filesystemTransport) Exchange(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
-	if filesystem == 0 {
-		return fsproto.Reply{}, ramfs.StatusPeerDied
-	}
-	correlation++
-	if !fsproto.EncodeRequest(request, correlation, &filesystemRequest, fileCache) {
-		return fsproto.Reply{}, ramfs.StatusIOError
-	}
-	size, ok := ipc.EncodeFrom(&filesystemRequest, filesystemWire[:])
-	if !ok {
-		return fsproto.Reply{}, ramfs.StatusIOError
-	}
-	status := sys.IPCSend(filesystem, filesystemWire[:size])
-	// A reply to an earlier request that timed out may still be queued; it is
-	// discarded rather than taken for this one's.
-	for status == kcall.StatusOK {
-		status = sys.IPCWaitReceive(filesystem, filesystemWire[:], fsproto.RequestDeadline)
-		if status != kcall.StatusOK {
-			break
-		}
-		if !ipc.DecodeInto(filesystemWire[:wireSize(filesystemWire[:])], &filesystemReply) {
-			return fsproto.Reply{}, ramfs.StatusIOError
-		}
-		if filesystemReply.Correlation < correlation {
-			continue
-		}
-		reply, valid := fsproto.DecodeReply(&filesystemReply, fileCache, &filesystemName)
-		if !valid || filesystemReply.Correlation != correlation {
-			return fsproto.Reply{}, ramfs.StatusIOError
-		}
-		return reply, ramfs.StatusOK
-	}
-	switch status {
-	case kcall.StatusPeerDied:
-		dropFilesystem()
-		return fsproto.Reply{}, ramfs.StatusPeerDied
-	case kcall.StatusTimeout:
-		return fsproto.Reply{}, ramfs.StatusTimeout
-	}
-	return fsproto.Reply{}, ramfs.StatusIOError
-}
-
-// dropFilesystem forgets a filesystem service that has gone. Its mounts answer
-// with I/O errors until PID 1 hands over a restarted one.
-func dropFilesystem() {
-	sys.HandleClose(filesystem)
-	filesystem = 0
-	service.DetachFilesystem()
-	syslog.Warn("filesystem service gone")
-}
-
-// attachFilesystem installs the channel to a filesystem service that has just
-// started. The first attach mounts its volume; a later one checks that the
-// restarted service serves the volume the mounts already name.
-func attachFilesystem(client handle.ID) vfs.Status {
-	if filesystem != 0 {
-		sys.HandleClose(filesystem)
-	}
-	filesystem = client
-	first := !service.PersistentMounted()
-	if service.AttachFilesystem(filesystemTransport{}) {
-		if service.SystemProtected() {
-			mark("SYSTEM_PROTECTED_OK\n")
-		}
-		if first {
-			mark("FAT32_MOUNT_OK\n")
-			syslog.Info("mounted", syslog.Str("fs", "fat32"), syslog.Str("path", "/persist"))
-		} else {
-			mark("FAT32_REATTACHED_OK\n")
-			syslog.Info("filesystem service reattached", syslog.Str("path", "/persist"))
-		}
-		return vfs.StatusOK
-	}
-	// A volume that cannot be mounted is not a reason for the system to stop.
-	// The root filesystem and the system image are up, so the machine comes to
-	// a prompt with no persistent storage rather than to nothing at all, which
-	// is the state from which the volume can be inspected (ADR 0077).
-	if first {
-		syslog.Error("persistent volume not mounted", syslog.Str("reason", "image rejected or device unavailable"))
-		write("[WARN] no persistent storage\n")
-	}
-	return vfs.StatusBackendError
-}
 
 // wireSize is the length of the message at the start of data, from its header.
 func wireSize(data []byte) int {
@@ -193,7 +87,7 @@ func (ramfsStore) Chunk() *ramfs.NodeChunk                      { return pages.P
 
 //export userspaceMain
 func userspaceMain() {
-	arena.InitService()
+	initRuntime()
 	arena.OnExhausted(func() { fatal("VFS_OUT_OF_MEMORY\n") })
 	startupData, validStartup := startup.Read()
 	var found bool
@@ -213,6 +107,10 @@ func userspaceMain() {
 	if !found {
 		fatal("VFS_CONTROL_MISSING\n")
 	}
+	recoveryHandle, found = startupData.Handle("recovery")
+	if !found {
+		fatal("VFS_RECOVERY_MISSING\n")
+	}
 	imageHandle, found := startupData.Handle("image")
 	if !found {
 		fatal("VFS_IMAGE_MISSING\n")
@@ -222,6 +120,7 @@ func userspaceMain() {
 		fatal("VFS_CACHE_MISSING\n")
 	}
 	sessions[0] = uint64(initialSessionHandle)
+	sessionGenerations[0] = 1
 	liveSessions = 1
 	// The volatile root keeps its files in whole pages outside the heap, which
 	// go back to the kernel when a file shrinks or goes (ADR 0105).
@@ -250,69 +149,10 @@ func userspaceMain() {
 	mark("VFS_SERVICE_OK\n")
 	mark("SYSTEM_IMAGE_MOUNT_OK\n")
 	syslog.Info("mounted", syslog.Str("fs", "image"), syslog.Str("path", vfsservice.BootstrapPath))
-	for {
-		var interests [userwait.MaxObjects]userwait.Interest
-		var sessionIndexes [maxSessions]int
-		interests[0] = userwait.Interest{Handle: controlHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-		count := 1
-		for index, session := range sessions {
-			if session != 0 {
-				interests[count] = userwait.Interest{Handle: handle.ID(session), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-				sessionIndexes[count-1] = index
-				count++
-			}
-		}
-		waitInterests, waitCount = &interests, count
-		if count-1 != liveSessions {
-			write("VFS_SESSIONS_CORRUPT\n")
-			if sys.DiagnosticsTrace(consoleHandle, sessions[:]) == kcall.StatusOK {
-				writeSessions()
-			}
-			sys.Exit(exitFailed)
-		}
-		result, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout)
-		if status != kcall.StatusOK {
-			switch status {
-			case kcall.StatusPermissionDenied:
-				fatal("VFS_WAIT_PERMISSION_DENIED\n")
-			case kcall.StatusNotFound:
-				fatal("VFS_WAIT_NOT_FOUND\n")
-			case kcall.StatusResourceExhausted:
-				fatal("VFS_WAIT_RESOURCE_EXHAUSTED\n")
-			case kcall.StatusPeerDied:
-				fatal("VFS_WAIT_PEER_DIED\n")
-			default:
-				fatal("VFS_WAIT_FAILED\n")
-			}
-		}
-		if result.ReadyMask&1 != 0 {
-			pollControl()
-		}
-		for interest := 1; interest < count; interest++ {
-			if result.ReadyMask&(1<<interest) == 0 {
-				continue
-			}
-			index := sessionIndexes[interest-1]
-			session := sessions[index]
-			message, receiveStatus := receiveNow(session)
-			if receiveStatus == ipc.StatusPeerDied {
-				// The files the session left open close with it, before its
-				// slot, and with it its owner number, can be reused.
-				service.CloseSession(sessionOwner(index))
-				if validation.Enabled {
-					releaseWithheld(sessionOwner(index), session, false)
-				}
-				sys.HandleClose(handle.ID(session))
-				sessions[index] = 0
-				liveSessions--
-				continue
-			}
-			if receiveStatus != ipc.StatusOK {
-				fatal("VFS_RECEIVE_FAILED\n")
-			}
-			serve(sessionOwner(index), session, message)
-		}
+	if validation.Enabled {
+		service.SetCopyFault(reportCopyFault)
 	}
+	runService()
 }
 
 func pollControl() bool {
@@ -323,8 +163,13 @@ func pollControl() bool {
 	if status != ipc.StatusOK {
 		fatal("VFS_CONTROL_FAILED\n")
 	}
-	if client, ok := vfs.DecodeSetFilesystem(message); ok {
-		reply, encoded := vfs.AddSessionReply(attachFilesystem(client), message.Correlation)
+	return processControl(message)
+}
+
+// processControl runs only on the namespace owner after earlier work drains.
+func processControl(message ipc.Message) bool {
+	if attach, ok := vfs.DecodeSetFilesystem(message); ok {
+		reply, encoded := vfs.AddSessionReply(attachFilesystem(attach), message.Correlation)
 		if !encoded {
 			fatal("VFS_CONTROL_REPLY_FAILED\n")
 		}
@@ -366,6 +211,7 @@ func pollControl() bool {
 		if result == vfs.StatusOK {
 			sys.HandleClose(filesystem)
 			filesystem = 0
+			filesystemState.endpoint = 0
 			syslog.Info("unmounted", syslog.Str("path", "/persist"))
 		}
 		reply, encoded := vfs.AddSessionReply(result, message.Correlation)
@@ -402,9 +248,14 @@ func pollControl() bool {
 		result = vfs.StatusResourceExhausted
 		for index := range sessions {
 			if sessions[index] == 0 {
+				generation, valid := nextSessionGeneration(sessionGenerations[index])
+				if !valid {
+					continue
+				}
 				result = service.SetAuthority(sessionOwner(index), authority)
 				if result == vfs.StatusOK {
 					sessions[index] = uint64(server)
+					sessionGenerations[index] = generation
 					liveSessions++
 				}
 				break
@@ -422,15 +273,37 @@ func pollControl() bool {
 	return true
 }
 
+// closeSession runs only after the owner's requests have retired. Kernel
+// channel receive reports PeerDied after queued messages (and attachments)
+// drain, so closing here does not abandon received handles in the IPC queue.
+func closeSession(index int) {
+	service.CloseSession(sessionOwner(index))
+	readPoolProbeSessionClosed(sessionOwner(index))
+	if validation.Enabled {
+		releaseWithheld(sessionOwner(index), sessions[index], false)
+		execCrashHandles[index] = 0
+	}
+	sys.HandleClose(handle.ID(sessions[index]))
+	sessions[index] = 0
+	liveSessions--
+}
+
 // sessionOwner names the session in slot index as the owner of the files it
 // opens.
 func sessionOwner(index int) vfs.Owner { return vfs.Owner(index + 1) }
 
-func serve(owner vfs.Owner, session uint64, message ipc.Message) {
+func beginServing(owner vfs.Owner, session uint64) {
 	if validation.Enabled {
 		releaseWithheld(owner, session, true)
 		reportMemory()
 	}
+}
+
+func serve(owner vfs.Owner, session uint64, message ipc.Message) {
+	if validation.Enabled {
+		service.SetCopyContext(vfsservice.ReadSession{Owner: owner, Generation: sessionGenerations[int(owner)-1]}, 0)
+	}
+	beginServing(owner, session)
 	request, ok := vfs.DecodeRequest(message)
 	// A bulk operation, and a request whose paths or listed name travel in
 	// memory, carry exactly one handle, and nothing else carries any.
@@ -483,6 +356,7 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 	}
 	if validation.Enabled {
 		noteExecCrashOpen(owner, request, answer)
+		readPoolProbeOpen(owner, request, answer)
 		if withhold(owner, request, reply) {
 			if request.Operation == vfs.OperationPrepareExecutable {
 				mark("VFS_EXEC_SOURCE_WITHHELD\n")
@@ -568,6 +442,12 @@ func releaseWithheld(owner vfs.Owner, session uint64, deliver bool) {
 // consumes the slot while handling this reply's send.
 func serveExecutable(owner vfs.Owner, request vfs.Request) vfs.Reply {
 	reply := vfs.Reply{Operation: request.Operation}
+	if filesystemState.availability.quarantined.Load() {
+		// The executable transport shares the old filesystem's cache object.
+		// Do not overwrite a slot an unanswered request may still consume.
+		reply.Status = vfs.StatusBackendError
+		return reply
+	}
 	if request.Size == 0 || request.Size > fsproto.PageSize || request.Offset+uint64(request.Size) < request.Offset {
 		reply.Status = vfs.StatusInvalidArgument
 		return reply
@@ -623,10 +503,6 @@ func closeAttached(attached []handle.ID) {
 	}
 }
 
-// maxBulkObject bounds the memory object a client may attach: the VFS maps
-// the whole object, and its page tables are the VFS's to pay for.
-const maxBulkObject = uint64(64 << 20)
-
 // fillBuffer is where a program's bytes pass on their way into the
 // executable object a launcher attached.
 var fillBuffer [128 << 10]byte
@@ -673,8 +549,8 @@ func serveBulk(owner vfs.Owner, request vfs.Request, object handle.ID) vfs.Reply
 		reply.Status = vfs.StatusPermissionDenied
 		return reply
 	}
-	end := request.Offset + uint64(request.Size)
-	if size > maxBulkObject || end < request.Offset || end > size {
+	end, valid := bulkReadWindow(size, request.Offset, request.Size)
+	if !valid {
 		reply.Status = vfs.StatusInvalidArgument
 		sys.VMUnmap(base, size)
 		return reply

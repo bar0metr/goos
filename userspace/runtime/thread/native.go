@@ -13,6 +13,9 @@ func Start(fn func(uintptr), argument uintptr) (ID, Status) {
 	if fn == nil {
 		return 0, kcall.StatusInvalidArgument
 	}
+	if hooks.Starting != nil {
+		hooks.Starting()
+	}
 	arena.EnableThreads()
 	index, ok := claim(fn, argument)
 	if !ok {
@@ -54,6 +57,9 @@ func yield() { sys.ThreadYield() }
 // Exit ends the calling thread with code. The process goes on while another
 // of its threads lives.
 func Exit(code uint64) {
+	if hooks.Exiting != nil {
+		hooks.Exiting()
+	}
 	arena.ThreadExiting()
 	sys.ThreadExit(code)
 }
@@ -65,7 +71,9 @@ func Exit(code uint64) {
 func main(index uint64, slot uint64) {
 	arena.ThreadStarted(int(slot))
 	fn, argument := take(int(index))
-	if fn != nil {
+	if fn != nil && hooks.Run != nil {
+		hooks.Run(fn, argument, int(slot))
+	} else if fn != nil {
 		fn(argument)
 	}
 	Exit(0)

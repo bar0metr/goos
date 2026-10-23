@@ -38,13 +38,12 @@ func shutDown(powerOff bool, correlationOfShell uint64) {
 	syslog.Info("shutdown requested", syslog.Str("action", name))
 	correlation++
 	sync, encoded := vfs.SyncRequest(correlation)
-	if !encoded || !sendMessage(vfsControlHandle, sync) {
+	if !encoded {
 		sendControlStatus(execproto.ControlSyncFailed, correlationOfShell)
 		return
 	}
-	reply, status := receive(vfsControlHandle, vfsSessionDeadline)
-	synced, valid := vfs.DecodeAddSessionReply(reply)
-	if status != ipc.StatusOK || !valid || synced != vfs.StatusOK || reply.Correlation != correlation {
+	synced, status, _ := filesystemRequests.Control(handle.ID(vfsControlHandle), &sync, vfsSessionDeadline)
+	if status != ipc.StatusOK || synced != vfs.StatusOK {
 		syslog.Error("shutdown: storage sync failed", syslog.Str("action", name))
 		sendControlStatus(execproto.ControlSyncFailed, correlationOfShell)
 		return

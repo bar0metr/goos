@@ -10,10 +10,13 @@ partition_log=build/logs/partition-tables.log
 stack_log=build/logs/kernel-stack-overflow.log
 poweroff_log=build/logs/poweroff.log
 poweroff_after_log=build/logs/poweroff-after.log
+stall_log=build/logs/fat32-stall.log
 pid=
 checks=0
 monitor=${TMPDIR:-/tmp}/goos-boot-monitor.$$
 heap_first=
+shell_ready_sequence=0
+shell_ready_limit=600
 
 cleanup() {
 	if [ -n "$pid" ]; then
@@ -132,6 +135,15 @@ window() {
 	log_lines "$1" | awk -v start="$2" -v stop="$3" 'seen && index($0, stop) { exit } seen { print } !seen && index($0, start) { seen = 1 }'
 }
 
+# window_closed reports whether a line containing $3 follows the first line
+# containing $2. Without it, window runs to the end of the log, where a later
+# command's output could satisfy a check meant for this one.
+window_closed() {
+	log_lines "$1" | awk -v start="$2" -v stop="$3" 'seen && index($0, stop) { found = 1; exit } !seen && index($0, start) { seen = 1 } END { exit !found }'
+}
+
+# require_window passes only for a closed window; NO_SUCH_LINE as the stop
+# reads to the end of the log on purpose.
 require_window() {
 	name=$1
 	pattern=$2
@@ -139,6 +151,9 @@ require_window() {
 	file=$4
 	start=$5
 	stop=$6
+	if [ "$stop" != NO_SUCH_LINE ] && ! window_closed "$file" "$start" "$stop"; then
+		fail_check "$name" "$expected" "no '$stop' after '$start'" "$file" "$start"
+	fi
 	window "$file" "$start" "$stop" | grep -q "$pattern" || fail_check "$name" "$expected" 'marker not found' "$file" "$start"
 	checks=$((checks + 1))
 }
@@ -229,6 +244,29 @@ await_count() { # file pattern count
 	done
 }
 
+# send_after_done requires both the command's output and a fresh acknowledgement
+# from the shell after the entire foreground sequence completes. Child stdout
+# precedes exit/reaping, and a prompt can be redrawn while a job still owns stdin;
+# neither proves that it is safe to type the next command. The validation-only
+# builtin runs in the shell, not in a child, and echoes our unique counter.
+send_after_done() { # line done-pattern
+	sent_before=$(log_count "$log" "$2")
+	shell_ready_sequence=$((shell_ready_sequence + 1))
+	shell_ready_pattern="^SHELL_READY token=$shell_ready_sequence\$"
+	printf '%s; __boot_ready %s\n' "$1" "$shell_ready_sequence"
+	shell_ready_waited=0
+	while [ "$shell_ready_waited" -lt "$shell_ready_limit" ]; do
+		if [ "$(log_count "$log" "$2")" -gt "$sent_before" ] &&
+			log_lines "$log" | grep -q "$shell_ready_pattern"; then
+			return 0
+		fi
+		sleep 0.1
+		shell_ready_waited=$((shell_ready_waited + 1))
+	done
+	fail_check timeout.shell-ready "new '$2' and SHELL_READY token=$shell_ready_sequence" \
+		"no completed foreground sequence after $shell_ready_limit polls" "$log" "$1"
+}
+
 # guest_memory_mib prints the size a QEMU -m value names, in MiB. It accepts a
 # whole number with an optional M or G suffix and fails on anything else.
 guest_memory_mib() {
@@ -238,6 +276,44 @@ guest_memory_mib() {
 	*[Gg]) echo $((number * 1024)) ;;
 	*) echo "$number" ;;
 	esac
+}
+
+# The main session already injects three FAT32 exits, the supervisor's limit.
+# Test an unanswered exchange in a fresh boot rather than spending a fourth
+# restart from that same budget. Keep its writes off the persistence disk.
+check_filesystem_stall() {
+	stall_disk=build/boot-fat32-stall.img
+	cp "$disk" "$stall_disk"
+	rm -f "$stall_log"
+	( await_ready "$stall_log"
+		printf 'write /home/.validation-fat32-recovery persistent; cat /home/.validation-fat32-recovery; echo before-fat32-stall\n'
+		wait_for_marker fat32-stall.seed '^before-fat32-stall$' 30 "$stall_log"
+		sleep 1
+		printf 'cd /persist/.validation-fat32-stall\n'
+		wait_for_count fat32-stall.cache '^FILE_CACHE_RECOVERED_OK$' 1 60 "$stall_log"
+		wait_for_count fat32-stall.system '^SYSTEM_REATTACHED_OK$' 1 60 "$stall_log"
+		sleep 3
+		printf 'cat /home/.validation-fat32-recovery; echo after-fat32-stall\n'
+		sleep 2
+	) | qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
+		-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
+		-drive "if=none,id=goosdisk,format=raw,file=$stall_disk" \
+		-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
+		-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$stall_log" 2>&1 &
+	pid=$!
+	wait_for_marker fat32-stall '^after-fat32-stall$' 90 "$stall_log"
+	cleanup
+	require_window storage.fat32-stall-seed-write 'WRITE_PROCESS_OK$' 'the control file written before the stall' "$stall_log" 'write /home/.validation-fat32-recovery persistent;' 'before-fat32-stall'
+	require_window storage.fat32-stall-seed-read '^persistent$' 'the control file read before the stall' "$stall_log" 'write /home/.validation-fat32-recovery persistent;' 'before-fat32-stall'
+	require_marker storage.fat32-stalled FAT32_STALLED "$stall_log" 'validation-fat32-stall'
+	require_marker storage.fat32-stall-replacing FAT32_STALL_REPLACING "$stall_log" 'validation-fat32-stall'
+	require_marker storage.fat32-control-renewed VFS_CONTROL_REPLACED_OK "$stall_log" 'validation-fat32-stall'
+	require_marker storage.fat32-cache-recovered FILE_CACHE_RECOVERED_OK "$stall_log" 'validation-fat32-stall'
+	forbid_regex storage.fat32-recovery-bounded 'FILE_CACHE_RECOVERY_LIMIT' 'one stall within the recovery bound' "$stall_log" 'validation-fat32-stall'
+	require_window storage.fat32-volume-after-stall '^persistent$' 'the volume read through the replacement of a stalled service' "$stall_log" 'cat /home/.validation-fat32-recovery; echo after-fat32-stall' 'after-fat32-stall'
+	require_count storage.fat32-stall-vfs-stable '^VFS_SERVICE_OK$' 1 "$stall_log" 'validation-fat32-stall'
+	forbid_regex storage.fat32-stall-no-recovery 'BOOT_MODE_RECOVERY' 'no fallback to recovery mode' "$stall_log" 'validation-fat32-stall'
+	pass_group fat32-stall
 }
 
 trap cleanup EXIT
@@ -252,6 +328,11 @@ if [ "${1-}" = '--self-test-failure' ]; then
 	exit 0
 fi
 
+stall_only=false
+if [ "${1-}" = '--fat32-stall-only' ]; then
+	stall_only=true
+	shift
+fi
 iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
 disk=${3:?test disk path required}
@@ -267,6 +348,10 @@ variant=$(cut -d' ' -f5 build/config/build)
 # Every disk this script makes for itself is an installed one, made from the
 # build's system tree as make test-disk makes the main one (ADR 0175).
 system_tree=build/variants/$variant/system
+if "$stall_only"; then
+	check_filesystem_stall
+	exit 0
+fi
 go run ./tools/padimage "build/variants/$variant/userspace/bin/vmprobe" build/bigprobe 3145728
 # The padded program exercises a source much larger than the pages it touches.
 # Launch must not read the padding before the process starts.
@@ -341,14 +426,13 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
   sleep 1
   printf 'echo pipeline-must-not-run | missing-stage | readline; echo pipeline-middle-failure-recovered\n'
   sleep 1
-  printf 'missing-stage | readline | readline; echo pipeline-first-failure-recovered\n'
-  sleep 1
+  send_after_done 'missing-stage | readline | readline; echo pipeline-first-failure-recovered' '^pipeline-first-failure-recovered$'
+  # A line typed while a pipeline still reads the terminal becomes its input,
+  # so each one waits for the shell to finish the one before.
   count=0
   while [ "$count" -lt 20 ]; do
-    printf 'echo pipeline-reuse | readline | readline | readline\n'
-    sleep 0.3
-    printf 'missing-stage | readline | readline\n'
-    sleep 0.3
+    send_after_done 'echo pipeline-reuse | readline | readline | readline' '^pipeline-reuse$'
+    send_after_done 'missing-stage | readline | readline' '^missing-stage: command not found$'
     count=$((count + 1))
   done
   printf 'echo pipeline-stress-complete\n'
@@ -436,13 +520,18 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'cd /\n'
 	sleep 1
+	stat_done=$(log_count "$log" '^STAT_PROCESS_OK$')
 	printf 'stat /system/bin/ls\n'
+	await_count "$log" '^STAT_PROCESS_OK$' "$((stat_done + 1))"
 	sleep 1
 	printf 'stat /system/bin\n'
+	await_count "$log" '^STAT_PROCESS_OK$' "$((stat_done + 2))"
 	sleep 1
 	printf 'stat -m /system\n'
+	await_count "$log" '^STAT_PROCESS_OK$' "$((stat_done + 3))"
 	sleep 1
 	printf 'stat -b /system/motd\n'
+	await_count "$log" '^STAT_PROCESS_OK$' "$((stat_done + 4))"
 	sleep 1
 	printf 'stat -x /system\n'
 	sleep 1
@@ -662,20 +751,19 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	# serves the same volume under the mounts and handles the VFS kept.
 	printf 'fault fat32\n'
 	sleep 3
-	printf 'ls /tmp; echo after-fat32-fault\n'
+	send_after_done 'ls /tmp; echo after-fat32-fault' '^after-fat32-fault$'
+	send_after_done 'cat /home/demo/message.txt; echo after-fat32-restart' '^after-fat32-restart$'
 	sleep 1
-	printf 'cat /home/demo/message.txt; echo after-fat32-restart\n'
-	sleep 2
 	# The default CPU has no RDRAND. getrandom and AT_RANDOM still work, from
 	# the kernel's jitter-seeded generator: static glibc reads AT_RANDOM
 	# before main and faults without it (ADR 0185).
-	printf '/system/linux/abi-probe random\n'
-	sleep 2
+	send_after_done '/system/linux/abi-probe random' '^random: '
+	sleep 1
 	# The validation VFS answers one name late. A Linux program that opens
 	# it waits out the bridge's eight-second deadline, gets ETIMEDOUT, and on
 	# its next request must discard the late reply and carry on.
-	printf '/system/linux/abi-probe session-timeout\n'
-	sleep 11
+	send_after_done '/system/linux/abi-probe session-timeout' 'session timeout: '
+	sleep 1
 	# The VFS restarts too (ADR 0099): its clients are handed new sessions,
 	# the FAT32 service restarts behind it, and the shell keeps its jobs.
 	printf 'sleep 25 &\n'
@@ -689,10 +777,9 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'fault vfs\n'
 	sleep 5
-	printf 'ls /tmp; echo after-vfs-fault\n'
+	send_after_done 'ls /tmp; echo after-vfs-fault' '^after-vfs-fault$'
+	send_after_done 'cat /home/demo/message.txt; echo after-vfs-restart' '^after-vfs-restart$'
 	sleep 1
-	printf 'cat /home/demo/message.txt; echo after-vfs-restart\n'
-	sleep 2
 	printf 'jobs\n'
 	sleep 1
 	printf 'echo before-vfs-ps; ps; echo after-vfs-ps\n'
@@ -721,22 +808,19 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	# log service are handed new configuration sessions.
 	printf 'fault config\n'
 	sleep 3
-	printf 'config get user.name\n'
-	sleep 1
-	printf 'config set user.name boot-test\n'
-	sleep 1
+	send_after_done 'config get user.name' 'CONFIG_GET_OK$'
+	send_after_done 'config set user.name boot-test' 'CONFIG_SET_OK$'
 	printf 'fault log\n'
 	sleep 3
-	printf 'echo after-log-restart\n'
-	sleep 2
+	send_after_done 'echo after-log-restart' '^after-log-restart$'
+	sleep 1
 	# The block service restarts too (ADR 0101): the driver and the FAT32
 	# service start again behind it, and the volume is read and written.
 	printf 'fault block\n'
 	sleep 5
-	printf 'cat /home/demo/message.txt; echo after-block-restart\n'
-	sleep 2
-	printf 'write /home/demo/after-block.txt block-restart-write; cat /home/demo/after-block.txt\n'
-	sleep 3
+	send_after_done 'cat /home/demo/message.txt; echo after-block-restart' '^after-block-restart$'
+	send_after_done 'write /home/demo/after-block.txt block-restart-write; cat /home/demo/after-block.txt; echo after-block-write' '^after-block-write$'
+	sleep 1
 	printf 'cd /system\n'
 	sleep 1
 	printf 'uptime\n'
@@ -900,7 +984,7 @@ require_regex storage.fsck-busy 'volume in use by the running system' 'the exclu
 forbid_regex storage.fsck-not-run '^FSCK_FAT_CHECK_OK$' 'no check against the live volume' "$log" 'fsck-fat --check auto'
 require_window storage.fsck-busy-mounted '^persistent$' 'the volume still mounted after the refusal' "$log" 'goos> cat /home/demo/message.txt; echo after-fsck-busy' 'after-fsck-busy'
 require_regex storage.fat32-rest-of-namespace '^after-fat32-fault$' 'the shell and /tmp working after the fault' "$log" 'fault fat32'
-require_window storage.fat32-volume-served-again '^persistent$' 'the volume read through the restarted service' "$log" 'goos> cat /home/demo/message.txt; echo after-fat32-restart' 'after-fat32-restart'
+require_window storage.fat32-volume-served-again '^persistent$' 'the volume read through the restarted service' "$log" 'cat /home/demo/message.txt; echo after-fat32-restart' 'after-fat32-restart'
 # File data moves between the VFS and the FAT32 service through the file cache
 # they share, not through messages (ADR 0098).
 require_marker storage.file-cache FILE_CACHE_OK "$log"
@@ -1162,9 +1246,10 @@ require_count vfs-restart.service-started-twice '^VFS_SERVICE_OK$' 2 "$log" 'fau
 require_marker vfs-restart.config-session CONFIG_SESSION_RENEWED_OK "$log" 'fault vfs'
 require_marker vfs-restart.log-session LOG_SESSION_RENEWED_OK "$log" 'fault vfs'
 require_min_count vfs-restart.fat32-restarted '^FAT32_RESTARTED_OK$' 2 "$log" 'fault vfs'
-require_regex vfs-restart.namespace '^after-vfs-fault$' 'the shell using the namespace after the restart' "$log" 'goos> ls /tmp; echo after-vfs-fault'
-forbid_window vfs-restart.tmp-empty '^redirected.txt$' 'an empty /tmp in the new VFS' "$log" 'goos> ls /tmp; echo after-vfs-fault' 'after-vfs-fault'
-require_window vfs-restart.volume '^persistent$' 'the volume read through the new VFS' "$log" 'goos> cat /home/demo/message.txt; echo after-vfs-restart' 'after-vfs-restart'
+require_regex vfs-restart.namespace '^after-vfs-fault$' 'the shell using the namespace after the restart' "$log" 'ls /tmp; echo after-vfs-fault'
+require_window vfs-restart.tmp-listed '^after-vfs-fault$' 'the /tmp listing after the restart' "$log" 'ls /tmp; echo after-vfs-fault' 'echo after-vfs-restart'
+forbid_window vfs-restart.tmp-empty '^redirected.txt$' 'an empty /tmp in the new VFS' "$log" 'ls /tmp; echo after-vfs-fault' 'after-vfs-fault'
+require_window vfs-restart.volume '^persistent$' 'the volume read through the new VFS' "$log" 'cat /home/demo/message.txt; echo after-vfs-restart' 'after-vfs-restart'
 require_regex vfs-restart.linux-random '^random: available$' 'getrandom and AT_RANDOM without RDRAND' "$log" 'goos> /system/linux/abi-probe random'
 require_regex vfs-restart.linux-timeout 'session timeout: ETIMEDOUT, then ok$' 'a Linux open gives up on a silent VFS and the session survives' "$log" 'goos> /system/linux/abi-probe session-timeout'
 forbid_regex vfs-restart.linux-no-reconnect 'session kept: ' 'a Linux process was not given a new session' "$log" 'goos> fault vfs'
@@ -1206,7 +1291,7 @@ pass_group vfs-restart
 # log service resumes after the last record its predecessor wrote.
 require_marker service-restart.config-injected CONFIG_FAULT_INJECTED "$log" 'fault config'
 require_marker service-restart.config-restarted CONFIG_RESTARTED_OK "$log" 'fault config'
-require_count service-restart.config-started-twice '^CONFIG_SERVICE_OK$' 2 "$log" 'fault config'
+require_count service-restart.config-started-twice 'CONFIG_SERVICE_OK$' 2 "$log" 'fault config'
 require_marker service-restart.shell-config SHELL_CONFIG_RENEWED_OK "$log" 'fault config'
 require_marker service-restart.log-config LOG_CONFIG_RENEWED_OK "$log" 'fault config'
 require_window service-restart.config-read '^boot-test$' 'a setting read back from the restarted service' "$log" 'goos> fault config' 'goos> fault log'
@@ -1586,5 +1671,7 @@ wait_for_marker poweroff-after '^kept across poweroff' 60 "$poweroff_after_log"
 cleanup
 require_regex poweroff.data-kept '^kept across poweroff' 'the file written before poweroff' "$poweroff_after_log" 'goos> cat /home/poweroff.txt'
 pass_group poweroff
+
+check_filesystem_stall
 
 printf '\nPASS qemu-boot (%s checks)\n' "$checks"

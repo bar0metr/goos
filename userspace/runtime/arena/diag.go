@@ -121,6 +121,10 @@ type Diagnostics struct {
 	// collection and SuspendFailures the collections given up because they
 	// could not be.
 	Suspensions, SuspendFailures uint64
+	// AllocWindowRetries and RegionWindowRetries count holds a collection
+	// let go because a held thread was inside an allocator window or a
+	// region transition; it then tries again or gives up (ADR 0204).
+	AllocWindowRetries, RegionWindowRetries uint64
 	// RendezvousLast, RendezvousMax, and RendezvousTotal are how long
 	// holding the other threads took, and PauseLast, PauseMax, and
 	// PauseTotal how long collections took, in nanoseconds.

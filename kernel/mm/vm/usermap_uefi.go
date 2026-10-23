@@ -258,6 +258,33 @@ func ProtectUserRange(rootAddress, base, length uint64, permissions Permissions)
 	return true
 }
 
+// RevokeUserRange takes user access away from every present page in a
+// range: the leaves stay present for the kernel, which keeps owning their
+// frames, and a user access faults. A range the runtime protects before it
+// touches it, such as a goroutine stack's guard (ADR 0204), has no present
+// page, and nothing changes but the region.
+func RevokeUserRange(rootAddress, base, length uint64) bool {
+	if rootAddress%PageSize != 0 || rootAddress >= IdentityMapLimit || base%PageSize != 0 || !ValidateUserRange(base, length) {
+		return false
+	}
+	// SAFETY: rootAddress names a process PML4 created by this package.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	changed := false
+	for address, end := base, base+length; ; {
+		leaf, at := nextLeaf(root, address, end)
+		if leaf == nil {
+			break
+		}
+		*leaf &^= entryUser | entryWritable
+		changed = true
+		address = at + PageSize
+	}
+	if changed {
+		shootdownRoot(rootAddress)
+	}
+	return true
+}
+
 // UserPageAllows reports whether the present user leaf at virtual permits
 // the access. A fault on such a page came from a translation another
 // processor has since replaced, and only needs a retry.

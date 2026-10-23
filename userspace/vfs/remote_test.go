@@ -224,3 +224,66 @@ func TestRenamedOpenFileSurvivesRestart(t *testing.T) {
 		t.Fatalf("read after rename and restart = %d, %q", read.Status, read.Data)
 	}
 }
+
+// Detach is also the owner-side fence for an unanswered transport. The old
+// filesystem may still consume the shared scratch slot: even a write that
+// returns PeerDied must not copy new bytes there before discovering detach.
+func TestDetachedRemoteWriteDoesNotReuseSharedCache(t *testing.T) {
+	service := startedService(t, testFAT32Device())
+	writePersistent(t, service, "/home/detached", "before")
+	opened := service.Dispatch(1, vfs.Request{Operation: vfs.OperationOpen, Path: []byte("/home/detached"), Rights: vfs.Write})
+	if opened.Status != vfs.StatusOK {
+		t.Fatal(opened.Status)
+	}
+	service.DetachFilesystem()
+	before := append([]byte(nil), testCache...)
+	reply := service.Dispatch(1, vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: []byte("changed")})
+	if reply.Status != vfs.StatusPeerDied || reply.Size != 0 {
+		t.Fatalf("detached write = %+v", reply)
+	}
+	for index, value := range before {
+		if testCache[index] != value {
+			t.Fatalf("detached write changed shared-cache byte %d", index)
+		}
+	}
+}
+
+// The service that left an exchange unanswered may write the shared cache
+// until PID 1's fence sees it exit. Nothing it wrote there is served once a
+// replacement is attached: the page index lives in the VFS, and a reattach
+// starts it empty, so every page is read again through the new service.
+func TestReattachDoesNotServeOldWriterCacheBytes(t *testing.T) {
+	device := testFAT32Device()
+	service := &Service{}
+	if !service.Init() || !service.MountBootstrap(testSystemImage(t)) || !service.AttachCache(testCache) {
+		t.Fatal("service init failed")
+	}
+	if !service.AttachFilesystem(newLoopback(device)) {
+		t.Fatal("volume refused")
+	}
+	writePersistent(t, service, "/home/cached", "trusted-bytes")
+	if !service.Sync() {
+		t.Fatal("sync failed")
+	}
+	read := func() vfs.Reply {
+		opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/home/cached")})
+		if opened.Status != vfs.StatusOK {
+			t.Fatalf("open = %d", opened.Status)
+		}
+		defer service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+		return service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64})
+	}
+	if reply := read(); reply.Status != vfs.StatusOK || string(reply.Data) != "trusted-bytes" {
+		t.Fatalf("read before quarantine = %+v", reply)
+	}
+	service.DetachFilesystem()
+	for index := range testCache {
+		testCache[index] = 'X'
+	}
+	if !service.AttachFilesystem(newLoopback(device)) {
+		t.Fatal("replacement refused")
+	}
+	if reply := read(); reply.Status != vfs.StatusOK || string(reply.Data) != "trusted-bytes" {
+		t.Fatalf("read after reattach = %q (%d)", reply.Data, reply.Status)
+	}
+}

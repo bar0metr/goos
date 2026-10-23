@@ -4,9 +4,124 @@
 _start:
     andq $-16, %rsp
     movq %rsp, goos_stack_top(%rip)
+    xorl %esi, %esi
+    call goos_tcb_install
     call userspaceMain
+    // A program built with the goroutine runtime ends when its main
+    // function returns; any other program never returns here.
+    movq $goos_main_returned, %rax
+    testq %rax, %rax
+    jz 1f
+    call *%rax
+1:
     ud2
 .size _start, .-_start
+.weak goos_main_returned
+
+// Thread control blocks (ADR 0204). Every thread's FS base points at the
+// block of its slot, so the runtime finds the thread it runs on with one
+// FS-relative load, whatever stack it runs on. A block is 64 bytes:
+//
+//	0   the block's own address
+//	8   the thread's slot
+//	16  GOOS_TCB_MAGIC
+//	24  the goroutine runtime's record of the thread (M), or zero
+//	32  the pin count: nonzero while the thread uses state that belongs
+//	    to it, such as its system-call descriptors or allocator caches,
+//	    and must not be preempted onto another goroutine
+//	40  the goroutine the thread runs, or zero
+//	48  the thread's ID, once the runtime has read it
+//	56  the TinyGo task of the code the thread runs, in the goroutine
+//	    runtime: the running goroutine's, or the scheduler stack's
+.set GOOS_TCB_MAGIC, 0x31424354534f4f47
+.section .bss.goos_tcbs,"aw",@nobits
+.balign 64
+.global goos_tcbs
+goos_tcbs:
+    .zero 64 * 16
+
+// goos_tcb_install makes the block of the slot in rsi the calling thread's
+// and sets its FS base to it. Only rax, rcx, and rdx change. A kernel that
+// refuses the base leaves the thread unable to name itself, so it stops.
+.section .text.goos_tcb_install,"ax",@progbits
+.global goos_tcb_install
+.type goos_tcb_install,@function
+goos_tcb_install:
+    pushq %rdi
+    pushq %rsi
+    movq %rsi, %rax
+    shlq $6, %rax
+    leaq goos_tcbs(%rip), %rdi
+    addq %rax, %rdi
+    movq %rdi, 0(%rdi)
+    movq %rsi, 8(%rdi)
+    movabsq $GOOS_TCB_MAGIC, %rax
+    movq %rax, 16(%rdi)
+    movq $0, 24(%rdi)
+    movq $0, 32(%rdi)
+    movq $0, 40(%rdi)
+    movq $0, 48(%rdi)
+    movq $0, 56(%rdi)
+    movl $66, %eax
+    int $0x80
+    testq %rax, %rax
+    jnz 1f
+    popq %rsi
+    popq %rdi
+    ret
+1:
+    ud2
+.size goos_tcb_install, .-goos_tcb_install
+
+// goos_g_current_task() *task.Task returns the task of the code that runs,
+// for TinyGo's task.Current. One FS-relative load reads it, so a goroutine
+// switched to another thread between two instructions never reads another
+// thread's. A thread the goroutine runtime has not set up yet takes the
+// slow path.
+.weak goos_g_current_task_slow
+.global goos_g_current_task
+.type goos_g_current_task,@function
+goos_g_current_task:
+    movq %fs:56, %rax
+    testq %rax, %rax
+    jz 1f
+    ret
+1:
+    jmp goos_g_current_task_slow
+.size goos_g_current_task, .-goos_g_current_task
+
+// goos_tls_block() uintptr returns the calling thread's control block.
+.global goos_tls_block
+.type goos_tls_block,@function
+goos_tls_block:
+    movq %fs:0, %rax
+    ret
+.size goos_tls_block, .-goos_tls_block
+
+// goos_tls_slot() uint64 returns the calling thread's slot.
+.global goos_tls_slot
+.type goos_tls_slot,@function
+goos_tls_slot:
+    movq %fs:8, %rax
+    ret
+.size goos_tls_slot, .-goos_tls_slot
+
+// goos_tls_pin() uint64 raises the calling thread's pin count and returns
+// its slot; goos_tls_unpin() lowers the count again.
+.global goos_tls_pin
+.type goos_tls_pin,@function
+goos_tls_pin:
+    incq %fs:32
+    movq %fs:8, %rax
+    ret
+.size goos_tls_pin, .-goos_tls_pin
+
+.global goos_tls_unpin
+.type goos_tls_unpin,@function
+goos_tls_unpin:
+    decq %fs:32
+    ret
+.size goos_tls_unpin, .-goos_tls_unpin
 
 // goos_gc_registers(buffer *[6]uintptr) uintptr stores the callee-saved
 // registers in buffer and returns the stack pointer its caller resumes with.
@@ -197,6 +312,14 @@ goos_irq_wait:
     ret
 .size goos_irq_wait, .-goos_irq_wait
 
+.global goos_irq_poll
+.type goos_irq_poll,@function
+goos_irq_poll:
+    movl $71, %eax
+    int $0x80
+    ret
+.size goos_irq_poll, .-goos_irq_poll
+
 .global goos_stream_create
 .type goos_stream_create,@function
 goos_stream_create:
@@ -220,6 +343,25 @@ goos_stream_write:
     int $0x80
     ret
 .size goos_stream_write, .-goos_stream_write
+
+// Panic reporting writes one byte without Go heap allocations or M-local
+// syscall scratch. RDI is the stderr stream handle and SIL is the byte.
+.global goos_panic_write_byte
+.type goos_panic_write_byte,@function
+goos_panic_write_byte:
+    subq $40, %rsp
+    movb %sil, 24(%rsp)
+    leaq 24(%rsp), %rax
+    movq %rax, 0(%rsp)
+    movq $1, 8(%rsp)
+    movq $0, 16(%rsp)
+    movq %rsp, %rsi
+    movl $24, %edx
+    movl $20, %eax
+    int $0x80
+    addq $40, %rsp
+    ret
+.size goos_panic_write_byte, .-goos_panic_write_byte
 
 .global goos_stream_wait
 .type goos_stream_wait,@function
@@ -582,6 +724,39 @@ goos_thread_resume:
     ret
 .size goos_thread_resume, .-goos_thread_resume
 
+// The goroutine runtime's calls (ADR 0204), operations 66 to 70.
+.global goos_thread_set_base
+.type goos_thread_set_base,@function
+goos_thread_set_base:
+    movl $66, %eax
+    int $0x80
+    ret
+.size goos_thread_set_base, .-goos_thread_set_base
+
+.global goos_thread_preempt
+.type goos_thread_preempt,@function
+goos_thread_preempt:
+    movl $67, %eax
+    int $0x80
+    ret
+.size goos_thread_preempt, .-goos_thread_preempt
+
+.global goos_thread_wake
+.type goos_thread_wake,@function
+goos_thread_wake:
+    movl $69, %eax
+    int $0x80
+    ret
+.size goos_thread_wake, .-goos_thread_wake
+
+.global goos_thread_wake_take
+.type goos_thread_wake_take,@function
+goos_thread_wake_take:
+    movl $70, %eax
+    int $0x80
+    ret
+.size goos_thread_wake_take, .-goos_thread_wake_take
+
 // goos_thread_entry is where the kernel starts a thread ThreadCreate made:
 // at its stack top, 16-byte aligned, with the runtime's argument in rdi and
 // the thread's slot in rsi. It calls goos_thread_main, which runs the
@@ -593,9 +768,191 @@ goos_thread_resume:
 goos_thread_entry:
     andq $-16, %rsp
     xorl %ebp, %ebp
+    call goos_tcb_install
     call goos_thread_main
     ud2
 .size goos_thread_entry, .-goos_thread_entry
+
+// goos_worker_entry starts a thread the goroutine runtime made to run
+// goroutines (ADR 0204), as goos_thread_entry does for thread.Start.
+.weak goos_worker_main
+.global goos_worker_entry
+.type goos_worker_entry,@function
+goos_worker_entry:
+    andq $-16, %rsp
+    xorl %ebp, %ebp
+    call goos_tcb_install
+    call goos_worker_main
+    ud2
+.size goos_worker_entry, .-goos_worker_entry
+
+.global goos_worker_entry_address
+.type goos_worker_entry_address,@function
+goos_worker_entry_address:
+    leaq goos_worker_entry(%rip), %rax
+    ret
+.size goos_worker_entry_address, .-goos_worker_entry_address
+
+// goos_g_swap(next uintptr, save *uintptr) switches stacks: it pushes the
+// callee-saved registers, stores the stack pointer at save, loads next, and
+// pops the registers saved there. The System V ABI makes every other
+// register, and every XMM register, the caller's to save.
+.section .text.goos_g_swap,"ax",@progbits
+.global goos_g_swap
+.type goos_g_swap,@function
+goos_g_swap:
+.global goos_g_swap_start
+goos_g_swap_start:
+    pushq %r15
+    pushq %r14
+    pushq %r13
+    pushq %r12
+    pushq %rbp
+    pushq %rbx
+    movq %rsp, (%rsi)
+    movq %rdi, %rsp
+    popq %rbx
+    popq %rbp
+    popq %r12
+    popq %r13
+    popq %r14
+    popq %r15
+    ret
+// goos_g_swap_start and goos_g_swap_end bound the switch for the
+// collector's validation counts, as the preempt_entry labels bound the entry.
+.global goos_g_swap_end
+goos_g_swap_end:
+.size goos_g_swap, .-goos_g_swap
+
+// goos_g_entry is the first frame of a goroutine. Its first swap pops r12,
+// the compiler's start wrapper, and r13, the wrapper's argument bundle.
+// goos_g_begin first drops the pin the scheduler stack handed over.
+.weak goos_g_exit
+.weak goos_g_begin
+.global goos_g_entry
+.type goos_g_entry,@function
+goos_g_entry:
+    xorl %ebp, %ebp
+    call goos_g_begin
+    movq %r13, %rdi
+    callq *%r12
+    xorl %edi, %edi
+    call goos_g_exit
+    ud2
+.size goos_g_entry, .-goos_g_entry
+
+.global goos_g_entry_address
+.type goos_g_entry_address,@function
+goos_g_entry_address:
+    leaq goos_g_entry(%rip), %rax
+    ret
+.size goos_g_entry_address, .-goos_g_entry_address
+
+// goos_g_mstart is the first frame of a scheduler stack the runtime made
+// for a thread: it runs goos_g_mloop with r13, which never returns.
+.weak goos_g_mloop
+.global goos_g_mstart
+.type goos_g_mstart,@function
+goos_g_mstart:
+    xorl %ebp, %ebp
+    movq %r13, %rdi
+    call goos_g_mloop
+    ud2
+.size goos_g_mstart, .-goos_g_mstart
+
+.global goos_g_mstart_address
+.type goos_g_mstart_address,@function
+goos_g_mstart_address:
+    leaq goos_g_mstart(%rip), %rax
+    ret
+.size goos_g_mstart_address, .-goos_g_mstart_address
+
+// goos_g_stack_pointer() uintptr returns its caller's stack pointer.
+.global goos_g_stack_pointer
+.type goos_g_stack_pointer,@function
+goos_g_stack_pointer:
+    leaq 8(%rsp), %rax
+    ret
+.size goos_g_stack_pointer, .-goos_g_stack_pointer
+
+// goos_preempt_entry is where the kernel diverts a thread that registered
+// it with ThreadPreempt (ADR 0204). It arrives with every register as the
+// interrupted code left it, except RIP, which the kernel keeps, and RSP,
+// lowered by the 128-byte red zone. It saves the flags, the fifteen
+// general-purpose registers, and the FPU and SSE state on that stack, takes
+// the interrupted RIP from the kernel into the slot above them, and calls
+// goos_g_preempt with the direction flag clear. The SSE state is saved before
+// the take: a native call keeps only the general-purpose registers, and the
+// interrupted code may hold live XMM values. Restoring everything and
+// returning through the slot with RET 128 resumes the interrupted code with
+// its stack pointer and red zone as they were. goos_g_preempt may switch
+// goroutines; the frame stays on this stack until the goroutine runs again.
+.weak goos_g_preempt
+.section .text.goos_preempt_entry,"ax",@progbits
+.global goos_preempt_entry
+.type goos_preempt_entry,@function
+goos_preempt_entry:
+.global goos_preempt_entry_start
+goos_preempt_entry_start:
+    pushq $0
+    pushfq
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq %rsp, %rbx
+    subq $512, %rsp
+    andq $-16, %rsp
+    fxsave64 (%rsp)
+    leaq 128(%rbx), %rdi
+    movl $68, %eax
+    int $0x80
+    testq %rax, %rax
+    jnz 1f
+    cld
+    call goos_g_preempt
+    fxrstor64 (%rsp)
+    movq %rbx, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    popfq
+    ret $128
+1:
+    ud2
+.global goos_preempt_entry_end
+goos_preempt_entry_end:
+.size goos_preempt_entry, .-goos_preempt_entry
+
+.global goos_preempt_entry_address
+.type goos_preempt_entry_address,@function
+goos_preempt_entry_address:
+    leaq goos_preempt_entry(%rip), %rax
+    ret
+.size goos_preempt_entry_address, .-goos_preempt_entry_address
 
 // goos_thread_entry_address() uintptr returns where goos_thread_entry lies,
 // from the code, so no data word holds it.
@@ -605,6 +962,44 @@ goos_thread_entry_address:
     leaq goos_thread_entry(%rip), %rax
     ret
 .size goos_thread_entry_address, .-goos_thread_entry_address
+
+// goos_probe_vector_spin(stop *uint32) uint64 fills XMM0 to XMM14 with a
+// pattern and loops without calls until *stop is nonzero. It returns how
+// many times a register was found without the pattern, which it then puts
+// back. Only goprobe calls it, to check that a preemption keeps the SSE
+// state of the code it interrupts.
+.section .text.goos_probe_vector_spin,"ax",@progbits
+.global goos_probe_vector_spin
+.type goos_probe_vector_spin,@function
+goos_probe_vector_spin:
+    subq $24, %rsp
+    movabsq $0x5a3c96e1c3a5f00f, %rax
+    movq %rax, 0(%rsp)
+    notq %rax
+    movq %rax, 8(%rsp)
+    xorl %ecx, %ecx
+.irp reg, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
+    movdqu (%rsp), %xmm\reg
+.endr
+1:
+    cmpl $0, (%rdi)
+    jne 3f
+.irp reg, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
+    movdqu (%rsp), %xmm15
+    pcmpeqb %xmm\reg, %xmm15
+    pmovmskb %xmm15, %eax
+    cmpl $0xffff, %eax
+    je 2f
+    incq %rcx
+    movdqu (%rsp), %xmm\reg
+2:
+.endr
+    jmp 1b
+3:
+    movq %rcx, %rax
+    addq $24, %rsp
+    ret
+.size goos_probe_vector_spin, .-goos_probe_vector_spin
 
 // goos_stack_pointer() uintptr returns its caller's stack pointer, which
 // names the caller's thread (userspace/runtime/tls).

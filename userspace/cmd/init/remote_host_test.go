@@ -156,3 +156,51 @@ func TestLauncherPreservesSessionOwnedExecInput(t *testing.T) {
 		t.Fatal("launcher may close session-owned exec stdin")
 	}
 }
+
+func TestVFSControlsUseSharedOwnership(t *testing.T) {
+	files := []string{"applications.go", "filesystem.go", "remotestorage.go", "shutdown.go", "system.go"}
+	shared := 0
+	for _, path := range files {
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "Control" {
+				if owner, ok := selector.X.(*ast.Ident); ok && owner.Name == "filesystemRequests" {
+					shared++
+				}
+			}
+			if name, ok := call.Fun.(*ast.Ident); ok && (name.Name == "sendMessage" || name.Name == "receive") && len(call.Args) != 0 {
+				if endpoint, ok := call.Args[0].(*ast.Ident); ok && endpoint.Name == "vfsControlHandle" {
+					t.Errorf("%s bypasses VFS control quarantine", path)
+				}
+			}
+			return true
+		})
+	}
+	if shared != 7 {
+		t.Fatalf("%d protected VFS control exchanges, want 7", shared)
+	}
+	file, err := parser.ParseFile(token.NewFileSet(), "prepare.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := false
+	ast.Inspect(file, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if ok && selector.Sel.Name == "Complete" {
+			if owner, ok := selector.X.(*ast.Ident); ok && owner.Name == "filesystemRequests" {
+				checked = true
+			}
+		}
+		return true
+	})
+	if !checked {
+		t.Fatal("async executable completion bypasses endpoint ownership")
+	}
+}

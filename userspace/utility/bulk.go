@@ -4,60 +4,74 @@ package utility
 
 import (
 	"goos/internal/capability"
+	"goos/internal/limits"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	"goos/userspace/runtime/sys"
 )
 
-// BulkSize is the memory a command moves file data through by default: one
-// exchange with the VFS moves this much, where an inline request moves a few
-// dozen bytes (ADR 0107).
+// BulkSize is the default transfer size (ADR 0107).
 const BulkSize = 64 << 10
 
-// Bulk is a shared-memory object a command reads files into and writes files
-// from. The command keeps its handle and its mapping; each request attaches a
-// copy of the handle carrying only the rights the VFS needs to map it, which the VFS
-// closes when it answers.
+// Bulk has caller-owned Memory and a separate shared staging object. Successful
+// reads copy into Memory before returning; writes snapshot it before sending.
+// After an abandoned transfer the staging object is retired, so late server
+// access cannot race the caller's Memory. This costs one additional buffer and
+// one copy per transfer. A Bulk belongs to one goroutine and must not be copied
+// after use. Different Bulks take turns on the filesystem session.
 type Bulk struct {
-	object handle.ID
-	Memory []byte
+	bulkBuffer[nativeBulk]
+	temporary *[limits.PathMax]byte
 }
 
-// NewBulk creates and maps a bulk buffer of size bytes, rounded up to pages.
+// NewBulk allocates size bytes rounded to pages, plus shared staging storage.
 func NewBulk(size uint64) (Bulk, bool) {
-	pages := (size + 4095) / 4096
-	object, status := sys.MemoryCreate(pages)
-	if status != kcall.StatusOK {
+	if size == 0 || size > uint64(^uint32(0))-4095 {
 		return Bulk{}, false
+	}
+	size = (size + 4095) / 4096 * 4096
+	var bulk Bulk
+	if !bulk.ensure(size) {
+		return Bulk{}, false
+	}
+	bulk.Memory = make([]byte, int(size))
+	return bulk, true
+}
+
+func (bulk *Bulk) ReadFile(file vfs.Handle, count int) (vfs.Reply, bool) {
+	return bulk.transfer(vfs.OperationReadInto, file, count)
+}
+
+func (bulk *Bulk) WriteFile(file vfs.Handle, count int) (vfs.Reply, bool) {
+	return bulk.transfer(vfs.OperationWriteFrom, file, count)
+}
+
+type nativeBulk struct{}
+
+func (nativeBulk) create(size uint64) (handle.ID, uint64, []byte, bool) {
+	object, status := sys.MemoryCreate((size + 4095) / 4096)
+	if status != kcall.StatusOK {
+		return 0, 0, nil, false
 	}
 	base, mapped, status := sys.MemoryMapAnywhere(object, true)
 	if status != kcall.StatusOK {
 		sys.HandleClose(object)
-		return Bulk{}, false
+		return 0, 0, nil, false
 	}
-	return Bulk{object: object, Memory: sys.Window(base, mapped)}, true
+	return object, base, sys.Window(base, mapped), true
 }
 
-// ReadFile reads up to count bytes from an open file into the start of the
-// buffer.
-func (bulk *Bulk) ReadFile(file vfs.Handle, count int) (vfs.Reply, bool) {
-	return bulk.transfer(vfs.OperationReadInto, file, count, capability.Read|capability.Write)
+func (nativeBulk) duplicate(object handle.ID, rights capability.Rights) (handle.ID, bool) {
+	attached, status := sys.HandleDuplicate(object, rights)
+	return attached, status == kcall.StatusOK
 }
 
-// WriteFile writes the first count bytes of the buffer to an open file.
-func (bulk *Bulk) WriteFile(file vfs.Handle, count int) (vfs.Reply, bool) {
-	return bulk.transfer(vfs.OperationWriteFrom, file, count, capability.Read)
+func (nativeBulk) retire(object handle.ID, base, size uint64) {
+	sys.VMUnmap(base, size)
+	sys.HandleClose(object)
 }
 
-func (bulk *Bulk) transfer(operation vfs.Operation, file vfs.Handle, count int, right capability.Rights) (vfs.Reply, bool) {
-	if count < 0 || count > len(bulk.Memory) {
-		return vfs.Reply{}, false
-	}
-	duplicate, status := sys.HandleDuplicate(bulk.object, right|capability.Transfer)
-	if status != kcall.StatusOK {
-		return vfs.Reply{}, false
-	}
-	// callVFS closes the copy if it never reaches the VFS.
-	return callVFS(vfs.Request{Operation: operation, Handle: file, Size: uint32(count)}, duplicate)
+func (nativeBulk) call(request vfs.Request, attached handle.ID) (vfs.Reply, bool) {
+	return attachedVFS(request, attached)
 }
