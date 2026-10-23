@@ -426,14 +426,13 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
   sleep 1
   printf 'echo pipeline-must-not-run | missing-stage | readline; echo pipeline-middle-failure-recovered\n'
   sleep 1
-  printf 'missing-stage | readline | readline; echo pipeline-first-failure-recovered\n'
-  sleep 1
+  send_after_done 'missing-stage | readline | readline; echo pipeline-first-failure-recovered' '^pipeline-first-failure-recovered$'
+  # A line typed while a pipeline still reads the terminal becomes its input,
+  # so each one waits for the shell to finish the one before.
   count=0
   while [ "$count" -lt 20 ]; do
-    printf 'echo pipeline-reuse | readline | readline | readline\n'
-    sleep 0.3
-    printf 'missing-stage | readline | readline\n'
-    sleep 0.3
+    send_after_done 'echo pipeline-reuse | readline | readline | readline' '^pipeline-reuse$'
+    send_after_done 'missing-stage | readline | readline' '^missing-stage: command not found$'
     count=$((count + 1))
   done
   printf 'echo pipeline-stress-complete\n'
