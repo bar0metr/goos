@@ -588,7 +588,8 @@ func overflowWorker(uintptr) {
 
 // recurse keeps its frame on the stack: TinyGo moves a local array larger
 // than 256 bytes to the heap, and such frames would exhaust the page quota
-// before the stack reached its guard.
+// before the stack reached its guard. Its result feeds the return twice, so
+// LLVM cannot turn the recursion into a loop with an accumulator.
 //
 //go:noinline
 func recurse(depth int) int {
@@ -597,7 +598,8 @@ func recurse(depth int) int {
 	if depth <= 1 {
 		return int(frame[0])
 	}
-	return recurse(depth-1) + int(frame[len(frame)-1]) - depth + 1
+	result := recurse(depth - 1)
+	return result ^ result>>3 ^ int(frame[len(frame)-1])
 }
 
 // crash starts a worker that faults. The fault ends the whole process, so
