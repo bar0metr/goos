@@ -115,26 +115,29 @@ refuse '^Off-line CPU(s) list:' 'lscpu offline list'
 
 # Threads and processes whose calls share no lock run kernel code on several
 # processors at once. The kernel prints each new peak of processors inside
-# calls together, and of one process's tasks inside calls together; only a
-# program with several threads raises the second, so it rises here.
+# calls together. Multithreaded services may already have the most tasks of
+# one process inside calls at the processor count, so the probe's own
+# overlap comes from the record the kernel prints when a process with two or
+# more such tasks exits.
 peaks() {
 	tr -d '\r' <"$log" | grep -o "$1 [0-9]*" | sed 's/.* //' | sort -n | tail -n 1
 }
-before=$(peaks KERNEL_THREAD_PEAK)
+probe_line=$(wc -l <"$log")
 run '/system/linux/abi-probe kernel'
 expect '^kernel ok$' 'kernel: calls beside each other'
-# Housekeeping prints the peaks on its next tick; one more command gives it
-# that tick.
+# Housekeeping prints the parallel peak on its next tick; one more command
+# gives it that tick, and lets the probe's exit be recorded.
 run uptime
-threads=$(peaks KERNEL_THREAD_PEAK)
+threads=$(tail -n "+$((probe_line + 1))" "$log" | tr -d '\r' |
+	sed -n 's/.*PROCESS_THREAD_PEAK pid=[0-9]* linux=1 peak=\([0-9]*\).*/\1/p' | sort -n | tail -n 1)
 peak=$(peaks KERNEL_PARALLEL_PEAK)
 if [ "$cpus" -gt 1 ]; then
-	[ "${threads:-0}" -ge 2 ] && [ "${threads:-0}" -gt "${before:-0}" ] ||
-		fail "kernel-thread-peak is ${threads:-0} after the kernel probe, ${before:-0} before; want at least 2, raised by the probe"
+	[ "${threads:-0}" -ge 2 ] ||
+		fail "the kernel probe had ${threads:-0} threads inside calls at once; want at least 2"
 	[ "${peak:-0}" -ge 2 ] || fail "kernel-parallel-peak is ${peak:-0}, want at least 2"
 	checks=$((checks + 2))
 fi
-printf '  kernel-parallel-peak: %s, kernel-thread-peak: %s (before the probe %s)\n' "${peak:-0}" "${threads:-0}" "${before:-0}"
+printf '  kernel-parallel-peak: %s, kernel probe thread peak: %s\n' "${peak:-0}" "${threads:-0}"
 
 run '/system/linux/abi-probe smp'
 expect "^smp cpus: $cpus online\$" 'smp: sched_getaffinity'
