@@ -214,6 +214,50 @@ completion rather than a child's stdout or a redrawn prompt. Host regressions
 cover stale tokens, missing output and bounded failure without sending the
 next command.
 
+## Soak and complete gates on 2026-10-23
+
+The preemption-entry fix (`13a6685`) removed the cause of both reproduced
+faults; the next two sections describe it.
+
+Ten consecutive joint KVM runs then passed on clean `74afcef`: eight vCPUs, one
+uploaded ISO (SHA-256 `2951a226…`) and disk (`849f4338…`), runs
+`20261023T093939Z-23e12d73` through `20261023T095225Z-7b48e9f2`. Every serial
+log showed `vector_lost=0`, `gcstress 8`, driver IRQ waits on Gs, logwait
+and `FILE_CACHE_RECOVERED_OK`, with no null-source fault and no slab
+mismatch. On TCG, 20 of 20 `test-goroutine-panic` boots and 20 of 20
+`gcstress 8` runs on eight processors passed.
+
+Every `test-all` step then passed, in order, with fixes made along the way.
+`test` through `test-lscpu` passed on `089f1bb`, `test-smp` on `fb224d5`,
+and the steps from `test-native-threads` through `test-stress` on
+`213ea93`, where `test`, `lint` and `docs` passed again. The steps after
+`fb224d5` changed only the threadprobe overflow probe. `test-boot` with the goroutine
+VFS and `test-vfs-serial` each passed 471 checks.
+
+The gates found five defects, all fixed:
+
+- `lint`: copy checks, their tests and goprobe used `unsafe` outside
+  `userspace/runtime`. A small `runtime/memory` package now holds those
+  address operations (`82c619d`).
+- `test-memory`: since `026dbb6`, `Line.Print` passed its value to a function
+  value and resliced it in a loop, so LLVM treated the value as captured and
+  TinyGo moved every caller's buffer, such as `PrintUint`'s digits, to the
+  heap. One retained page went to those objects. The value now stays
+  uncaptured (`7e0f32a`).
+- `test-boot`: the pipeline stress loop typed each line after a fixed
+  0.3 s, so one line became a running pipeline's input. It now waits for the
+  shell's acknowledgement (`089f1bb`).
+- `test-smp`: multithreaded validation services reach the processor count
+  for one process's tasks inside the kernel at boot, so the Linux probe could
+  not raise the global peak. Validation kernels now print
+  `PROCESS_THREAD_PEAK` for each exiting process with two or more such tasks;
+  the probe reported 4 (`fb224d5`).
+- `test-native-threads`: the overflow probe's 16 KiB frame went to the heap,
+  so the page quota ended the worker before its stack guard. With a small
+  frame, LLVM turned the recursion into a loop. The probe now keeps a stack
+  frame and a recursion LLVM cannot remove (`ee42adc`, `a30c049`,
+  `213ea93`).
+
 ## Remaining evidence limits
 
 The historical KVM run did not give goprobe a log capability or run the disk
