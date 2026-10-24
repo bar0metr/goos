@@ -96,6 +96,14 @@ unreachable Go objects, reuses their storage, and returns free heap pages to
 the kernel. Interrupt handlers allocate nothing, and the kernel keeps its own
 bounded allocation discipline (ADR 0065).
 
+Native processes can also run sibling threads in parallel (ADR 0203). Selected
+images use a separate GoOS TinyGo target with an M:N goroutine runtime,
+channels, select, sync primitives, timers, preemption, and scheduler-aware
+blocking (ADR 0204). The VFS uses that goroutine runtime for its bounded read
+pool by default; a serial VFS build remains available as a regression fallback.
+The ordinary native target remains available for programs that do not need
+goroutines.
+
 GoOS also runs unmodified statically linked Linux x86_64 ELF programs through
 the kernel-resident Linux ABI compatibility subsystem. Static musl and glibc
 programs, Linux threads,
