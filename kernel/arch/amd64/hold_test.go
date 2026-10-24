@@ -14,26 +14,62 @@ func TestStepOverRunsKernelEntriesAndFlagsToABreakpoint(t *testing.T) {
 	const rip = 0x40001000
 	for _, test := range []struct {
 		name string
-		code [3]byte
+		code []byte
 		want uint64
 	}{
-		{"int 0x80", [3]byte{0xcd, 0x80}, rip + 2},
-		{"int3", [3]byte{0xcc}, rip + 1},
-		{"int1", [3]byte{0xf1}, rip + 1},
-		{"syscall", [3]byte{0x0f, 0x05}, rip + 2},
-		{"pushfq", [3]byte{0x9c}, rip + 1},
-		{"popfq", [3]byte{0x9d}, rip + 1},
-		{"rex pushfq", [3]byte{0x48, 0x9c}, rip + 2},
-		{"rex popfq", [3]byte{0x41, 0x9d}, rip + 2},
-		{"push r15", [3]byte{0x41, 0x57}, 0},
-		{"call rel32", [3]byte{0xe8, 0x10, 0x00}, 0},
-		{"ret imm16", [3]byte{0xc2, 0x80, 0x00}, 0},
-		{"fxsave64", [3]byte{0x48, 0x0f, 0xae}, 0},
-		{"ud2", [3]byte{0x0f, 0x0b}, 0},
-		{"pushq imm8", [3]byte{0x6a, 0x00}, 0},
+		{"int 0x80", []byte{0xcd, 0x80}, rip + 2},
+		{"int3", []byte{0xcc}, rip + 1},
+		{"int1", []byte{0xf1}, rip + 1},
+		{"into", []byte{0xce}, rip + 1},
+		{"syscall", []byte{0x0f, 0x05}, rip + 2},
+		{"sysenter", []byte{0x0f, 0x34}, rip + 2},
+		{"pushfq", []byte{0x9c}, rip + 1},
+		{"popfq", []byte{0x9d}, rip + 1},
+		{"rex pushfq", []byte{0x48, 0x9c}, rip + 2},
+		{"rex popfq", []byte{0x41, 0x9d}, rip + 2},
+		{"o16 pushf", []byte{0x66, 0x9c}, rip + 2},
+		{"o16 popf", []byte{0x66, 0x9d}, rip + 2},
+		{"prefixed syscall", []byte{0x2e, 0x0f, 0x05}, rip + 3},
+		{"prefixed int", []byte{0x66, 0x67, 0xcd, 0x80}, rip + 4},
+		{"push r15", []byte{0x41, 0x57}, 0},
+		{"call rel32", []byte{0xe8, 0x10, 0x00, 0x00, 0x00}, 0},
+		{"ret imm16", []byte{0xc2, 0x80, 0x00}, 0},
+		{"fxsave64", []byte{0x48, 0x0f, 0xae, 0x04, 0x24}, 0},
+		{"ud2", []byte{0x0f, 0x0b}, 0},
+		{"pushq imm8", []byte{0x6a, 0x00}, 0},
+		{"mov ds", []byte{0x8e, 0xd8}, 0},
+		{"one byte before an unmapped page", []byte{0x57}, 0},
 	} {
-		if got := StepOver(rip, test.code); got != test.want {
-			t.Errorf("%s: breakpoint %#x, want %#x", test.name, got, test.want)
+		got, ok := StepOver(rip, test.code)
+		if !ok || got != test.want {
+			t.Errorf("%s: breakpoint %#x %v, want %#x", test.name, got, ok, test.want)
+		}
+	}
+}
+
+func TestStepOverRefusesTrapShadowsIretAndTruncatedCode(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		code []byte
+	}{
+		{"mov ss, ax", []byte{0x8e, 0xd0}},
+		{"mov ss, mem", []byte{0x8e, 0x10}},
+		{"o16 mov ss", []byte{0x66, 0x8e, 0xd0}},
+		{"rex mov ss", []byte{0x48, 0x8e, 0xd0}},
+		{"prefixed mov ss", []byte{0x2e, 0x3e, 0x8e, 0x17}},
+		{"pop ss", []byte{0x17}},
+		{"iretq", []byte{0x48, 0xcf}},
+		{"iret", []byte{0xcf}},
+		{"nothing", nil},
+		{"prefixes only", []byte{0x66, 0x66, 0x66}},
+		{"rex only", []byte{0x48}},
+		{"int without vector", []byte{0xcd}},
+		{"0f without second byte", []byte{0x0f}},
+		{"8e without modrm", []byte{0x8e}},
+		{"too many prefixes", []byte{0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x90}},
+	} {
+		if got, ok := StepOver(0x1000, test.code); ok {
+			t.Errorf("%s: stepped to %#x", test.name, got)
 		}
 	}
 }
@@ -163,5 +199,25 @@ func TestEndHoldWakesAStoppedTaskStillOnItsProcessor(t *testing.T) {
 	stale, wake := endHold(&taskHold{armed: true, state: holdRunning}, true)
 	if wake || stale != (staleHold{step: true}) {
 		t.Fatalf("step in flight: wake %v stale %+v", wake, stale)
+	}
+}
+
+func TestKernelDebugSingleStepResumesWithoutPanic(t *testing.T) {
+	wire, err := os.ReadFile("io.S")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A step trap MOV SS delayed into the kernel's entry arrives in kernel
+	// mode. The entry clears DR6 and TF and returns instead of panicking;
+	// any other kernel-mode debug exception stays fatal.
+	entry := assemblyBody(t, string(wire), ".L_exception_1:", ".debug_hold:")
+	if !strings.Contains(entry, "jne .debug_kernel") {
+		t.Fatalf("kernel-mode debug exceptions skip .debug_kernel:\n%s", entry)
+	}
+	path := assemblyBody(t, string(wire), ".debug_kernel:", "jmp .debug_fatal")
+	for _, want := range []string{"movq %dr6, %rax", "$0x4000", "movq %rax, %dr6", "andq $-0x101, 24(%rsp)", "iretq"} {
+		if !strings.Contains(path, want) {
+			t.Fatalf("kernel debug path lacks %q:\n%s", want, path)
+		}
 	}
 }

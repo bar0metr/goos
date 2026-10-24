@@ -107,12 +107,13 @@ func (handler nativeCallHandler) ThreadHoldWait(thread uint64, address uint64) k
 }
 
 // ThreadHoldStep runs a stopped thread to its next instruction boundary.
-// The instruction it stands at decides how (amd64.StepOver).
+// The instruction it stands at decides how (amd64.StepOver). MOV SS, POP SS,
+// IRET and code that cannot be read far enough are refused with
+// InvalidArgument; the thread stays stopped.
 func (handler nativeCallHandler) ThreadHoldStep(thread uint64) kcall.Status {
 	if !validation.Enabled {
 		return kcall.StatusUnsupported
 	}
-	local := thisCPU()
 	target, status := handler.holdTarget(thread)
 	if status != kcall.StatusOK {
 		return status
@@ -124,12 +125,20 @@ func (handler nativeCallHandler) ThreadHoldStep(thread uint64) kcall.Status {
 	if !hold.Off || hold.State != amd64.HoldStopped {
 		return kcall.StatusTimeout
 	}
-	var code [3]byte
-	if !vm.CopyIn(handler.root, hold.RIP, local.threadInfoWire[:len(code)]) {
+	// The instruction may end on a page before an unmapped one: read what
+	// is there, a byte at a time, and let StepOver refuse what it cannot
+	// decode.
+	var code [kcall.MaxInstruction]byte
+	length := 0
+	for length < len(code) && vm.ValidateUserRange(hold.RIP+uint64(length), 1) &&
+		vm.CopyIn(handler.root, hold.RIP+uint64(length), code[length:length+1]) {
+		length++
+	}
+	breakpoint, stepped := amd64.StepOver(hold.RIP, code[:length])
+	if !stepped {
 		return kcall.StatusInvalidArgument
 	}
-	copy(code[:], local.threadInfoWire[:len(code)])
-	if !amd64.StepTaskHold(target, amd64.StepOver(hold.RIP, code)) {
+	if !amd64.StepTaskHold(target, breakpoint) {
 		return kcall.StatusNotFound
 	}
 	return kcall.StatusOK

@@ -145,6 +145,9 @@ const (
 	HoldDone       = uint64(2)
 	// MaxHoldRange bounds the bytes a hold range spans.
 	MaxHoldRange = uint64(4096)
+	// MaxInstruction is the longest x86 instruction, the most a hold step
+	// reads of the code it decodes.
+	MaxInstruction = 15
 )
 
 // Native thread layout (ADR 0203). A process has ThreadSlots thread slots.

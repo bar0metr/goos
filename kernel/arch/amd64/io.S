@@ -722,7 +722,7 @@ goos_exception_1:
     GOOS_ENTER_LOW .L_exception_1
 .L_exception_1:
     cmpq $0x23, 8(%rsp)
-    jne .debug_fatal
+    jne .debug_kernel
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -780,6 +780,24 @@ goos_exception_1:
     pushq $0
     pushq $1
     jmp goos_exception_fatal
+// A single step in kernel mode comes only from a step trap that MOV SS or
+// POP SS delayed past an INT or SYSCALL into the entry it reached. The kernel
+// never runs with TF set, so it clears DR6 and the interrupted TF and
+// returns; the user frame keeps the user's TF. Any other kernel debug
+// exception is fatal.
+.debug_kernel:
+    pushq %rax
+    movq %dr6, %rax
+    testq $0x4000, %rax
+    jz 1f
+    movq $0xffff0ff0, %rax
+    movq %rax, %dr6
+    andq $-0x101, 24(%rsp)
+    popq %rax
+    iretq
+1:
+    popq %rax
+    jmp .debug_fatal
 
 GOOS_FATAL_NOERR 2
 
