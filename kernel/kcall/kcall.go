@@ -150,6 +150,10 @@ const (
 	MaxInstruction = 15
 )
 
+// ValidHoldRange reports whether [lo, hi) is a range ThreadHoldRange
+// accepts: nonempty and at most MaxHoldRange bytes.
+func ValidHoldRange(lo, hi uint64) bool { return hi > lo && hi-lo <= MaxHoldRange }
+
 // Native thread layout (ADR 0203). A process has ThreadSlots thread slots.
 // Slot 0 is the main task on its own stack; slot k from 1 owns a stack of
 // ThreadStackSize bytes ending at ThreadStackTop(k), above a ThreadGuardSize
@@ -556,9 +560,8 @@ func Dispatch(request Request, handler Handler) Result {
 	case OperationThreadWakeTake:
 		return Result{Status: handler.ThreadWakeTake()}
 	case OperationThreadHoldRange:
-		if request.Arg2 <= request.Arg1 || request.Arg2-request.Arg1 > MaxHoldRange {
-			return Result{Status: StatusInvalidArgument}
-		}
+		// The handler checks the range (ValidHoldRange), so a kernel
+		// without holds answers Unsupported whatever the arguments.
 		return Result{Status: handler.ThreadHoldRange(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationThreadHoldWait:
 		return Result{Status: handler.ThreadHoldWait(request.Arg0, request.Arg1)}

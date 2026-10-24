@@ -42,6 +42,9 @@ func (handler nativeCallHandler) ThreadHoldRange(thread uint64, lo uint64, hi ui
 	if !validation.Enabled {
 		return kcall.StatusUnsupported
 	}
+	if !kcall.ValidHoldRange(lo, hi) {
+		return kcall.StatusInvalidArgument
+	}
 	owner, _, _, found := handler.threadCaller()
 	if !found {
 		return kcall.StatusPermissionDenied

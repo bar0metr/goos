@@ -893,11 +893,20 @@ func TestThreadHoldCallsAreAppended(t *testing.T) {
 	if result.Status != StatusOK || handler.channel != 7 || handler.address != 0x1000 || handler.length != 0x1000+MaxHoldRange {
 		t.Fatalf("hold range dispatch %+v %+v", result, handler)
 	}
+	// Malformed ranges reach the handler too, so a kernel without holds
+	// answers Unsupported for them; the handler checks ValidHoldRange.
 	for _, bounds := range [][2]uint64{{0x1000, 0x1000}, {0x2000, 0x1000}, {0x1000, 0x1001 + MaxHoldRange}} {
 		handler = &testHandler{}
-		if result := Dispatch(Request{Operation: OperationThreadHoldRange, Arg1: bounds[0], Arg2: bounds[1]}, handler); result.Status != StatusInvalidArgument || *handler != (testHandler{}) {
-			t.Fatalf("hold range %#x-%#x reached the handler", bounds[0], bounds[1])
+		if result := Dispatch(Request{Operation: OperationThreadHoldRange, Arg1: bounds[0], Arg2: bounds[1]}, handler); result.Status != StatusOK ||
+			handler.address != bounds[0] || handler.length != bounds[1] {
+			t.Fatalf("hold range %#x-%#x did not reach the handler", bounds[0], bounds[1])
 		}
+		if ValidHoldRange(bounds[0], bounds[1]) {
+			t.Fatalf("hold range %#x-%#x accepted", bounds[0], bounds[1])
+		}
+	}
+	if !ValidHoldRange(0x1000, 0x1001) || !ValidHoldRange(0x1000, 0x1000+MaxHoldRange) {
+		t.Fatal("a valid hold range refused")
 	}
 	handler = &testHandler{}
 	if result := Dispatch(Request{Operation: OperationThreadHoldWait, Arg0: 9, Arg1: 0x3000}, handler); result.Status != StatusTimeout ||
