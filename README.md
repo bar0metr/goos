@@ -31,40 +31,67 @@ tests, and documented consequences.
 
 ## Architecture
 
-GoOS uses a pragmatic microkernel/hybrid design. The diagram below shows
-the privilege boundary, not a mandatory call sequence:
+GoOS uses a pragmatic microkernel/hybrid design. The diagram below shows the
+main structure and privilege boundary, not a mandatory call sequence:
 
 ```text
-  Native applications          Static Linux ELF applications
-          |                              |
-   native int 0x80                  Linux SYSCALL
-          |                              |
-+---------v------------------------------v----------+
-|                     KERNEL                        |
-|   Native call dispatch    Linux ABI translation   |
-|            \                 /                    |
-|       Process authority / capabilities / handles  |
-|       VM / scheduling / interrupts / timers       |
-|                   IPC primitives                  |
-+-------------------------|-------------------------+
-                          | typed IPC
-+-------------------------|------------------------+
-|                     USERSPACE                    |
-|                   service processes              |
-|            VFS / network / device drivers        |
-+--------------------------------------------------+
-                          |
-                    x86_64 hardware
+ Native GoOS applications                     Static Linux ELF applications
++--------------------------+                           |
+| GoOS native runtime      |                           |
+| heap / allocator / GC    |                           |
+| threads / M:N goroutines |                           |
++------------+-------------+                           |
+             |                                         |
+       native int 0x80                           Linux SYSCALL
+             |                                         |
++------------v-----------------------------------------v---------+
+|                             KERNEL                             |
+|                                                               |
+|   Native call dispatch              Linux ABI translation      |
+|                                                               |
+|   Processes / tasks / scheduler / address spaces              |
+|   Capabilities / handles / resource authority                 |
+|   IPC / streams / shared memory / waits                       |
+|   interrupts / timers / device authority / DMA                |
++-----------------------------+---------------------------------+
+                              |
+                         typed IPC
+                              |
++-----------------------------v---------------------------------+
+|                         USERSPACE                              |
+|                                                               |
+|   PID 1 / supervision                                         |
+|                                                               |
+|   VFS ----- FAT32 ----- block ----- virtio-blk                 |
+|                                                               |
+|   resolved --- netd ---------------- virtio-net                |
+|                                                               |
+|   terminal / config / logging / remoted / other services      |
++-----------------------------+---------------------------------+
+                              |
+                         x86_64 hardware
 ```
 
 The kernel keeps the mechanisms that need full privilege: CPU state,
-interrupts, memory, scheduling, processes, IPC, handles, capabilities, and
-timers. Linux x86_64 syscall translation also lives inside the kernel: the
-Linux SYSCALL entry is distinct from native int 0x80, and translated operations
-use kernel primitives or capability-scoped IPC with userspace services as
-needed. Filesystems, the terminal, configuration, logging, networking, and
-complex drivers run as isolated userspace services with only their granted
-authority. UEFI is used during boot, not a runtime layer below the kernel.
+interrupts, memory, scheduling, processes and tasks, IPC, streams, shared
+memory, waits, handles, capabilities, timers, and device authority such as IRQ
+routing and DMA control. Linux x86_64 syscall translation also lives inside
+the kernel: the Linux `SYSCALL` entry is distinct from native `int 0x80`,
+and translated operations use kernel primitives or capability-scoped IPC with
+userspace services as needed.
+
+Native GoOS programs are linked with a GoOS-owned runtime. It provides the
+reclaiming heap, allocator, stop-the-world conservative GC, native threads and,
+for selected images, an M:N goroutine scheduler. The runtime is part of each
+native image rather than a shared privileged service; the kernel schedules
+native tasks, while the goroutine runtime multiplexes Gs over those tasks.
+
+Filesystems, terminal services, configuration, logging, networking, and
+complex device drivers run as isolated userspace services with only their
+granted authority. Storage and networking are composed from supervised
+service chains such as VFS -> FAT32 -> block -> `virtio-blk` and
+`resolved`/`netd` -> `virtio-net`. UEFI is used during boot, not as a
+runtime layer below the kernel.
 
 The central principle:
 
