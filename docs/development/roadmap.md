@@ -2,7 +2,7 @@
 
 This roadmap records the current implementation state and the next major development priorities.
 
-GoOS is no longer at the stage where adding kernel mechanisms is automatically the most useful work. The current system already has a substantial native userspace, persistent storage, SMP, Linux static-binary compatibility, native IPv4 networking, HTTPS, and native SSH remote administration. The next milestones should therefore focus on making those environments more complete without weakening capability boundaries or turning the native ABI into POSIX by accident.
+GoOS is no longer at the stage where adding kernel mechanisms is automatically the most useful work. The current system already has a substantial reclaiming and concurrent native userspace, persistent storage, SMP, Linux static-binary compatibility, native IPv4 networking, HTTPS, and native SSH remote administration. The next milestones should therefore focus on making those environments more complete without weakening capability boundaries or turning the native ABI into POSIX by accident.
 
 ## Current baseline
 
@@ -38,7 +38,11 @@ The following foundation is implemented.
 - persistent FAT32 storage with interoperable metadata, VFAT long names, MBR/GPT slices, checking/repair, stable open-file identity and restart recovery;
 - versioned typed configuration and persistent system log;
 - independent restart of storage/network/terminal-facing services where supported;
-- capability-scoped VFS authorities for sensitive paths and administration operations.
+- capability-scoped VFS authorities for sensitive paths and administration operations;
+- a reclaiming per-process native heap with conservative stop-the-world collection;
+- native sibling threads with kernel-created guarded stacks and shared-process execution;
+- a dedicated M:N goroutine target with channels, select, sync, timers and scheduler-aware waits;
+- a goroutine-backed VFS read pool as the production default, with a serial VFS fallback kept under the boot gate.
 
 ### Native shell and applications
 
@@ -156,7 +160,7 @@ Added `gfm`, expanded keyboard sequences, CSI/SGR terminal support, scoped raw t
 
 Expanded filesystem metadata and native TUI applications with capacity/mount discovery, typed timestamps/attributes, `df`, `mount`, `gview`, `edit`, nested TUI launch and safer whole-file replacement.
 
-## 0.2.x — Compatibility, SMP, networking and remote administration
+## 0.2.x — Compatibility, SMP, networking, remote administration and native concurrency
 
 ### 0.2.0 — Linux ABI
 
@@ -219,34 +223,59 @@ The remote shell still intentionally excludes SFTP/SCP, SSH forwarding, agent/X1
 
 See [remote access](remote-access.md), [ADR 0199](../adr/0199-native-remote-terminal-sessions.md), and [ADR 0200](../adr/0200-native-administration-contracts.md).
 
+### 0.2.8 — Reclaimable and concurrent native userspace
+
+GoOS 0.2.8 replaces request-scoped bump-allocation discipline with a reclaiming
+native heap and extends native userspace from one execution stream to
+multithreaded and selected M:N goroutine workloads.
+
+Implemented:
+
+- size-classed slab/page-run allocation, conservative mark-and-sweep, real
+  `runtime.free`/`runtime.GC`/`runtime.ReadMemStats`, `VMDiscard`, and
+  scoped `arena.Region` scratch (ADR 0201);
+- measured allocator tuning, diagnostics, the 1360-byte class, bounded stack
+  scrub and configurable free-page retention (ADR 0202);
+- native sibling threads with guarded kernel-created stacks, generation-safe
+  IDs, join/yield, per-thread runtime state, thread-owned slabs and
+  stop-the-world snapshots (ADR 0203);
+- a source-pinned TinyGo overlay for M:N goroutines, channels, select, sync,
+  timers, preemption and scheduler-aware waits (ADR 0204);
+- goroutine-aware GC stack planning across G and M stacks, full held GPR/XMM
+  snapshots, allocator/region transition windows and fail-closed rendezvous;
+- a bounded concurrent VFS read pool with ordered mutation barriers,
+  quarantined-cache recovery, independent control handoff and fenced
+  filesystem replacement; the goroutine VFS is the default and the serial
+  build remains a regression fallback;
+- a userspace concurrency/caller audit and dedicated native-thread,
+  goroutine, GC, I/O, VFS and KVM validation;
+- deterministic `swaphold` coverage of all 15 reachable
+  `goos_g_swap` boundaries and all 47 reachable
+  `goos_preempt_entry` boundaries, plus isolated coverage of XMM0-XMM15
+  and the 15 saved general-purpose register roots.
+
+The preemption stress exposed and fixed an asynchronous SSE-state corruption:
+the preemption entry now saves vector state before making its native call.
+The integrated concurrency soak and full `test-all` passed before the final
+context-save coverage additions, which then passed their targeted TCG and KVM
+gates.
+
+See [ADR 0201](../adr/0201-reclaimable-userspace-memory.md),
+[ADR 0202](../adr/0202-allocator-measurements-and-tuning.md),
+[ADR 0203](../adr/0203-native-multithreaded-userspace.md),
+[ADR 0204](../adr/0204-native-goroutines-and-concurrency.md), the
+[native concurrency validation report](native-concurrency-validation.md) and
+[0.2.8 release notes](../releases/0.2.8.md).
+
 ---
 
 # Next priorities
 
-The order is 0.2.8 memory reclamation, then the Linux terminal and
-interactive BusyBox, then Linux runtime and ABI work driven by real
-applications.
+The next major compatibility milestone is the Linux terminal and interactive
+BusyBox. Linux runtime and ABI work remains driven by real applications after
+that.
 
-## Priority 1 — 0.2.8 reclaimable native userspace memory
-
-Native userspace allocated from a bump allocator and never freed an ordinary
-Go object; services rewound it once per request. 0.2.8 replaces it with a
-reclaiming heap (ADR 0201):
-
-- size-classed slabs and page runs with metadata outside the payload pages;
-- a real `runtime.free`, `runtime.GC`, and `runtime.ReadMemStats`;
-- a per-process, stop-the-world, non-moving, conservative mark and sweep with
-  roots found by GoOS itself: linker-bracketed globals, the stack, the
-  callee-saved registers, and region memory;
-- free pages returned with `VMDiscard`;
-- `arena.Region` kept for scoped scratch, backed outside the heap;
-- every `Current`/`Reset` loop moved to collected allocation;
-- `make test-memory`: host model tests and an in-guest `memreclaim` and VFS
-  endurance gate, in `test-all` and `release-check`.
-
-The kernel keeps the ADR 0065 discipline and gains no collector.
-
-## Priority 2 — Linux terminal support
+## Priority 1 — Linux terminal support
 
 The next major compatibility milestone is to give Linux programs a real terminal.
 
@@ -282,19 +311,19 @@ Once the terminal contract is stable:
 
 - run `nano`;
 - add missing terminal ioctls only when a real application requires them;
-- add `utimensat` so editors can preserve/update file timestamps correctly;
+- add missing file timestamp/metadata semantics only where real editors expose a gap;
 - consider additional static CLI/TUI applications as compatibility probes.
 
 Do not turn this milestone into full Linux TTY subsystem emulation unless an actual application demonstrates the need.
 
-## Priority 3 — Linux runtime completeness
+## Priority 2 — Linux runtime completeness
 
 After interactive Linux programs work, improve the static Linux environment where concrete programs expose gaps.
 
 Likely work:
 
 - thread-directed signal cases not yet represented cleanly;
-- missing file metadata/time syscalls such as `utimensat`;
+- remaining file metadata/time semantics exposed by real applications;
 - remaining practical ioctls required by common CLI programs;
 - stronger `/proc`-like introspection only if an application needs it;
 - better diagnostics for unsupported syscalls;
@@ -304,7 +333,7 @@ The rule remains:
 
 > Add Linux ABI surface because a useful program requires it, not because Linux has the syscall.
 
-## Priority 4 — Entropy and load randomization
+## Priority 3 — Entropy and load randomization
 
 Two security/portability items are independent of the terminal milestone and can be done separately.
 
@@ -318,7 +347,7 @@ Add bounded randomized base selection for compatible executable mappings.
 
 This is not a full ASLR project. Do not expand it into complete Linux/macOS-style address-space randomization before the simpler mechanism is measured and validated.
 
-## Priority 5 — Native shell/application polish
+## Priority 4 — Native shell/application polish
 
 The native environment is already usable. Future improvements should remain small and capability-oriented.
 
@@ -333,7 +362,7 @@ Candidates:
 
 Avoid importing POSIX shell semantics wholesale.
 
-## Priority 6 — Networking beyond the current native IPv4 stack
+## Priority 5 — Networking beyond the current native IPv4 stack
 
 The current network stack is sufficient for HTTP/HTTPS, DNS and SSH administration.
 
@@ -351,7 +380,7 @@ Linux networking must remain an adapter over native services rather than a privi
 
 Encrypted DNS, HTTP/2, HTTP/3 and QUIC are not immediate priorities.
 
-## Priority 7 — Dynamic Linux linking
+## Priority 6 — Dynamic Linux linking
 
 Dynamic ELF support remains separate from the static Linux ABI.
 
@@ -368,7 +397,7 @@ A minimal musl dynamic binary is a better first target than a general desktop Li
 
 This milestone should come after the static interactive environment is strong enough to justify it.
 
-## Priority 8 — In-system compilation experiment
+## Priority 7 — In-system compilation experiment
 
 A compiler running inside GoOS remains a long-term proof that the system is a usable computing environment rather than only a bootable image.
 
