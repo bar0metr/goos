@@ -117,10 +117,13 @@ packages. The updater follows no redirects and accepts only HTTP 200 bodies.
 ## Consequences
 
 We must maintain the small compatibility patches against pinned source hashes
-and test them when changing toolchains. Native programs use a bump allocator;
-root state must outlive request arenas, and reset must not invalidate library
-caches. Binary, heap, stack, root and chain costs require measurements rather
-than `runtime.ReadMemStats`, which the native runtime does not implement.
+and test them when changing toolchains. At the time this ADR was implemented,
+native programs still used the resettable bump allocator, so TLS root state had
+to outlive request arenas and the feasibility report measured allocation
+directly. ADR 0201 later replaced that allocator with the reclaiming native heap
+and implemented `runtime.ReadMemStats`; the recorded binary, heap, stack, root
+and chain measurements remain evidence for the pinned TLS build rather than a
+statement about the current allocator contract.
 
 Exclude TLS server mode, client certificates, resumption, 0-RTT, revocation
 network requests, OCSP stapling validation, Certificate Transparency, AIA,
