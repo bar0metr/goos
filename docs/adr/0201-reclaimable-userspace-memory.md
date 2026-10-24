@@ -61,12 +61,14 @@ allocates again does not take and return a page each time.
 ### Collector
 
 The collector is a per-process, stop-the-world, non-moving, conservative mark
-and sweep. A native program has one thread (`scheduler: none`), so stopping the
-world means the allocating call does the work. The kernel and other processes
-keep running.
+and sweep. In the single-thread model this ADR introduced, a native program had
+one thread (`scheduler: none`), so stopping the world meant the allocating call
+did the work. The kernel and other processes kept running. ADR 0203 and ADR
+0204 later extend the rendezvous and root plan to native sibling threads and
+goroutines.
 
-Roots are the mutable globals, the stack, the callee-saved registers, and the
-used part of every region. Marking reads every aligned word of a root or a
+In this ADR's original model, roots are the mutable globals, the stack, the
+callee-saved registers, and the used part of every region. Marking reads every aligned word of a root or a
 marked allocation. A word inside the handed-out part of the heap marks the
 allocation containing it, at its start or anywhere inside, so interior pointers
 keep their allocation. Other words are ignored: the collector never follows a
