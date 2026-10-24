@@ -643,7 +643,7 @@ func TestDispatchExecutableCalls(t *testing.T) {
 			t.Fatalf("random read of %d bytes reached the handler", length)
 		}
 	}
-	if result := Dispatch(Request{Operation: OperationIRQPoll + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if result := Dispatch(Request{Operation: OperationThreadHoldCancel + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}
@@ -859,5 +859,57 @@ func TestIRQPollIsAppendedAndNeverBlocks(t *testing.T) {
 		if result.Action != ActionReturn || result.Status != StatusNotFound || handler.channel != 0x10000001d {
 			t.Fatalf("IRQ poll dispatch=%+v handle=%#x", result, handler.channel)
 		}
+	}
+}
+
+func (handler *testHandler) ThreadHoldRange(thread uint64, lo uint64, hi uint64) Status {
+	handler.channel, handler.address, handler.length = thread, lo, hi
+	return StatusOK
+}
+
+func (handler *testHandler) ThreadHoldWait(thread uint64, address uint64) Status {
+	handler.channel, handler.address = thread, address
+	return StatusTimeout
+}
+
+func (handler *testHandler) ThreadHoldStep(thread uint64) Status {
+	handler.channel = thread
+	return StatusOK
+}
+
+func (handler *testHandler) ThreadHoldCancel(thread uint64) Status {
+	handler.channel, handler.called = thread, true
+	return StatusOK
+}
+
+func TestThreadHoldCallsAreAppended(t *testing.T) {
+	if OperationIRQPoll != 71 || OperationThreadHoldRange != 72 || OperationThreadHoldWait != 73 ||
+		OperationThreadHoldStep != 74 || OperationThreadHoldCancel != 75 {
+		t.Fatalf("hold ABI renumbered: range=%d wait=%d step=%d cancel=%d",
+			OperationThreadHoldRange, OperationThreadHoldWait, OperationThreadHoldStep, OperationThreadHoldCancel)
+	}
+	handler := &testHandler{}
+	result := Dispatch(Request{Operation: OperationThreadHoldRange, Arg0: 7, Arg1: 0x1000, Arg2: 0x1000 + MaxHoldRange}, handler)
+	if result.Status != StatusOK || handler.channel != 7 || handler.address != 0x1000 || handler.length != 0x1000+MaxHoldRange {
+		t.Fatalf("hold range dispatch %+v %+v", result, handler)
+	}
+	for _, bounds := range [][2]uint64{{0x1000, 0x1000}, {0x2000, 0x1000}, {0x1000, 0x1001 + MaxHoldRange}} {
+		handler = &testHandler{}
+		if result := Dispatch(Request{Operation: OperationThreadHoldRange, Arg1: bounds[0], Arg2: bounds[1]}, handler); result.Status != StatusInvalidArgument || *handler != (testHandler{}) {
+			t.Fatalf("hold range %#x-%#x reached the handler", bounds[0], bounds[1])
+		}
+	}
+	handler = &testHandler{}
+	if result := Dispatch(Request{Operation: OperationThreadHoldWait, Arg0: 9, Arg1: 0x3000}, handler); result.Status != StatusTimeout ||
+		result.Action != ActionReturn || handler.channel != 9 || handler.address != 0x3000 {
+		t.Fatalf("hold wait dispatch %+v %+v", result, handler)
+	}
+	handler = &testHandler{}
+	if result := Dispatch(Request{Operation: OperationThreadHoldStep, Arg0: 9}, handler); result.Status != StatusOK || handler.channel != 9 {
+		t.Fatalf("hold step dispatch %+v %+v", result, handler)
+	}
+	handler = &testHandler{}
+	if result := Dispatch(Request{Operation: OperationThreadHoldCancel, Arg0: 9}, handler); result.Status != StatusOK || !handler.called {
+		t.Fatalf("hold cancel dispatch %+v %+v", result, handler)
 	}
 }

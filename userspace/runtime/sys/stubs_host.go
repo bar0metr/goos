@@ -45,6 +45,14 @@ func threadWake(thread uint64) uint64 { return unsupported }
 
 func threadWakeTake() uint64 { return unsupported }
 
+func threadHoldRange(thread uint64, lo uintptr, hi uintptr) uint64 { return unsupported }
+
+func threadHoldWait(thread uint64, record unsafe.Pointer) uint64 { return unsupported }
+
+func threadHoldStep(thread uint64) uint64 { return unsupported }
+
+func threadHoldCancel(thread uint64) uint64 { return unsupported }
+
 func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64 { return unsupported }
 
 func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64 { return unsupported }

@@ -808,3 +808,5 @@ CA-1023	goos/userspace/runtime/goroutine	swapStart	process	immutable	goprobe gcs
 CA-1024	goos/userspace/runtime/goroutine	swapEnd	process	immutable	goprobe gcstress
 CA-1025	goos/userspace/runtime/goroutine	preemptStart	process	immutable	goprobe gcstress
 CA-1026	goos/userspace/runtime/goroutine	preemptEnd	process	immutable	goprobe gcstress
+CA-1027	goos/userspace/bin/goprobe	holdControllers	process	owned	goprobe swaphold
+CA-1028	goos/userspace/bin/goprobe	holdMix	goroutine	owned	goprobe swaphold

@@ -41,6 +41,7 @@ type wires struct {
 	vmDescriptor    [2]uint64
 	vmRecord        [kcall.VMRecordSize]byte
 	threadWire      [2]uint64
+	holdWire        [3]uint64
 	countWire       uint64
 	// touched keeps the reads touch makes from being optimized away.
 	touched byte

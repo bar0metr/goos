@@ -14,29 +14,64 @@ type goroutinesScenario struct{}
 
 func (goroutinesScenario) Name() string { return "goroutines" }
 
-// goroutineChecks lists each fixture command, its completion marker, and
-// the measurement records, by name, it must also print once.
+// goroutineChecks lists each fixture command, its completion marker, the
+// measurement records, by name, it must also print once, and an optional
+// check of its output.
 var goroutineChecks = []struct {
 	command, marker string
 	records         []string
+	verify          func(string) error
 }{
-	{"goprobe pool", "GOPROBE_POOL_OK", nil},
-	{"goprobe smoke 2", "GOPROBE_SMOKE_OK", nil},
-	{"goprobe smoke 8", "GOPROBE_SMOKE_OK", nil},
-	{"goprobe chan", "GOPROBE_CHAN_OK", nil},
-	{"goprobe sync", "GOPROBE_SYNC_OK", nil},
-	{"goprobe timers", "GOPROBE_TIMERS_OK", nil},
-	{"goprobe fair", "GOPROBE_FAIR_OK", nil},
-	{"goprobe panic", "GOPROBE_PANIC_OK", nil},
-	{"goprobe limit", "GOPROBE_LIMIT_OK", nil},
-	{"goprobe io", "GOPROBE_IO_OK", nil},
-	{"goprobe waitsets", "GOPROBE_WAITSETS_OK", []string{"GOPROBE_WAITSETS_JOIN"}},
-	{"goprobe logwait", "GOPROBE_LOGWAIT_OK", []string{"GOPROBE_LOGWAIT"}},
-	{"goprobe threads", "GOPROBE_THREADS_OK", nil},
-	{"goprobe gc 1", "GOPROBE_GC_OK", nil},
-	{"goprobe gc 8", "GOPROBE_GC_OK", nil},
-	{"goprobe gcstress 1", "GOPROBE_GCSTRESS_OK", []string{"GOPROBE_GCSTRESS"}},
-	{"goprobe gcstress 8", "GOPROBE_GCSTRESS_OK", []string{"GOPROBE_GCSTRESS"}},
+	{"goprobe pool", "GOPROBE_POOL_OK", nil, nil},
+	{"goprobe smoke 2", "GOPROBE_SMOKE_OK", nil, nil},
+	{"goprobe smoke 8", "GOPROBE_SMOKE_OK", nil, nil},
+	{"goprobe chan", "GOPROBE_CHAN_OK", nil, nil},
+	{"goprobe sync", "GOPROBE_SYNC_OK", nil, nil},
+	{"goprobe timers", "GOPROBE_TIMERS_OK", nil, nil},
+	{"goprobe fair", "GOPROBE_FAIR_OK", nil, nil},
+	{"goprobe panic", "GOPROBE_PANIC_OK", nil, nil},
+	{"goprobe limit", "GOPROBE_LIMIT_OK", nil, nil},
+	{"goprobe io", "GOPROBE_IO_OK", nil, nil},
+	{"goprobe waitsets", "GOPROBE_WAITSETS_OK", []string{"GOPROBE_WAITSETS_JOIN"}, nil},
+	{"goprobe logwait", "GOPROBE_LOGWAIT_OK", []string{"GOPROBE_LOGWAIT"}, nil},
+	{"goprobe threads", "GOPROBE_THREADS_OK", nil, nil},
+	{"goprobe gc 1", "GOPROBE_GC_OK", nil, nil},
+	{"goprobe gc 8", "GOPROBE_GC_OK", nil, nil},
+	{"goprobe gcstress 1", "GOPROBE_GCSTRESS_OK", []string{"GOPROBE_GCSTRESS"}, nil},
+	{"goprobe gcstress 8", "GOPROBE_GCSTRESS_OK", []string{"GOPROBE_GCSTRESS"}, nil},
+	{"goprobe swaphold", "GOPROBE_SWAPHOLD_OK", nil, swapHoldRecords},
+}
+
+// swapHoldRecords checks the instruction-hold records: one per region, each
+// with every expected boundary held and no list lost. Under KVM it shows the
+// processor's execute breakpoints and single steps reach each boundary.
+func swapHoldRecords(out string) error {
+	seen := map[string]int{}
+	for _, line := range strings.Split(strings.ReplaceAll(out, "\r", ""), "\n") {
+		if !strings.HasPrefix(line, "GOPROBE_SWAPHOLD region=") {
+			continue
+		}
+		fields := map[string]string{}
+		for _, field := range strings.Fields(line)[1:] {
+			key, value, _ := strings.Cut(field, "=")
+			fields[key] = value
+		}
+		region := fields["region"]
+		if region != "swap" && region != "preempt" {
+			return fmt.Errorf("unknown swaphold region in %q", line)
+		}
+		seen[region]++
+		if fields["expected"] == "" || fields["distinct_rips"] != fields["expected"] {
+			return fmt.Errorf("swaphold %s held %s of %s boundaries", region, fields["distinct_rips"], fields["expected"])
+		}
+		if fields["lost"] != "0" || fields["collections"] == "" || fields["collections"] == "0" {
+			return fmt.Errorf("swaphold %s: lost=%s collections=%s", region, fields["lost"], fields["collections"])
+		}
+	}
+	if seen["swap"] != 1 || seen["preempt"] != 1 {
+		return fmt.Errorf("expected one swap and one preempt swaphold record, got %d and %d", seen["swap"], seen["preempt"])
+	}
+	return nil
 }
 
 func goroutineMarker(out, marker string) error {
@@ -86,6 +121,11 @@ func (goroutinesScenario) Run(ctx context.Context, s *Session) (Result, error) {
 		}
 		for _, name := range check.records {
 			if err := goroutineRecord(out, name); err != nil {
+				return "", fail(ClassScenario, check.command, err)
+			}
+		}
+		if check.verify != nil {
+			if err := check.verify(out); err != nil {
 				return "", fail(ClassScenario, check.command, err)
 			}
 		}

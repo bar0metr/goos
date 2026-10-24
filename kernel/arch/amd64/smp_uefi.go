@@ -177,6 +177,9 @@ func schedSwitch(action uint64) uint64 {
 	if next != sched.Idle && next >= kernelTasks {
 		noteParallel(taskRoots[next])
 	}
+	if validation.Enabled {
+		switchDebug(cpu, next)
+	}
 	atomic.StoreUint64(&cpuData[cpu][cpuNeedResched], 0)
 	leave := uint64(0)
 	if runState.MustLeave(cpu) {

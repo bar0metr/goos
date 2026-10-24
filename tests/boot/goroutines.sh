@@ -6,7 +6,9 @@
 # of goroutines in waiting states, collector stress, handle waits, a goroutine
 # joining a native thread, log cursor waits, the storage driver's goroutine
 # waiting on disk interrupts, mixed native threads and goroutines, and the
-# faults that end the process. Writes
+# faults that end the process. SUITE=gc also holds a worker at every
+# instruction of the goroutine switch and preemption entry; GOPROBE_ELF names
+# the goprobe ELF whose disassembly those holds are checked against. Writes
 # build/reports/goroutines-SUITE.txt.
 #
 # SUITE picks the checks: runtime (scheduling, channels, sync, timers,
@@ -161,6 +163,13 @@ else
 		for count in 1 $cpus; do
 			probe "gcstress $count"
 		done
+		# A collection at every instruction boundary of goos_g_swap and
+		# goos_preempt_entry while a worker thread stands there. With
+		# GOPROBE_ELF set, the held offsets must equal the ELF's boundaries.
+		probe swaphold
+		if [ -n "${GOPROBE_ELF:-}" ]; then
+			go run ./tools/swaphold "$GOPROBE_ELF" "$work/output" >>"$work/summary" || fail 'goprobe swaphold: held offsets differ from the disassembly'
+		fi
 	fi
 	if wants io; then
 		probe io

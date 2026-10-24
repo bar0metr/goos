@@ -303,12 +303,61 @@ guarantees a user-time preemption. Temporary mutations that omitted parked or ru
 G stacks made gcstress fail during preemption with process fault status 13;
 the mutations are not part of the runtime.
 
-These tests cover root lifetimes but
-do not force collections at each instruction of creation, completion,
-context save, or G/M switching. Preemption-entry hold counts include restore
-instructions; they do not establish a hold during each register save. Swap
-holds cover some runs but do not identify the individual save instruction.
-Compiler spills and
+### Instruction holds
+
+`goprobe swaphold` forces a collection at every instruction boundary of
+`goos_g_swap` and `goos_preempt_entry`. Validation kernels add four native
+calls, appended as operations 72 to 75: `ThreadHoldRange`,
+`ThreadHoldWait`, `ThreadHoldStep` and `ThreadHoldCancel`. Other kernels
+answer `Unsupported`, and the shared `userspace/runtime.o` gains only four
+call stubs; the switch and the entry stay unchanged.
+
+A hold arms an execute breakpoint in DR0 for one thread of the caller's
+process at the range's first instruction. The debug exception entry saves
+the thread's registers and IRETQ frame as the context a switch restores,
+the same context a collection snapshots, and blocks the thread. A step sets
+RFLAGS.TF. INT, INT3, INT1, SYSCALL, PUSHF and POPF instead run to a
+breakpoint on the next instruction, so the kernel never sees a trap in its
+own code and TF never reaches the saved flags. A step that lands outside the
+range with a return address just past the stepped instruction at RSP runs to
+a breakpoint there: `call goos_g_preempt` is stepped over. Any other exit
+ends the hold. While a thread stands, DR0 holds its RIP and TF is clear, so
+a stale wake runs it back into the same stop. A processor loads DR0 and DR7
+only when it switches to a held task and clears DR7 otherwise. Preemption
+delivery to a held thread stops after its first stop, and delivery clears
+RF in the diverted context; QEMU TCG left RF set there, which hid the
+breakpoint at the entry.
+
+One permit runs the probe's goroutines, so every switch of the region runs
+on the main thread; a `thread.Start` controller arms the hold and calls
+`runtime.GC()` at each stop. In the swap region two goroutines yield in a
+loop holding a list each. Passes run until both directions stopped at all 15
+boundaries: the outgoing goroutine's saves and the restore of the goroutine
+switched to. In the preemption region one goroutine spins without calls on a
+list held only in registers. Each pass covers all 47 reachable boundaries
+of the entry, through the kernel call, the stepped-over runtime call and the
+restore to `RET 128`. The UD2 after a failed take is never reached. Every
+stop must run a completed collection, or a later one must complete before
+the region ends; each list must survive. `tools/swaphold` compares the held
+offsets with the boundaries `go tool objdump` lists for the ELF.
+
+A TCG SMP=4 run held 45 swap stops, covering 15 of 15 distinct RIPs in two
+outgoing and one incoming pass, and 94 preemption stops, covering 47 of 47
+in two passes. All 139 collections completed at their stops, with no retry,
+suspension failure or lost list. Two temporary stack-plan mutations failed
+the swap region. One counted the goroutine a held thread's M runs as
+scanned whenever the thread's stack pointer lay on the scheduler stack; it
+lost both lists. The other dropped the stack of every held thread whose
+stack pointer lay on a goroutine stack; it lost one. A third mutation
+cleared the held threads' snapshot registers before marking, and both
+regions still passed: another root kept each list, so the probe does not
+isolate register roots.
+
+These tests cover root lifetimes and every context-save instruction of one
+thread, but do not force collections at each instruction of creation,
+completion or the scheduler's own G/M bookkeeping around the switch. A hold
+stops one thread at a time on one permit; it does not combine a held switch
+with other threads switching at once. Compiler spills and
 conservative aliases can retain a list through another root. The tests do
 not isolate each XMM register, cover all timer cancellation races, or
 exercise kernel-induced rendezvous timeouts. The rejected region window
@@ -415,6 +464,7 @@ boots and 20 TCG `gcstress 8` runs passed with no lost vector state, slab
 mismatch or null-source fault. A complete `test-all` then passed on `main`
 at `39c7036`, including `test-boot` with the goroutine VFS and
 `test-vfs-serial`. On that evidence the goroutine VFS became the production
-default. The remaining evidence limits in the validation report still apply:
-collector stress does not cover every context-save instruction or isolate
-each XMM root.
+default. The remaining evidence limits in the validation report still apply.
+`goprobe swaphold` later covered every context-save instruction of one
+held thread (Instruction holds above); the tests still do not isolate
+register or XMM roots.

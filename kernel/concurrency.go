@@ -95,6 +95,8 @@ type cpuScratch struct {
 	threadSnapshot     amd64.UserSnapshot
 	threadSnapshotWire [kcall.ThreadSnapshotSize]byte
 	threadTasks        [nativethread.Slots]sched.TaskID
+	// holdWire is an instruction hold's record (ADR 0204).
+	holdWire [kcall.HoldRecordSize]byte
 	// siblingTasks lists the other tasks of a process a call stops or ends.
 	siblingTasks [sched.MaxTasks]sched.TaskID
 	// linuxVFSMessage holds the request being sent, then the reply being read.

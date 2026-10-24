@@ -89,6 +89,10 @@ table with type, generation, and rights checks.
 | 56 | `RandomRead` | — | length 1..64, checked in `Dispatch`; `CopyOut` of generator output, after which the kernel clears its copy | at most 64 bytes from a per-CPU buffer; stirs the pool with the cycle counter | no; no generator output → `Unsupported` |
 
 | 71 | `IRQPoll` | IRQ handle, Wait, line 11, checked by the same validator as `IRQWait` | ignores unused arguments | atomically consumes one pending flag; registers no waiter | no; nothing pending → `NotFound` |
+| 72 | `ThreadHoldRange` | validation build only (`Unsupported` otherwise); native caller; target another live thread of the caller's process | range nonempty and at most 4096 bytes, checked in `Dispatch`; first and last byte in read-execute, non-writable regions | one hold per task slot: DR0 and DR7 loaded for that task only (ADR 0204) | no |
+| 73 | `ThreadHoldWait` | as 72 | 24-byte `CopyOut` of RIP, state and RSP; after a step into a call, 8-byte `CopyIn` from the held thread's stack | none | no; a running target → `Timeout` |
+| 74 | `ThreadHoldStep` | as 72 | target stopped and off its processor; 3-byte `CopyIn` of the instruction at the held RIP | sets TF or DR0 in the target's saved state | no; target not stopped → `Timeout` |
+| 75 | `ThreadHoldCancel` | as 72 | target hold armed | clears TF and DR7 for the target | no |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording

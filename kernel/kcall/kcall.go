@@ -122,6 +122,29 @@ const (
 	// It keeps IRQWait's line-11-only authority; the separate opcode leaves
 	// legacy IRQWait's unused arguments unchanged.
 	OperationIRQPoll
+	// The instruction holds, carried out only by validation kernels (ADR
+	// 0204). ThreadHoldRange arms a hardware execute breakpoint for a
+	// thread of the caller's process at the first instruction of [lo, hi).
+	// ThreadHoldWait reports where the thread stopped, ThreadHoldStep runs
+	// it to the next instruction boundary in the range, stepping over
+	// calls, and ThreadHoldCancel disarms it. Other kernels answer
+	// Unsupported.
+	OperationThreadHoldRange
+	OperationThreadHoldWait
+	OperationThreadHoldStep
+	OperationThreadHoldCancel
+)
+
+// Instruction holds (ADR 0204). A ThreadHoldWait record is HoldRecordSize
+// bytes: the held RIP; HoldStopped while the thread stands at that boundary
+// of its range, or HoldDone once it left the range and runs on; then the
+// stack pointer it stopped with.
+const (
+	HoldRecordSize = uint64(24)
+	HoldStopped    = uint64(1)
+	HoldDone       = uint64(2)
+	// MaxHoldRange bounds the bytes a hold range spans.
+	MaxHoldRange = uint64(4096)
 )
 
 // Native thread layout (ADR 0203). A process has ThreadSlots thread slots.
@@ -308,6 +331,10 @@ type Handler interface {
 	ThreadPreemptTake(address uint64) Status
 	ThreadWake(thread uint64) Status
 	ThreadWakeTake() Status
+	ThreadHoldRange(thread uint64, lo uint64, hi uint64) Status
+	ThreadHoldWait(thread uint64, address uint64) Status
+	ThreadHoldStep(thread uint64) Status
+	ThreadHoldCancel(thread uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -525,6 +552,17 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.ThreadWake(request.Arg0)}
 	case OperationThreadWakeTake:
 		return Result{Status: handler.ThreadWakeTake()}
+	case OperationThreadHoldRange:
+		if request.Arg2 <= request.Arg1 || request.Arg2-request.Arg1 > MaxHoldRange {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.ThreadHoldRange(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationThreadHoldWait:
+		return Result{Status: handler.ThreadHoldWait(request.Arg0, request.Arg1)}
+	case OperationThreadHoldStep:
+		return Result{Status: handler.ThreadHoldStep(request.Arg0)}
+	case OperationThreadHoldCancel:
+		return Result{Status: handler.ThreadHoldCancel(request.Arg0)}
 	default:
 		return Result{Status: StatusUnsupported}
 	}
