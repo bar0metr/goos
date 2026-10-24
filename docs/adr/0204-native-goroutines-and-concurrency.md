@@ -210,6 +210,27 @@ retries within its rendezvous bound. Kernel snapshots include XMM words;
 conservative scanning must retain that coverage because LLVM can keep pointer
 aggregates only in vector registers during a copy.
 
+The snapshot words reach the mark twice: `markThreads` scans each record's
+registers and vectors, and `markGlobals` scans the snapshot buffer, a
+global. A mutation that shortens only the `markThreads` range therefore
+changes nothing. `goprobe regroots` checks each register root alone. Two
+validation helpers, `goos_probe_xmm_root` and `goos_probe_gpr_root`, put a
+list's address in one register, XMM0 to XMM15 or one of the fifteen
+general-purpose registers, zero every other register copy and spin without
+calls or stack writes. Their callers keep only an inverted token. After the
+stop the spinner checks the list while the returned address is still live.
+Each register runs as a `thread.Start` thread, which the collector finds in
+its snapshot, and as a goroutine. The goroutine runs first on every permit,
+where collections hold it in user code and, for every register in each TCG
+run, inside `goos_preempt_entry`. It then runs on one permit, where every
+collection finds it switched out with the address only in the frame the
+entry saved on its stack. Control runs that hold the address in no register
+must see the list freed. A temporary mutation that zeroed the vector words of
+every snapshot before marking lost all 16 XMM lists of the thread and running
+cases and none of the switched-out ones; zeroing the general-purpose words
+lost all 15 lists of those cases in the same way. The validation report gives
+the counts.
+
 `threadprobe region-window N ROUNDS` now exercises the native region window.
 A validation-only hook holds one thread after the cursor store and before the
 innermost store in nested Enter and Leave. The main thread or a peer worker
@@ -309,9 +330,10 @@ context save, or G/M switching. Preemption-entry hold counts include restore
 instructions; they do not establish a hold during each register save. Swap
 holds cover some runs but do not identify the individual save instruction.
 Compiler spills and
-conservative aliases can retain a list through another root. The tests do
-not isolate each XMM register, cover all timer cancellation races, or
-exercise kernel-induced rendezvous timeouts. The rejected region window
+conservative aliases can retain a list through another root. Collector
+stress does not isolate a register root; `goprobe regroots`, described
+under collector integration, does. The tests do not cover all timer
+cancellation races or exercise kernel-induced rendezvous timeouts. The rejected region window
 covers bounded rendezvous failure with parked Gs. A later eight-vCPU KVM
 run passed this stress fixture at one and eight collectors after the fixture
 reserved task slots for its native threads and required three completed
@@ -416,5 +438,6 @@ mismatch or null-source fault. A complete `test-all` then passed on `main`
 at `39c7036`, including `test-boot` with the goroutine VFS and
 `test-vfs-serial`. On that evidence the goroutine VFS became the production
 default. The remaining evidence limits in the validation report still apply:
-collector stress does not cover every context-save instruction or isolate
-each XMM root.
+collector stress does not cover every context-save instruction.
+`goprobe regroots` later isolated each XMM and general-purpose register
+root.
