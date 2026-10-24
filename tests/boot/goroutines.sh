@@ -3,13 +3,13 @@
 # (ADR 0204) with goprobe: the worker pool, goroutines on several
 # processors at once, channels and select, the sync package, timers and
 # contexts, fairness on one permit, panics, the goroutine limit, the roots
-# of goroutines in waiting states, collector stress, handle waits, a goroutine
-# joining a native thread, log cursor waits, the storage driver's goroutine
-# waiting on disk interrupts, mixed native threads and goroutines, and the
-# faults that end the process. SUITE=gc also holds a worker at every
-# instruction of the goroutine switch and preemption entry; GOPROBE_ELF names
-# the goprobe ELF whose disassembly those holds are checked against. Writes
-# build/reports/goroutines-SUITE.txt.
+# of goroutines in waiting states, collector stress, roots held in each
+# register, handle waits, a goroutine joining a native thread, log cursor
+# waits, the storage driver's goroutine waiting on disk interrupts, mixed
+# native threads and goroutines, and the faults that end the process.
+# SUITE=gc also holds a worker at every instruction of the goroutine switch
+# and preemption entry; GOPROBE_ELF names the goprobe ELF whose disassembly
+# those holds are checked against. Writes build/reports/goroutines-SUITE.txt.
 #
 # SUITE picks the checks: runtime (scheduling, channels, sync, timers,
 # fairness, panics, limit, threads), gc, io, panic, faults, or all, the default.
@@ -170,6 +170,11 @@ else
 		if [ -n "${GOPROBE_ELF:-}" ]; then
 			go run ./tools/swaphold "$GOPROBE_ELF" "$work/output" >>"$work/summary" || fail 'goprobe swaphold: held offsets differ from the disassembly'
 		fi
+		probe regroots
+		for class in xmm:16 gpr:15; do
+			require "^GOPROBE_REGROOTS class=${class%:*} situation=thread regs=${class#*:} collections=[1-9][0-9]* lost=0 controls=4 reclaimed=4\$" "goprobe regroots: ${class%:*} thread roots"
+			require "^GOPROBE_REGROOTS class=${class%:*} situation=goroutine regs=${class#*:} collections=[1-9][0-9]* lost=0 running=[1-9][0-9]* switched=[1-9][0-9]* .* entry_regs=[1-9][0-9]* .* controls=4 reclaimed=4\$" "goprobe regroots: ${class%:*} goroutine roots"
+		done
 	fi
 	if wants io; then
 		probe io

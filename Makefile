@@ -806,7 +806,7 @@ test-performance: test-microbench
 
 lint:
 	$(BUILD_ENV) go vet ./...
-	@unformatted=$$(find . -path ./build -prune -o -name '*.go' -print | xargs gofmt -l); \
+	@unformatted=$$(find . \( -path ./build -o -path ./.claude -o -path ./.git \) -prune -o -name '*.go' -print | xargs gofmt -l); \
 		test -z "$$unformatted" || { echo "$$unformatted"; exit 1; }
 	@tests/lint/unsafe_boundary.sh --self-test >/dev/null
 	@tests/lint/unsafe_boundary.sh

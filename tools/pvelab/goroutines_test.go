@@ -89,3 +89,48 @@ func TestSwapHoldRecordsRequireEveryBoundaryOfBothRegions(t *testing.T) {
 		}
 	}
 }
+func TestRegRootsRecordsRequireEveryClassRegisterAndSituation(t *testing.T) {
+	records := []string{
+		"GOPROBE_REGROOTS class=xmm situation=thread regs=16 collections=80 lost=0 controls=4 reclaimed=4",
+		"GOPROBE_REGROOTS class=xmm situation=goroutine regs=16 collections=128 lost=0 running=64 switched=64 permits=3 " +
+			"running_visits=90 running_preemptions=0 entry_regs=16 switched_preemptions=64 controls=4 reclaimed=4",
+		"GOPROBE_REGROOTS class=gpr situation=thread regs=15 collections=76 lost=0 controls=4 reclaimed=4",
+		"GOPROBE_REGROOTS class=gpr situation=goroutine regs=15 collections=120 lost=0 running=60 switched=60 permits=3 " +
+			"running_visits=80 running_preemptions=0 entry_regs=15 switched_preemptions=60 controls=4 reclaimed=4",
+	}
+	good := strings.Join(records, "\r\n") + "\r\nGOPROBE_REGROOTS_OK\r\n"
+	if err := regRootsRecords(good); err != nil {
+		t.Fatal(err)
+	}
+	for _, output := range []string{
+		"",
+		records[0] + "\n" + records[1],
+		strings.Join(records[:3], "\n"),
+		good + records[0] + "\n",
+		strings.Replace(good, "regs=16", "regs=15", 1),
+		strings.Replace(good, "regs=15", "regs=16", 1),
+		strings.Replace(good, "lost=0", "lost=1", 1),
+		strings.Replace(good, "collections=76", "collections=59", 1),
+		strings.Replace(good, "reclaimed=4", "reclaimed=3", 1),
+		strings.Replace(good, "switched=60", "switched=10", 1),
+		strings.Replace(good, "switched_preemptions=64", "switched_preemptions=0", 1),
+		strings.Replace(good, "entry_regs=15", "entry_regs=0", 1),
+		strings.Replace(good, "regs=16", "regs=x", 1),
+		strings.Replace(good, "class=gpr situation=thread", "class=other situation=thread", 1),
+		good + "GOPROBE_REGROOTS_LOST class=gpr situation=thread reg=7 collections=4 entered=0 kept=1 bad_cell=1\n",
+		good + "GOPROBE_REGROOTS_KEPT class=xmm situation=thread collections=4\n",
+	} {
+		if err := regRootsRecords(output); err == nil {
+			t.Fatalf("accepted %q", output)
+		}
+	}
+}
+
+func TestGoroutineChecksIncludeRegRoots(t *testing.T) {
+	for _, check := range goroutineChecks {
+		if check.command == "goprobe regroots" && check.marker == "GOPROBE_REGROOTS_OK" && check.verify != nil {
+			return
+		}
+	}
+	t.Fatal("missing goprobe regroots check")
+}

@@ -210,6 +210,27 @@ retries within its rendezvous bound. Kernel snapshots include XMM words;
 conservative scanning must retain that coverage because LLVM can keep pointer
 aggregates only in vector registers during a copy.
 
+The snapshot words reach the mark twice: `markThreads` scans each record's
+registers and vectors, and `markGlobals` scans the snapshot buffer, a
+global. A mutation that shortens only the `markThreads` range therefore
+changes nothing. `goprobe regroots` checks each register root alone. Two
+validation helpers, `goos_probe_xmm_root` and `goos_probe_gpr_root`, put a
+list's address in one register, XMM0 to XMM15 or one of the fifteen
+general-purpose registers, zero every other register copy and spin without
+calls or stack writes. Their callers keep only an inverted token. After the
+stop the spinner checks the list while the returned address is still live.
+Each register runs as a `thread.Start` thread, which the collector finds in
+its snapshot, and as a goroutine. The goroutine runs first on every permit,
+where collections hold it in user code and, for every register in each TCG
+run, inside `goos_preempt_entry`. It then runs on one permit, where every
+collection finds it switched out with the address only in the frame the
+entry saved on its stack. Control runs that hold the address in no register
+must see the list freed. A temporary mutation that zeroed the vector words of
+every snapshot before marking lost all 16 XMM lists of the thread and running
+cases and none of the switched-out ones; zeroing the general-purpose words
+lost all 15 lists of those cases in the same way. The validation report gives
+the counts.
+
 `threadprobe region-window N ROUNDS` now exercises the native region window.
 A validation-only hook holds one thread after the cursor store and before the
 innermost store in nested Enter and Leave. The main thread or a peer worker
@@ -356,16 +377,17 @@ lost both lists. The other dropped the stack of every held thread whose
 stack pointer lay on a goroutine stack; it lost one. A third mutation
 cleared the held threads' snapshot registers before marking, and both
 regions still passed: another root kept each list, so the probe does not
-isolate register roots.
+isolate register roots; `goprobe regroots`, described under collector
+integration, isolates each XMM and general-purpose register root.
 
-These tests cover root lifetimes and every context-save instruction of one
-thread, but do not force collections at each instruction of creation,
-completion or the scheduler's own G/M bookkeeping around the switch. A hold
-stops one thread at a time on one permit; it does not combine a held switch
-with other threads switching at once. Compiler spills and
-conservative aliases can retain a list through another root. The tests do
-not isolate each XMM register, cover all timer cancellation races, or
-exercise kernel-induced rendezvous timeouts. The rejected region window
+These tests cover root lifetimes, every context-save instruction of one
+thread and each register root alone. They do not force collections at each
+instruction of creation, completion or the scheduler's own G/M bookkeeping
+around the switch. A hold stops one thread at a time on one permit; it does
+not combine a held switch with other threads switching at once. Compiler
+spills and conservative aliases can retain a list through another root. The
+tests do not cover all timer cancellation races or exercise kernel-induced
+rendezvous timeouts. The rejected region window
 covers bounded rendezvous failure with parked Gs. A later eight-vCPU KVM
 run passed this stress fixture at one and eight collectors after the fixture
 reserved task slots for its native threads and required three completed
@@ -470,6 +492,6 @@ mismatch or null-source fault. A complete `test-all` then passed on `main`
 at `39c7036`, including `test-boot` with the goroutine VFS and
 `test-vfs-serial`. On that evidence the goroutine VFS became the production
 default. The remaining evidence limits in the validation report still apply.
-`goprobe swaphold` later covered every context-save instruction of one
-held thread (Instruction holds above); the tests still do not isolate
-register or XMM roots.
+`goprobe swaphold` later covered every context-save instruction of one held
+thread (Instruction holds above), and `goprobe regroots` isolated each XMM
+and general-purpose register root.

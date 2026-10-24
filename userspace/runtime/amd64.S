@@ -1035,6 +1035,161 @@ goos_probe_vector_spin:
     ret
 .size goos_probe_vector_spin, .-goos_probe_vector_spin
 
+// goos_probe_xmm_root(index, token uint64, state *[2]uint32) uint64 holds
+// a heap address in one XMM register while it spins. token is the address
+// with every bit inverted. It zeroes XMM0 to XMM15, puts the address in
+// XMM[index] alone, zeroes every caller-saved general-purpose register that
+// held the address or the token, sets state[1], and loops without calls or
+// stack writes until state[0] is nonzero. It returns the register's value,
+// the address again when the register kept it, so the caller holds the list
+// once more while it checks it. An index of 16 or more holds the address
+// nowhere and returns zero. Only goprobe calls it, to show that a
+// collection finds a root that only one XMM register of a held thread
+// holds.
+.section .text.goos_probe_xmm_root,"ax",@progbits
+.global goos_probe_xmm_root
+.type goos_probe_xmm_root,@function
+goos_probe_xmm_root:
+.irp reg, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+    pxor %xmm\reg, %xmm\reg
+.endr
+    notq %rsi
+    xorl %eax, %eax
+    xorl %ecx, %ecx
+    xorl %r8d, %r8d
+    xorl %r9d, %r9d
+    xorl %r10d, %r10d
+    xorl %r11d, %r11d
+    cmpq $16, %rdi
+    jae .Lxmm_root_none
+    // Each register's block starts 64 bytes after the one before it.
+    shlq $6, %rdi
+    leaq .Lxmm_root_hold0(%rip), %rax
+    addq %rdi, %rax
+    xorl %edi, %edi
+    jmp *%rax
+.irp reg, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+.balign 64
+.Lxmm_root_hold\reg:
+    movq %rsi, %xmm\reg
+    xorl %esi, %esi
+    xorl %eax, %eax
+    movl $1, 4(%rdx)
+1:
+    pause
+    cmpl $0, (%rdx)
+    je 1b
+    movq %xmm\reg, %rax
+    pxor %xmm\reg, %xmm\reg
+    ret
+.endr
+.Lxmm_root_none:
+    xorl %esi, %esi
+    movl $1, 4(%rdx)
+1:
+    pause
+    cmpl $0, (%rdx)
+    je 1b
+    xorl %eax, %eax
+    ret
+.size goos_probe_xmm_root, .-goos_probe_xmm_root
+
+// goos_probe_gpr_root(index, token uint64, state *[2]uint32) uint64 is
+// goos_probe_xmm_root for the general-purpose registers. index names one of
+// RAX, RBX, RCX, RDX, RSI, RDI, RBP and R8 to R15, in that order. It saves
+// the callee-saved registers, which hold its callers' values, zeroes every
+// general-purpose and XMM register except the state pointer it polls through
+// (R11, or R10 while R11 holds the address), puts the address in that one
+// register, and spins as goos_probe_xmm_root does. It returns the
+// register's value, or zero for an index of 15 or more.
+.macro GOOS_GPR_ROOT_HOLD reg, state
+.balign 64
+    movq %rsi, %\reg
+.ifnc \reg,rsi
+    xorl %esi, %esi
+.endif
+.ifnc \reg,rax
+    xorl %eax, %eax
+.endif
+    movl $1, 4(%\state)
+1:
+    pause
+    cmpl $0, (%\state)
+    je 1b
+    movq %\reg, %rax
+    xorl %esi, %esi
+    jmp .Lgpr_root_done
+.endm
+.section .text.goos_probe_gpr_root,"ax",@progbits
+.global goos_probe_gpr_root
+.type goos_probe_gpr_root,@function
+goos_probe_gpr_root:
+    pushq %rbx
+    pushq %rbp
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+.irp reg, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+    pxor %xmm\reg, %xmm\reg
+.endr
+    notq %rsi
+    movq %rdx, %r11
+    movq %rdx, %r10
+    xorl %eax, %eax
+    xorl %ebx, %ebx
+    xorl %ecx, %ecx
+    xorl %edx, %edx
+    xorl %ebp, %ebp
+    xorl %r8d, %r8d
+    xorl %r9d, %r9d
+    xorl %r12d, %r12d
+    xorl %r13d, %r13d
+    xorl %r14d, %r14d
+    xorl %r15d, %r15d
+    cmpq $15, %rdi
+    jae .Lgpr_root_none
+    // Each register's block starts 64 bytes after the one before it.
+    shlq $6, %rdi
+    leaq .Lgpr_root_hold(%rip), %rax
+    addq %rdi, %rax
+    xorl %edi, %edi
+    jmp *%rax
+.balign 64
+.Lgpr_root_hold:
+    GOOS_GPR_ROOT_HOLD rax, r11
+    GOOS_GPR_ROOT_HOLD rbx, r11
+    GOOS_GPR_ROOT_HOLD rcx, r11
+    GOOS_GPR_ROOT_HOLD rdx, r11
+    GOOS_GPR_ROOT_HOLD rsi, r11
+    GOOS_GPR_ROOT_HOLD rdi, r11
+    GOOS_GPR_ROOT_HOLD rbp, r11
+    GOOS_GPR_ROOT_HOLD r8, r11
+    GOOS_GPR_ROOT_HOLD r9, r11
+    GOOS_GPR_ROOT_HOLD r10, r11
+    GOOS_GPR_ROOT_HOLD r11, r10
+    GOOS_GPR_ROOT_HOLD r12, r11
+    GOOS_GPR_ROOT_HOLD r13, r11
+    GOOS_GPR_ROOT_HOLD r14, r11
+    GOOS_GPR_ROOT_HOLD r15, r11
+.Lgpr_root_none:
+    xorl %esi, %esi
+    movl $1, 4(%r11)
+1:
+    pause
+    cmpl $0, (%r11)
+    je 1b
+    xorl %eax, %eax
+.Lgpr_root_done:
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbp
+    popq %rbx
+    ret
+.size goos_probe_gpr_root, .-goos_probe_gpr_root
+
 // goos_stack_pointer() uintptr returns its caller's stack pointer, which
 // names the caller's thread (userspace/runtime/tls).
 .global goos_stack_pointer

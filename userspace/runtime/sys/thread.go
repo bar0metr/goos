@@ -110,6 +110,23 @@ func ThreadPreempt(entry uintptr, ticks uint64) kcall.Status {
 // it interrupts shows up here. Only goprobe calls it.
 func ProbeVectorSpin(stop *uint32) uint64 { return probeVectorSpin(stop) }
 
+// ProbeXMMRoot holds the heap address token names (arena.Token) in
+// XMM[index] alone and loops without calls: it sets state[1] once the
+// register holds it and returns when state[0] is nonzero. It returns the
+// register's value, the address when the register kept it, or zero for an
+// index of 16 or more, which holds the address nowhere. Only goprobe calls it, to show that a
+// collection keeps a list only one XMM register holds.
+func ProbeXMMRoot(index, token uint64, state *[2]uint32) uint64 {
+	return probeXMMRoot(index, token, state)
+}
+
+// ProbeGPRRoot is ProbeXMMRoot for the general-purpose registers: index
+// names one of RAX, RBX, RCX, RDX, RSI, RDI, RBP and R8 to R15, in that
+// order, and an index of 15 or more holds the address nowhere.
+func ProbeGPRRoot(index, token uint64, state *[2]uint32) uint64 {
+	return probeGPRRoot(index, token, state)
+}
+
 // ThreadWake sets the wake flag of a thread of the calling process: a
 // WaitAny of that thread with an interest in kcall.WaitAnyThread returns
 // (ADR 0204).
