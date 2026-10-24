@@ -138,15 +138,25 @@ the backend, then removes every mount of it, `/system` and `/apps` included, ato
 the service channel. A dead filesystem service is not treated as a clean
 unmount: its mounts remain and return peer errors so supervision can reattach a
 replacement without invalidating namespace identity.
-The freestanding runtime uses a fixed bump allocator. After persistent service
-initialization, VFS records an arena mark and restores it before every request;
-temporary decode and dispatch allocations therefore remain request-bounded.
+VFS uses the reclaiming native heap of ADR 0201. Request allocations are
+ordinary collected objects; the service no longer rewinds a request arena.
+The production VFS is built with the goroutine target of ADR 0204. Its ingress
+owner is the only mutator of namespace, session, open-file and control state.
+It admits at most eight requests to two read workers, with at most one admitted
+request per session. The owner builds canonical read plans, workers execute
+RAMFS or image reads without a process-wide VFS lock, and the owner commits
+cursor state and retires the request after completion. Mutations, namespace
+operations, session close and controls cross ordered barriers so they cannot
+overtake an admitted read. `VFS_RUNTIME=serial` keeps the same ownership and
+recovery rules while executing requests on one thread, and the full boot gate
+runs against that fallback too.
 
 VFS also owns a control endpoint. PID 1 creates a new channel pair for every
 external process and moves the server endpoint to VFS in an attached IPC handle.
 The client endpoint is consumed by the child's launch manifest. VFS maintains a
-fixed table of active sessions. One bounded `WaitAny` operation covers the
-control endpoint and every active session, and its ready mask identifies the
-endpoints to receive from. VFS closes a server endpoint on `PeerDied`, and the
+bounded table of active sessions. The ingress owner waits on the control route,
+session readiness, persistent-backend state and worker-completion hints through
+the native readiness mechanisms; completion hints bridge the goroutine workers
+back into that owner loop. VFS closes a server endpoint on `PeerDied`, and the
 kernel then releases the channel object. Replies therefore cannot be consumed
 by another process sharing one queue.
