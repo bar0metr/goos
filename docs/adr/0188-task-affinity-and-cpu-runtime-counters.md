@@ -48,8 +48,10 @@ verifies that no queue holds a task barred from its processor.
 Handle zero names the calling task. Another process needs a process handle,
 with `Wait` to read and with `Write` to set; setting applies to every task of
 the process, and reading returns the first task's mask. A mask of zero only
-reads. Native processes run one task each, so a process handle is the task
-handle they need; there is no handle type for one task of another process.
+reads. At the time of this ADR native processes ran one task each; ADR 0203
+later added native sibling threads. A process handle still applies to all of
+that process's tasks, and there is no handle type for one task of another
+process.
 
 ### Linux
 
