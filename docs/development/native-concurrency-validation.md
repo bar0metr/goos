@@ -367,6 +367,27 @@ The switched-out holds survive both mutations because the preemption entry
 stores the registers on the goroutine's stack. Neither mutation is part of
 the runtime.
 
+## Joint KVM run of both probes
+
+The branch that merges `swaphold`, its review fixes and `regroots` passed two
+consecutive joint KVM runs on clean `c96895b`, eight vCPUs:
+`20261024T190608Z-541e9403` and `20261024T190748Z-95f3fd6e`. In both runs:
+
+- `swaphold` held 15 of 15 switch boundaries and 47 of 47 preemption-entry
+  boundaries, each with a completed collection, with `retried=0` and
+  `lost=0`. `tools/swaphold` matched both serial logs against the goprobe
+  ELF's disassembly.
+- `regroots` lost no list for any of the 31 registers, in the thread and
+  goroutine holds, with 4 of 4 controls reclaimed. The running goroutine was
+  held inside the preemption entry for all 16 XMM and all 15 general-purpose
+  registers.
+
+The first two runs on the merge commit `cc876e9` failed in pvelab, not in
+the guest: the merged check table also required `GOPROBE_SWAPHOLD` to
+appear once, while the probe prints one record per region.
+`TestGoroutineChecksAcceptTheirFixtureOutput` now runs every check against
+its fixture output.
+
 ## Remaining evidence limits
 
 Register roots: `goprobe regroots` covers each XMM and general-purpose
