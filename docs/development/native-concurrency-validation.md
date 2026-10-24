@@ -277,12 +277,19 @@ tool objdump` of the goprobe ELF.
 
 | Region | Stops | Distinct RIPs | Collections | Retries | Lost |
 |---|---|---|---|---|---|
-| `goos_g_swap`, two outgoing and one incoming pass | 45 | 15 of 15 | 45 | 0 | 0 |
+| `goos_g_swap`, two or three passes, both directions | 30 or 45 | 15 of 15 | every stop | 0 | 0 |
 | `goos_preempt_entry`, two passes | 94 | 47 of 47 | 94 | 0 | 0 |
 
-The preemption entry has 48 instructions; the UD2 after a failed take is
-never reached. Every run reported zero suspension failures and zero
-allocation or region window retries. The first TCG run never stopped in the
+Three `make test-goroutine-gc` runs on TCG with four processors at
+`6bbb2c6` passed with these results, and `tools/swaphold` matched the
+offsets to the ELF in each. The joint KVM run
+`20261024T125815Z-3f1a5801` on eight vCPUs, clean `6bbb2c6`, passed the
+same check: 30 swap and 94 preemption stops, 15 of 15 and 47 of 47 distinct
+RIPs, no retry and no lost list, so the processor's execute breakpoints and
+single steps reach every boundary under KVM as under TCG. The preemption
+entry has 48 instructions; the UD2 after a failed take is never reached.
+Every run reported zero suspension failures and zero allocation or region
+window retries. The first TCG run never stopped in the
 entry: QEMU TCG left RF set in the context that preemption delivery diverts,
 which suppressed the breakpoint. Delivery now clears RF in validation
 kernels.

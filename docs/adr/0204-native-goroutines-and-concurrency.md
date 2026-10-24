@@ -343,7 +343,7 @@ offsets with the boundaries `go tool objdump` lists for the ELF.
 
 A TCG SMP=4 run held 45 swap stops, covering 15 of 15 distinct RIPs in two
 outgoing and one incoming pass, and 94 preemption stops, covering 47 of 47
-in two passes. All 139 collections completed at their stops, with no retry,
+in two passes. A joint eight-vCPU KVM run matched it with 30 swap stops. All 139 collections completed at their stops, with no retry,
 suspension failure or lost list. Two temporary stack-plan mutations failed
 the swap region. One counted the goroutine a held thread's M runs as
 scanned whenever the thread's stack pointer lay on the scheduler stack; it
