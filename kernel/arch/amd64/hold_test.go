@@ -109,3 +109,32 @@ func TestDebugEntryHoldsWithoutSavingTheFPUAgain(t *testing.T) {
 		t.Fatalf("debug fault path:\n%s", fatal)
 	}
 }
+
+func TestStaleTrapResumesOnlyTheCancelledHoldsOwnException(t *testing.T) {
+	const at = 0x40001000
+	breakpoint := staleOf(&taskHold{state: holdRunning, dr0: at, dr7: dr7Local0})
+	step := staleOf(&taskHold{state: holdRunning})
+	standing := staleOf(&taskHold{state: holdStopped, dr0: at, dr7: dr7Local0})
+	if breakpoint != (staleHold{breakpoint: at}) || step != (staleHold{step: true}) || standing != (staleHold{breakpoint: at}) {
+		t.Fatalf("staleOf: breakpoint %+v step %+v standing %+v", breakpoint, step, standing)
+	}
+	for _, test := range []struct {
+		name   string
+		status uint64
+		rip    uint64
+		stale  staleHold
+		want   bool
+	}{
+		{"breakpoint hit", dr6Clear | dr6B0, at, breakpoint, true},
+		{"hit elsewhere", dr6Clear | dr6B0, at + 2, breakpoint, false},
+		{"own step after breakpoint cancel", dr6Clear | dr6BS, at + 2, breakpoint, false},
+		{"step in flight", dr6Clear | dr6BS, at + 3, step, true},
+		{"breakpoint without one armed", dr6Clear | dr6B0, at, step, false},
+		{"no hold", dr6Clear | dr6BS, at, staleHold{}, false},
+		{"int1 or icebp", dr6Clear, at, breakpoint, false},
+	} {
+		if got := staleTrap(test.status, test.rip, test.stale); got != test.want {
+			t.Errorf("%s: staleTrap = %v, want %v", test.name, got, test.want)
+		}
+	}
+}

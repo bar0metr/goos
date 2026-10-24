@@ -322,7 +322,10 @@ own code and TF never reaches the saved flags. A step that lands outside the
 range with a return address just past the stepped instruction at RSP runs to
 a breakpoint there: `call goos_g_preempt` is stepped over. Any other exit
 ends the hold. While a thread stands, DR0 holds its RIP and TF is clear, so
-a stale wake runs it back into the same stop. A processor loads DR0 and DR7
+a stale wake runs it back into the same stop. A cancel while the thread runs
+resumes it only from the debug exception the old hold can still raise: a
+DR0 hit at the armed address, or the trap of a step in flight. Any other
+debug exception ends the thread as before. A processor loads DR0 and DR7
 only when it switches to a held task and clears DR7 otherwise. Preemption
 delivery to a held thread stops after its first stop, and delivery clears
 RF in the diverted context; QEMU TCG left RF set there, which hid the

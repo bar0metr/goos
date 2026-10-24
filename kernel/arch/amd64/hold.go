@@ -27,8 +27,13 @@ const (
 // and LEN0 zero.
 const dr7Local0 = uint64(1)
 
-// dr6Clear is DR6 with no condition recorded.
-const dr6Clear = uint64(0xffff0ff0)
+// dr6Clear is DR6 with no condition recorded; dr6B0 records a DR0 hit and
+// dr6BS a single step.
+const (
+	dr6Clear = uint64(0xffff0ff0)
+	dr6B0    = uint64(1)
+	dr6BS    = uint64(1) << 14
+)
 
 // maxInstruction is the longest x86 instruction, which bounds how far past
 // a call its return address lies.
@@ -76,4 +81,48 @@ func StepOver(rip uint64, code [3]byte) uint64 {
 // call at previous that lies in the range: the step entered a callee.
 func ReturnInto(ret, previous, lo, hi uint64) bool {
 	return ret > previous && ret-previous <= maxInstruction && ret >= lo && ret < hi
+}
+
+// taskHold is one task's hold. The scheduler lock guards it.
+type taskHold struct {
+	armed bool
+	// stale is what a hold cancelled while its task ran may still raise
+	// (staleTrap); that exception resumes the task, any other ends it.
+	stale staleHold
+	state uint8
+	// quiet stops preemption delivery once the first stop came, so a
+	// diversion cannot enter the range in the middle of a step.
+	quiet    bool
+	lo, hi   uint64
+	rip      uint64
+	previous uint64
+	dr0, dr7 uint64
+}
+
+// staleHold is what a hold cancelled while its task ran may still raise
+// before the task's processor switches: a DR0 hit at breakpoint, or the trap
+// of a single step in flight.
+type staleHold struct {
+	breakpoint uint64
+	step       bool
+}
+
+// staleOf returns what hold, cancelled while its task runs, may still raise.
+func staleOf(hold *taskHold) staleHold {
+	stale := staleHold{step: hold.state == holdRunning && hold.dr7 == 0}
+	if hold.dr7 != 0 {
+		stale.breakpoint = hold.dr0
+	}
+	return stale
+}
+
+// staleTrap reports whether a debug exception with DR6 status at rip is the
+// leftover of a cancelled hold: a DR0 hit at its breakpoint, or a single
+// step it had in flight. Any other debug exception is the task's own and
+// ends it as a fault, as without a hold.
+func staleTrap(status, rip uint64, stale staleHold) bool {
+	if stale.breakpoint != 0 && status&dr6B0 != 0 && rip == stale.breakpoint {
+		return true
+	}
+	return stale.step && status&dr6BS != 0
 }

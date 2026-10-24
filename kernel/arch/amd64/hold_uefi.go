@@ -21,22 +21,6 @@ import (
 // the same stop. A processor loads a task's DR0 and DR7 when it switches to
 // the task, and clears DR7 for any task without a hold.
 
-type taskHold struct {
-	armed bool
-	// stale marks a hold cancelled while its task ran: the debug exception
-	// the old DR7 or TF may still raise resumes the task instead of ending
-	// it.
-	stale bool
-	state uint8
-	// quiet stops preemption delivery once the first stop came, so a
-	// diversion cannot enter the range in the middle of a step.
-	quiet    bool
-	lo, hi   uint64
-	rip      uint64
-	previous uint64
-	dr0, dr7 uint64
-}
-
 var (
 	holds [sched.MaxTasks]taskHold
 	// loadedDR0 and loadedDR7 are what each processor's registers hold, so
@@ -72,6 +56,7 @@ func userDebug(context uintptr) uint64 {
 	if !validation.Enabled {
 		return debugTerminate
 	}
+	status := readDR6()
 	writeDR6(dr6Clear)
 	slot := currentSlot()
 	if slot == sched.Idle || slot < kernelTasks {
@@ -85,9 +70,10 @@ func userDebug(context uintptr) uint64 {
 	hold := &holds[slot]
 	action := uint64(debugHold)
 	switch {
-	case !hold.armed && hold.stale:
+	case !hold.armed && staleTrap(status, frame[15], hold.stale):
 		frame[17] &^= flagTF
 		hold.dr0, hold.dr7 = 0, 0
+		hold.stale = staleHold{}
 		action = debugResume
 	case !hold.armed:
 		action = debugTerminate
@@ -264,8 +250,8 @@ func StepTaskHold(task sched.TaskID, breakpoint uint64) bool {
 // EndTaskHold disarms task's hold and lets it run on with TF and its
 // breakpoint clear. A task that stopped is woken; one on no processor gets
 // TF cleared in its saved flags; one that runs is asked to switch, which
-// clears its processor's DR7. A debug exception still raised by the old
-// state resumes the task.
+// clears its processor's DR7. A debug exception that the old breakpoint or
+// single step still raises resumes the task; any other ends it as before.
 func EndTaskHold(task sched.TaskID) bool {
 	if !validation.Enabled {
 		return false
@@ -277,10 +263,13 @@ func EndTaskHold(task sched.TaskID) bool {
 	target, wake := sched.Idle, false
 	if ok {
 		hold := &holds[slot]
+		stale := staleHold{}
 		if context, stopped := stoppedContext(slot); stopped {
 			context[17] &^= flagTF
 			wake = true
-		} else if target = runState.RunningOn(slot); target == sched.Idle {
+		} else if target = runState.RunningOn(slot); target != sched.Idle {
+			stale = staleOf(hold)
+		} else {
 			// SAFETY: as in stoppedContext, a task off every processor
 			// keeps its saved context on its own kernel stack.
 			if address := taskContexts[slot]; address != 0 {
@@ -290,7 +279,7 @@ func EndTaskHold(task sched.TaskID) bool {
 				}
 			}
 		}
-		*hold = taskHold{stale: true}
+		*hold = taskHold{stale: stale}
 	}
 	schedulerLock.Unlock()
 	if target != sched.Idle {
