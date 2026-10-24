@@ -48,11 +48,29 @@ func threadPreempt(entry uintptr, ticks uint64) uint64
 //go:linkname probeVectorSpin goos_probe_vector_spin
 func probeVectorSpin(stop *uint32) uint64
 
+//go:linkname probeXMMRoot goos_probe_xmm_root
+func probeXMMRoot(index, token uint64, state *[2]uint32) uint64
+
+//go:linkname probeGPRRoot goos_probe_gpr_root
+func probeGPRRoot(index, token uint64, state *[2]uint32) uint64
+
 //go:linkname threadWake goos_thread_wake
 func threadWake(thread uint64) uint64
 
 //go:linkname threadWakeTake goos_thread_wake_take
 func threadWakeTake() uint64
+
+//go:linkname threadHoldRange goos_thread_hold_range
+func threadHoldRange(thread uint64, lo uintptr, hi uintptr) uint64
+
+//go:linkname threadHoldWait goos_thread_hold_wait
+func threadHoldWait(thread uint64, record unsafe.Pointer) uint64
+
+//go:linkname threadHoldStep goos_thread_hold_step
+func threadHoldStep(thread uint64) uint64
+
+//go:linkname threadHoldCancel goos_thread_hold_cancel
+func threadHoldCancel(thread uint64) uint64
 
 //go:linkname ipcSend goos_ipc_send
 func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64

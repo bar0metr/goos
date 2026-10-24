@@ -806,7 +806,7 @@ test-performance: test-microbench
 
 lint:
 	$(BUILD_ENV) go vet ./...
-	@unformatted=$$(find . -path ./build -prune -o -name '*.go' -print | xargs gofmt -l); \
+	@unformatted=$$(find . \( -path ./build -o -path ./.claude -o -path ./.git \) -prune -o -name '*.go' -print | xargs gofmt -l); \
 		test -z "$$unformatted" || { echo "$$unformatted"; exit 1; }
 	@tests/lint/unsafe_boundary.sh --self-test >/dev/null
 	@tests/lint/unsafe_boundary.sh
@@ -1243,8 +1243,11 @@ goroutine-test-images:
 test-goroutines: goroutine-test-images
 	@SUITE=runtime SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
 
+# The goprobe ELF of the validation images, which goroutine-test-images
+# builds, for the instruction-hold check.
+GOROUTINE_PROBE_ELF = $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation$(if $(filter 1,$(VFS_PROBE)),-vfsprobe)$(if $(filter-out $(VFS_RUNTIME_DEFAULT),$(VFS_RUNTIME)),-vfs$(VFS_RUNTIME))-opt$(OPT)/userspace/bin-elf/goprobe.elf
 test-goroutine-gc: goroutine-test-images
-	@SUITE=gc SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
+	@GOPROBE_ELF=$(GOROUTINE_PROBE_ELF) SUITE=gc SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
 
 test-goroutine-io: goroutine-test-images
 	@SUITE=io SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img

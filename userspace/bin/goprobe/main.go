@@ -17,6 +17,12 @@
 //	gc N        roots of parked, sleeping, waiting, and migrating goroutines
 //	gcstress N ROUNDS  roots of every runtime root class under N collecting
 //	            goroutines (gcstress.go)
+//	swaphold    a collection at every instruction of goos_g_swap and
+//	            goos_preempt_entry, with a worker thread held there
+//	            (swaphold.go)
+//	regroots    a list held only in one register, for each XMM and
+//	            general-purpose register, of a thread and of a goroutine
+//	            (regroots.go)
 //	io          handle waits that park only the goroutine
 //	waitsets    duplicate-interest validation, overlapping waits, and a parked join
 //	logwait     goroutines parked on a kernel log cursor until a record arrives
@@ -51,7 +57,7 @@ import (
 var manifest = commands.Manifest{
 	Usage:   "goprobe mode [N [ROUNDS]]",
 	Summary: "goroutine checks",
-	Options: "modes: pool, smoke, chan, sync, timers, fair, panic, panicreport, limit, gc, gcstress, io, waitsets, logwait, threads, bench, overflow, deadlock",
+	Options: "modes: pool, smoke, chan, sync, timers, fair, panic, panicreport, limit, gc, gcstress, swaphold, regroots, io, waitsets, logwait, threads, bench, overflow, deadlock",
 	MaxArgs: 3,
 }
 
@@ -107,6 +113,10 @@ func run(data startup.Data) {
 		roots(int(argument))
 	case utility.Equal(mode, "gcstress"):
 		gcStress(int(argument), int(rounds), int(taskLimit))
+	case utility.Equal(mode, "swaphold"):
+		swapHold()
+	case utility.Equal(mode, "regroots"):
+		regRoots(int(taskLimit))
 	case utility.Equal(mode, "io"):
 		waits()
 	case utility.Equal(mode, "waitsets"):
@@ -913,6 +923,18 @@ func roots(count int) {
 	check(closure() == expectedSum(length, 9000), "a captured value was lost")
 	wg.Wait()
 	check(bad.Load() == 0, "a goroutine's list was lost")
+	// WaitGroup completion precedes scheduler retirement on another M, so
+	// wait for every worker to retire before counting live goroutines.
+	retired := time.Now().Add(30 * time.Second)
+	for {
+		var stats goroutine.Stats
+		goroutine.ReadStats(&stats)
+		if stats.Live == 1 {
+			break
+		}
+		check(time.Now().Before(retired), "goroutines did not retire")
+		time.Sleep(time.Millisecond)
+	}
 	// Everything those goroutines held is garbage now; the stacks went
 	// back to the pool.
 	for i := 0; i < 3; i++ {

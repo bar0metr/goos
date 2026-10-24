@@ -176,7 +176,10 @@ precedes final heap measurements, because WaitGroup completion alone does not
 mean another M has finished retiring its G.
 
 The context-save counters cover instruction ranges, including restore. These
-runs do not establish per-instruction coverage or isolate every XMM root.
+runs do not establish per-instruction coverage or isolate a register root.
+`goprobe swaphold` later added per-instruction coverage (Instruction holds
+below), and `goprobe regroots` isolates each XMM and general-purpose root
+(Register roots below).
 Conservative aliases can retain an object through another root. The rejected
 rendezvous uses a held region transition, not a kernel-induced timeout.
 
@@ -264,6 +267,45 @@ The gates found five defects, all fixed:
   frame and a recursion LLVM cannot remove (`ee42adc`, `a30c049`,
   `213ea93`).
 
+## Instruction holds on 2026-10-24
+
+`goprobe swaphold`, in `make test-goroutine-gc`, stops a goroutine worker
+thread at every instruction boundary of `goos_g_swap` and
+`goos_preempt_entry` through validation-only debug-register holds (ADR
+0204, operations 72 to 75) and forces a collection from a `thread.Start`
+thread at each stop. `tools/swaphold` checks the held offsets against `go
+tool objdump` of the goprobe ELF.
+
+| Region | Stops | Distinct RIPs | Collections | Retries | Lost |
+|---|---|---|---|---|---|
+| `goos_g_swap`, two or three passes, both directions | 30 or 45 | 15 of 15 | every stop | 0 | 0 |
+| `goos_preempt_entry`, two passes | 94 | 47 of 47 | 94 | 0 | 0 |
+
+Three `make test-goroutine-gc` runs on TCG with four processors at
+`6bbb2c6` passed with these results, and `tools/swaphold` matched the
+offsets to the ELF in each. The joint KVM run
+`20261024T125815Z-3f1a5801` on eight vCPUs, clean `6bbb2c6`, passed the
+same check: 30 swap and 94 preemption stops, 15 of 15 and 47 of 47 distinct
+RIPs, no retry and no lost list, so the processor's execute breakpoints and
+single steps reach every boundary under KVM as under TCG. The preemption
+entry has 48 instructions; the UD2 after a failed take is never reached.
+Every run reported zero suspension failures and zero allocation or region
+window retries. The first TCG run never stopped in the
+entry: QEMU TCG left RF set in the context that preemption delivery diverts,
+which suppressed the breakpoint. Delivery now clears RF in validation
+kernels.
+
+Temporary mutations of `planStacks` failed the swap region: counting a held
+thread's current goroutine as scanned while its stack pointer lay on the
+scheduler stack lost both lists, and dropping held goroutine stacks lost
+one. Clearing the held threads' snapshot registers before marking did not
+fail either region, so a list stayed reachable through another root. The
+probe covers every context-save instruction of one held thread on one
+permit. It does not isolate register or XMM roots; `goprobe regroots`
+(Register roots below) does. It does not combine a held switch with other
+threads switching, or hold the scheduler's G and M bookkeeping around the
+switch.
+
 ## Production switch
 
 After the merge, a complete `make -j8 test-all` from a clean start passed on
@@ -273,7 +315,88 @@ every build. `VFS_RUNTIME=serial` still builds the serial VFS, and
 `test-vfs-serial` keeps it under every boot check. Normal images keep the
 serial disk driver.
 
+## Register roots on 2026-10-24
+
+`goprobe regroots` holds a list's only address in one register while
+collections run: each of XMM0 to XMM15, and each of RAX, RBX, RCX, RDX, RSI,
+RDI, RBP and R8 to R15. The helpers `goos_probe_xmm_root` and
+`goos_probe_gpr_root` zero every other register copy and spin without calls
+or stack writes; the callers keep only an inverted token. Each register runs
+three holds of at least four collections:
+
+- `thread`: a `thread.Start` thread without a preemption entry. The
+  collector finds the address in the thread's snapshot.
+- `goroutine-running`: a goroutine on every permit. Collections hold it in
+  user code and keep going, up to 3 s, until one holds it inside
+  `goos_preempt_entry`.
+- `goroutine-switched`: the same goroutine on one permit. Every collection
+  runs while it is switched out, with the address only in the frame the
+  entry saved on its stack.
+
+Four control runs per class and situation hold the address in no register;
+validation poisoning must then show the list freed.
+
+Fifteen consecutive SMP=4 TCG runs passed with `lost=0` for all 31 registers
+in every hold and 4 of 4 controls reclaimed each time. The goroutine holds
+ran 193,565 XMM and 169,658 general-purpose collections. Collections held
+the running spinner inside the preemption entry for 15 or 16 XMM registers
+and 14 or 15 general-purpose registers per run. Thirty earlier XMM-only runs
+also passed with 219,671 goroutine collections and an entry hold for every
+register. A temporary collector hook confirmed in those runs that each
+collection during a hold found the address.
+
+The first version of the probe failed once in about 16 TCG runs: one list
+held in XMM4 read poisoned. That helper returned the register's value
+inverted, so the list had no root once the spinner returned and before the
+caller checked it; a collection an allocation started in that window freed
+it. The helper now returns the address, and the spinner checks the list
+while it holds it.
+
+The snapshot buffer is a global, so `markGlobals` scans its register and
+vector words as well as `markThreads`. A mutation that shortened only the
+`markThreads` range left `regroots` passing. Two temporary mutations
+cleared snapshot words in the buffer before marking:
+
+| Words cleared | thread | goroutine-running | goroutine-switched |
+|---|---|---|---|
+| XMM0 to XMM15 | XMM lost 16 of 16 | XMM lost 16 of 16 | XMM lost 0 of 16 |
+| General-purpose registers | GPR lost 15 of 15 | GPR lost 15 of 15 | GPR lost 0 of 15 |
+
+The other class passed in each mutated run, and the controls were reclaimed.
+The switched-out holds survive both mutations because the preemption entry
+stores the registers on the goroutine's stack. Neither mutation is part of
+the runtime.
+
+## Joint KVM run of both probes
+
+The branch that merges `swaphold`, its review fixes and `regroots` passed two
+consecutive joint KVM runs on clean `c96895b`, eight vCPUs:
+`20261024T190608Z-541e9403` and `20261024T190748Z-95f3fd6e`. In both runs:
+
+- `swaphold` held 15 of 15 switch boundaries and 47 of 47 preemption-entry
+  boundaries, each with a completed collection, with `retried=0` and
+  `lost=0`. `tools/swaphold` matched both serial logs against the goprobe
+  ELF's disassembly.
+- `regroots` lost no list for any of the 31 registers, in the thread and
+  goroutine holds, with 4 of 4 controls reclaimed. The running goroutine was
+  held inside the preemption entry for all 16 XMM and all 15 general-purpose
+  registers.
+
+The first two runs on the merge commit `cc876e9` failed in pvelab, not in
+the guest: the merged check table also required `GOPROBE_SWAPHOLD` to
+appear once, while the probe prints one record per region.
+`TestGoroutineChecksAcceptTheirFixtureOutput` now runs every check against
+its fixture output.
+
 ## Remaining evidence limits
+
+Register roots: `goprobe regroots` covers each XMM and general-purpose
+register alone, in a native thread and in a goroutine that runs, stands in
+the preemption entry or is switched out. The entry holds count the whole
+entry range, so they do not show a hold at each save or restore
+instruction. The probe holds an address only in a spinning loop; it does
+not cover a root in a register across a native call, which the ABI does
+not preserve.
 
 The historical KVM run did not give goprobe a log capability or run the disk
 driver on Gs. The follow-up TCG fixture now does both: validation PID 1 grants
