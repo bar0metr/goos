@@ -149,28 +149,43 @@ const (
 	HoldLeft    = holdLeft
 )
 
+// What ArmTaskHold answers.
+const (
+	ArmOK = iota
+	// ArmMissing: the task is dead, the caller, or a kernel task.
+	ArmMissing
+	// ArmBusy: the task already has a hold armed (armHold).
+	ArmBusy
+)
+
 // ArmTaskHold arms a hold of task at the first boundary of [lo, hi). A
 // processor that runs the task is asked to switch, which loads the
-// breakpoint. It refuses the caller, kernel tasks, and dead tasks.
-func ArmTaskHold(task sched.TaskID, lo, hi uint64) bool {
+// breakpoint; a task on no processor gets RF cleared in its saved flags.
+func ArmTaskHold(task sched.TaskID, lo, hi uint64) int {
 	if !validation.Enabled {
-		return false
+		return ArmMissing
 	}
 	cpu := CPUIndex()
 	flags := lockScheduler()
 	slot, ok := runState.Alive(task)
-	ok = ok && slot >= kernelTasks && runState.Current(cpu) != slot
+	result := ArmMissing
 	target := sched.Idle
-	if ok {
-		holds[slot] = taskHold{armed: true, state: holdRunning, lo: lo, hi: hi, dr0: lo, dr7: dr7Local0}
-		target = runState.RunningOn(slot)
+	if ok && slot >= kernelTasks && runState.Current(cpu) != slot {
+		result = ArmBusy
+		if armHold(&holds[slot], lo, hi) {
+			result = ArmOK
+			if context, off := offContext(slot); off {
+				context[17] = armFlags(context[17])
+			}
+			target = runState.RunningOn(slot)
+		}
 	}
 	schedulerLock.Unlock()
 	if target != sched.Idle {
 		kickCPU(target, cpu)
 	}
 	RestoreInterrupts(flags)
-	return ok
+	return result
 }
 
 // TaskHoldStatus reads task's hold and, once the task stopped and left its

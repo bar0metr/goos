@@ -221,3 +221,22 @@ func TestKernelDebugSingleStepResumesWithoutPanic(t *testing.T) {
 		}
 	}
 }
+
+func TestArmHoldRefusesAnArmedHoldAndClearsResume(t *testing.T) {
+	hold := &taskHold{}
+	if !armHold(hold, 0x1000, 0x1010) || *hold != (taskHold{armed: true, state: holdRunning, lo: 0x1000, hi: 0x1010, dr0: 0x1000, dr7: dr7Local0}) {
+		t.Fatalf("arm: %+v", hold)
+	}
+	stopped := &taskHold{armed: true, state: holdStopped, rip: 0x1004, dr0: 0x1004, dr7: dr7Local0}
+	before := *stopped
+	if armHold(stopped, 0x2000, 0x2010) || *stopped != before {
+		t.Fatalf("re-armed a stopped hold: %+v", stopped)
+	}
+	// A cancelled hold's leftover does not block a new one.
+	if !armHold(&taskHold{stale: staleHold{step: true}}, 0x1000, 0x1010) {
+		t.Fatal("refused a cancelled hold")
+	}
+	if got := armFlags(0x202 | flagRF | flagTF); got != 0x202|flagTF {
+		t.Fatalf("armFlags = %#x", got)
+	}
+}

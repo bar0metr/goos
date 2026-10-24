@@ -36,7 +36,8 @@ func (handler nativeCallHandler) holdTarget(thread uint64) (sched.TaskID, kcall.
 }
 
 // ThreadHoldRange arms a hold of thread at the first instruction of
-// [lo, hi), which must lie in the process's code.
+// [lo, hi), which must lie in the process's code. A thread whose hold is
+// still armed answers AlreadyExists; cancel it first.
 func (handler nativeCallHandler) ThreadHoldRange(thread uint64, lo uint64, hi uint64) kcall.Status {
 	if !validation.Enabled {
 		return kcall.StatusUnsupported
@@ -52,10 +53,13 @@ func (handler nativeCallHandler) ThreadHoldRange(thread uint64, lo uint64, hi ui
 	if !executableEntry(owner, lo) || !executableEntry(owner, hi-1) {
 		return kcall.StatusInvalidArgument
 	}
-	if !amd64.ArmTaskHold(target, lo, hi) {
-		return kcall.StatusNotFound
+	switch amd64.ArmTaskHold(target, lo, hi) {
+	case amd64.ArmOK:
+		return kcall.StatusOK
+	case amd64.ArmBusy:
+		return kcall.StatusAlreadyExists
 	}
-	return kcall.StatusOK
+	return kcall.StatusNotFound
 }
 
 // ThreadHoldWait writes where thread stopped: its RIP and HoldStopped, or

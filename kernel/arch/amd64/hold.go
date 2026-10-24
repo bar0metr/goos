@@ -172,3 +172,19 @@ func endHold(hold *taskHold, onCPU bool) (stale staleHold, wake bool) {
 	}
 	return stale, wake
 }
+
+// armHold arms hold at the first boundary of [lo, hi). It refuses a hold
+// already armed: replacing it would leave a stopped task blocked, or a step's
+// TF in its flags. The caller cancels the old hold first.
+func armHold(hold *taskHold, lo, hi uint64) bool {
+	if hold.armed {
+		return false
+	}
+	*hold = taskHold{armed: true, state: holdRunning, lo: lo, hi: hi, dr0: lo, dr7: dr7Local0}
+	return true
+}
+
+// armFlags returns the saved RFLAGS of a task a hold arms on no processor.
+// A resume flag left from a fault would hide the breakpoint at the
+// instruction the task resumes at.
+func armFlags(flags uint64) uint64 { return flags &^ flagRF }
