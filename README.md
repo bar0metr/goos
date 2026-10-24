@@ -46,25 +46,25 @@ main structure and privilege boundary, not a mandatory call sequence:
              |                                         |
 +------------v-----------------------------------------v---------+
 |                             KERNEL                             |
-|                                                               |
+|                                                                |
 |   Native call dispatch              Linux ABI translation      |
-|                                                               |
-|   Processes / tasks / scheduler / address spaces              |
-|   Capabilities / handles / resource authority                 |
-|   IPC / streams / shared memory / waits                       |
-|   interrupts / timers / device authority / DMA                |
-+-----------------------------+---------------------------------+
+|                                                                |
+|   Processes / tasks / scheduler / address spaces               |
+|   Capabilities / handles / resource authority                  |
+|   IPC / streams / shared memory / waits                        |
+|   interrupts / timers / device authority / DMA                 |
++-----------------------------+----------------------------------+
                               |
                          typed IPC
                               |
 +-----------------------------v---------------------------------+
-|                         USERSPACE                              |
+|                         USERSPACE                             |
 |                                                               |
 |   PID 1 / supervision                                         |
 |                                                               |
-|   VFS ----- FAT32 ----- block ----- virtio-blk                 |
+|   VFS ----- FAT32 ----- block ----- virtio-blk                |
 |                                                               |
-|   resolved --- netd ---------------- virtio-net                |
+|   resolved --- netd ---------------- virtio-net               |
 |                                                               |
 |   terminal / config / logging / remoted / other services      |
 +-----------------------------+---------------------------------+
