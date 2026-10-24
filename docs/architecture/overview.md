@@ -58,6 +58,14 @@ The kernel exposes independent typed `MONOTONIC` and UTC `REALTIME` clocks;
 the latter is initialized once from UEFI and then advanced only from the
 existing monotonic TSC source (ADR 0113).
 
+Native userspace allocates from a reclaiming per-process heap with a
+conservative stop-the-world collector (ADR 0201). A process may run sibling
+native threads in parallel (ADR 0203), and selected images use a dedicated
+TinyGo target that schedules M:N goroutines over those threads, integrating G
+and M stacks into the collector and parking supported waits through the
+runtime (ADR 0204). The VFS uses the goroutine runtime for its bounded
+concurrent read pool by default; the serial VFS remains a tested fallback.
+
 ## Further reading
 
 - [boot sequence](boot.md);
