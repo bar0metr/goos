@@ -13,8 +13,11 @@ Builds on ADR 0196 and ADR 0198.
 
 GoOS needs public-key SSH access to its existing shell and native terminal
 applications. The local terminal service combines line editing, raw mode,
-redraw, and console syscalls. PID 1 owns shell launches and jobs. The userspace
-runtime has no Go scheduler and uses a resettable bump allocator.
+redraw, and console syscalls. PID 1 owns shell launches and jobs. When this ADR
+was designed, native userspace had no Go scheduler and still used the
+resettable bump allocator. ADR 0201 later added reclamation and ADR 0204 added
+a separate goroutine-enabled target; the remote-session design does not depend
+on either old limitation.
 
 ## Decision
 
