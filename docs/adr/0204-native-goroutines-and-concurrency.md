@@ -380,15 +380,21 @@ regions still passed: another root kept each list, so the probe does not
 isolate register roots; `goprobe regroots`, described under collector
 integration, isolates each XMM and general-purpose register root.
 
-These tests cover root lifetimes, every context-save instruction of one
-thread and each register root alone. They do not force collections at each
-instruction of creation, completion or the scheduler's own G/M bookkeeping
-around the switch. A hold stops one thread at a time on one permit; it does
-not combine a held switch with other threads switching at once. Compiler
-spills and conservative aliases can retain a list through another root. The
-tests do not cover all timer cancellation races or exercise kernel-induced
-rendezvous timeouts. The rejected region window
-covers bounded rendezvous failure with parked Gs. A later eight-vCPU KVM
+These tests cover root lifetimes, every reachable context-save boundary of
+one held thread, and each snapshot register root in isolation. `gcstress`
+exercises G creation and completion while collections run, but it does not
+force a collection at every publication or scheduler-bookkeeping instruction.
+`swaphold` holds one thread at a time; it does not place several Ms at
+independently selected switch/bookkeeping phases in the same accepted
+rendezvous. Once a rendezvous is accepted, every other native thread is already
+held, so this is a deterministic coverage limit rather than a case where peers
+continue switching during mark/sweep. Compiler spills and conservative aliases
+can retain a list through another root. The tests do not cover every timer
+cancellation race or a direct kernel-induced rendezvous timeout. Ordinary
+native-wrapper calls do not add another GC register-root class: caller-saved
+GPRs and XMM registers are not live across the userspace function-call ABI,
+while asynchronous preemption/native entry has its own explicit save contract.
+The rejected region window covers bounded rendezvous failure with parked Gs. A later eight-vCPU KVM
 run passed this stress fixture at one and eight collectors after the fixture
 reserved task slots for its native threads and required three completed
 final collections. An earlier KVM retry reported an impossible `Live` count;
