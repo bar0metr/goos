@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // goroutinesScenario exercises the native runtime fixture under KVM. It
@@ -38,44 +39,54 @@ var goroutineChecks = []struct {
 	{"goprobe gc 8", "GOPROBE_GC_OK", nil},
 	{"goprobe gcstress 1", "GOPROBE_GCSTRESS_OK", []string{"GOPROBE_GCSTRESS"}},
 	{"goprobe gcstress 8", "GOPROBE_GCSTRESS_OK", []string{"GOPROBE_GCSTRESS"}},
-	{"goprobe xmmroots", "GOPROBE_XMMROOTS_OK", nil},
+	{"goprobe regroots", "GOPROBE_REGROOTS_OK", nil},
 }
 
 // goroutineVerifiers check the records of the commands whose output a
 // single named record does not cover.
 var goroutineVerifiers = map[string]func(string) error{
-	"goprobe xmmroots": xmmRootsRecords,
+	"goprobe regroots": regRootsRecords,
 }
 
-// xmmRegisters is how many XMM registers goprobe xmmroots checks, and
-// xmmCollections how many collections each register's hold spans.
-const (
-	xmmRegisters   = 16
-	xmmCollections = 4
-)
+// goroutineTimeouts replaces commandTimeout for commands that run longer:
+// goprobe regroots may spend its entry budget on each of 31 registers.
+var goroutineTimeouts = map[string]time.Duration{
+	"goprobe regroots": 300 * time.Second,
+}
 
-// xmmRootsRecords checks goprobe xmmroots output: one record per situation,
-// each covering every register with no list lost, and the goroutine one
-// covering the running phase, with at least one hold inside the preemption
-// entry, and the switched-out phase.
-func xmmRootsRecords(out string) error {
+// regClasses maps each register class goprobe regroots checks to its
+// register count; regCollections is how many collections each register's
+// hold spans.
+var regClasses = map[string]uint64{"xmm": 16, "gpr": 15}
+
+const regCollections = 4
+
+// regRootsRecords checks goprobe regroots output: one record per register
+// class and situation, each covering every register of the class with no
+// list lost, and each goroutine one covering the running phase, with at
+// least one hold inside the preemption entry, and the switched-out phase.
+func regRootsRecords(out string) error {
 	seen := map[string]map[string]uint64{}
 	for _, line := range strings.Split(strings.ReplaceAll(out, "\r", ""), "\n") {
-		if strings.HasPrefix(line, "GOPROBE_XMMROOTS_LOST ") || strings.HasPrefix(line, "GOPROBE_XMMROOTS_KEPT ") {
+		if strings.HasPrefix(line, "GOPROBE_REGROOTS_LOST ") || strings.HasPrefix(line, "GOPROBE_REGROOTS_KEPT ") {
 			return fmt.Errorf("fixture reported: %s", line)
 		}
-		rest, found := strings.CutPrefix(line, "GOPROBE_XMMROOTS ")
+		rest, found := strings.CutPrefix(line, "GOPROBE_REGROOTS ")
 		if !found {
 			continue
 		}
 		fields := map[string]uint64{}
-		situation := ""
+		class, situation := "", ""
 		for _, field := range strings.Fields(rest) {
 			name, value, found := strings.Cut(field, "=")
 			if !found {
 				return fmt.Errorf("malformed field %q in %q", field, line)
 			}
-			if name == "situation" {
+			switch name {
+			case "class":
+				class = value
+				continue
+			case "situation":
 				situation = value
 				continue
 			}
@@ -85,30 +96,35 @@ func xmmRootsRecords(out string) error {
 			}
 			fields[name] = number
 		}
-		if _, dup := seen[situation]; dup {
-			return fmt.Errorf("two %s records", situation)
+		key := class + "/" + situation
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("two %s records", key)
 		}
-		seen[situation] = fields
+		seen[key] = fields
 	}
-	if len(seen) != 2 {
-		return fmt.Errorf("expected thread and goroutine records, got %d", len(seen))
+	if len(seen) != 2*len(regClasses) {
+		return fmt.Errorf("expected %d records, got %d", 2*len(regClasses), len(seen))
 	}
-	least := uint64(xmmRegisters * xmmCollections)
-	for _, situation := range []string{"thread", "goroutine"} {
-		fields, found := seen[situation]
-		if !found {
-			return fmt.Errorf("no %s record", situation)
+	for class, registers := range regClasses {
+		least := registers * regCollections
+		for _, situation := range []string{"thread", "goroutine"} {
+			key := class + "/" + situation
+			fields, found := seen[key]
+			if !found {
+				return fmt.Errorf("no %s record", key)
+			}
+			if fields["regs"] != registers || fields["lost"] != 0 || fields["collections"] < least {
+				return fmt.Errorf("%s record: regs=%d lost=%d collections=%d", key, fields["regs"], fields["lost"], fields["collections"])
+			}
+			if fields["controls"] == 0 || fields["reclaimed"] != fields["controls"] {
+				return fmt.Errorf("%s record: controls=%d reclaimed=%d", key, fields["controls"], fields["reclaimed"])
+			}
 		}
-		if fields["regs"] != xmmRegisters || fields["lost"] != 0 || fields["collections"] < least {
-			return fmt.Errorf("%s record: regs=%d lost=%d collections=%d", situation, fields["regs"], fields["lost"], fields["collections"])
+		g := seen[class+"/goroutine"]
+		if g["running"] < least || g["switched"] < least || g["switched_preemptions"] == 0 || g["entry_regs"] == 0 {
+			return fmt.Errorf("%s goroutine record: running=%d switched=%d switched_preemptions=%d entry_regs=%d",
+				class, g["running"], g["switched"], g["switched_preemptions"], g["entry_regs"])
 		}
-		if fields["controls"] == 0 || fields["reclaimed"] != fields["controls"] {
-			return fmt.Errorf("%s record: controls=%d reclaimed=%d", situation, fields["controls"], fields["reclaimed"])
-		}
-	}
-	if g := seen["goroutine"]; g["running"] < least || g["switched"] < least || g["switched_preemptions"] == 0 || g["entry_regs"] == 0 {
-		return fmt.Errorf("goroutine record: running=%d switched=%d switched_preemptions=%d entry_regs=%d",
-			g["running"], g["switched"], g["switched_preemptions"], g["entry_regs"])
 	}
 	return nil
 }
@@ -148,7 +164,11 @@ func (goroutinesScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	g := s.Guest
 	var evidence strings.Builder
 	for _, check := range goroutineChecks {
-		out, err := g.Run(ctx, check.command, commandTimeout)
+		timeout := commandTimeout
+		if longer, found := goroutineTimeouts[check.command]; found {
+			timeout = longer
+		}
+		out, err := g.Run(ctx, check.command, timeout)
 		if err != nil {
 			return "", fail(ClassScenario, check.command, err)
 		}

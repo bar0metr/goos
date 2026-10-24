@@ -51,6 +51,9 @@ func probeVectorSpin(stop *uint32) uint64
 //go:linkname probeXMMRoot goos_probe_xmm_root
 func probeXMMRoot(index, token uint64, state *[2]uint32) uint64
 
+//go:linkname probeGPRRoot goos_probe_gpr_root
+func probeGPRRoot(index, token uint64, state *[2]uint32) uint64
+
 //go:linkname threadWake goos_thread_wake
 func threadWake(thread uint64) uint64
 

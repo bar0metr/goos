@@ -17,8 +17,9 @@
 //	gc N        roots of parked, sleeping, waiting, and migrating goroutines
 //	gcstress N ROUNDS  roots of every runtime root class under N collecting
 //	            goroutines (gcstress.go)
-//	xmmroots    a list held only in one XMM register, for each of XMM0 to
-//	            XMM15, of a thread and of a goroutine (xmmroots.go)
+//	regroots    a list held only in one register, for each XMM and
+//	            general-purpose register, of a thread and of a goroutine
+//	            (regroots.go)
 //	io          handle waits that park only the goroutine
 //	waitsets    duplicate-interest validation, overlapping waits, and a parked join
 //	logwait     goroutines parked on a kernel log cursor until a record arrives
@@ -53,7 +54,7 @@ import (
 var manifest = commands.Manifest{
 	Usage:   "goprobe mode [N [ROUNDS]]",
 	Summary: "goroutine checks",
-	Options: "modes: pool, smoke, chan, sync, timers, fair, panic, panicreport, limit, gc, gcstress, xmmroots, io, waitsets, logwait, threads, bench, overflow, deadlock",
+	Options: "modes: pool, smoke, chan, sync, timers, fair, panic, panicreport, limit, gc, gcstress, regroots, io, waitsets, logwait, threads, bench, overflow, deadlock",
 	MaxArgs: 3,
 }
 
@@ -109,8 +110,8 @@ func run(data startup.Data) {
 		roots(int(argument))
 	case utility.Equal(mode, "gcstress"):
 		gcStress(int(argument), int(rounds), int(taskLimit))
-	case utility.Equal(mode, "xmmroots"):
-		xmmRoots(int(taskLimit))
+	case utility.Equal(mode, "regroots"):
+		regRoots(int(taskLimit))
 	case utility.Equal(mode, "io"):
 		waits()
 	case utility.Equal(mode, "waitsets"):

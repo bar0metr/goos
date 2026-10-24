@@ -120,6 +120,13 @@ func ProbeXMMRoot(index, token uint64, state *[2]uint32) uint64 {
 	return probeXMMRoot(index, token, state)
 }
 
+// ProbeGPRRoot is ProbeXMMRoot for the general-purpose registers: index
+// names one of RAX, RBX, RCX, RDX, RSI, RDI, RBP and R8 to R15, in that
+// order, and an index of 15 or more holds the address nowhere.
+func ProbeGPRRoot(index, token uint64, state *[2]uint32) uint64 {
+	return probeGPRRoot(index, token, state)
+}
+
 // ThreadWake sets the wake flag of a thread of the calling process: a
 // WaitAny of that thread with an interest in kcall.WaitAnyThread returns
 // (ADR 0204).

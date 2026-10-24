@@ -43,6 +43,8 @@ func probeVectorSpin(stop *uint32) uint64 { return 0 }
 
 func probeXMMRoot(index, token uint64, state *[2]uint32) uint64 { return 0 }
 
+func probeGPRRoot(index, token uint64, state *[2]uint32) uint64 { return 0 }
+
 func threadWake(thread uint64) uint64 { return unsupported }
 
 func threadWakeTake() uint64 { return unsupported }
