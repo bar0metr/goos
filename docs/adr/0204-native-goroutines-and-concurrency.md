@@ -339,10 +339,12 @@ boundaries: the outgoing goroutine's saves and the restore of the goroutine
 switched to. In the preemption region one goroutine spins without calls on a
 list held only in registers. Each pass covers all 47 reachable boundaries
 of the entry, through the kernel call, the stepped-over runtime call and the
-restore to `RET 128`. The UD2 after a failed take is never reached. Every
-stop must run a completed collection, or a later one must complete before
-the region ends; each list must survive. `tools/swaphold` compares the held
-offsets with the boundaries `go tool objdump` lists for the ELF.
+restore to `RET 128`. The UD2 after a failed take is never reached. Only a
+stop whose collection completed covers its boundary. Every boundary, and for
+the switch every boundary in each direction, must be covered, and each list
+must survive. `tools/swaphold` compares the covered offsets with the
+boundaries `go tool objdump` lists for the ELF; the KVM check counts them
+from the same offset lists.
 
 A TCG SMP=4 run held 45 swap stops, covering 15 of 15 distinct RIPs in two
 outgoing and one incoming pass, and 94 preemption stops, covering 47 of 47

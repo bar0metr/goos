@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -43,8 +44,10 @@ var goroutineChecks = []struct {
 }
 
 // swapHoldRecords checks the instruction-hold records: one per region, each
-// with every expected boundary held and no list lost. Under KVM it shows the
-// processor's execute breakpoints and single steps reach each boundary.
+// with no list lost and a completed collection at every expected boundary,
+// counted from the offsets the guest lists (per direction for the switch),
+// not only from its counters. Under KVM it shows the processor's execute
+// breakpoints and single steps reach each boundary.
 func swapHoldRecords(out string) error {
 	seen := map[string]int{}
 	for _, line := range strings.Split(strings.ReplaceAll(out, "\r", ""), "\n") {
@@ -57,21 +60,55 @@ func swapHoldRecords(out string) error {
 			fields[key] = value
 		}
 		region := fields["region"]
-		if region != "swap" && region != "preempt" {
+		keys := []string{"offsets"}
+		switch region {
+		case "swap":
+			keys = append(keys, "offsets_out", "offsets_in")
+		case "preempt":
+		default:
 			return fmt.Errorf("unknown swaphold region in %q", line)
 		}
 		seen[region]++
-		if fields["expected"] == "" || fields["distinct_rips"] != fields["expected"] {
+		expected, err := strconv.Atoi(fields["expected"])
+		if err != nil || expected <= 0 {
+			return fmt.Errorf("swaphold %s: malformed expected=%q", region, fields["expected"])
+		}
+		for _, key := range keys {
+			count, err := distinctOffsets(fields[key])
+			if err != nil {
+				return fmt.Errorf("swaphold %s %s: %v", region, key, err)
+			}
+			if count != expected {
+				return fmt.Errorf("swaphold %s: %s covers %d of %d boundaries", region, key, count, expected)
+			}
+		}
+		if fields["distinct_rips"] != fields["expected"] {
 			return fmt.Errorf("swaphold %s held %s of %s boundaries", region, fields["distinct_rips"], fields["expected"])
 		}
-		if fields["lost"] != "0" || fields["collections"] == "" || fields["collections"] == "0" {
-			return fmt.Errorf("swaphold %s: lost=%s collections=%s", region, fields["lost"], fields["collections"])
+		if fields["lost"] != "0" {
+			return fmt.Errorf("swaphold %s: lost=%s", region, fields["lost"])
 		}
 	}
 	if seen["swap"] != 1 || seen["preempt"] != 1 {
 		return fmt.Errorf("expected one swap and one preempt swaphold record, got %d and %d", seen["swap"], seen["preempt"])
 	}
 	return nil
+}
+
+// distinctOffsets counts the distinct offsets of a comma-separated list.
+func distinctOffsets(list string) (int, error) {
+	if list == "" {
+		return 0, fmt.Errorf("no offsets")
+	}
+	distinct := map[uint64]bool{}
+	for _, part := range strings.Split(list, ",") {
+		value, err := strconv.ParseUint(part, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("malformed offset %q", part)
+		}
+		distinct[value] = true
+	}
+	return len(distinct), nil
 }
 
 func goroutineMarker(out, marker string) error {

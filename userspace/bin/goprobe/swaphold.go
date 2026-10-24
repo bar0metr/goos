@@ -37,10 +37,12 @@ import (
 //	         the pass steps through the saves, the kernel call, the call
 //	         into the runtime (stepped over), and the restore to RET 128.
 //
-// Each region prints its stops, the distinct RIPs among them, the expected
-// boundary count, the collections that completed at a stop, the stops whose
-// collection gave up, and the lists lost, then the offsets of the RIPs
-// seen, which tools/swaphold checks against the ELF's disassembly.
+// Each region prints its stops, the distinct RIPs among the stops whose
+// collection completed, the expected boundary count, the collections that
+// completed at a stop, the stops whose collection gave up, and the lists
+// lost, then the offsets of the RIPs with a completed collection, per
+// direction for the switch, which tools/swaphold checks against the ELF's
+// disassembly. A stop whose collection gave up covers nothing.
 
 const (
 	// swapBoundaries and preemptBoundaries are the instruction boundaries
@@ -165,22 +167,15 @@ func swapHold() {
 		if region == "swap" {
 			l.field("outgoing", result.passes[0]).field("incoming", result.passes[1])
 		}
-		l.text(" offsets=")
-		first := true
-		for offset, hit := range result.seen {
-			if !hit {
-				continue
-			}
-			if !first {
-				l.text(",")
-			}
-			first = false
-			l.length = len(utility.AppendUint(l.buffer[:l.length], uint64(offset)))
+		appendOffsets(l, " offsets=", &result.seen)
+		if region == "swap" {
+			appendOffsets(l, " offsets_out=", &result.directions[0])
+			appendOffsets(l, " offsets_in=", &result.directions[1])
 		}
 		l.end()
 		check(run.lost.Load() == 0, "swaphold: a live list was freed")
 		check(run.checked.Load() > 0, "swaphold: the workers checked no list")
-		check(result.distinct(&result.seen) == result.expected, "swaphold: a boundary of the range was never held")
+		check(result.distinct(&result.seen) == result.expected, "swaphold: a boundary of the range had no completed collection")
 		check(result.collections > 0 && result.collections+result.retried == result.held, "swaphold: a stop ran no collection")
 		check(after.Frees > before.Frees, "swaphold: the collections freed nothing")
 		if region == "swap" {
@@ -190,6 +185,22 @@ func swapHold() {
 	}
 	check(arena.PoisonedBytes() > poisoned, "swaphold: sweep poisoned nothing in a validation image")
 	ok("GOPROBE_SWAPHOLD_OK")
+}
+
+// appendOffsets appends name and the comma-separated offsets set in seen.
+func appendOffsets(l *line, name string, seen *[holdSpan]bool) {
+	l.text(name)
+	first := true
+	for offset, hit := range seen {
+		if !hit {
+			continue
+		}
+		if !first {
+			l.text(",")
+		}
+		first = false
+		l.length = len(utility.AppendUint(l.buffer[:l.length], uint64(offset)))
+	}
 }
 
 // holdControllers passes the controller its state: a thread.Start function
@@ -273,20 +284,42 @@ func (c *holdController) pass() {
 			region.passes[direction]++
 		}
 		region.held++
-		region.seen[offset] = true
-		if region.name == "swap" {
-			region.directions[direction][offset] = true
-		}
 		c.collect()
 		if c.pending {
 			region.retried++
 		} else {
+			// Only a stop whose collection completed covers its boundary.
 			region.collections++
+			region.seen[offset] = true
+			if region.name == "swap" {
+				region.directions[direction][offset] = true
+			}
 		}
-		if sys.ThreadHoldStep(worker) != kcall.StatusOK {
-			c.failure = "swaphold: the kernel refused a step"
+		if !c.step(worker) {
 			sys.ThreadHoldCancel(worker)
 			return
+		}
+	}
+}
+
+// step runs the worker to its next stop. A stale wake can put the stopped
+// worker back on a processor for a moment, and the kernel answers Timeout
+// until it stands again, so a Timeout is retried until the deadline.
+func (c *holdController) step(worker uint64) bool {
+	deadline := now() + holdTimeout
+	for {
+		switch sys.ThreadHoldStep(worker) {
+		case kcall.StatusOK:
+			return true
+		case kcall.StatusTimeout:
+			if now() > deadline {
+				c.failure = "swaphold: the held thread did not stand for its step"
+				return false
+			}
+			sys.ThreadYield()
+		default:
+			c.failure = "swaphold: the kernel refused a step"
+			return false
 		}
 	}
 }

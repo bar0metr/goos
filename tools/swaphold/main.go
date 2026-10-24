@@ -4,8 +4,10 @@
 // goos_g_swap and goos_preempt_entry from the goprobe ELF with `go tool
 // objdump` and requires each region's offsets to equal the instruction
 // boundaries a thread reaches there: every instruction except UD2, which
-// only a failed preemption take reaches. It also requires the guest's
-// expected and distinct_rips fields to match that count and lost=0.
+// only a failed preemption take reaches. The offsets are those of stops whose
+// collection completed; the switch also reports them per direction, and each
+// direction must cover every boundary. It also requires the guest's expected
+// and distinct_rips fields to match that count and lost=0.
 //
 // Usage: swaphold ELF LOG
 package main
@@ -135,13 +137,19 @@ func check(log io.Reader, want map[string][]uint64) (string, error) {
 		if !known {
 			return "", fmt.Errorf("unknown region in %q", line)
 		}
-		offsets, err := parseOffsets(fields["offsets"])
-		if err != nil {
-			return "", fmt.Errorf("%s: %v", region, err)
-		}
 		expected := want[function]
-		if !equal(offsets, expected) {
-			return "", fmt.Errorf("%s: held offsets %v, instruction boundaries %v", region, offsets, expected)
+		keys := []string{"offsets"}
+		if region == "swap" {
+			keys = append(keys, "offsets_out", "offsets_in")
+		}
+		for _, key := range keys {
+			offsets, err := parseOffsets(fields[key])
+			if err != nil {
+				return "", fmt.Errorf("%s %s: %v", region, key, err)
+			}
+			if !equal(offsets, expected) {
+				return "", fmt.Errorf("%s: %s %v, instruction boundaries %v", region, key, offsets, expected)
+			}
 		}
 		count := strconv.Itoa(len(expected))
 		if fields["expected"] != count || fields["distinct_rips"] != count {
