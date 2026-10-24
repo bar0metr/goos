@@ -302,9 +302,11 @@ one. Clearing the held threads' snapshot registers before marking did not
 fail either region, so a list stayed reachable through another root. The
 probe covers every context-save instruction of one held thread on one
 permit. It does not isolate register or XMM roots; `goprobe regroots`
-(Register roots below) does. It does not combine a held switch with other
-threads switching, or hold the scheduler's G and M bookkeeping around the
-switch.
+(Register roots below) does. It does not construct one accepted rendezvous
+with several Ms captured at independently selected switch/bookkeeping phases.
+Once a rendezvous is accepted, those peers are already held; the missing case
+is a deterministic state combination, not peers continuing to switch during
+mark/sweep.
 
 ## Production switch
 
@@ -390,13 +392,23 @@ its fixture output.
 
 ## Remaining evidence limits
 
-Register roots: `goprobe regroots` covers each XMM and general-purpose
-register alone, in a native thread and in a goroutine that runs, stands in
-the preemption entry or is switched out. The entry holds count the whole
-entry range, so they do not show a hold at each save or restore
-instruction. The probe holds an address only in a spinning loop; it does
-not cover a root in a register across a native call, which the ABI does
-not preserve.
+`goprobe regroots` isolates each XMM and general-purpose register as a root
+in a native thread, a running goroutine and a switched-out goroutine.
+`swaphold` separately forces a completed collection at every reachable
+instruction boundary of `goos_g_swap` and `goos_preempt_entry`, so the
+register probe itself does not need a per-save/per-restore hold. Ordinary
+userspace calls are not an additional register-root case: caller-saved GPRs
+and XMM registers are not preserved by the function-call ABI. The
+asynchronous preemption/native-entry path is covered by its explicit
+context-save contract and the instruction-hold probe.
+
+`gcstress` exercises goroutine creation and completion under concurrent
+collection, but does not force collection at every publication or
+scheduler-bookkeeping instruction. `swaphold` controls one held thread at a
+time on one permit; it does not build a same-rendezvous cross-product of
+several Ms captured at independently selected switch phases. In an accepted
+rendezvous the peers are already held, so this is missing deterministic
+state-combination evidence rather than concurrent switching during sweep.
 
 The historical KVM run did not give goprobe a log capability or run the disk
 driver on Gs. The follow-up TCG fixture now does both: validation PID 1 grants
