@@ -116,10 +116,13 @@ crossing the 64-byte boundary. No userspace PRNG supplies these reads.
 
 ## Measured costs
 
-These are observations from the compatibility run, not resource limits for a
-TLS client. The native process uses a bump arena; the reported allocation delta
-is also its peak unreclaimed probe allocation. `runtime.ReadMemStats` is a no-op
-in this runtime, so the driver reads arena counters instead.
+These are observations from the original compatibility run, not resource
+limits for a TLS client. That run predates ADR 0201: the native process used a
+bump arena, so the reported allocation delta was also its peak unreclaimed
+probe allocation, and `runtime.ReadMemStats` was a no-op. The current native
+runtime reclaims heap objects and implements `runtime.ReadMemStats`; the table
+below is retained as historical allocation-volume evidence for the pinned TLS
+build, not as the current allocator's peak-heap contract.
 
 | Probe | Native image bytes | Probe allocation bytes | Largest frame bytes |
 | --- | ---: | ---: | ---: |
@@ -219,9 +222,10 @@ The handshake measurement includes the presented leaf/intermediate chain,
 verification state, ephemeral keys and record buffers; it does not isolate a
 certificate-only allocator. The stack figure includes the compiled ML-KEM
 routine, which the X25519-only client does not negotiate. The fixed redirect and
-address limits bound connection attempts within a one-shot process. We do not
-reset an arena underneath live TLS or library globals. TCP and VFS buffers use
-existing shared mappings outside the bump-heap counter.
+address limits bound connection attempts within a one-shot process. The
+original fixture did not reset its arena underneath live TLS or library
+globals. TCP and VFS buffers used existing shared mappings outside the
+allocator counter recorded by that run.
 
 Full PEM loading fits the native quota and stack model, so the release keeps PEM
 instead of adding a binary root format. These observations describe these
