@@ -7,8 +7,9 @@ Measurements section names.
 
 ## Context
 
-A native process runs one task. The kernel already schedules several tasks
-of one process on several processors: Linux processes do it through `clone`
+Before this ADR, a native process ran one task. The kernel already scheduled
+several tasks of one process on several processors: Linux processes did it
+through `clone`
 (ADR 0177, ADR 0179), and `process.Process` holds up to 32 task identities.
 The native runtime does not: its system-call wrappers share scratch
 descriptors in package variables, the collector (ADR 0201) scans one stack
@@ -318,8 +319,10 @@ shows a speedup of 1.25x at four and eight threads.
 - Existing single-thread programs keep their behaviour: they never call the
   new operations, the heap lock is uncontended, and the collector skips
   suspension when the process has one thread.
-- TinyGo goroutines, `go` statements, and `sync` stay unsupported. Threads
-  are started with `thread.Start` and joined with `thread.Join`.
+- The ordinary native target still does not provide TinyGo goroutines; its
+  parallel execution API is `thread.Start`/`thread.Join`. ADR 0204 adds a
+  separate goroutine-enabled target and M:N scheduler for images that select
+  it.
 - A collection pauses every thread of the process. Suspension cost grows with
   the number of threads; the pauses are reported.
 - Only `sys` keeps its scratch per thread. The other libraries keep their
