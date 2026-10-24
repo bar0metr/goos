@@ -3,8 +3,11 @@
 ## Status
 
 Accepted. ADR 0202 adds the 1360-byte class, a stack scrub before each
-collection bounded by the bottom of the stack, free-page retention (off by default), and trims of free pages at
-idle time and before out-of-memory.
+collection bounded by the bottom of the stack, free-page retention (off by
+default), and trims of free pages at idle time and before out-of-memory.
+ADR 0203 extends the heap and stop-the-world collector to native sibling
+threads. ADR 0204 extends root discovery to M:N goroutine stacks and full
+held-thread register snapshots.
 
 ## Context
 
