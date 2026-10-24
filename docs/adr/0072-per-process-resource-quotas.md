@@ -121,8 +121,9 @@ channels and each service an ordinary four-of-each share.
 
 The task quota of four binds before `MaxTasksPerProcess` of thirty-two does.
 That is intended: the table size is a structural bound and the quota is the
-policy one. Every native process has one task today, so nothing is constrained
-by it yet.
+policy one. At the time of this ADR every native process had one task, so the
+task quota did not constrain native programs yet. ADR 0203 later made that
+quota relevant to native sibling threads.
 
 `ProcessInfo` records grew from 32 bytes to 80. The native ABI is not stable
 until it is declared so, and the record's layout is documented with the constant.
