@@ -126,3 +126,16 @@ func staleTrap(status, rip uint64, stale staleHold) bool {
 	}
 	return stale.step && status&dr6BS != 0
 }
+
+// endHold decides how a cancel ends hold. A task that stopped or left the
+// range is woken, even while it still runs between its debug exception and
+// the switch that blocks it: the wake then keeps the block from parking it.
+// A task on a processor may still raise its old breakpoint or step, which
+// stale records.
+func endHold(hold *taskHold, onCPU bool) (stale staleHold, wake bool) {
+	wake = hold.state == holdStopped || hold.state == holdLeft
+	if onCPU {
+		stale = staleOf(hold)
+	}
+	return stale, wake
+}

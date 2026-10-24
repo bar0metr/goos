@@ -138,3 +138,30 @@ func TestStaleTrapResumesOnlyTheCancelledHoldsOwnException(t *testing.T) {
 		}
 	}
 }
+
+func TestEndHoldWakesAStoppedTaskStillOnItsProcessor(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		state uint8
+		onCPU bool
+		wake  bool
+		stale staleHold
+	}{
+		// The window between the debug exception and the blocking switch.
+		{"stopped on cpu", holdStopped, true, true, staleHold{breakpoint: 0x1000}},
+		{"left on cpu", holdLeft, true, true, staleHold{breakpoint: 0x1000}},
+		{"stopped off cpu", holdStopped, false, true, staleHold{}},
+		{"running breakpoint on cpu", holdRunning, true, false, staleHold{breakpoint: 0x1000}},
+		{"running off cpu", holdRunning, false, false, staleHold{}},
+	} {
+		hold := &taskHold{armed: true, state: test.state, dr0: 0x1000, dr7: dr7Local0}
+		stale, wake := endHold(hold, test.onCPU)
+		if wake != test.wake || stale != test.stale {
+			t.Errorf("%s: wake %v stale %+v, want %v %+v", test.name, wake, stale, test.wake, test.stale)
+		}
+	}
+	stale, wake := endHold(&taskHold{armed: true, state: holdRunning}, true)
+	if wake || stale != (staleHold{step: true}) {
+		t.Fatalf("step in flight: wake %v stale %+v", wake, stale)
+	}
+}

@@ -247,10 +247,27 @@ func StepTaskHold(task sched.TaskID, breakpoint uint64) bool {
 	return ok
 }
 
+// offContext returns the saved user context of a slot on no processor. The
+// scheduler lock is held.
+func offContext(slot int) (*[contextWords]uint64, bool) {
+	address := taskContexts[slot]
+	if address == 0 || runState.RunningOn(slot) != sched.Idle {
+		return nil, false
+	}
+	// SAFETY: a task off every processor keeps its context on its own
+	// kernel stack, and the scheduler lock keeps it from resuming while
+	// the frame changes.
+	context := (*[contextWords]uint64)(unsafe.Pointer(uintptr(address)))
+	if context[16] != uint64(userCodeSelector) {
+		return nil, false
+	}
+	return context, true
+}
+
 // EndTaskHold disarms task's hold and lets it run on with TF and its
-// breakpoint clear. A task that stopped is woken; one on no processor gets
-// TF cleared in its saved flags; one that runs is asked to switch, which
-// clears its processor's DR7. A debug exception that the old breakpoint or
+// breakpoint clear. A task that stopped or left the range is woken (endHold);
+// one on no processor gets TF cleared in its saved flags; one that runs is
+// asked to switch, which clears its processor's DR7. A debug exception that the old breakpoint or
 // single step still raises resumes the task; any other ends it as before.
 func EndTaskHold(task sched.TaskID) bool {
 	if !validation.Enabled {
@@ -263,21 +280,11 @@ func EndTaskHold(task sched.TaskID) bool {
 	target, wake := sched.Idle, false
 	if ok {
 		hold := &holds[slot]
-		stale := staleHold{}
-		if context, stopped := stoppedContext(slot); stopped {
+		target = runState.RunningOn(slot)
+		var stale staleHold
+		stale, wake = endHold(hold, target != sched.Idle)
+		if context, off := offContext(slot); off {
 			context[17] &^= flagTF
-			wake = true
-		} else if target = runState.RunningOn(slot); target != sched.Idle {
-			stale = staleOf(hold)
-		} else {
-			// SAFETY: as in stoppedContext, a task off every processor
-			// keeps its saved context on its own kernel stack.
-			if address := taskContexts[slot]; address != 0 {
-				context := (*[contextWords]uint64)(unsafe.Pointer(uintptr(address)))
-				if context[16] == uint64(userCodeSelector) {
-					context[17] &^= flagTF
-				}
-			}
 		}
 		*hold = taskHold{stale: stale}
 	}
