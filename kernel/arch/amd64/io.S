@@ -582,6 +582,27 @@ goos_trigger_breakpoint:
     int3
     retq
 
+// The debug registers an instruction hold uses (hold_uefi.go).
+.global goos_read_dr6
+goos_read_dr6:
+    movq %dr6, %rax
+    retq
+
+.global goos_write_dr6
+goos_write_dr6:
+    movq %rcx, %dr6
+    retq
+
+.global goos_write_dr0
+goos_write_dr0:
+    movq %rcx, %dr0
+    retq
+
+.global goos_write_dr7
+goos_write_dr7:
+    movq %rcx, %dr7
+    retq
+
 // IDT gates use the higher-half alias of each entry label. This prefix uses
 // assembly only, installs the kernel root, and returns to the handler's low
 // link-time address with every interrupted register intact.
@@ -690,7 +711,94 @@ goos_exception_\vector:
 .endm
 
 GOOS_FATAL_NOERR 0
-GOOS_FATAL_NOERR 1
+
+// A debug exception from user mode saves the task's registers and FPU state
+// as the context a switch restores and asks goos_user_debug what to do: a
+// validation kernel's instruction hold (hold_uefi.go) blocks the task with
+// that context saved, so a collection can snapshot it; a task without a hold
+// ends with the fault as before. A debug exception in kernel mode is fatal.
+.global goos_exception_1
+goos_exception_1:
+    GOOS_ENTER_LOW .L_exception_1
+.L_exception_1:
+    cmpq $0x23, 8(%rsp)
+    jne .debug_kernel
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rbp
+    pushq %rsi
+    pushq %rdi
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    GOOS_CPU %rbx, %ebx
+    movq GOOS_CPU_CURRENT(%rbx), %rax
+    shlq $GOOS_FPU_AREA_SHIFT, %rax
+    leaq goos_task_fpu(%rip), %r10
+    fxsave64 (%r10,%rax)
+    movq %rsp, %rcx
+    GOOS_CALL goos_user_debug
+    cmpq $1, %rax
+    je .debug_hold
+    cmpq $0, %rax
+    jne .debug_terminate
+    movq GOOS_CPU_CURRENT(%rbx), %r13
+    jmp .switch_same
+// The FPU state was saved before the Go call, which may have used the SSE
+// registers, so the hold records the context without saving it again.
+.debug_hold:
+    movq GOOS_CPU_CURRENT(%rbx), %rax
+    leaq goos_task_contexts(%rip), %rdx
+    movq %rsp, (%rdx,%rax,8)
+    movq $GOOS_SWITCH_BLOCK, %rcx
+    jmp .switch_away
+.debug_terminate:
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rdi
+    popq %rsi
+    popq %rbp
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+.debug_fatal:
+    cli
+    pushq $0
+    pushq $1
+    jmp goos_exception_fatal
+// A single step in kernel mode comes only from a step trap that MOV SS or
+// POP SS delayed past an INT or SYSCALL into the entry it reached. The kernel
+// never runs with TF set, so it clears DR6 and the interrupted TF and
+// returns; the user frame keeps the user's TF. Any other kernel debug
+// exception is fatal.
+.debug_kernel:
+    pushq %rax
+    movq %dr6, %rax
+    testq $0x4000, %rax
+    jz 1f
+    movq $0xffff0ff0, %rax
+    movq %rax, %dr6
+    andq $-0x101, 24(%rsp)
+    popq %rax
+    iretq
+1:
+    popq %rax
+    jmp .debug_fatal
+
 GOOS_FATAL_NOERR 2
 
 .global goos_exception_3

@@ -176,7 +176,9 @@ precedes final heap measurements, because WaitGroup completion alone does not
 mean another M has finished retiring its G.
 
 The context-save counters cover instruction ranges, including restore. These
-runs do not establish per-instruction coverage or isolate every XMM root.
+runs do not establish per-instruction coverage or isolate every XMM root;
+`goprobe swaphold` later added per-instruction coverage (Instruction holds
+below).
 Conservative aliases can retain an object through another root. The rejected
 rendezvous uses a held region transition, not a kernel-induced timeout.
 
@@ -263,6 +265,44 @@ The gates found five defects, all fixed:
   frame, LLVM turned the recursion into a loop. The probe now keeps a stack
   frame and a recursion LLVM cannot remove (`ee42adc`, `a30c049`,
   `213ea93`).
+
+## Instruction holds on 2026-10-24
+
+`goprobe swaphold`, in `make test-goroutine-gc`, stops a goroutine worker
+thread at every instruction boundary of `goos_g_swap` and
+`goos_preempt_entry` through validation-only debug-register holds (ADR
+0204, operations 72 to 75) and forces a collection from a `thread.Start`
+thread at each stop. `tools/swaphold` checks the held offsets against `go
+tool objdump` of the goprobe ELF.
+
+| Region | Stops | Distinct RIPs | Collections | Retries | Lost |
+|---|---|---|---|---|---|
+| `goos_g_swap`, two or three passes, both directions | 30 or 45 | 15 of 15 | every stop | 0 | 0 |
+| `goos_preempt_entry`, two passes | 94 | 47 of 47 | 94 | 0 | 0 |
+
+Three `make test-goroutine-gc` runs on TCG with four processors at
+`6bbb2c6` passed with these results, and `tools/swaphold` matched the
+offsets to the ELF in each. The joint KVM run
+`20261024T125815Z-3f1a5801` on eight vCPUs, clean `6bbb2c6`, passed the
+same check: 30 swap and 94 preemption stops, 15 of 15 and 47 of 47 distinct
+RIPs, no retry and no lost list, so the processor's execute breakpoints and
+single steps reach every boundary under KVM as under TCG. The preemption
+entry has 48 instructions; the UD2 after a failed take is never reached.
+Every run reported zero suspension failures and zero allocation or region
+window retries. The first TCG run never stopped in the
+entry: QEMU TCG left RF set in the context that preemption delivery diverts,
+which suppressed the breakpoint. Delivery now clears RF in validation
+kernels.
+
+Temporary mutations of `planStacks` failed the swap region: counting a held
+thread's current goroutine as scanned while its stack pointer lay on the
+scheduler stack lost both lists, and dropping held goroutine stacks lost
+one. Clearing the held threads' snapshot registers before marking did not
+fail either region, so a list stayed reachable through another root. The
+probe covers every context-save instruction of one held thread on one
+permit. It does not isolate register or XMM roots, combine a held switch
+with other threads switching, or hold the scheduler's G and M bookkeeping
+around the switch.
 
 ## Production switch
 

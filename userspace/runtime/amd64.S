@@ -757,6 +757,40 @@ goos_thread_wake_take:
     ret
 .size goos_thread_wake_take, .-goos_thread_wake_take
 
+// The instruction holds of validation kernels (ADR 0204). Only goprobe calls
+// them; other kernels answer Unsupported.
+.global goos_thread_hold_range
+.type goos_thread_hold_range,@function
+goos_thread_hold_range:
+    movl $72, %eax
+    int $0x80
+    ret
+.size goos_thread_hold_range, .-goos_thread_hold_range
+
+.global goos_thread_hold_wait
+.type goos_thread_hold_wait,@function
+goos_thread_hold_wait:
+    movl $73, %eax
+    int $0x80
+    ret
+.size goos_thread_hold_wait, .-goos_thread_hold_wait
+
+.global goos_thread_hold_step
+.type goos_thread_hold_step,@function
+goos_thread_hold_step:
+    movl $74, %eax
+    int $0x80
+    ret
+.size goos_thread_hold_step, .-goos_thread_hold_step
+
+.global goos_thread_hold_cancel
+.type goos_thread_hold_cancel,@function
+goos_thread_hold_cancel:
+    movl $75, %eax
+    int $0x80
+    ret
+.size goos_thread_hold_cancel, .-goos_thread_hold_cancel
+
 // goos_thread_entry is where the kernel starts a thread ThreadCreate made:
 // at its stack top, 16-byte aligned, with the runtime's argument in rdi and
 // the thread's slot in rsi. It calls goos_thread_main, which runs the

@@ -170,12 +170,19 @@ func schedSwitch(action uint64) uint64 {
 	if tick && previous != sched.Idle {
 		notePreemptTick(uint64(previous))
 	}
+	if validation.Enabled && action != switchExit && !runState.Killed(cpu) {
+		// An exit saves no context to settle.
+		leaveDebug(previous)
+	}
 	if runState.Killed(cpu) && previous != sched.Idle {
 		taskExitCodes[previous] = killCodes[previous]
 	}
 	next := runState.Switch(cpu, sched.Action(action))
 	if next != sched.Idle && next >= kernelTasks {
 		noteParallel(taskRoots[next])
+	}
+	if validation.Enabled {
+		switchDebug(cpu, next)
 	}
 	atomic.StoreUint64(&cpuData[cpu][cpuNeedResched], 0)
 	leave := uint64(0)

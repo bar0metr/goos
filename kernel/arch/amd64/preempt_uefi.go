@@ -5,6 +5,7 @@ package amd64
 import (
 	"unsafe"
 
+	"goos/internal/validation"
 	"goos/kernel/sched"
 )
 
@@ -86,6 +87,9 @@ func notePreemptTick(slot uint64) {
 	if slot < kernelTasks || slot >= slotCount || preemptEntry[slot] == 0 || preemptArmed[slot] {
 		return
 	}
+	if validation.Enabled && holdSuppressesPreempt(slot) {
+		return
+	}
 	address := taskContexts[slot]
 	if address == 0 {
 		return
@@ -109,5 +113,11 @@ func notePreemptTick(slot uint64) {
 	preemptRIP[slot], preemptArmed[slot] = context[15], true
 	context[15] = preemptEntry[slot]
 	context[18] = rsp - preemptRedZone
+	if validation.Enabled {
+		// The diverted context resumes at an instruction it never faulted
+		// on: a resume flag left in its image would hide an instruction
+		// hold's breakpoint at the entry (hold_uefi.go).
+		context[17] &^= flagRF
+	}
 	preemptDeliveries++
 }

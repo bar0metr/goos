@@ -119,6 +119,38 @@ func ThreadWake(thread uint64) kcall.Status { return status(threadWake(thread)) 
 // was not set.
 func ThreadWakeTake() kcall.Status { return status(threadWakeTake()) }
 
+// ThreadHoldRange arms an instruction hold of another thread of the process
+// at the first boundary of [lo, hi) (ADR 0204). Only validation kernels
+// carry it out; others answer Unsupported. Only goprobe calls it.
+func ThreadHoldRange(thread uint64, lo, hi uintptr) kcall.Status {
+	return status(threadHoldRange(thread, lo, hi))
+}
+
+// HoldStop is where a held thread stopped.
+type HoldStop struct {
+	RIP, SP uintptr
+	// State is kcall.HoldStopped, or kcall.HoldDone once the thread left
+	// the range.
+	State uint64
+}
+
+// ThreadHoldWait reports where a held thread stopped. Timeout means it
+// still runs toward its next stop.
+func ThreadHoldWait(thread uint64) (HoldStop, kcall.Status) {
+	w := current()
+	defer tls.Unpin()
+	w.holdWire = [3]uint64{}
+	result := status(threadHoldWait(thread, unsafe.Pointer(&w.holdWire[0])))
+	return HoldStop{RIP: uintptr(w.holdWire[0]), State: w.holdWire[1], SP: uintptr(w.holdWire[2])}, result
+}
+
+// ThreadHoldStep runs a stopped thread to its next instruction boundary in
+// its range, stepping over calls.
+func ThreadHoldStep(thread uint64) kcall.Status { return status(threadHoldStep(thread)) }
+
+// ThreadHoldCancel disarms a thread's hold and lets it run on.
+func ThreadHoldCancel(thread uint64) kcall.Status { return status(threadHoldCancel(thread)) }
+
 // ThreadJoinClaim reserves a join independently of the calling native
 // thread and returns its token. The reservation excludes native joiners and
 // other claims until collection or release. It never blocks.

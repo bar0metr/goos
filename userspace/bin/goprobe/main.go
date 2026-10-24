@@ -17,6 +17,9 @@
 //	gc N        roots of parked, sleeping, waiting, and migrating goroutines
 //	gcstress N ROUNDS  roots of every runtime root class under N collecting
 //	            goroutines (gcstress.go)
+//	swaphold    a collection at every instruction of goos_g_swap and
+//	            goos_preempt_entry, with a worker thread held there
+//	            (swaphold.go)
 //	io          handle waits that park only the goroutine
 //	waitsets    duplicate-interest validation, overlapping waits, and a parked join
 //	logwait     goroutines parked on a kernel log cursor until a record arrives
@@ -51,7 +54,7 @@ import (
 var manifest = commands.Manifest{
 	Usage:   "goprobe mode [N [ROUNDS]]",
 	Summary: "goroutine checks",
-	Options: "modes: pool, smoke, chan, sync, timers, fair, panic, panicreport, limit, gc, gcstress, io, waitsets, logwait, threads, bench, overflow, deadlock",
+	Options: "modes: pool, smoke, chan, sync, timers, fair, panic, panicreport, limit, gc, gcstress, swaphold, io, waitsets, logwait, threads, bench, overflow, deadlock",
 	MaxArgs: 3,
 }
 
@@ -107,6 +110,8 @@ func run(data startup.Data) {
 		roots(int(argument))
 	case utility.Equal(mode, "gcstress"):
 		gcStress(int(argument), int(rounds), int(taskLimit))
+	case utility.Equal(mode, "swaphold"):
+		swapHold()
 	case utility.Equal(mode, "io"):
 		waits()
 	case utility.Equal(mode, "waitsets"):

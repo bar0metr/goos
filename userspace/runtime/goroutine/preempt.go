@@ -26,6 +26,18 @@ var preemptStart [0]byte
 //go:extern goos_preempt_entry_end
 var preemptEnd [0]byte
 
+// SwitchRanges returns the bounds of goos_g_swap and of
+// goos_preempt_entry. goprobe holds a thread at each of their instructions
+// (ADR 0204).
+func SwitchRanges() (swapLo, swapHi, preemptLo, preemptHi uintptr) {
+	return uintptr(unsafe.Pointer(&swapStart)), uintptr(unsafe.Pointer(&swapEnd)),
+		uintptr(unsafe.Pointer(&preemptStart)), uintptr(unsafe.Pointer(&preemptEnd))
+}
+
+// StackPointer returns a stack pointer of the calling goroutine, within a
+// frame of its caller's.
+func StackPointer() uintptr { return stackPointer() }
+
 // switchAt is the collector's Switch hook: it names the context-save code
 // pc lies in.
 func switchAt(pc uintptr) int {
