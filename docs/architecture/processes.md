@@ -118,6 +118,19 @@ syscall. The slot is keyed by the full generation-safe Task ID, not the reusable
 scheduler index. Kill, fault, and process teardown cancel it before task-slot
 reclamation, so a late VFS reply cannot wake a replacement task.
 
+A native process may also add sibling Tasks through the native thread ABI
+(ADR 0203). They share the Process address space, handles, capabilities,
+resource account and native ABI while keeping task identity, guarded stacks,
+FS-based runtime state and saved CPU context per thread. The runtime has 16
+native thread slots including the main thread; the selected launch profile's
+task quota can bind first. A normal thread exit retires one sibling, while a
+fatal fault or process-wide Exit retires the group.
+
+Goroutines of ADR 0204 do not create a new kernel process abstraction. A
+goroutine-enabled native image schedules many Gs over those native Tasks (Ms)
+in userspace. G stacks and scheduler state are runtime-owned; the kernel still
+schedules and accounts the M Tasks.
+
 Linux `fork`, `vfork`, and process-form `clone` create a Process with a private
 address space and its first Task. Thread-form `clone` adds a Task to the
 caller's Process and address space. Each Linux thread owns a 64 KiB file-I/O
