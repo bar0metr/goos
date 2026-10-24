@@ -188,3 +188,19 @@ func armHold(hold *taskHold, lo, hi uint64) bool {
 // A resume flag left from a fault would hide the breakpoint at the
 // instruction the task resumes at.
 func armFlags(flags uint64) uint64 { return flags &^ flagRF }
+
+// settleStale ends a cancelled hold's leftover when its task leaves its
+// processor from user mode with flags saved. A step trap comes right after
+// its instruction, before any interrupt, so a TF still set marks a step not
+// yet taken: clearing it drops the step. The breakpoint ends because a switch
+// back loads DR7 clear. A task that leaves from kernel mode keeps its user
+// flags elsewhere, so the leftover waits for a switch from user mode.
+func settleStale(stale staleHold, flags uint64, user bool) (uint64, staleHold) {
+	if !user || stale == (staleHold{}) {
+		return flags, stale
+	}
+	if stale.step {
+		flags &^= flagTF
+	}
+	return flags, staleHold{}
+}

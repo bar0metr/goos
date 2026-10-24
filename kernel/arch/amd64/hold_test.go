@@ -240,3 +240,20 @@ func TestArmHoldRefusesAnArmedHoldAndClearsResume(t *testing.T) {
 		t.Fatalf("armFlags = %#x", got)
 	}
 }
+
+func TestSettleStaleEndsALeftoverAtTheNextSwitchFromUserMode(t *testing.T) {
+	step := staleHold{step: true}
+	breakpoint := staleHold{breakpoint: 0x1000}
+	if flags, stale := settleStale(step, 0x202|flagTF, true); flags != 0x202 || stale != (staleHold{}) {
+		t.Fatalf("step: flags %#x stale %+v", flags, stale)
+	}
+	if flags, stale := settleStale(breakpoint, 0x202|flagTF, true); flags != 0x202|flagTF || stale != (staleHold{}) {
+		t.Fatalf("breakpoint: flags %#x stale %+v", flags, stale)
+	}
+	if flags, stale := settleStale(step, 0x202|flagTF, false); flags != 0x202|flagTF || stale != step {
+		t.Fatalf("kernel-mode leave: flags %#x stale %+v", flags, stale)
+	}
+	if flags, stale := settleStale(staleHold{}, 0x202|flagTF, true); flags != 0x202|flagTF || stale != (staleHold{}) {
+		t.Fatalf("no leftover changed the user's TF: %#x %+v", flags, stale)
+	}
+}

@@ -170,6 +170,10 @@ func schedSwitch(action uint64) uint64 {
 	if tick && previous != sched.Idle {
 		notePreemptTick(uint64(previous))
 	}
+	if validation.Enabled && action != switchExit && !runState.Killed(cpu) {
+		// An exit saves no context to settle.
+		leaveDebug(previous)
+	}
 	if runState.Killed(cpu) && previous != sched.Idle {
 		taskExitCodes[previous] = killCodes[previous]
 	}

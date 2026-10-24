@@ -107,6 +107,24 @@ func loadDebug(cpu int, dr0, dr7 uint64) {
 	loadedDR7[cpu] = dr7
 }
 
+// leaveDebug settles a cancelled hold's leftover as previous leaves its
+// processor with its context saved (settleStale). The scheduler lock is
+// held.
+func leaveDebug(previous int) {
+	if previous == sched.Idle || previous < kernelTasks || previous >= sched.MaxTasks || holds[previous].stale == (staleHold{}) {
+		return
+	}
+	address := taskContexts[previous]
+	if address == 0 {
+		return
+	}
+	// SAFETY: the entry code saved this context on the task's own kernel
+	// stack before it called the scheduler, and the task cannot resume
+	// while the scheduler lock is held.
+	context := (*[contextWords]uint64)(unsafe.Pointer(uintptr(address)))
+	context[17], holds[previous].stale = settleStale(holds[previous].stale, context[17], context[16] == uint64(userCodeSelector))
+}
+
 // switchDebug loads the debug registers of the task cpu switches to. The
 // scheduler lock is held.
 func switchDebug(cpu int, next int) {
