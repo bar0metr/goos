@@ -44,7 +44,7 @@ var goroutineChecks = []goroutineCheck{
 	{"goprobe gc 8", "GOPROBE_GC_OK", nil, nil},
 	{"goprobe gcstress 1", "GOPROBE_GCSTRESS_OK", []string{"GOPROBE_GCSTRESS"}, nil},
 	{"goprobe gcstress 8", "GOPROBE_GCSTRESS_OK", []string{"GOPROBE_GCSTRESS"}, nil},
-	{"goprobe swaphold", "GOPROBE_SWAPHOLD_OK", []string{"GOPROBE_SWAPHOLD"}, swapHoldRecords},
+	{"goprobe swaphold", "GOPROBE_SWAPHOLD_OK", nil, swapHoldRecords},
 	{"goprobe regroots", "GOPROBE_REGROOTS_OK", nil, regRootsRecords},
 }
 

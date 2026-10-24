@@ -134,3 +134,36 @@ func TestGoroutineChecksIncludeRegRoots(t *testing.T) {
 	}
 	t.Fatal("missing goprobe regroots check")
 }
+
+// Each check's records and verifier must accept the fixture output they
+// were written for: a command that prints a record per region or register
+// class cannot also list that record as one that appears once.
+func TestGoroutineChecksAcceptTheirFixtureOutput(t *testing.T) {
+	swap := "0,2,4,6,8,9,10,13,16,17,18,20,22,24,26"
+	preempt := "0,2,3,4,5,6,7,8,9,10,12,14,16,18,20,22,24,26,29,36,40,45,52,57,59,62,64,65,70,75,78,80,82,84,86,88,90,92,94,95,96,97,98,99,100,101,102"
+	outputs := map[string]string{
+		"goprobe swaphold": "GOPROBE_SWAPHOLD region=swap held=45 distinct_rips=15 expected=15 collections=45 retried=0 lost=0 offsets=" + swap +
+			" offsets_out=" + swap + " offsets_in=" + swap + "\n" +
+			"GOPROBE_SWAPHOLD region=preempt held=94 distinct_rips=47 expected=47 collections=94 retried=0 lost=0 offsets=" + preempt + "\n" +
+			"GOPROBE_SWAPHOLD_OK\n",
+	}
+	for _, check := range goroutineChecks {
+		out, found := outputs[check.command]
+		if !found {
+			continue
+		}
+		if err := goroutineMarker(out, check.marker); err != nil {
+			t.Fatalf("%s marker: %v", check.command, err)
+		}
+		for _, name := range check.records {
+			if err := goroutineRecord(out, name); err != nil {
+				t.Fatalf("%s record %s: %v", check.command, name, err)
+			}
+		}
+		if check.verify != nil {
+			if err := check.verify(out); err != nil {
+				t.Fatalf("%s verify: %v", check.command, err)
+			}
+		}
+	}
+}
