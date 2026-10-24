@@ -184,10 +184,13 @@ ADR 0202). Allocations up to 2 KiB share slab pages of one of fourteen size
 classes, from 16 to 2048 bytes with 1360 between 1024 and 2048; larger ones
 take runs of whole pages. Page metadata lives in its own reservation, outside the
 pages it describes. A per-process, stop-the-world, non-moving, conservative
-mark and sweep, which keeps objects the compiler marks pointer-free without
-reading them, finds roots in the globals the linker script brackets, the
-stack from the collector's frame up to the stack top `_start` records, the
-callee-saved registers, and the used part of every region. It runs on
+mark and sweep keeps objects the compiler marks pointer-free without reading
+them. On the original single-thread native target it finds roots in the
+globals the linker script brackets, the stack from the collector's frame up
+to the stack top `_start` records, the callee-saved registers, and the used
+part of every region. ADR 0203 and ADR 0204 extend that root set to all held
+native-thread register/vector snapshots and to the runtime's G/M stack plan.
+It runs on
 `runtime.GC`, when live bytes reach `max(2 × live, live + 1 MiB)` of the last
 collection, when an allocation does not fit, and when a service has waited
 100 ms with nothing to do; `arena.OnExhausted` runs only after a collection
@@ -205,14 +208,24 @@ paths.
 
 **Threads.** A native process may run up to 16 threads (ADR 0203). The kernel
 makes each thread's 512 KiB stack, pinned above its own 64 KiB guard, in a
-fixed slot below the main stack, and the runtime finds the current thread from
-the stack pointer. Once a second thread exists, heap operations take the heap
-lock or run on the slabs the calling thread owns, one per size class, without
-a lock; a thread that frees into another's slab records the free in that
-slab's idle mark bitmap. A collection holds every other thread off its
-processor with `ThreadSuspend`, takes back every owned slab, and adds each
-held thread's saved registers and stack to the roots, as well as the part of
-another thread's region it has used so far.
+fixed slot below the main stack. Once a second thread exists, heap operations
+take the heap lock or run on the slabs the calling thread owns, one per size
+class, without a lock; a thread that frees into another's slab records the
+free in that slab's idle mark bitmap. A collection holds every other thread
+off its processor with `ThreadSuspend`, takes back every owned slab, and
+adds each held thread's saved general-purpose and XMM registers and its stack
+to the roots, as well as the part of another thread's region it has used so
+far.
+
+**Goroutines.** Images built with the ADR 0204 goroutine target run Gs over
+native M threads on separate guarded G stacks. During stop-the-world
+collection, a lockless stack planner maps every held thread's RSP to an M
+scheduler stack or a running G stack, adds switched-out G stacks and dormant M
+stacks, and refuses to sweep if it cannot account for the runtime state. A
+thread caught in an allocator or region-transition publication window is
+resumed and the rendezvous is retried instead of marking incomplete roots.
+The VFS uses this runtime for its bounded read pool by default; the serial VFS
+build remains available as a regression fallback.
 
 ## Shared image pages
 
