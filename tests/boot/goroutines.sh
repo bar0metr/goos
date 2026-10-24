@@ -3,10 +3,10 @@
 # (ADR 0204) with goprobe: the worker pool, goroutines on several
 # processors at once, channels and select, the sync package, timers and
 # contexts, fairness on one permit, panics, the goroutine limit, the roots
-# of goroutines in waiting states, collector stress, handle waits, a goroutine
-# joining a native thread, log cursor waits, the storage driver's goroutine
-# waiting on disk interrupts, mixed native threads and goroutines, and the
-# faults that end the process. Writes
+# of goroutines in waiting states, collector stress, roots held in each XMM
+# register, handle waits, a goroutine joining a native thread, log cursor
+# waits, the storage driver's goroutine waiting on disk interrupts, mixed
+# native threads and goroutines, and the faults that end the process. Writes
 # build/reports/goroutines-SUITE.txt.
 #
 # SUITE picks the checks: runtime (scheduling, channels, sync, timers,
@@ -161,6 +161,9 @@ else
 		for count in 1 $cpus; do
 			probe "gcstress $count"
 		done
+		probe xmmroots
+		require '^GOPROBE_XMMROOTS situation=thread regs=16 collections=[1-9][0-9]* lost=0 controls=4 reclaimed=4$' 'goprobe xmmroots: thread XMM roots'
+		require '^GOPROBE_XMMROOTS situation=goroutine regs=16 collections=[1-9][0-9]* lost=0 running=[1-9][0-9]* switched=[1-9][0-9]* .* entry_regs=[1-9][0-9]* .* controls=4 reclaimed=4$' 'goprobe xmmroots: goroutine XMM roots'
 	fi
 	if wants io; then
 		probe io

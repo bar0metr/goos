@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -37,6 +38,79 @@ var goroutineChecks = []struct {
 	{"goprobe gc 8", "GOPROBE_GC_OK", nil},
 	{"goprobe gcstress 1", "GOPROBE_GCSTRESS_OK", []string{"GOPROBE_GCSTRESS"}},
 	{"goprobe gcstress 8", "GOPROBE_GCSTRESS_OK", []string{"GOPROBE_GCSTRESS"}},
+	{"goprobe xmmroots", "GOPROBE_XMMROOTS_OK", nil},
+}
+
+// goroutineVerifiers check the records of the commands whose output a
+// single named record does not cover.
+var goroutineVerifiers = map[string]func(string) error{
+	"goprobe xmmroots": xmmRootsRecords,
+}
+
+// xmmRegisters is how many XMM registers goprobe xmmroots checks, and
+// xmmCollections how many collections each register's hold spans.
+const (
+	xmmRegisters   = 16
+	xmmCollections = 4
+)
+
+// xmmRootsRecords checks goprobe xmmroots output: one record per situation,
+// each covering every register with no list lost, and the goroutine one
+// covering the running phase, with at least one hold inside the preemption
+// entry, and the switched-out phase.
+func xmmRootsRecords(out string) error {
+	seen := map[string]map[string]uint64{}
+	for _, line := range strings.Split(strings.ReplaceAll(out, "\r", ""), "\n") {
+		if strings.HasPrefix(line, "GOPROBE_XMMROOTS_LOST ") || strings.HasPrefix(line, "GOPROBE_XMMROOTS_KEPT ") {
+			return fmt.Errorf("fixture reported: %s", line)
+		}
+		rest, found := strings.CutPrefix(line, "GOPROBE_XMMROOTS ")
+		if !found {
+			continue
+		}
+		fields := map[string]uint64{}
+		situation := ""
+		for _, field := range strings.Fields(rest) {
+			name, value, found := strings.Cut(field, "=")
+			if !found {
+				return fmt.Errorf("malformed field %q in %q", field, line)
+			}
+			if name == "situation" {
+				situation = value
+				continue
+			}
+			number, err := strconv.ParseUint(value, 10, 64)
+			if err != nil {
+				return fmt.Errorf("malformed field %q in %q", field, line)
+			}
+			fields[name] = number
+		}
+		if _, dup := seen[situation]; dup {
+			return fmt.Errorf("two %s records", situation)
+		}
+		seen[situation] = fields
+	}
+	if len(seen) != 2 {
+		return fmt.Errorf("expected thread and goroutine records, got %d", len(seen))
+	}
+	least := uint64(xmmRegisters * xmmCollections)
+	for _, situation := range []string{"thread", "goroutine"} {
+		fields, found := seen[situation]
+		if !found {
+			return fmt.Errorf("no %s record", situation)
+		}
+		if fields["regs"] != xmmRegisters || fields["lost"] != 0 || fields["collections"] < least {
+			return fmt.Errorf("%s record: regs=%d lost=%d collections=%d", situation, fields["regs"], fields["lost"], fields["collections"])
+		}
+		if fields["controls"] == 0 || fields["reclaimed"] != fields["controls"] {
+			return fmt.Errorf("%s record: controls=%d reclaimed=%d", situation, fields["controls"], fields["reclaimed"])
+		}
+	}
+	if g := seen["goroutine"]; g["running"] < least || g["switched"] < least || g["switched_preemptions"] == 0 || g["entry_regs"] == 0 {
+		return fmt.Errorf("goroutine record: running=%d switched=%d switched_preemptions=%d entry_regs=%d",
+			g["running"], g["switched"], g["switched_preemptions"], g["entry_regs"])
+	}
+	return nil
 }
 
 func goroutineMarker(out, marker string) error {
@@ -86,6 +160,11 @@ func (goroutinesScenario) Run(ctx context.Context, s *Session) (Result, error) {
 		}
 		for _, name := range check.records {
 			if err := goroutineRecord(out, name); err != nil {
+				return "", fail(ClassScenario, check.command, err)
+			}
+		}
+		if verify := goroutineVerifiers[check.command]; verify != nil {
+			if err := verify(out); err != nil {
 				return "", fail(ClassScenario, check.command, err)
 			}
 		}

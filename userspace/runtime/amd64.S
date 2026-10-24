@@ -1001,6 +1001,65 @@ goos_probe_vector_spin:
     ret
 .size goos_probe_vector_spin, .-goos_probe_vector_spin
 
+// goos_probe_xmm_root(index, token uint64, state *[2]uint32) uint64 holds
+// a heap address in one XMM register while it spins. token is the address
+// with every bit inverted. It zeroes XMM0 to XMM15, puts the address in
+// XMM[index] alone, zeroes every caller-saved general-purpose register that
+// held the address or the token, sets state[1], and loops without calls or
+// stack writes until state[0] is nonzero. It returns the register's value,
+// the address again when the register kept it, so the caller holds the list
+// once more while it checks it. An index of 16 or more holds the address
+// nowhere and returns zero. Only goprobe calls it, to show that a
+// collection finds a root that only one XMM register of a held thread
+// holds.
+.section .text.goos_probe_xmm_root,"ax",@progbits
+.global goos_probe_xmm_root
+.type goos_probe_xmm_root,@function
+goos_probe_xmm_root:
+.irp reg, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+    pxor %xmm\reg, %xmm\reg
+.endr
+    notq %rsi
+    xorl %eax, %eax
+    xorl %ecx, %ecx
+    xorl %r8d, %r8d
+    xorl %r9d, %r9d
+    xorl %r10d, %r10d
+    xorl %r11d, %r11d
+    cmpq $16, %rdi
+    jae .Lxmm_root_none
+    // Each register's block starts 64 bytes after the one before it.
+    shlq $6, %rdi
+    leaq .Lxmm_root_hold0(%rip), %rax
+    addq %rdi, %rax
+    xorl %edi, %edi
+    jmp *%rax
+.irp reg, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+.balign 64
+.Lxmm_root_hold\reg:
+    movq %rsi, %xmm\reg
+    xorl %esi, %esi
+    xorl %eax, %eax
+    movl $1, 4(%rdx)
+1:
+    pause
+    cmpl $0, (%rdx)
+    je 1b
+    movq %xmm\reg, %rax
+    pxor %xmm\reg, %xmm\reg
+    ret
+.endr
+.Lxmm_root_none:
+    xorl %esi, %esi
+    movl $1, 4(%rdx)
+1:
+    pause
+    cmpl $0, (%rdx)
+    je 1b
+    xorl %eax, %eax
+    ret
+.size goos_probe_xmm_root, .-goos_probe_xmm_root
+
 // goos_stack_pointer() uintptr returns its caller's stack pointer, which
 // names the caller's thread (userspace/runtime/tls).
 .global goos_stack_pointer
