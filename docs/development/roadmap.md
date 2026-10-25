@@ -260,7 +260,7 @@ The preemption stress exposed and fixed an asynchronous SSE-state corruption:
 the preemption entry now saves vector state before making its native call.
 The integrated concurrency soak and full `test-all` passed before the final
 context-save coverage additions, which then passed their targeted TCG and KVM
-gates.
+gates. The complete `release-check` then passed on the 0.2.8 tree.
 
 See [ADR 0201](../adr/0201-reclaimable-userspace-memory.md),
 [ADR 0202](../adr/0202-allocator-measurements-and-tuning.md),

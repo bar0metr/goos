@@ -34,8 +34,8 @@ Go 1.25.5/TinyGo 0.42.0 sources, reject scheduler-dependent paths, and bound
 certificate lists, DER, SANs and chain search. Native crypto and X.509 probes
 pass. `make test-tls` passed 69 native assertions, including authenticated fetch,
 peer rejection and production-bundle loading. `make test-network
-NETWORK_SCENARIOS=stream` also passed; full `test-all` and `release-check` have
-not run. See
+NETWORK_SCENARIOS=stream` also passed, and the complete `release-check` passed
+for 0.2.6 and 0.2.8. See
 [the evidence report](crypto-feasibility.md) and
 [ADR 0198](../adr/0198-native-tls-and-system-trust.md).
 

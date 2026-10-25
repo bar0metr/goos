@@ -419,8 +419,8 @@ X.509 verification; stock TinyGo TLS still fails its no-wire shim check.
 The native HTTPS gate has now passed 69 assertions with authenticated transfers,
 certificate/handshake/record failures and production-root loading. The earlier
 ClientHello probe alone proved only wire output. The stream network regression
-also passed (`make test-network NETWORK_SCENARIOS=stream`). Full `test-all` and
-`release-check` have not run.
+also passed (`make test-network NETWORK_SCENARIOS=stream`). The complete
+`release-check` passed for 0.2.6 and again for 0.2.8.
 [The feasibility report](crypto-feasibility.md) keeps measured native results;
 [ADR 0198](../adr/0198-native-tls-and-system-trust.md) describes the chosen path.
 
