@@ -202,13 +202,11 @@ func collect(reason collectionReason) {
 	native.phase = PhaseNone
 	native.finishMark()
 	native.sweep()
-	// With several threads the collector gives pages back after it lets
-	// the others go (collectThreaded): discarding thousands of pages took
-	// most of a pause on eight processors.
-	if !threaded.Load() {
-		native.trimAfter(reason)
-		releaseMarkStack()
-	}
+	// Pages go back while the other threads are held: a discard while they
+	// run costs every processor that runs one a TLB shootdown, and they
+	// would wait for the heap lock this thread holds anyway (ADR 0205).
+	native.trimAfter(reason)
+	releaseMarkStack()
 	pause := uint64(nativeTicks() - started)
 	lastPause = pause
 	totalPause += pause

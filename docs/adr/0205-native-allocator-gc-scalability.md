@@ -161,10 +161,12 @@ default, `r64`). Between two runs of one image the four-thread time for 16
 pages moved from 142 ms to 203 ms, and 32 pages passed the targets in every
 run, so the default stays at 32.
 
-With several threads the collector discards free pages after it lets the
-other threads go, still holding the heap lock: a free run changes only under
-that lock, and the threads run on their own slabs meanwhile. At an 8 MiB
-floor the discards had taken half of each pause.
+The collector still discards free pages while it holds the other threads.
+Moving the discards after it let them go, with the heap lock still held,
+shortened pauses and slowed the work: eight threads keeping 15 MiB live went
+from 565 ms to between 1170 and 1403 ms. A discard while the process's
+threads run on other processors costs each of them a TLB shootdown, and
+they wait on the heap lock for their refills meanwhile.
 
 ### Idle collection
 
