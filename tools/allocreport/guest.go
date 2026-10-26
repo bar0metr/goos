@@ -230,6 +230,24 @@ var threadKeys = []string{
 	"rendezvous_last", "rendezvous_max", "rendezvous_total", "pause_last", "pause_max", "pause_total",
 }
 
+// v3Lines are the labeled lines version 3 added, each kept in Fields with
+// its label and an underscore before the key, and the keys each must carry.
+var v3Lines = []struct {
+	label string
+	keys  []string
+}{
+	{"cache", []string{"hits", "misses", "batches", "batch_slabs", "disowned_full", "cached", "peak_cached", "bound",
+		"preserved", "flushed", "unfolded"}},
+	{"gc", []string{"automatic", "explicit", "idle", "pressure", "abandoned_automatic", "abandoned_explicit",
+		"abandoned_idle", "abandoned_pressure", "allocators", "max_allocators", "floor", "live", "goal", "page_limit",
+		"retain_target", "idle_requests", "idle_skipped", "idle_abandoned"}},
+	{"pause_hist", histKeys},
+	{"rendezvous_hist", histKeys},
+}
+
+// histKeys are the buckets of a version 3 histogram line.
+var histKeys = []string{"50us", "100us", "250us", "500us", "1ms", "2ms", "5ms", "more"}
+
 // Version is the profile format version; a report without the field is
 // version 1.
 func (p *Profile) Version() uint64 {
@@ -250,6 +268,15 @@ func (p *Profile) missing() string {
 		for _, key := range threadKeys {
 			if _, ok := p.Fields["thread_"+key]; !ok {
 				return "thread_" + key
+			}
+		}
+	}
+	if p.Version() >= 3 {
+		for _, line := range v3Lines {
+			for _, key := range line.keys {
+				if _, ok := p.Fields[line.label+"_"+key]; !ok {
+					return line.label + "_" + key
+				}
 			}
 		}
 	}
@@ -277,6 +304,10 @@ func (p *Profile) add(words []string) error {
 	case "threads":
 		for key, value := range pairs(words[1:]) {
 			p.Fields["thread_"+key] = value
+		}
+	case "cache", "gc", "pause_hist", "rendezvous_hist":
+		for key, value := range pairs(words[1:]) {
+			p.Fields[words[0]+"_"+key] = value
 		}
 	default:
 		for key, value := range pairs(words) {

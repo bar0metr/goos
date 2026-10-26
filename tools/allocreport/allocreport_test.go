@@ -160,9 +160,15 @@ func TestProfileCompleteness(t *testing.T) {
 	if len(good) < 4 || !strings.Contains(good[len(good)-1], " end lines=") {
 		t.Fatalf("profile lines %q", good)
 	}
-	var sizesLine, slabsLine, threadsLine int
+	var sizesLine, slabsLine, threadsLine, cacheLine, gcLine, pauseLine int
 	for index, line := range good {
 		switch {
+		case strings.HasPrefix(line, "ALLOC_PROFILE vfs cache"):
+			cacheLine = index
+		case strings.HasPrefix(line, "ALLOC_PROFILE vfs gc"):
+			gcLine = index
+		case strings.HasPrefix(line, "ALLOC_PROFILE vfs pause_hist"):
+			pauseLine = index
 		case strings.HasPrefix(line, "ALLOC_PROFILE vfs sizes"):
 			sizesLine = index
 		case strings.HasPrefix(line, "ALLOC_PROFILE vfs slabs"):
@@ -171,7 +177,7 @@ func TestProfileCompleteness(t *testing.T) {
 			threadsLine = index
 		}
 	}
-	if !strings.HasPrefix(good[0], "ALLOC_PROFILE vfs version=2 large=") || threadsLine == 0 {
+	if !strings.HasPrefix(good[0], "ALLOC_PROFILE vfs version=3 large=") || threadsLine == 0 || cacheLine == 0 || gcLine == 0 || pauseLine == 0 {
 		t.Fatalf("profile lines %q", good)
 	}
 	drop := func(lines []string, index int) []string {
@@ -179,12 +185,32 @@ func TestProfileCompleteness(t *testing.T) {
 	}
 	noCounter := append([]string(nil), good...)
 	noCounter[0] = strings.Replace(noCounter[0], " new_slabs=0", "", 1)
-	// A version 1 report has no version field and no threads line, and
-	// its end line counts one line fewer.
-	versionOne := drop(good, threadsLine)
-	versionOne[0] = strings.Replace(versionOne[0], " version=2", "", 1)
-	last := len(versionOne) - 1
-	versionOne[last] = strings.Replace(versionOne[last], fmt.Sprintf("lines=%d", len(good)-1), fmt.Sprintf("lines=%d", len(versionOne)-1), 1)
+	// An older report lacks the lines its version did not have, and its
+	// end line counts only the lines it has.
+	older := func(version int, prefixes ...string) []string {
+		var lines []string
+		for _, line := range good {
+			keep := true
+			for _, prefix := range prefixes {
+				keep = keep && !strings.HasPrefix(line, "ALLOC_PROFILE vfs "+prefix+" ")
+			}
+			if keep {
+				lines = append(lines, line)
+			}
+		}
+		version3 := " version=3"
+		switch version {
+		case 1:
+			lines[0] = strings.Replace(lines[0], version3, "", 1)
+		default:
+			lines[0] = strings.Replace(lines[0], version3, fmt.Sprintf(" version=%d", version), 1)
+		}
+		last := len(lines) - 1
+		lines[last] = strings.Replace(lines[last], fmt.Sprintf("lines=%d", len(good)-1), fmt.Sprintf("lines=%d", last), 1)
+		return lines
+	}
+	versionTwo := older(2, "cache", "gc", "pause_hist", "rendezvous_hist")
+	versionOne := older(1, "threads", "cache", "gc", "pause_hist", "rendezvous_hist")
 	cases := []struct {
 		name              string
 		lines             []string
@@ -199,6 +225,10 @@ func TestProfileCompleteness(t *testing.T) {
 		{"never ended", good[:len(good)-1], 0, 1, false},
 		{"lost counter", noCounter, 0, 1, false},
 		{"lost threads", drop(good, threadsLine), 0, 1, false},
+		{"lost cache", drop(good, cacheLine), 0, 1, false},
+		{"lost gc", drop(good, gcLine), 0, 1, false},
+		{"lost pause histogram", drop(good, pauseLine), 0, 1, false},
+		{"version 2", versionTwo, 1, 0, true},
 		{"version 1", versionOne, 1, 0, true},
 		{"a good one after a broken one", append(drop(good, sizesLine), good...), 1, 1, true},
 	}
