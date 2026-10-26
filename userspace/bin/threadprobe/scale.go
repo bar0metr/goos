@@ -5,7 +5,6 @@ package main
 import (
 	"runtime"
 	"sync/atomic"
-	"unsafe"
 
 	"goos/kernel/clock"
 	"goos/kernel/kcall"
@@ -32,9 +31,11 @@ import (
 // start, drop it, and take it again, ROUNDS times: the collector must keep
 // the process inside its quota.
 
-// pairRing carries objects from one thread of a pair to the other.
+// pairRing carries objects from one thread of a pair to the other. Only
+// the producer writes a slot and tail, only the consumer clears a slot and
+// writes head; the atomic stores publish the slots.
 type pairRing struct {
-	slots      [256]atomic.Pointer[uint64]
+	slots      [256][]byte
 	head, tail atomic.Uint32
 	done       atomic.Bool
 	_          [40]byte
@@ -49,15 +50,27 @@ var (
 	remoteSizes  = [...]int{16, 48, 96, 200, 400, 1000, 2000}
 )
 
-// push hands p to the ring, consuming inbox while the ring is full.
-func (r *pairRing) push(p *uint64, inbox *pairRing) {
+// tagWord reads or, with set, writes the eight bytes of buffer at offset.
+func tagWord(buffer []byte, offset int, value uint64, set bool) uint64 {
+	word := uint64(0)
+	for index := 7; index >= 0; index-- {
+		if set {
+			buffer[offset+index] = byte(value >> (8 * index))
+		}
+		word = word<<8 | uint64(buffer[offset+index])
+	}
+	return word
+}
+
+// push hands buffer to the ring, consuming inbox while the ring is full.
+func (r *pairRing) push(buffer []byte, inbox *pairRing) {
 	for r.tail.Load()-r.head.Load() == uint32(len(r.slots)) {
 		if inbox == nil || !inbox.pop() {
 			thread.Yield()
 		}
 	}
 	tail := r.tail.Load()
-	r.slots[tail%uint32(len(r.slots))].Store(p)
+	r.slots[tail%uint32(len(r.slots))] = buffer
 	r.tail.Store(tail + 1)
 }
 
@@ -69,14 +82,14 @@ func (r *pairRing) pop() bool {
 		return false
 	}
 	slot := &r.slots[head%uint32(len(r.slots))]
-	p := slot.Load()
-	slot.Store(nil)
+	buffer := *slot
+	*slot = nil
 	r.head.Store(head + 1)
-	tag := *p
-	if tag>>56 == 0 || *(*uint64)(unsafe.Add(unsafe.Pointer(p), 8)) != ^tag {
+	tag := tagWord(buffer, 0, 0, false)
+	if tag>>56 == 0 || tagWord(buffer, 8, 0, false) != ^tag {
 		remoteBad.Add(1)
 	}
-	arena.FreeBytes(unsafe.Slice((*byte)(unsafe.Pointer(p)), 16))
+	arena.FreeBytes(buffer)
 	remoteFreed.Add(1)
 	return true
 }
@@ -91,10 +104,10 @@ func remoteLoop(index int) {
 		for op := 0; op < benchOps; op++ {
 			size := remoteSizes[(op+index)%len(remoteSizes)]
 			buffer := make([]byte, size)
-			p := (*uint64)(unsafe.Pointer(unsafe.SliceData(buffer)))
-			*p = uint64(index+1)<<56 | uint64(op)
-			*(*uint64)(unsafe.Add(unsafe.Pointer(p), 8)) = ^*p
-			out.push(p, in)
+			tag := uint64(index+1)<<56 | uint64(op)
+			tagWord(buffer, 0, tag, true)
+			tagWord(buffer, 8, ^tag, true)
+			out.push(buffer, in)
 			in.pop()
 			// Garbage no one frees: the heap reaches its goal, so
 			// collections run while remote frees wait in the slabs.
