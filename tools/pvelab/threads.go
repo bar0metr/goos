@@ -36,8 +36,13 @@ var threadChecks = []struct{ name, command, want string }{
 var threadWorkloads = []struct{ name, command, want string }{
 	{"threads-remote-one", "threadprobe remote 2 200000 one", "THREADPROBE_REMOTE_OK"},
 	{"threads-remote-two", "threadprobe remote 8 200000 two", "THREADPROBE_REMOTE_OK"},
-	{"threads-live-25", "threadprobe live 8 200000 4096", "THREADPROBE_LIVE_OK"},
-	{"threads-live-50", "threadprobe live 8 200000 16384", "THREADPROBE_LIVE_OK"},
+	// Eight threads keeping 1024 or 2048 objects of the bench mix hold
+	// about 2 or 4 MiB: a quarter or half of what they allocate between
+	// collections at the 8 MiB floor. 8192 objects, about 15 MiB, outgrow
+	// the floor, so the goal is twice the live heap.
+	{"threads-live-25", "threadprobe live 8 200000 1024", "THREADPROBE_LIVE_OK"},
+	{"threads-live-50", "threadprobe live 8 200000 2048", "THREADPROBE_LIVE_OK"},
+	{"threads-live-heap", "threadprobe live 8 200000 8192", "THREADPROBE_LIVE_OK"},
 	{"threads-idle", "threadprobe idle 8 20", "THREADPROBE_IDLE_OK"},
 	{"threads-quota", "threadprobe quota 8 3", "THREADPROBE_QUOTA_OK"},
 }
