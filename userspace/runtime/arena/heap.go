@@ -200,10 +200,13 @@ type Stats struct {
 // collectionFloor is the growth below which no collection starts: a heap
 // holding little collects after another MiB of allocation, not after every
 // few objects. Each thread that allocated since the last collection adds a
-// MiB, up to quotaShare of the process's page quota (goal).
+// MiB, up to a quotaShare-th of the process's page quota (goal). With an
+// eighth, eight threads collected every 8 MiB and each pause swept that
+// much: over 1.5 ms on eight processors with validation poisoning
+// (ADR 0205).
 const (
 	collectionFloor = uint64(1 << 20)
-	quotaShare      = 8
+	quotaShare      = 16
 )
 
 // collectionReason is why a collection runs. It decides what the
@@ -777,8 +780,8 @@ func (h *heap) goal() {
 }
 
 // floor is the least growth before the next collection: collectionFloor
-// for every thread that allocated since the last one, up to a quotaShare of
-// the page quota and never below collectionFloor. Without a known quota it
+// for every thread that allocated since the last one, up to a quotaShare-th
+// of the page quota and never below collectionFloor. Without a known quota it
 // is collectionFloor.
 func (h *heap) floor() uint64 {
 	if h.pageLimit == 0 {

@@ -401,12 +401,12 @@ func TestGoalScalesWithAllocatingThreads(t *testing.T) {
 	}{
 		{"no quota known", 0, 0, 8, mib, mib},
 		{"one thread", 64 * mib, 0, 1, mib, mib},
+		{"two threads", 64 * mib, 0, 2, 2 * mib, 2 * mib},
 		{"four threads", 64 * mib, 0, 4, 4 * mib, 4 * mib},
-		{"eight threads", 64 * mib, 0, 8, 8 * mib, 8 * mib},
-		{"capped by a large quota", 64 * mib, 0, 16, 8 * mib, 8 * mib},
-		{"capped by a normal quota", 32 * mib, 0, 8, 4 * mib, 4 * mib},
+		{"capped by a large quota", 64 * mib, 0, 8, 4 * mib, 4 * mib},
+		{"capped by a normal quota", 32 * mib, 0, 4, 2 * mib, 2 * mib},
 		{"tiny quota keeps the floor", 8 * mib, 0, 8, mib, mib},
-		{"live heap dominates", 64 * mib, 20 * mib, 8, 8 * mib, 40 * mib},
+		{"live heap dominates", 64 * mib, 20 * mib, 8, 4 * mib, 40 * mib},
 		{"floor dominates a small live heap", 64 * mib, 2 * mib, 4, 4 * mib, 6 * mib},
 	}
 	for _, c := range cases {
