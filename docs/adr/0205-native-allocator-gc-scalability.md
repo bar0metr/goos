@@ -237,7 +237,76 @@ again.
 
 ### Measurements
 
-Filled in from the reference runs below.
+`make test-pve-threads`, one VM with eight processors under KVM,
+`cpu=host`, on 2026-10-26. The baseline is `ab34281` with the current
+`threadprobe` and `tools/pvelab/threads.go` copied in, run
+`20261026T205107Z-ffbb1d98`; this design is `dce70cd`, run
+`20261026T221007Z-1712ed8d`. Each thread makes 200000 allocations of 16 to
+1000 bytes and keeps the last 64; times are medians of five runs, in
+validation images, which poison what a sweep frees.
+
+| Threads | 0.2.8 ms | ADR 0205 ms | Change | Collections | Heap-lock waits | Refills per 1000 allocations | Pause share | Longest pause us |
+|---:|---:|---:|---:|---|---|---|---|---|
+| 1 | 35.2 | 35.3 | +0.3% | 49 → 49 | 0 → 0 | 0 → 0 | 20.3% → 21.5% | 312 → 411 |
+| 2 | 120.8 | 71.4 | −41% | 98 → 49 | 4830 → 1476 | 66.5 → 31.9 | 16.2% → 18.7% | 326 → 413 |
+| 4 | 210.3 | 121.6 | −42% | 196 → 50 | 23260 → 8882 | 69.4 → 32.0 | 18.8% → 21.5% | 464 → 594 |
+| 8 | 875.5 | 429.3 | −51% | 390 → 98 | 32397 → 17394 | 74.1 → 31.6 | 13.4% → 15.7% | 774 → 994 |
+
+The same baseline put 361.3 ms at four threads and 816.7 ms at eight in
+ADR 0203's run of 2026-10-19; only runs on the same day are compared here.
+The eight-thread time moved between 349 and 512 ms over the four runs of
+this design.
+
+Sizes of 512 to 2048 bytes only (`big`): 132.0, 529.0, 1188.1, and 3820.7 ms
+on 1, 2, 4, and 8 threads before; 130.8, 271.4, 445.6, and 1917.5 ms after,
+with refills per 1000 allocations down from 293 to 324 to 78 to 79.
+
+The heap lock alone (`lock`): 36.7, 185.8, 425.2, and 1757.3 ms before;
+35.3, 167.3, 372.6, and 991.6 ms after, from the pacing alone.
+
+Every collection removed takes its roots and rendezvous with it, but a
+validation sweep still poisons every freed byte, and the bytes freed do not
+change with the number of collections. The total pause time at eight
+threads fell from 117 ms to 67 ms; its share of a run that also halved did
+not. One pair of images with poisoning compiled out (runs
+`20261026T213925Z-321a285c` and `20261026T214158Z-11dc1b7c`, not committed)
+measured the collector alone:
+
+| Threads | 0.2.8 ms | ADR 0205 ms | Pause share | Longest pause us | Heap-lock waits |
+|---:|---:|---:|---|---|---|
+| 1 | 31.7 | 32.9 | 10.3% → 10.6% | 251 → 353 | 0 → 0 |
+| 2 | 82.3 | 74.5 | 9.0% → 2.7% | 157 → 158 | 3388 → 1705 |
+| 4 | 223.5 | 117.7 | 8.8% → 2.6% | 157 → 177 | 23650 → 9443 |
+| 8 | 533.9 | 313.8 | 11.3% → 2.0% | 247 → 167 | 35405 → 15996 |
+
+Against the targets this design set itself:
+
+- One thread stays within 5% in every run.
+- Four threads run 35 to 47% faster and eight 41 to 60% faster over all
+  runs, with 50 and 98 to 101 collections.
+- Refills per allocation fall by 54 to 58%. Heap-lock waits at eight
+  threads fall by 46 to 55% depending on the run. Of about 50800
+  heap-lock acquisitions per eight-thread run, 50600 are refills; the other
+  250 are the 98 collections, thread starts and exits, and reading the
+  profile. The remaining contention is refills of the classes of 384 bytes
+  and up, not page runs or rendezvous, and does not justify locks per class.
+- The pause share falls by 82% with poisoning compiled out and rises in
+  validation images; the longest pause stays under 1 ms in both, except
+  for `big` on eight threads (1.9 ms, validation).
+
+Workloads in the same runs, 0.2.8 before ADR 0205:
+
+- `live 8 200000 N` keeping 1024 objects per thread: 925 → 586 ms; 8192
+  objects, 15 MiB live, goal twice the live heap: 806 → 543 ms, 28 → 27
+  collections.
+- `quota 8 3`: peak 8201 → 8875 of 16384 pages; both stayed in their quota.
+- `idle 8 20`: 102 to 106 pages after each round before, 147 to 153 after,
+  flat over the 20 rounds; 30 idle collections ran, 142 requests were
+  skipped while a thread was not waiting, and 2 were given up after the
+  rendezvous.
+- `remote 2 … one` and `remote 8 … two` ran 109 and 218 collections while
+  remote frees waited, and every one of 1.8 million objects reached its
+  consumer with its tag intact.
 
 ## Consequences
 
