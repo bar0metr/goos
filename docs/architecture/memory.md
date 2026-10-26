@@ -195,7 +195,7 @@ It runs on
 collection, when an allocation does not fit, and when a service has waited
 100 ms with nothing to do; `arena.OnExhausted` runs only after a collection
 and a retry fail. The floor is 1 MiB for each thread that allocated since the
-last collection, at most an eighth of the process's page quota and at least
+last collection, at most a sixteenth of the process's page quota and at least
 1 MiB (ADR 0205). The collector first zeroes up to 4 KiB of stack below itself,
 never past the bottom of the stack, so its own frames hold no stale address. Free pages go back with `VMDiscard`
 after each collection. `arena.SetRetained` can keep up to 256 of them for the

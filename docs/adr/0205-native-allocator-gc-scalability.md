@@ -122,23 +122,27 @@ The heap reads its page quota once, at start, with `ProcessInfo` into a
 global. After each sweep:
 
 ```text
-floor = min(allocators × 1 MiB, max(1 MiB, quota / 8))
+floor = min(allocators × 1 MiB, max(1 MiB, quota / 16))
 next  = min(reservation, live + max(live, floor))
 ```
 
 | Profile | Page quota | Largest floor |
 |---|---:|---:|
 | tiny | 8 MiB | 1 MiB |
-| normal | 32 MiB | 4 MiB |
-| large | 64 MiB | 8 MiB |
+| normal | 32 MiB | 2 MiB |
+| large | 64 MiB | 4 MiB |
 
 A heap that cannot read its quota keeps the 1 MiB floor. A large live heap
 keeps `2 × live`. Both the small-allocation refill and the run-allocation
 path fold the caller's counts before comparing with the goal. Other threads'
 unfolded counts can overshoot it by at most what their caches hold.
 
-The 1/8 share bounds how much garbage the floor allows. It reserves nothing,
-and images, page tables, stacks, and regions share the same quota.
+The 1/16 share bounds how much garbage the floor allows. It reserves
+nothing, and images, page tables, stacks, and regions share the same quota.
+An eighth was measured first: eight threads then collected every 8 MiB,
+and each pause swept, and in validation images poisoned, 8 MiB of garbage,
+up to 1.9 ms. A sixteenth kept eight threads under 100 collections and the
+longest pause near half a millisecond.
 
 ### Retention
 
@@ -151,6 +155,16 @@ and images, page tables, stacks, and regions share the same quota.
 | idle, pressure | none |
 
 Kept pages stay dirty. Allocation clears only the slot or run it hands out.
+
+The benchmark ran 16, 32, and 64 pages per allocating thread (`r16`, the
+default, `r64`). Between two runs of one image the four-thread time for 16
+pages moved from 142 ms to 203 ms, and 32 pages passed the targets in every
+run, so the default stays at 32.
+
+With several threads the collector discards free pages after it lets the
+other threads go, still holding the heap lock: a free run changes only under
+that lock, and the threads run on their own slabs meanwhile. At an 8 MiB
+floor the discards had taken half of each pause.
 
 ### Idle collection
 
@@ -227,9 +241,13 @@ Filled in from the reference runs below.
 
 - Threads that allocate collect less often, up to eight times less in a
   large process, and keep their slabs across those collections.
-- A large process can hold up to 8 MiB more garbage between collections and
-  896 KiB of slabs in thread caches; an idle wait on every thread gives both
-  back.
+- A large process can hold up to 4 MiB of garbage between collections
+  instead of 1 MiB, and 896 KiB of slabs in thread caches; an idle wait on
+  every thread gives both back.
+- The heap's frontier grows with the floor, and the page records up to the
+  frontier stay charged: 128 bytes per heap page, one page of records per
+  32 heap pages. After the idle rounds of eight threads a process held about
+  135 pages where 0.2.8 held 104, steady from round to round.
 - A process whose threads block outside `wait.Any` and the goroutine
   scheduler never counts as idle, and gets no idle collection.
 - A pressure collection runs when the 256 MiB reservation is full. The
