@@ -45,6 +45,7 @@ var (
 	remoteBad    atomic.Uint64
 	remoteFreed  atomic.Uint64
 	remoteTwoWay bool
+	remoteSink   [thread.Slots]atomic.Pointer[byte]
 	remoteSizes  = [...]int{16, 48, 96, 200, 400, 1000, 2000}
 )
 
@@ -97,8 +98,10 @@ func remoteLoop(index int) {
 			in.pop()
 			// Garbage no one frees: the heap reaches its goal, so
 			// collections run while remote frees wait in the slabs.
+			// The sink makes it escape to the heap.
 			garbage := make([]byte, remoteSizes[(op+index+3)%len(remoteSizes)])
 			garbage[0] = byte(op)
+			remoteSink[index].Store(&garbage[0])
 		}
 	}
 	// The partner frees until this thread says it sends no more.
