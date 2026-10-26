@@ -164,28 +164,28 @@ func Collect() {
 	tls.Unpin()
 }
 
-// collectPinned runs a collection for reason; the caller is pinned to its
-// thread.
-func collectPinned(reason collectionReason) {
+// collectPinned runs a collection for reason and reports whether one ran to
+// its end; the caller is pinned to its thread.
+func collectPinned(reason collectionReason) bool {
 	if !ready || self().regions.depth != 0 {
-		return
+		return false
 	}
 	if collecting {
 		panic("arena: collection started during a collection")
 	}
 	if threaded.Load() {
-		collectThreaded(selfSlot(), reason)
-		return
+		return collectThreaded(selfSlot(), reason)
 	}
 	if !planStacks(selfSlot(), stackPointer()) {
 		suspendFailures.Add(1)
 		native.diag.abandoned[reason]++
-		return
+		return false
 	}
 	native.allocators = 1
 	base, _ := currentStack()
 	scrubStack(base)
 	collect(reason)
+	return true
 }
 
 //go:noinline
@@ -248,8 +248,10 @@ func CollectIdle() {
 		native.diag.idleSkipped++
 	}
 	unlockHeap()
-	if waiting && allocated {
-		collectPinned(collectIdle)
+	// An idle collection given up found a thread at work: its free
+	// pages stay for that thread.
+	if waiting && allocated && !collectPinned(collectIdle) {
+		waiting = false
 	}
 	if waiting && !collecting {
 		lockHeap()

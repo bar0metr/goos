@@ -202,13 +202,14 @@ func unlockHeap() {
 // collectThreaded is a collection with several threads: the caller becomes
 // the collection's owner, holds every other thread off its processor, and
 // collects over their roots. A thread that asks while another collects
-// waits for that collection and does not run another.
-func collectThreaded(slot int, reason collectionReason) {
+// waits for that collection and does not run another, and reports whether
+// a collection completed.
+func collectThreaded(slot int, reason collectionReason) bool {
 	epoch := gcEpoch.Load()
 	gcLock.lock()
 	if gcEpoch.Load() != epoch {
 		gcLock.unlock()
-		return
+		return true
 	}
 	heapLock.lock()
 	gcFlag.Store(1)
@@ -257,6 +258,7 @@ func collectThreaded(slot int, reason collectionReason) {
 	gcFlag.Store(0)
 	heapLock.unlock()
 	gcLock.unlock()
+	return completed
 }
 
 // prepareThreads makes the held threads' heap state ready for marking and
