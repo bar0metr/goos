@@ -159,14 +159,13 @@ func (h *heap) sweep() {
 	}
 	h.collections++
 	h.collectedMallocs = h.mallocs
-	h.nextCollection = h.liveBytes * 2
-	if h.nextCollection < h.liveBytes+collectionFloor {
-		h.nextCollection = h.liveBytes + collectionFloor
-	}
+	h.goal()
 }
 
 // sweepSlab frees the unmarked slots of a slab. When that empties it, it
 // returns the page after the free run the slab joined, and zero otherwise.
+// A slab a thread still owns stays with its owner, off the lists, even
+// empty: its thread's cache names it (drainCache).
 func (h *heap) sweepSlab(page uint32) uint32 {
 	m := &h.meta[page]
 	slots := slotsPerPage(m.class)
@@ -204,6 +203,9 @@ func (h *heap) sweepSlab(page uint32) uint32 {
 	}
 	m.mark = [slotWords]uint64{}
 	m.used -= uint16(dead)
+	if m.owner != 0 {
+		return 0
+	}
 	switch {
 	case m.used == 0:
 		if !wasFull {

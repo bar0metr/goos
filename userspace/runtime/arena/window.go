@@ -16,8 +16,16 @@ import "sync/atomic"
 // inside a window takes the locked path instead.
 var gcFlag atomic.Uint32
 
-// threadAlloc is the part of a thread's state the fast path uses.
+// threadAlloc is the part of a thread's state the fast path and the
+// collector's bookkeeping use.
 type threadAlloc struct {
+	// live is set while a thread runs in the slot. It changes under the
+	// heap lock.
+	live bool
+	// idle is set while the thread waits in wait.Any or the goroutine
+	// scheduler's idle wait (IdleEnter): an idle collection runs only while
+	// every other live thread has it set.
+	idle atomic.Uint32
 	// fast is set while the thread is inside a window.
 	fast atomic.Uint32
 	// regionChanging covers cursor/innermost publication in Enter and Leave.
@@ -31,6 +39,11 @@ type threadAlloc struct {
 	// unfolded is set while counts holds anything fold has not folded.
 	counts   threadCounts
 	unfolded atomic.Uint32
+	// allocated is set when the thread allocated from the heap since the
+	// last collection: fold sets it from the counts, and a run allocation
+	// sets it under the heap lock. A collection counts the threads that
+	// set it to pace the next one and clears it once it completes.
+	allocated bool
 }
 
 // windowPause, in host tests, runs at every point where a collector could
@@ -81,6 +94,9 @@ func (a *threadAlloc) noteUnfolded() {
 // fold publishes a's counts into h's. The caller holds the heap lock and is
 // a's thread, or a's thread is held outside a window or has ended.
 func (a *threadAlloc) fold(h *heap) {
+	if a.counts.allocs != 0 {
+		a.allocated = true
+	}
 	h.foldCounts(&a.counts)
 	a.unfolded.Store(0)
 }
@@ -141,6 +157,17 @@ func (a *threadAlloc) freeOwned(h *heap, address uintptr, owner uint32) bool {
 	if !ok {
 		a.fast.Store(0)
 		panic("arena: double free or free of a non-allocation")
+	}
+	return true
+}
+
+// idleQuorum reports whether every live thread of count but slot is idle;
+// at returns a thread's state.
+func idleQuorum(slot, count int, at func(int) *threadAlloc) bool {
+	for index := 0; index < count; index++ {
+		if a := at(index); index != slot && a.live && a.idle.Load() == 0 {
+			return false
+		}
 	}
 	return true
 }

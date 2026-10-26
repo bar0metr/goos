@@ -6,14 +6,15 @@ import (
 	"unsafe"
 )
 
-// Thread-owned slabs (ADR 0203). Once a process runs several threads, each
-// thread owns at most one slab per class. Only the owner allocates from it
-// and frees into it, without the heap lock; its page record names the owner.
-// A thread that frees a slot of a slab another thread owns sets the slot's
-// bit in the slab's mark bitmap, which no collection uses until the
-// collection takes the slab back, and the owner folds those bits into its
-// allocation bitmap when the slab runs out. A second free of one slot finds
-// its bit already set.
+// Thread-owned slabs (ADR 0203, ADR 0205). Once a process runs several
+// threads, each thread owns up to maxCachedSlabs slabs per class. Only the
+// owner allocates from them and frees into them, without the heap lock; a
+// slab's page record names its owner. A thread that frees a slot of a slab
+// another thread owns sets the slot's bit in the slab's mark bitmap, and the
+// owner folds those bits into its allocation bitmap when its slabs of that
+// class run out. A collection folds them too, while it holds every thread,
+// before it marks: from then until its sweep ends the bitmap holds marks. A
+// second free of one slot finds its bit already set.
 //
 // Ownership changes only under the heap lock. A thread that frees remotely
 // reads the owner without it, so its bit can land after the owner gave the
@@ -23,10 +24,27 @@ import (
 //
 // The functions here run without the heap lock only where they say so.
 
-// threadCache is the slabs a thread owns: page plus one per class, zero for
-// none.
+// maxCachedSlabs bounds the slabs a thread owns per class. A refill aims to
+// give a thread targetCachedSlots free slots: one slab of a small class
+// holds more, and a class with few slots per page takes several slabs, up
+// to the bound (cacheTarget).
+const (
+	maxCachedSlabs    = 4
+	targetCachedSlots = 16
+)
+
+// classCache is the slabs a thread owns of one class. pages[:count] hold
+// page plus one and the rest zero; hint is the slab the fast path tries
+// first.
+type classCache struct {
+	pages [maxCachedSlabs]uint32
+	count uint8
+	hint  uint8
+}
+
+// threadCache is the slabs a thread owns, by class.
 type threadCache struct {
-	slabs [classCount]uint32
+	classes [classCount]classCache
 }
 
 // threadCounts is what a thread counted without the heap lock. foldCounts
@@ -34,27 +52,53 @@ type threadCache struct {
 type threadCounts struct {
 	allocs, allocBytes, frees, freeBytes, cleared uint64
 	localFrees, remoteFrees, refills, drained     uint64
-	sizeCounts, sizeBytes                         [threadSizeBuckets]uint64
+	// misses counts fast-path allocations that found every owned slab of
+	// their class full; batches counts refills that took new slabs and
+	// claimed the slabs they took.
+	misses, batches, claimed uint64
+	sizeCounts, sizeBytes    [threadSizeBuckets]uint64
 }
 
-// cacheAlloc takes a slot from the slab c owns for class, or returns zero
-// when c owns none or it is full. Only c's thread calls it, and it needs no
-// lock: no other thread allocates from the slab or changes its bitmap.
+// cacheTarget is how many slabs of class a refill gives a thread.
+func cacheTarget(class uint8) uint32 {
+	slots := slotsPerPage(class)
+	return min(max((targetCachedSlots+slots-1)/slots, 1), maxCachedSlabs)
+}
+
+// cacheBound is the most slab pages one thread's cache can own.
+func cacheBound() uint32 {
+	pages := uint32(0)
+	for class := range classSizes {
+		pages += cacheTarget(uint8(class))
+	}
+	return pages
+}
+
+// cacheAlloc takes a slot from a slab c owns for class, the hinted one
+// first, or returns zero when c owns none with a free slot. Only c's thread
+// calls it, and it needs no lock: no other thread allocates from those
+// slabs or changes their allocation bitmaps.
 func (h *heap) cacheAlloc(c *threadCache, n *threadCounts, class uint8, pointerFree bool) uintptr {
-	page := c.slabs[class]
-	if page == 0 {
-		return 0
+	cc := &c.classes[class]
+	slots := h.classSlots[class]
+	index := cc.hint
+	for tries := uint8(0); tries < cc.count; tries++ {
+		page := cc.pages[index] - 1
+		if h.meta[page].used < slots {
+			cc.hint = index
+			address, cleared := h.takeSlot(page, pointerFree)
+			size := uint64(classSizes[class])
+			n.allocs++
+			n.allocBytes += size
+			n.cleared += uint64(cleared)
+			return address
+		}
+		if index++; index == cc.count {
+			index = 0
+		}
 	}
-	page--
-	if uint32(h.meta[page].used) == uint32(h.classSlots[class]) {
-		return 0
-	}
-	address, cleared := h.takeSlot(page, pointerFree)
-	size := uint64(classSizes[class])
-	n.allocs++
-	n.allocBytes += size
-	n.cleared += uint64(cleared)
-	return address
+	n.misses++
+	return 0
 }
 
 // ownedSlot resolves address to its slot in a slab some thread owns. It
@@ -137,32 +181,56 @@ func (h *heap) drainRemote(n *threadCounts, page uint32) {
 	n.drained += drained
 }
 
-// refill makes c own a slab of class with a free slot: the one it owns once
-// the remote frees are folded in, or else a listed or new slab. owner is the
-// thread's slot plus one. It reports false when the heap has no page. The
-// caller holds the heap lock.
-func (h *heap) refill(c *threadCache, n *threadCounts, class uint8, owner uint32) bool {
+// refill makes c own a slab of class with a free slot. It folds the remote
+// frees of the slabs c owns of class first; when every one is still full,
+// it gives them up and takes up to want slabs, listed ones first, then new
+// ones. owner is the thread's slot plus one. It reports false when c owns
+// no slab with a free slot afterwards: the heap had no page. The caller
+// holds the heap lock.
+func (h *heap) refill(c *threadCache, n *threadCounts, class uint8, owner, want uint32) bool {
 	n.refills++
+	cc := &c.classes[class]
 	slots := uint32(h.classSlots[class])
-	if page := c.slabs[class]; page != 0 {
-		page--
+	room := false
+	for index := uint8(0); index < cc.count; index++ {
+		page := cc.pages[index] - 1
 		h.drainRemote(n, page)
-		if uint32(h.meta[page].used) < slots {
-			return true
+		if !room && uint32(h.meta[page].used) < slots {
+			cc.hint, room = index, true
 		}
-		h.disown(n, page)
-		c.slabs[class] = 0
 	}
-	page := h.partial[class]
-	if page != noPage {
-		h.removePartial(page)
-		// A free that read a stale owner may have left bits.
-		h.drainRemote(n, page)
-	} else if page = h.newSlab(class); page == noPage {
+	if room {
+		return true
+	}
+	// Every slab is full. A full slab given up stays off the lists until a
+	// free or a sweep gives it a free slot.
+	for index := uint8(0); index < cc.count; index++ {
+		h.disown(n, cc.pages[index]-1)
+		cc.pages[index] = 0
+		h.diag.disownedFull++
+	}
+	cc.count, cc.hint = 0, 0
+	want = min(max(want, 1), maxCachedSlabs)
+	for uint32(cc.count) < want {
+		page := h.partial[class]
+		if page != noPage {
+			h.removePartial(page)
+			// A free that read a stale owner may have left bits.
+			h.drainRemote(n, page)
+		} else if page = h.newSlab(class); page == noPage {
+			break
+		}
+		atomic.StoreUint32(&h.meta[page].owner, owner)
+		cc.pages[cc.count] = page + 1
+		cc.count++
+		h.cachedPages++
+		n.claimed++
+	}
+	if cc.count == 0 {
 		return false
 	}
-	atomic.StoreUint32(&h.meta[page].owner, owner)
-	c.slabs[class] = page + 1
+	n.batches++
+	h.diag.peakCached = max(h.diag.peakCached, h.cachedPages)
 	return true
 }
 
@@ -172,6 +240,7 @@ func (h *heap) refill(c *threadCache, n *threadCounts, class uint8, owner uint32
 func (h *heap) disown(n *threadCounts, page uint32) {
 	m := &h.meta[page]
 	atomic.StoreUint32(&m.owner, 0)
+	h.cachedPages--
 	h.drainRemote(n, page)
 	switch {
 	case m.used == 0:
@@ -181,14 +250,55 @@ func (h *heap) disown(n *threadCounts, page uint32) {
 	}
 }
 
-// returnCache gives every slab c owns back to the heap. The caller holds the
-// heap lock, and c's thread is the caller, is held, or has ended.
-func (h *heap) returnCache(c *threadCache, n *threadCounts) {
-	for class := range c.slabs {
-		if page := c.slabs[class]; page != 0 {
-			h.disown(n, page-1)
-			c.slabs[class] = 0
-			h.diag.returnedSlabs++
+// returnCache gives every slab c owns back to the heap and returns how many
+// it gave. The caller holds the heap lock, and c's thread is the caller, is
+// held, or has ended.
+func (h *heap) returnCache(c *threadCache, n *threadCounts) uint64 {
+	returned := uint64(0)
+	for class := range c.classes {
+		cc := &c.classes[class]
+		for index := uint8(0); index < cc.count; index++ {
+			h.disown(n, cc.pages[index]-1)
+			cc.pages[index] = 0
+			returned++
+		}
+		cc.count, cc.hint = 0, 0
+	}
+	h.diag.returnedSlabs += returned
+	return returned
+}
+
+// drainCache folds the remote frees of every slab c owns and keeps them
+// owned. A collection that keeps the threads' slabs calls it for every
+// thread before it marks, so the mark bitmaps hold no remote free when
+// marking starts. It returns how many slabs c owns. The caller holds the
+// heap lock and c's thread is the caller or is held.
+func (h *heap) drainCache(c *threadCache, n *threadCounts) uint64 {
+	kept := uint64(0)
+	for class := range c.classes {
+		cc := &c.classes[class]
+		for index := uint8(0); index < cc.count; index++ {
+			h.drainRemote(n, cc.pages[index]-1)
+		}
+		kept += uint64(cc.count)
+	}
+	return kept
+}
+
+// checkCache stops the process when a slab c names is no longer a slab of
+// its class owned by owner: a sweep that kept the threads' slabs must leave
+// every one where it was. The caller holds the heap lock.
+func (h *heap) checkCache(c *threadCache, owner uint32) {
+	for class := range c.classes {
+		cc := &c.classes[class]
+		if uint32(cc.count) > cacheTarget(uint8(class)) || cc.count != 0 && cc.hint >= cc.count {
+			panic("arena: thread cache out of bounds")
+		}
+		for index := uint8(0); index < cc.count; index++ {
+			m := &h.meta[cc.pages[index]-1]
+			if m.kind != pageSlab || int(m.class) != class || m.owner != owner || m.flags&pageListed != 0 {
+				panic("arena: thread cache names a slab it does not own")
+			}
 		}
 	}
 }
@@ -215,6 +325,9 @@ func (h *heap) foldCounts(n *threadCounts) {
 	c.remoteFrees += n.remoteFrees
 	c.refills += n.refills
 	c.drained += n.drained
+	c.misses += n.misses
+	c.batches += n.batches
+	c.claimed += n.claimed
 	for bucket := range n.sizeCounts {
 		c.sizeCounts[bucket] += n.sizeCounts[bucket]
 		c.sizeBytes[bucket] += n.sizeBytes[bucket]
@@ -225,8 +338,8 @@ func (h *heap) foldCounts(n *threadCounts) {
 }
 
 // foldStrayFrees folds the remote frees left in slabs no thread owns. A
-// collection calls it after taking every slab back, before it marks: from
-// then on the mark bitmaps hold marks.
+// collection calls it after it took the threads' slabs back or folded their
+// remote frees, before it marks: from then on the mark bitmaps hold marks.
 func (h *heap) foldStrayFrees() {
 	// The counts are the heap's own: TinyGo would put a local this large,
 	// whose address is passed on, on the heap.
@@ -234,6 +347,12 @@ func (h *heap) foldStrayFrees() {
 	for page := uint32(0); page < h.frontier; page++ {
 		m := &h.meta[page]
 		if m.kind != pageSlab || m.mark == [slotWords]uint64{} {
+			continue
+		}
+		if m.owner != 0 {
+			// A kept slab: drainCache folded it, and an owned slab is
+			// never listed.
+			h.drainRemote(n, page)
 			continue
 		}
 		slots := uint32(h.classSlots[m.class])

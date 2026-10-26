@@ -22,7 +22,7 @@ func (c *cacheThread) alloc(t testing.TB, th *testHeap, lock *sync.Mutex, size u
 	lock.Lock()
 	th.foldCounts(&c.counts)
 	address := uintptr(0)
-	if th.refill(&c.cache, &c.counts, class, c.owner) {
+	if th.refill(&c.cache, &c.counts, class, c.owner, cacheTarget(class)) {
 		address = th.cacheAlloc(&c.cache, &c.counts, class, false)
 	}
 	lock.Unlock()

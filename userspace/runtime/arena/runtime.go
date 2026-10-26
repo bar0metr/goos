@@ -74,7 +74,26 @@ func Init() {
 	metadata := unsafe.Slice((*pageMeta)(pointerAt(uintptr(meta))), heapPages)
 	stack := unsafe.Slice((*uintptr)(pointerAt(uintptr(work))), markStackEntries)
 	native.init(uintptr(base), heapPages, metadata, stack, discard)
+	native.pageLimit = pageLimit()
 	ready = true
+}
+
+// processInfo receives the process's record; a global, so reading it
+// allocates nothing.
+var processInfo [kcall.ProcessInfoSize]byte
+
+// pageLimit returns the process's page quota in bytes, or zero when the
+// kernel does not say. The quota is set at launch and never changes.
+func pageLimit() uint64 {
+	if sys.ProcessInfo(kcall.ProcessInfoSelf, &processInfo) != kcall.StatusOK {
+		return 0
+	}
+	offset := kcall.ProcessInfoLimitsOffset + 4*kcall.ProcessPages
+	limit := uint64(0)
+	for index := 3; index >= 0; index-- {
+		limit = limit<<8 | uint64(processInfo[offset+index])
+	}
+	return limit * kcall.SystemInfoPageSize
 }
 
 // InitService is Init for a long-running service. A program started from a
@@ -141,11 +160,13 @@ func fail() {
 // position.
 func Collect() {
 	tls.Pin()
-	collectPinned()
+	collectPinned(collectExplicit)
 	tls.Unpin()
 }
 
-func collectPinned() {
+// collectPinned runs a collection for reason; the caller is pinned to its
+// thread.
+func collectPinned(reason collectionReason) {
 	if !ready || self().regions.depth != 0 {
 		return
 	}
@@ -153,20 +174,22 @@ func collectPinned() {
 		panic("arena: collection started during a collection")
 	}
 	if threaded.Load() {
-		collectThreaded(selfSlot())
+		collectThreaded(selfSlot(), reason)
 		return
 	}
 	if !planStacks(selfSlot(), stackPointer()) {
 		suspendFailures.Add(1)
+		native.diag.abandoned[reason]++
 		return
 	}
+	native.allocators = 1
 	base, _ := currentStack()
 	scrubStack(base)
-	collect()
+	collect(reason)
 }
 
 //go:noinline
-func collect() {
+func collect(reason collectionReason) {
 	collecting = true
 	started := nativeTicks()
 	native.beginMark()
@@ -179,7 +202,7 @@ func collect() {
 	native.phase = PhaseNone
 	native.finishMark()
 	native.sweep()
-	native.trimAfterCollection()
+	native.trimAfter(reason)
 	releaseMarkStack()
 	pause := uint64(nativeTicks() - started)
 	lastPause = pause
@@ -187,17 +210,21 @@ func collect() {
 	if pause > maxPause {
 		maxPause = pause
 	}
+	native.diag.pauses[histBucket(pause)]++
+	native.diag.completed[reason]++
 	collecting = false
 }
 
 // IdlePending reports whether anything was allocated since the last
-// collection, or free pages wait to go back to the kernel.
+// collection, free pages wait to go back to the kernel, or threads own
+// slabs an idle collection would take back.
 func IdlePending() bool {
 	if !ready {
 		return false
 	}
 	lockHeap()
-	pending := native.mallocs != native.collectedMallocs || native.dirtyFree != 0 || threaded.Load() && anyUnfolded()
+	pending := native.mallocs != native.collectedMallocs || native.dirtyFree != 0 ||
+		threaded.Load() && (anyUnfolded() || native.cachedPages != 0)
 	unlockHeap()
 	return pending
 }
@@ -205,28 +232,39 @@ func IdlePending() bool {
 // CollectIdle collects if anything was allocated since the last collection,
 // then gives every free page back, retained ones included. A service calls
 // it when it has nothing to do, so its pages drop to its live heap while it
-// waits rather than at the next threshold.
+// waits rather than at the next threshold. With several threads it does
+// nothing unless every other thread waits too (IdleEnter): one thread with
+// nothing to do does not make its process idle.
 func CollectIdle() {
 	if !ready {
 		return
 	}
+	tls.Pin()
 	lockHeap()
-	allocated := native.mallocs != native.collectedMallocs || threaded.Load() && anyUnfolded()
-	unlockHeap()
-	if allocated {
-		Collect()
+	native.diag.idleRequests++
+	waiting := !threaded.Load() || othersIdle(selfSlot())
+	allocated := native.mallocs != native.collectedMallocs || threaded.Load() && (anyUnfolded() || native.cachedPages != 0)
+	if !waiting {
+		native.diag.idleSkipped++
 	}
-	if !collecting {
+	unlockHeap()
+	if waiting && allocated {
+		collectPinned(collectIdle)
+	}
+	if waiting && !collecting {
 		lockHeap()
 		native.trim()
 		unlockHeap()
 	}
+	tls.Unpin()
 }
 
 // SetRetained sets how many free pages a collection or an explicit free
 // leaves for the allocations after it instead of giving them back, up to
-// 256. Zero, the default, gives every page back at once. An idle wait and a
-// failed allocation give back the retained pages too. Retained pages stay
+// 256. Zero, the default, gives every page back at once; without a call, a
+// collection that several threads' allocations started keeps some
+// (retention). An idle wait and a failed allocation give back the retained
+// pages too. Retained pages stay
 // charged to the process's page quota, and nothing gives them back when a
 // page touched past the quota stops the process: the kernel charges a page
 // at that touch, after the allocator has returned (ADR 0202).
@@ -301,12 +339,12 @@ func allocPinned(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 		return pointerAt(allocThreaded(t, size, pointerFree(layout)))
 	}
 	if native.liveBytes >= native.nextCollection && !collecting {
-		Collect()
+		collectPinned(collectAutomatic)
 	}
 	noPointers := pointerFree(layout)
 	address := native.allocObject(size, noPointers)
 	if address == 0 && !collecting {
-		Collect()
+		collectPinned(collectPressure)
 		native.trim()
 		address = native.allocObject(size, noPointers)
 	}
@@ -318,21 +356,26 @@ func allocPinned(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 
 // allocThreaded is alloc once threads exist. A collection never starts
 // while the heap lock is held: the lock is let go, the collection runs, and
-// the allocation starts again.
+// the allocation starts again. The thread's own counts are folded first, so
+// the goal is compared with what it allocated from its slabs too.
 func allocThreaded(t *threadState, size uintptr, noPointers bool) uintptr {
 	heapLock.lock()
+	t.fold(&native)
 	if native.liveBytes >= native.nextCollection && !collecting {
 		heapLock.unlock()
-		Collect()
+		collectPinned(collectAutomatic)
 		heapLock.lock()
 	}
 	address := native.allocObject(size, noPointers)
 	if address == 0 && !collecting {
 		heapLock.unlock()
-		Collect()
+		collectPinned(collectPressure)
 		heapLock.lock()
 		native.trim()
 		address = native.allocObject(size, noPointers)
+	}
+	if address != 0 {
+		t.allocated = true
 	}
 	heapLock.unlock()
 	if address == 0 {

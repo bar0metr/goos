@@ -11,3 +11,9 @@ func IdlePending() bool { return false }
 // CollectIdle collects if anything was allocated since the last collection,
 // then gives every free page back.
 func CollectIdle() {}
+
+// IdleEnter marks the calling thread as waiting with nothing to run.
+func IdleEnter() {}
+
+// IdleLeave clears the calling thread's idle mark.
+func IdleLeave() {}
