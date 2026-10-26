@@ -10,9 +10,11 @@
 // transitions while another collects (region_window.go); "storm N ROUNDS"
 // has N threads ask for collections at once; "fault" and "overflow" end a worker with a fault, which ends the
 // process; "bench N OPS MODE" times N threads that allocate, with the heap
-// lock alone (lock), with thread-owned slabs (cache), or with owned slabs
-// and 256 free pages retained (retain), and prints the allocator profile. Only the main thread prints. It is built only into validation
-// images.
+// lock alone (lock), with thread-owned slabs (cache), with owned slabs and
+// 256 free pages retained (retain), or with owned slabs and only sizes of
+// 512 to 2048 bytes (big), and prints the allocator profile. "remote",
+// "live", "idle", and "quota" are further allocator workloads (scale.go).
+// Only the main thread prints. It is built only into validation images.
 package main
 
 import (
@@ -30,7 +32,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "threadprobe smoke|lifecycle|gc|roots|region-window|storm|fault|overflow|bench [ARGS...]",
+	Usage:   "threadprobe smoke|lifecycle|gc|roots|region-window|storm|fault|overflow|bench|remote|live|idle|quota [ARGS...]",
 	Summary: "native thread checks",
 	MaxArgs: 4,
 }
@@ -76,13 +78,34 @@ func run(data startup.Data) {
 		count, _ := data.Arg(2)
 		ops, _ := data.Arg(3)
 		kind, _ := data.Arg(4)
-		if !utility.Equal(kind, "lock") && !utility.Equal(kind, "cache") && !utility.Equal(kind, "retain") {
+		if !utility.Equal(kind, "lock") && !utility.Equal(kind, "cache") && !utility.Equal(kind, "retain") && !utility.Equal(kind, "big") {
 			utility.Usage()
 		}
 		if utility.Equal(kind, "retain") {
 			arena.SetRetained(256)
 		}
+		if utility.Equal(kind, "big") {
+			benchMix = bigSizes[:]
+		}
 		bench(int(parse(count)), int(parse(ops)), !utility.Equal(kind, "lock"), kind)
+	case utility.Equal(mode, "remote") && data.ArgCount() == 4:
+		count, _ := data.Arg(2)
+		ops, _ := data.Arg(3)
+		way, _ := data.Arg(4)
+		remote(int(parse(count)), int(parse(ops)), way)
+	case utility.Equal(mode, "live") && data.ArgCount() == 4:
+		count, _ := data.Arg(2)
+		ops, _ := data.Arg(3)
+		keep, _ := data.Arg(4)
+		live(int(parse(count)), int(parse(ops)), int(parse(keep)))
+	case utility.Equal(mode, "idle") && data.ArgCount() == 3:
+		count, _ := data.Arg(2)
+		rounds, _ := data.Arg(3)
+		idle(int(parse(count)), int(parse(rounds)))
+	case utility.Equal(mode, "quota") && data.ArgCount() == 3:
+		count, _ := data.Arg(2)
+		rounds, _ := data.Arg(3)
+		quota(int(parse(count)), int(parse(rounds)))
 	case utility.Equal(mode, "fault"):
 		crash(faultWorker)
 	case utility.Equal(mode, "overflow"):
@@ -620,13 +643,16 @@ var (
 	benchGo    atomic.Bool
 	benchSums  [thread.Slots]atomic.Uint64
 	benchSizes = [...]int{16, 24, 48, 64, 100, 200, 400, 1000}
+	// bigSizes are the classes with five or fewer slots per page.
+	bigSizes = [...]int{512, 768, 1024, 1360, 2048}
+	benchMix = benchSizes[:]
 )
 
 //go:noinline
 func benchLoop(index int) {
 	var ring [64][]byte
 	for op := 0; op < benchOps; op++ {
-		buffer := make([]byte, benchSizes[(op+index)%len(benchSizes)])
+		buffer := make([]byte, benchMix[(op+index)%len(benchMix)])
 		buffer[0] = byte(op)
 		ring[op%len(ring)] = buffer
 	}
@@ -666,7 +692,7 @@ func bench(count int, ops int, caches bool, mode []byte) {
 	after := arena.HeapStats()
 	total := uint64(count) * uint64(ops)
 	utility.PrintText("THREADPROBE_BENCH mode=")
-	for _, name := range [...]string{"lock", "cache", "retain"} {
+	for _, name := range [...]string{"lock", "cache", "retain", "big"} {
 		if utility.Equal(mode, name) {
 			utility.PrintText(name)
 		}

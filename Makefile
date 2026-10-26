@@ -685,12 +685,14 @@ test-smp:
 # test-native-threads checks threads, joins, exit codes, the task quota, and
 # faults; test-thread-gc the roots of every thread, collections they ask
 # for at once, and collections while a thread is held inside a region
-# transition; test-thread-allocator the thread-owned slabs, with their host
-# model and race tests. bench-thread-allocator only measures: allocation with
-# the heap lock alone and with owned slabs on 1, 2, 4, and 8 threads, on
-# eight processors, into build/reports/thread-allocator.md.
+# transition; test-thread-allocator the thread caches, the collection goal,
+# idle collections, and allocation near the page quota (ADR 0205), with
+# their host model and race tests. bench-thread-allocator only measures:
+# allocation with the heap lock alone and with thread caches on 1, 2, 4, and
+# 8 threads, on eight processors, into build/reports/thread-allocator.md.
 THREAD_SMP ?= 4
 BENCH_SMP ?= 8
+THREAD_ALLOCATOR_TESTS = Owned|Stray|Window|Cache|Batch|Remote|Automatic|Abandoned|Goal|Retention|Idle|Fold|PageRecord
 
 test-native-threads:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
@@ -703,8 +705,8 @@ test-thread-gc:
 	@SUITE=gc SMP=$(THREAD_SMP) MEMORY=$(MEMORY) tests/boot/threads.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/threads-test.img
 
 test-thread-allocator:
-	$(BUILD_ENV) go test -count=1 -run 'Owned|Stray|Window' ./userspace/runtime/arena
-	$(BUILD_ENV) go test -race -count=1 -run 'Owned|Stray|Window' ./userspace/runtime/arena
+	$(BUILD_ENV) go test -count=1 -run '$(THREAD_ALLOCATOR_TESTS)' ./userspace/runtime/arena
+	$(BUILD_ENV) go test -race -count=1 -run '$(THREAD_ALLOCATOR_TESTS)' ./userspace/runtime/arena
 	@$(MAKE) --no-print-directory iso VALIDATION=1
 	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/threads-test.img
 	@SUITE=allocator SMP=$(THREAD_SMP) MEMORY=$(MEMORY) tests/boot/threads.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/threads-test.img
@@ -1094,9 +1096,9 @@ test-pve-smp: pve-artifacts
 	@$(PVELAB) run --scenario smp --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
 
 # Native threads under KVM on eight processors (ADR 0203): the thread checks,
-# then the allocator timed with the heap lock alone and with thread-owned
-# slabs, into thread-allocator.md in the run's directory. threadprobe is in
-# validation images only.
+# the allocator workloads of ADR 0205, then the allocator timed with the heap
+# lock alone and with thread caches, into thread-allocator.md in the run's
+# directory. threadprobe is in validation images only.
 test-pve-threads:
 	@$(MAKE) --no-print-directory pve-artifacts VALIDATION=1
 	@$(PVELAB) run --scenario threads --cpu host --sockets 1 --cores 8 $(PVE_RUN_FLAGS)
@@ -1183,8 +1185,8 @@ help:
 	  '  test-smp        boot four processors and prove they run tasks at once' \
 	  '  test-native-threads  native threads: parallel run, joins, quota, faults' \
 	  '  test-thread-gc  the roots of every thread survive a stop-the-world collection' \
-	  '  test-thread-allocator  thread-owned slabs: host model, race, and guest checks' \
-	  '  bench-thread-allocator  heap lock against owned slabs on 1, 2, 4, 8 threads' \
+	  '  test-thread-allocator  thread caches, goal, idle, quota: host model, race, and guest checks' \
+	  '  bench-thread-allocator  heap lock against thread caches on 1, 2, 4, 8 threads' \
 	  '  test-stress     run parallel QEMU command stress (STRESS_RUNS, STRESS_ROUNDS)' \
 	  '  test-storage-stress run the FAT32 model, failure, and fsck workload at scale' \
 	  '  test-fat32         run the FAT32 format tests, host FAT tools included' \

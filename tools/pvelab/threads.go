@@ -11,10 +11,12 @@ import (
 	"time"
 )
 
-// threadsScenario checks native threads under KVM (ADR 0203) and times the
-// allocator with the heap lock alone and with thread-owned slabs. It needs a
-// validation image, which carries threadprobe. The timings go to
-// thread-allocator.md and thread-bench.txt in the run's evidence directory.
+// threadsScenario checks native threads under KVM (ADR 0203), runs the
+// allocator workloads of ADR 0205, and times the allocator with the heap
+// lock alone and with thread caches. It needs a validation image, which
+// carries threadprobe. The timings go to thread-allocator.md and
+// thread-bench.txt, and the workloads' output to thread-workloads.txt, in
+// the run's evidence directory.
 type threadsScenario struct{}
 
 func (threadsScenario) Name() string { return "threads" }
@@ -28,6 +30,18 @@ var threadChecks = []struct{ name, command, want string }{
 	{"threads-storm", "threadprobe storm 7 20", "THREADPROBE_STORM_OK"},
 }
 
+// threadWorkloads are the allocator workloads: remote frees, a mostly live
+// heap, bursts with idle waits, and allocation near the page quota. Their
+// output goes to the evidence directory.
+var threadWorkloads = []struct{ name, command, want string }{
+	{"threads-remote-one", "threadprobe remote 2 200000 one", "THREADPROBE_REMOTE_OK"},
+	{"threads-remote-two", "threadprobe remote 8 200000 two", "THREADPROBE_REMOTE_OK"},
+	{"threads-live-25", "threadprobe live 8 200000 4096", "THREADPROBE_LIVE_OK"},
+	{"threads-live-50", "threadprobe live 8 200000 16384", "THREADPROBE_LIVE_OK"},
+	{"threads-idle", "threadprobe idle 8 20", "THREADPROBE_IDLE_OK"},
+	{"threads-quota", "threadprobe quota 8 3", "THREADPROBE_QUOTA_OK"},
+}
+
 const (
 	threadBenchRuns = 5
 	threadBenchOps  = 200000
@@ -35,9 +49,10 @@ const (
 
 var threadBenchCounts = []int{1, 2, 4, 8}
 
-// threadBenchModes are the heap lock alone, thread-owned slabs, and owned
-// slabs with 256 free pages retained across collections.
-var threadBenchModes = []string{"lock", "cache", "retain"}
+// threadBenchModes are the heap lock alone, thread caches, thread caches
+// with 256 free pages retained across collections, and thread caches on
+// sizes of 512 to 2048 bytes only.
+var threadBenchModes = []string{"lock", "cache", "retain", "big"}
 
 func (threadsScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	g := s.Guest
@@ -52,6 +67,18 @@ func (threadsScenario) Run(ctx context.Context, s *Session) (Result, error) {
 		if err := g.Clean(check.name, out); err != nil {
 			return "", err
 		}
+		g.pass(check.name)
+	}
+	var workloads strings.Builder
+	for _, check := range threadWorkloads {
+		out, err := g.Run(ctx, check.command, 10*time.Minute)
+		if err != nil {
+			return "", fail(ClassScenario, check.name, err)
+		}
+		if err := g.Expect(check.name, out, check.want); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&workloads, "$ %s\n%s\n", check.command, strings.TrimSpace(out))
 		g.pass(check.name)
 	}
 	var raw strings.Builder
@@ -73,7 +100,7 @@ func (threadsScenario) Run(ctx context.Context, s *Session) (Result, error) {
 				}
 				samples[benchKey{threads, mode}] = append(samples[benchKey{threads, mode}], sample)
 				for _, line := range strings.Split(out, "\n") {
-					if strings.HasPrefix(line, "THREADPROBE_BENCH ") || strings.HasPrefix(line, "ALLOC_PROFILE threadprobe threads ") {
+					if strings.HasPrefix(line, "THREADPROBE_BENCH ") || strings.HasPrefix(line, "ALLOC_PROFILE threadprobe ") {
 						raw.WriteString(strings.TrimSpace(line) + "\n")
 					}
 				}
@@ -84,6 +111,9 @@ func (threadsScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	cpus := s.Report.VM.Sockets * s.Report.VM.Cores
 	if s.EvidenceDir != "" {
 		if err := os.WriteFile(filepath.Join(s.EvidenceDir, "thread-bench.txt"), []byte(raw.String()), 0o600); err != nil {
+			return "", failf(ClassInfra, "threads-bench", "writing evidence: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(s.EvidenceDir, "thread-workloads.txt"), []byte(workloads.String()), 0o600); err != nil {
 			return "", failf(ClassInfra, "threads-bench", "writing evidence: %v", err)
 		}
 		table := benchTable(samples, cpus)
@@ -101,7 +131,7 @@ type benchKey struct {
 }
 
 type benchSample struct {
-	ns, collections, contended, refills, pauseMax uint64
+	ns, collections, contended, refills, pauseMax, pauseTotal uint64
 }
 
 // parseBench reads one bench run's timing line and profile.
@@ -123,10 +153,14 @@ func parseBench(out string) (benchSample, bool) {
 			}
 		}
 	}
-	return benchSample{fields["ns"], fields["collections"], fields["heap_contended"], fields["refills"], fields["pause_max"]}, found && fields["ns"] != 0
+	return benchSample{fields["ns"], fields["collections"], fields["heap_contended"], fields["refills"], fields["pause_max"], fields["pause_total"]},
+		found && fields["ns"] != 0
 }
 
-// benchTable renders the median run of each thread count and mode.
+// benchTable renders the median run of each mode and thread count: wall
+// time, throughput, scaling against one thread of the same mode, speedup
+// against the heap lock alone at the same count, and the shared-heap and
+// collection work behind them.
 func benchTable(samples map[benchKey][]benchSample, cpus int) string {
 	median := func(list []benchSample) benchSample {
 		sorted := append([]benchSample(nil), list...)
@@ -135,22 +169,32 @@ func benchTable(samples map[benchKey][]benchSample, cpus int) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Thread allocator benchmark\n\n%d processors under KVM, %d allocations per thread, median of %d runs.\n\n", cpus, threadBenchOps, threadBenchRuns)
-	b.WriteString("| Threads | Heap lock ms | Owned slabs ms | Heap lock Mallocs/s | Owned slabs Mallocs/s | Speedup | Collections | Contended (lock) | Refills (slabs) | Longest pause us (slabs) | Retained ms |\n")
-	b.WriteString("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
-	for _, threads := range threadBenchCounts {
-		lockRuns, cacheRuns := samples[benchKey{threads, "lock"}], samples[benchKey{threads, "cache"}]
-		if len(lockRuns) == 0 || len(cacheRuns) == 0 {
-			continue
+	b.WriteString("| Mode | Threads | ms | Mallocs/s | ns/alloc | Scaling | vs lock | Collections | Contended | Refills/kalloc | Pause share | Longest pause us |\n")
+	b.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	for _, mode := range threadBenchModes {
+		var single float64
+		for _, threads := range threadBenchCounts {
+			runs := samples[benchKey{threads, mode}]
+			if len(runs) == 0 {
+				continue
+			}
+			m := median(runs)
+			total := float64(threads * threadBenchOps)
+			rate := total / float64(m.ns) * 1e9
+			if threads == 1 {
+				single = rate
+			}
+			scaling, speedup := "-", "-"
+			if single != 0 {
+				scaling = fmt.Sprintf("%.0f%%", rate/(float64(threads)*single)*100)
+			}
+			if lock := samples[benchKey{threads, "lock"}]; len(lock) != 0 {
+				speedup = fmt.Sprintf("%.2fx", float64(median(lock).ns)/float64(m.ns))
+			}
+			fmt.Fprintf(&b, "| %s | %d | %.1f | %.0f | %.0f | %s | %s | %d | %d | %.2f | %.1f%% | %.0f |\n", mode, threads,
+				float64(m.ns)/1e6, rate, float64(m.ns)/total, scaling, speedup, m.collections, m.contended,
+				float64(m.refills)*1000/total, float64(m.pauseTotal)/float64(m.ns)*100, float64(m.pauseMax)/1e3)
 		}
-		lock, cache := median(lockRuns), median(cacheRuns)
-		retained := "-"
-		if runs := samples[benchKey{threads, "retain"}]; len(runs) != 0 {
-			retained = fmt.Sprintf("%.1f", float64(median(runs).ns)/1e6)
-		}
-		total := float64(threads * threadBenchOps)
-		fmt.Fprintf(&b, "| %d | %.1f | %.1f | %.2f | %.2f | %.2fx | %d | %d | %d | %.0f | %s |\n", threads,
-			float64(lock.ns)/1e6, float64(cache.ns)/1e6, total/float64(lock.ns)*1e3, total/float64(cache.ns)*1e3,
-			float64(lock.ns)/float64(cache.ns), cache.collections, lock.contended, cache.refills, float64(cache.pauseMax)/1e3, retained)
 	}
 	return b.String()
 }

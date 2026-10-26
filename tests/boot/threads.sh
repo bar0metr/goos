@@ -162,35 +162,41 @@ if [ "$suite" = bench ]; then
 	runs=${BENCH_RUNS:-3}
 	ops=${BENCH_OPS:-50000}
 	for threads in 1 2 4 8; do
-		for mode in lock cache; do
+		for mode in lock cache big; do
 			run=0
 			while [ "$run" -lt "$runs" ]; do
 				run "threadprobe bench $threads $ops $mode"
 				require '^THREADPROBE_BENCH_OK$' "bench $threads $mode"
-				printf '%s %s %s %s %s %s\n' "$threads" "$mode" "$(field ns '^THREADPROBE_BENCH ')" \
+				printf '%s %s %s %s %s %s %s %s\n' "$threads" "$mode" "$(field ns '^THREADPROBE_BENCH ')" \
 					"$(field heap_contended '^ALLOC_PROFILE threadprobe threads ')" \
 					"$(field refills '^ALLOC_PROFILE threadprobe threads ')" \
-					"$(field pause_max '^ALLOC_PROFILE threadprobe threads ')" >>"$work/bench"
+					"$(field pause_max '^ALLOC_PROFILE threadprobe threads ')" \
+					"$(field pause_total '^ALLOC_PROFILE threadprobe threads ')" \
+					"$(field collections '^THREADPROBE_BENCH ')" >>"$work/bench"
 				run=$((run + 1))
 			done
 		done
 	done
-	# The median of the runs, then the throughput and the speedup of owned
-	# slabs over the heap lock at each thread count.
+	# The median run of each thread count and mode: throughput, scaling
+	# against one thread of the same mode, and the shared-heap and
+	# collection work behind it.
 	{
 		printf '# Thread allocator benchmark\n\n'
 		printf '%s processors, %s allocations per thread, median of %s runs. ' "$cpus" "$ops" "$runs"
 		printf 'Accelerator: %s.\n\n' "${ACCEL:-tcg}"
-		printf '| Threads | Heap lock ms | Owned slabs ms | Heap lock Mallocs/s | Owned slabs Mallocs/s | Speedup | Contended (lock) | Refills (slabs) | Longest pause us (slabs) |\n'
-		printf '|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n'
-		for threads in 1 2 4 8; do
-			lock=$(awk -v t="$threads" '$1 == t && $2 == "lock" {print $3, $4}' "$work/bench" | sort -n | awk '{a[NR]=$0} END {print a[int((NR+1)/2)]}')
-			cache=$(awk -v t="$threads" '$1 == t && $2 == "cache" {print $3, $5, $6}' "$work/bench" | sort -n | awk '{a[NR]=$0} END {print a[int((NR+1)/2)]}')
-			echo "$threads $ops $lock $cache" | awk '{
-				total = $1 * $2
-				printf "| %d | %.1f | %.1f | %.2f | %.2f | %.2fx | %d | %d | %.0f |\n", $1, $3 / 1e6, $5 / 1e6,
-					total / $3 * 1e3, total / $5 * 1e3, $3 / $5, $4, $6, $7 / 1e3
-			}'
+		printf '| Mode | Threads | ms | Mallocs/s | ns/alloc | Scaling | Collections | Contended | Refills/kalloc | Pause share | Longest pause us |\n'
+		printf '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n'
+		for mode in lock cache big; do
+			one=
+			for threads in 1 2 4 8; do
+				median=$(awk -v t="$threads" -v m="$mode" '$1 == t && $2 == m' "$work/bench" | sort -k3 -n | awk '{a[NR]=$0} END {print a[int((NR+1)/2)]}')
+				[ -n "$one" ] || one=$(echo "$median" | awk '{print $3}')
+				echo "$median $ops $one" | awk '{
+					total = $1 * $9; rate = total / $3 * 1e9; single = $9 / $10 * 1e9
+					printf "| %s | %d | %.1f | %.0f | %.0f | %.0f%% | %d | %d | %.2f | %.1f%% | %.0f |\n", $2, $1, $3 / 1e6,
+						rate, $3 / total, rate / ($1 * single) * 100, $8, $4, $5 * 1000 / total, $7 / $3 * 100, $6 / 1e3
+				}'
+			done
 		done
 	} >"$work/bench.md"
 	mkdir -p build/reports
@@ -200,11 +206,12 @@ fi
 
 if wants allocator; then
 	# With the heap lock alone no allocation comes from an owned slab; with
-	# owned slabs nearly all do, and the profile is complete.
-	for mode in lock cache; do
+	# thread caches nearly all do, and the profile is complete.
+	for mode in lock cache big; do
 		run "threadprobe bench 4 20000 $mode"
 		require '^THREADPROBE_BENCH_OK$' "allocation with $mode"
 		require '^ALLOC_PROFILE threadprobe threads ' "the $mode profile has its threads line"
+		require '^ALLOC_PROFILE threadprobe gc ' "the $mode profile has its gc line"
 		require '^ALLOC_PROFILE threadprobe end lines=' "the $mode profile ended"
 		local_allocs=$(field local_allocs '^ALLOC_PROFILE threadprobe threads ')
 		refills=$(field refills '^ALLOC_PROFILE threadprobe threads ')
@@ -212,15 +219,66 @@ if wants allocator; then
 		if [ "$mode" = lock ]; then
 			[ "$local_allocs" -eq 0 ] || fail "the heap lock alone allocated $local_allocs from owned slabs"
 		else
-			[ "$local_allocs" -ge $((ops * 9 / 10)) ] || fail "owned slabs served $local_allocs of $ops allocations"
-			[ "$refills" -gt 0 ] && [ "$refills" -lt $((ops / 4)) ] || fail "owned slabs refilled $refills times for $ops allocations"
+			[ "$local_allocs" -ge $((ops * 9 / 10)) ] || fail "thread caches served $local_allocs of $ops allocations"
+			[ "$refills" -gt 0 ] && [ "$refills" -lt $((ops / 8)) ] || fail "thread caches refilled $refills times for $ops allocations"
+			# Several threads allocated, so the goal counted them and an
+			# automatic collection kept their slabs.
+			allocators=$(field max_allocators '^ALLOC_PROFILE threadprobe gc ')
+			[ "$allocators" -ge 2 ] || fail "the goal counted $allocators allocating threads"
+			preserved=$(field preserved '^ALLOC_PROFILE threadprobe cache ')
+			[ "$preserved" -gt 0 ] || fail 'no automatic collection kept a thread cache'
 		fi
-		grep '^THREADPROBE_BENCH \|^ALLOC_PROFILE threadprobe threads ' "$work/output" >>"$work/summary"
+		if [ "$mode" = big ]; then
+			batches=$(field batches '^ALLOC_PROFILE threadprobe cache ')
+			slabs=$(field batch_slabs '^ALLOC_PROFILE threadprobe cache ')
+			[ "$slabs" -gt "$batches" ] || fail "refills of large classes took $slabs slabs in $batches batches"
+		fi
+		grep '^THREADPROBE_BENCH \|^ALLOC_PROFILE threadprobe threads \|^ALLOC_PROFILE threadprobe cache \|^ALLOC_PROFILE threadprobe gc ' "$work/output" >>"$work/summary"
 	done
 	run 'threadprobe gc 7 40'
 	require '^THREADPROBE_GC_OK$' 'collection over owned slabs'
 	run 'threadprobe storm 7 20'
 	require '^THREADPROBE_STORM_OK$' 'collection requests over owned slabs'
+
+	# Objects freed by the other thread of a pair, one way and both ways,
+	# across automatic collections: none is handed out twice.
+	for check in 2:one 4:two; do
+		run "threadprobe remote ${check%:*} 20000 ${check#*:}"
+		require '^THREADPROBE_REMOTE_OK$' "remote frees ${check#*:} way on ${check%:*} threads"
+		require '^THREADPROBE_REMOTE_CHECK bad=0$' "remote frees ${check#*:} way kept every tag"
+		remote_frees=$(field remote_frees '^ALLOC_PROFILE threadprobe threads ')
+		[ "$remote_frees" -gt 0 ] || fail "no remote free in the ${check#*:} way run"
+		grep '^THREADPROBE_REMOTE ' "$work/output" >>"$work/summary"
+	done
+
+	# Most of the heap stays live: the goal is twice the live heap, not
+	# the floor the allocating threads give.
+	run 'threadprobe live 4 40000 8192'
+	require '^THREADPROBE_LIVE_OK$' 'high-live allocation'
+	live=$(field live '^ALLOC_PROFILE threadprobe gc ')
+	goal=$(field goal '^ALLOC_PROFILE threadprobe gc ')
+	floor=$(field floor '^ALLOC_PROFILE threadprobe gc ')
+	[ "$live" -gt "$floor" ] || fail "the live heap $live stayed under the floor $floor"
+	[ "$goal" -ge $((live * 2)) ] || fail "goal $goal under twice the live heap $live"
+	grep '^THREADPROBE_LIVE \|^ALLOC_PROFILE threadprobe gc ' "$work/output" >>"$work/summary"
+
+	# Bursts on four threads, each followed by an idle wait on all of
+	# them: idle collections run, and the process's pages do not climb.
+	run 'threadprobe idle 4 8'
+	require '^THREADPROBE_IDLE_OK$' 'bursts and idle waits'
+	idle=$(field idle '^ALLOC_PROFILE threadprobe gc ')
+	[ "$idle" -gt 0 ] || fail 'no idle collection ran while every thread waited'
+	grep '^THREADPROBE_IDLE round=' "$work/output" | tr ' ' '\n' | sed -n 's/^pages=//p' >"$work/pages"
+	first=$(head -n 3 "$work/pages" | sort -n | tail -n 1)
+	last=$(tail -n 3 "$work/pages" | sort -n | tail -n 1)
+	[ "$last" -le $((first + 64)) ] || fail "pages climbed from $first to $last over the idle rounds"
+	grep '^THREADPROBE_IDLE' "$work/output" >>"$work/summary"
+
+	# Four threads hold a third of the page quota, drop it, and take it
+	# again: the collector keeps the process inside its quota.
+	run 'threadprobe quota 4 3'
+	require '^THREADPROBE_QUOTA_OK$' 'allocation near the page quota'
+	grep '^THREADPROBE_QUOTA' "$work/output" >>"$work/summary"
 fi
 
 run 'echo after-threads'
