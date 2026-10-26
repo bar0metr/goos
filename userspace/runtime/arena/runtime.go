@@ -364,10 +364,13 @@ func allocPinned(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 // allocThreaded is alloc once threads exist. A collection never starts
 // while the heap lock is held: the lock is let go, the collection runs, and
 // the allocation starts again. The thread's own counts are folded first, so
-// the goal is compared with what it allocated from its slabs too.
+// the goal is compared with what it allocated from its slabs too; a thread
+// with nothing to fold skips the fold, which clears the whole histogram.
 func allocThreaded(t *threadState, size uintptr, noPointers bool) uintptr {
 	heapLock.lock()
-	t.fold(&native)
+	if t.unfolded.Load() != 0 {
+		t.fold(&native)
+	}
 	if native.liveBytes >= native.nextCollection && !collecting {
 		heapLock.unlock()
 		collectPinned(collectAutomatic)
