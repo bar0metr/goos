@@ -437,7 +437,11 @@ Current important areas include:
 - housekeeping wakeup only when deadlines/lifecycle work exists;
 - TCP throughput/latency under real KVM;
 - TUI/terminal redraw efficiency;
-- Linux syscall/descriptor overhead under practical workloads.
+- Linux syscall/descriptor overhead under practical workloads;
+- native allocation on several threads: thread caches of several slabs and
+  collection pacing by allocating threads (ADR 0205) are implemented; locks
+  per size class wait until the version 3 allocator profile shows the heap
+  lock still costs a material share of an eight-thread run after them.
 
 Avoid scheduler rewrites without evidence.
 
