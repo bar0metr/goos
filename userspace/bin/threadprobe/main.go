@@ -32,8 +32,8 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "threadprobe smoke|lifecycle|gc|roots|region-window|storm|fault|overflow|bench|remote|live|idle|quota [ARGS...]",
-	Summary: "native thread checks",
+	Usage:   "threadprobe smoke|lifecycle|gc|roots|region-window|storm|fault|overflow|bench [ARGS...]",
+	Summary: "native thread and allocator checks",
 	MaxArgs: 4,
 }
 
