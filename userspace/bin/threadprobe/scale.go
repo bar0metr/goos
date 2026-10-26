@@ -23,7 +23,8 @@ import (
 // "remote N OPS one|two" pairs threads: in each pair one allocates and the
 // other frees what it got (one), or both do (two). Every object carries a
 // tag its producer wrote; a consumer that reads another tag found a slot
-// handed out twice. "live N OPS KEEP" is the bench with KEEP objects kept
+// handed out twice. Producers also drop garbage, so collections run while
+// remote frees wait. "live N OPS KEEP" is the bench with KEEP objects kept
 // per thread, so most of the heap survives each collection. "idle N
 // ROUNDS" allocates a burst on N threads, then has every thread wait until
 // the idle collection has run, and prints the process's pages each round.
@@ -94,6 +95,10 @@ func remoteLoop(index int) {
 			*(*uint64)(unsafe.Add(unsafe.Pointer(p), 8)) = ^*p
 			out.push(p, in)
 			in.pop()
+			// Garbage no one frees: the heap reaches its goal, so
+			// collections run while remote frees wait in the slabs.
+			garbage := make([]byte, remoteSizes[(op+index+3)%len(remoteSizes)])
+			garbage[0] = byte(op)
 		}
 	}
 	// The partner frees until this thread says it sends no more.

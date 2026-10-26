@@ -248,6 +248,8 @@ if wants allocator; then
 		require '^THREADPROBE_REMOTE_CHECK bad=0$' "remote frees ${check#*:} way kept every tag"
 		remote_frees=$(field remote_frees '^ALLOC_PROFILE threadprobe threads ')
 		[ "$remote_frees" -gt 0 ] || fail "no remote free in the ${check#*:} way run"
+		collections=$(field collections '^THREADPROBE_REMOTE ')
+		[ "$collections" -gt 0 ] || fail "no collection ran during the ${check#*:} way run"
 		grep '^THREADPROBE_REMOTE ' "$work/output" >>"$work/summary"
 	done
 
