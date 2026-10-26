@@ -11,8 +11,9 @@
 // has N threads ask for collections at once; "fault" and "overflow" end a worker with a fault, which ends the
 // process; "bench N OPS MODE" times N threads that allocate, with the heap
 // lock alone (lock), with thread-owned slabs (cache), with owned slabs and
-// 256 free pages retained (retain), or with owned slabs and only sizes of
-// 512 to 2048 bytes (big), and prints the allocator profile. "remote",
+// 256 free pages retained (retain), with 16 or 64 free pages retained per
+// thread (r16, r64), or with owned slabs and only sizes of 512 to 2048
+// bytes (big), and prints the allocator profile. "remote",
 // "live", "idle", and "quota" are further allocator workloads (scale.go).
 // Only the main thread prints. It is built only into validation images.
 package main
@@ -78,16 +79,21 @@ func run(data startup.Data) {
 		count, _ := data.Arg(2)
 		ops, _ := data.Arg(3)
 		kind, _ := data.Arg(4)
-		if !utility.Equal(kind, "lock") && !utility.Equal(kind, "cache") && !utility.Equal(kind, "retain") && !utility.Equal(kind, "big") {
-			utility.Usage()
-		}
-		if utility.Equal(kind, "retain") {
+		threads := int(parse(count))
+		switch {
+		case utility.Equal(kind, "retain"):
 			arena.SetRetained(256)
+		case utility.Equal(kind, "r16"):
+			arena.SetRetained(uint32(16 * threads))
+		case utility.Equal(kind, "r64"):
+			arena.SetRetained(uint32(64 * threads))
+		case !utility.Equal(kind, "lock") && !utility.Equal(kind, "cache") && !utility.Equal(kind, "big"):
+			utility.Usage()
 		}
 		if utility.Equal(kind, "big") {
 			benchMix = bigSizes[:]
 		}
-		bench(int(parse(count)), int(parse(ops)), !utility.Equal(kind, "lock"), kind)
+		bench(threads, int(parse(ops)), !utility.Equal(kind, "lock"), kind)
 	case utility.Equal(mode, "remote") && data.ArgCount() == 4:
 		count, _ := data.Arg(2)
 		ops, _ := data.Arg(3)
@@ -692,7 +698,7 @@ func bench(count int, ops int, caches bool, mode []byte) {
 	after := arena.HeapStats()
 	total := uint64(count) * uint64(ops)
 	utility.PrintText("THREADPROBE_BENCH mode=")
-	for _, name := range [...]string{"lock", "cache", "retain", "big"} {
+	for _, name := range [...]string{"lock", "cache", "retain", "big", "r16", "r64"} {
 		if utility.Equal(mode, name) {
 			utility.PrintText(name)
 		}

@@ -246,8 +246,13 @@ func collectThreaded(slot int, reason collectionReason) bool {
 		}
 		collecting = false
 		releaseHeld()
+		gcFlag.Store(0)
 		if completed {
 			gcEpoch.Add(1)
+			// The other threads run again, on their own slabs; free
+			// pages change only under the heap lock this thread holds.
+			native.trimAfter(reason)
+			releaseMarkStack()
 		} else {
 			suspendFailures.Add(1)
 		}

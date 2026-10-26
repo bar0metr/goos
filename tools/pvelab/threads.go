@@ -55,9 +55,10 @@ const (
 var threadBenchCounts = []int{1, 2, 4, 8}
 
 // threadBenchModes are the heap lock alone, thread caches, thread caches
-// with 256 free pages retained across collections, and thread caches on
-// sizes of 512 to 2048 bytes only.
-var threadBenchModes = []string{"lock", "cache", "retain", "big"}
+// with 256 free pages retained across collections, thread caches on sizes
+// of 512 to 2048 bytes only, and thread caches retaining 16 or 64 free
+// pages per thread.
+var threadBenchModes = []string{"lock", "cache", "retain", "big", "r16", "r64"}
 
 func (threadsScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	g := s.Guest
