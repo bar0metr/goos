@@ -390,6 +390,33 @@ appear once, while the probe prints one record per region.
 `TestGoroutineChecksAcceptTheirFixtureOutput` now runs every check against
 its fixture output.
 
+## Thread caches and collection pacing on 2026-10-26
+
+ADR 0205 gave threads up to four slabs per class, kept them across
+automatic collections, and paced collections by the threads that allocate.
+The deterministic host cases:
+
+- `TestWindowHoldAtEveryPoint` holds a thread at every point of its
+  allocation, of an allocation that moves to its next slab, and of its own
+  and a remote free, with a collector that takes the slabs back and one that
+  folds their remote frees and leaves them owned.
+- `TestAutomaticCollectionKeepsCaches` and
+  `TestAbandonedCollectionLeavesCachesUsable` cover live objects in every
+  cache position, a remote free pending when the collection starts, an
+  owned slab that empties, and preparation followed by no sweep, three times
+  over.
+- `TestBatchedSlabsRace` runs four threads over the classes of 384 to 2048
+  bytes with kept-cache collections between rounds, under `-race`.
+- `TestIdleQuorum` checks the first look and the look after the rendezvous.
+
+`make test-thread-allocator` passed under TCG with four processors at
+`223c1af`: the profile counters, remote frees one and both ways, a live
+heap above the floor, eight bursts with idle waits (one idle collection per
+round, pages 120 to 122), and a third of the free quota held, dropped, and
+taken again. `make test-pve-threads` passed under KVM on eight processors at
+`dce70cd` (run `20261026T221007Z-1712ed8d`), with 109 and 218 collections
+during the remote-free runs and no tag lost. ADR 0205 has the timings.
+
 ## Remaining evidence limits
 
 `goprobe regroots` isolates each XMM and general-purpose register as a root

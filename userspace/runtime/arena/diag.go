@@ -24,6 +24,25 @@ type counters struct {
 	// folded, and slabs given back.
 	localAllocs, localFrees, remoteFrees uint64
 	refills, drained, returnedSlabs      uint64
+	// Thread caches (ADR 0205): fast-path misses, refills that took slabs
+	// and the slabs they took, full slabs a refill gave up, the most slabs
+	// owned at once, and slabs a collection kept owned or took back.
+	misses, batches, claimed, disownedFull uint64
+	peakCached, preserved, flushed         uint64
+	// The last goal: its floor, the live bytes it started from, and the
+	// allocating threads it counted; the most such threads; and the free
+	// pages the last collection kept.
+	lastFloor, lastLive           uint64
+	lastAllocators, maxAllocators uint32
+	retainTarget                  uint32
+	// Collections completed and given up, by reason, and idle requests,
+	// the ones skipped because a thread was not waiting, and the ones
+	// given up because a held thread no longer was.
+	completed, abandoned                    [collectReasons]uint64
+	idleRequests, idleSkipped, idleAbandons uint64
+	// pauses and rendezvous histogram collection pauses and the time
+	// taken to hold the other threads (histBounds).
+	pauses, rendezvous [histBuckets]uint64
 	// slabChunks marks every page of slab bitmaps a slab would have touched
 	// so far had the bitmaps their own array indexed by page.
 	slabChunks [slabChunkWords]uint64
@@ -36,6 +55,25 @@ const (
 	slabChunkWords = (heapPagesMax/slabsPerChunk + 64) / 64
 	heapPagesMax   = uint32(1 << 16)
 )
+
+// histBounds are the upper bounds, in nanoseconds, of every histogram
+// bucket but the last, which counts the rest.
+var histBounds = [...]uint64{50e3, 100e3, 250e3, 500e3, 1e6, 2e6, 5e6}
+
+// histNames label the buckets in a profile.
+var histNames = [...]string{"50us", "100us", "250us", "500us", "1ms", "2ms", "5ms", "more"}
+
+const histBuckets = len(histNames)
+
+// histBucket returns the bucket of a duration in nanoseconds.
+func histBucket(ns uint64) int {
+	for bucket, bound := range histBounds {
+		if ns <= bound {
+			return bucket
+		}
+	}
+	return histBuckets - 1
+}
 
 // noteSlab records the bitmap page the slab at page would touch.
 func (c *counters) noteSlab(page uint32) {
@@ -130,12 +168,52 @@ type Diagnostics struct {
 	// PauseTotal how long collections took, in nanoseconds.
 	RendezvousLast, RendezvousMax, RendezvousTotal uint64
 	PauseLast, PauseMax, PauseTotal                uint64
+
+	// The rest is the thread caches and collection policy (ADR 0205).
+	// CacheHits counts allocations a thread's own slabs served and
+	// CacheMisses fast-path allocations that found them all full.
+	// BatchRefills counts refills that took slabs and BatchSlabs the slabs
+	// they took; DisownedFull counts full slabs a refill gave up.
+	CacheHits, CacheMisses, BatchRefills, BatchSlabs, DisownedFull uint64
+	// CachedPages is the slabs the caches own now, PeakCached the most at
+	// once, and CacheBound the most one thread can own.
+	CachedPages, PeakCached uint64
+	CacheBound              uint32
+	// PreservedSlabs counts slabs automatic collections left with their
+	// threads and FlushedSlabs the slabs other collections took back.
+	PreservedSlabs, FlushedSlabs uint64
+	// UnfoldedThreads is how many threads hold counts not yet folded:
+	// while it is nonzero the totals above lag what the threads did.
+	UnfoldedThreads uint32
+	// Collections completed and given up, indexed automatic, explicit,
+	// idle, pressure.
+	Completed, Abandoned [collectReasons]uint64
+	// The goal the last collection set: the threads that allocated before
+	// it, the floor they gave, the live bytes it started from, and the
+	// goal itself; the most allocating threads any collection counted;
+	// the page quota that caps the floor, zero when unknown; and the free
+	// pages the last collection kept.
+	Allocators, MaxAllocators         uint32
+	Floor, LiveAfter, Goal, PageLimit uint64
+	RetainTarget                      uint32
+	// IdleRequests counts CollectIdle calls, IdleSkipped those that did
+	// not collect because another thread was not waiting, and
+	// IdleAbandoned idle collections given up after the threads were held.
+	IdleRequests, IdleSkipped, IdleAbandoned uint64
+	// PauseHistogram and RendezvousHistogram count collections by pause
+	// and by the time holding the other threads took (HistogramBounds).
+	PauseHistogram, RendezvousHistogram [histBuckets]uint64
 }
 
+// HistogramBounds returns the upper bound in nanoseconds of every
+// histogram bucket but the last.
+func HistogramBounds() [histBuckets - 1]uint64 { return histBounds }
+
 // ProfileVersion is the version of the ALLOC_PROFILE format AppendProfile
-// writes. Version 2 added the version field and the threads line; a report
+// writes. Version 2 added the version field and the threads line, and
+// version 3 the cache, gc, pause_hist, and rendezvous_hist lines; a report
 // without the field is version 1.
-const ProfileVersion = 2
+const ProfileVersion = 3
 
 // slabBitmapBytes is the size of the three slot bitmaps of a slab.
 const slabBitmapBytes = 3 * slotWords * 8
@@ -161,6 +239,14 @@ func (h *heap) diagnostics(d *Diagnostics) {
 	d.SlabMetadataChunks, d.SlabChunksTouched = 0, 0
 	d.LocalAllocs, d.LocalFrees, d.RemoteFrees = c.localAllocs, c.localFrees, c.remoteFrees
 	d.Refills, d.Drained, d.ReturnedSlabs = c.refills, c.drained, c.returnedSlabs
+	d.CacheHits, d.CacheMisses, d.BatchRefills, d.BatchSlabs = c.localAllocs, c.misses, c.batches, c.claimed
+	d.DisownedFull, d.CachedPages, d.PeakCached, d.CacheBound = c.disownedFull, h.cachedPages, c.peakCached, cacheBound()
+	d.PreservedSlabs, d.FlushedSlabs = c.preserved, c.flushed
+	d.Completed, d.Abandoned = c.completed, c.abandoned
+	d.Allocators, d.MaxAllocators, d.RetainTarget = c.lastAllocators, c.maxAllocators, c.retainTarget
+	d.Floor, d.LiveAfter, d.Goal, d.PageLimit = c.lastFloor, c.lastLive, h.nextCollection, h.pageLimit
+	d.IdleRequests, d.IdleSkipped, d.IdleAbandoned = c.idleRequests, c.idleSkipped, c.idleAbandons
+	d.PauseHistogram, d.RendezvousHistogram = c.pauses, c.rendezvous
 	for _, word := range c.slabChunks {
 		d.SlabChunksTouched += uint32(bits.OnesCount64(word))
 	}
@@ -202,7 +288,7 @@ func (h *heap) diagnostics(d *Diagnostics) {
 
 // AppendProfile writes d as lines of the form
 //
-//	ALLOC_PROFILE name version=2 key=value ...
+//	ALLOC_PROFILE name version=3 key=value ...
 //
 // and ends with "ALLOC_PROFILE name end lines=N", N the number of lines
 // before it.
@@ -283,12 +369,57 @@ func (d *Diagnostics) AppendProfile(name string, line []byte, emit func([]byte))
 	w.pair("pause_max", d.PauseMax)
 	w.pair("pause_total", d.PauseTotal)
 	w.flush()
+	w.start()
+	w.text("cache")
+	w.pair("hits", d.CacheHits)
+	w.pair("misses", d.CacheMisses)
+	w.pair("batches", d.BatchRefills)
+	w.pair("batch_slabs", d.BatchSlabs)
+	w.pair("disowned_full", d.DisownedFull)
+	w.pair("cached", d.CachedPages)
+	w.pair("peak_cached", d.PeakCached)
+	w.pair("bound", uint64(d.CacheBound))
+	w.pair("preserved", d.PreservedSlabs)
+	w.pair("flushed", d.FlushedSlabs)
+	w.pair("unfolded", uint64(d.UnfoldedThreads))
+	w.flush()
+	w.start()
+	w.text("gc")
+	for reason, name := range [...]string{"automatic", "explicit", "idle", "pressure"} {
+		w.pair(name, d.Completed[reason])
+	}
+	for reason, name := range [...]string{"abandoned_automatic", "abandoned_explicit", "abandoned_idle", "abandoned_pressure"} {
+		w.pair(name, d.Abandoned[reason])
+	}
+	w.pair("allocators", uint64(d.Allocators))
+	w.pair("max_allocators", uint64(d.MaxAllocators))
+	w.pair("floor", d.Floor)
+	w.pair("live", d.LiveAfter)
+	w.pair("goal", d.Goal)
+	w.pair("page_limit", d.PageLimit)
+	w.pair("retain_target", uint64(d.RetainTarget))
+	w.pair("idle_requests", d.IdleRequests)
+	w.pair("idle_skipped", d.IdleSkipped)
+	w.pair("idle_abandoned", d.IdleAbandoned)
+	w.flush()
+	w.histogram("pause_hist", &d.PauseHistogram)
+	w.histogram("rendezvous_hist", &d.RendezvousHistogram)
 	// The last line counts the ones before it, so a reader can tell a
 	// profile whose lines all arrived from one that lost some.
 	lines := uint64(w.lines)
 	w.start()
 	w.text("end")
 	w.pair("lines", lines)
+	w.flush()
+}
+
+// histogram writes one line of a histogram's buckets.
+func (w *profileWriter) histogram(label string, counts *[histBuckets]uint64) {
+	w.start()
+	w.text(label)
+	for bucket, name := range histNames {
+		w.pair(name, counts[bucket])
+	}
 	w.flush()
 }
 

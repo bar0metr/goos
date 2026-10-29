@@ -399,12 +399,20 @@ func (r *report) renderProfiles(g *Guest) {
 	keys := []string{"large", "large_pages", "new_slabs", "from_runs", "from_fresh", "recommitted", "cleared", "to_full", "to_partial",
 		"searches", "candidates", "discards", "discard_failures", "discarded", "trims", "frontier", "meta_pages", "slab_chunks", "slab_chunks_touched",
 		"free_runs", "free_pages", "longest_free", "dirty_free", "run_pages"}
+	version := uint64(1)
 	for _, name := range g.Order {
-		if g.Profiles[name].Version() >= 2 {
-			for _, key := range threadKeys {
-				keys = append(keys, "thread_"+key)
+		version = max(version, g.Profiles[name].Version())
+	}
+	if version >= 2 {
+		for _, key := range threadKeys {
+			keys = append(keys, "thread_"+key)
+		}
+	}
+	if version >= 3 {
+		for _, line := range v3Lines {
+			for _, key := range line.keys {
+				keys = append(keys, line.label+"_"+key)
 			}
-			break
 		}
 	}
 	r.printf("| Counter |")

@@ -27,20 +27,32 @@ type Result struct {
 //
 // A caller that allocated since its last collection and waits longer than
 // idleTicks is idle: after idleTicks with nothing ready, Any collects and then
-// waits out the rest of the timeout.
+// waits out the rest of the timeout. In a process with several threads the
+// collection runs only if every other thread waits too, so the caller is
+// marked idle for the whole wait.
 func Any(interests *[MaxObjects]Interest, count int, timeout uint64) (Result, kcall.Status) {
+	if timeout == 0 {
+		mask, status := sys.WaitAny(interests, count, timeout)
+		return Result{ReadyMask: mask}, status
+	}
+	arena.IdleEnter()
+	mask, status := waitIdle(interests, count, timeout)
+	arena.IdleLeave()
+	return Result{ReadyMask: mask}, status
+}
+
+func waitIdle(interests *[MaxObjects]Interest, count int, timeout uint64) (uint64, kcall.Status) {
 	if timeout > idleTicks && arena.IdlePending() {
 		mask, status := sys.WaitAny(interests, count, idleTicks)
 		if status != kcall.StatusTimeout {
-			return Result{ReadyMask: mask}, status
+			return mask, status
 		}
 		arena.CollectIdle()
 		if timeout != kcall.WaitAnyInfiniteTimeout {
 			timeout -= idleTicks
 		}
 	}
-	mask, status := sys.WaitAny(interests, count, timeout)
-	return Result{ReadyMask: mask}, status
+	return sys.WaitAny(interests, count, timeout)
 }
 
 // Sleep blocks the caller for timeout ticks. It is Any with no interests, so

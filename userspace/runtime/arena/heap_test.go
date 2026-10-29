@@ -15,6 +15,8 @@ type testHeap struct {
 	stack     []uintptr
 	discarded uint64
 	refuse    bool
+	// allowOwned lets verify accept slabs a thread cache still owns.
+	allowOwned bool
 }
 
 func newTestHeap(t testing.TB, pages uint32, work int) *testHeap {
@@ -125,18 +127,24 @@ func (th *testHeap) verify() {
 			continue
 		case pageSlab:
 			used := 0
+			owned := m.owner != 0
+			if owned && !th.allowOwned {
+				panic("a slab is still owned")
+			}
 			for word := 0; word < slotWords; word++ {
 				for bits := m.alloc[word]; bits != 0; bits &= bits - 1 {
 					used++
 				}
-				if m.mark[word] != 0 {
+				// An owned slab's mark bitmap holds the remote frees not
+				// yet folded, each of an allocated slot.
+				if !owned && m.mark[word] != 0 || m.mark[word]&^m.alloc[word] != 0 {
 					panic("mark bit left after a collection")
 				}
-				if m.owner != 0 {
-					panic("a slab is still owned")
-				}
 			}
-			if used != int(m.used) || (used == 0 && !listedSlabs[page]) || listedSlabs[page] != (uint32(used) < slotsPerPage(m.class)) {
+			if owned && listedSlabs[page] {
+				panic("an owned slab is listed")
+			}
+			if used != int(m.used) || !owned && ((used == 0 && !listedSlabs[page]) || listedSlabs[page] != (uint32(used) < slotsPerPage(m.class))) {
 				panic("slab bookkeeping is inconsistent")
 			}
 			// Every slot below the hint word is in use.

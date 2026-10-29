@@ -27,7 +27,6 @@ type threadState struct {
 	regions   regionStack
 	cursor    allocatorPosition
 	innermost *Region
-	live      bool
 	// threadAlloc is the fast path's state (window.go).
 	threadAlloc
 }
@@ -118,6 +117,8 @@ func ThreadStarted(slot int) {
 	t.regions, t.cursor, t.innermost = regionStack{}, allocatorPosition{}, nil
 	native.returnCache(&t.cache, &t.counts)
 	t.fold(&native)
+	t.allocated = false
+	t.idle.Store(0)
 	t.live = true
 	live := uint32(0)
 	for index := range threads {
@@ -198,58 +199,130 @@ func unlockHeap() {
 	}
 }
 
-// collectThreaded is Collect with several threads: the caller becomes the
-// collection's owner, holds every other thread off its processor, and
+// collectThreaded is a collection with several threads: the caller becomes
+// the collection's owner, holds every other thread off its processor, and
 // collects over their roots. A thread that asks while another collects
-// waits for that collection and does not run another.
-func collectThreaded(slot int) {
+// waits for that collection and does not run another, and reports whether
+// a collection completed.
+func collectThreaded(slot int, reason collectionReason) bool {
 	epoch := gcEpoch.Load()
 	gcLock.lock()
 	if gcEpoch.Load() != epoch {
 		gcLock.unlock()
-		return
+		return true
 	}
 	heapLock.lock()
 	gcFlag.Store(1)
-	if suspendOthers() {
+	completed := false
+	switch {
+	case !suspendOthers():
+		suspendFailures.Add(1)
+	case reason == collectIdle && !othersIdle(slot):
+		// A thread found work after CollectIdle looked: the process is
+		// not idle, and an idle collection would take back the slabs it
+		// allocates from.
+		native.diag.idleAbandons++
+		releaseHeld()
+	default:
 		// From here an allocation would wait for the heap lock this
 		// thread holds; alloc stops the process instead.
 		collecting = true
-		// Every other thread is held outside the fast path: their slabs
-		// and counts come back, and the mark bitmaps hold marks again.
-		for index := range threads {
-			native.returnCache(&threads[index].cache, &threads[index].counts)
-			threads[index].fold(&native)
-		}
-		native.foldStrayFrees()
+		allocators := prepareThreads(reason)
 		// A stack pointer in no known stack means the roots are not all
 		// known: nothing is marked or swept (ADR 0204).
-		planned := planStacks(slot, stackPointer())
-		if planned {
+		completed = planStacks(slot, stackPointer())
+		if completed {
 			if validation.Enabled {
 				noteSwitchHolds()
 			}
+			native.allocators = allocators
 			base, _ := currentStack()
 			scrubStack(base)
-			collect()
+			collect(reason)
+			for index := range threads {
+				native.checkCache(&threads[index].cache, uint32(index+1))
+				threads[index].allocated = false
+			}
 		}
 		collecting = false
-		clear(snapshots[:snapshotCount*int(kcall.ThreadSnapshotSize)])
-		snapshotCount = 0
-		if sys.ThreadResume() != kcall.StatusOK {
-			panic("arena: held threads could not be released")
-		}
-		if planned {
+		releaseHeld()
+		if completed {
 			gcEpoch.Add(1)
 		} else {
 			suspendFailures.Add(1)
 		}
-	} else {
-		suspendFailures.Add(1)
+	}
+	if !completed {
+		native.diag.abandoned[reason]++
 	}
 	gcFlag.Store(0)
 	heapLock.unlock()
 	gcLock.unlock()
+	return completed
+}
+
+// prepareThreads makes the held threads' heap state ready for marking and
+// returns how many live threads allocated since the last collection, at
+// least one. Every thread's counts are folded and every remote free is
+// folded into its slab, so the mark bitmaps are clear. An automatic
+// collection leaves each thread that allocated its slabs; any other
+// collection, and a thread that did not allocate, gives them back. Every
+// thread is held outside the fast path, or is the caller.
+//
+// Each step leaves the heap consistent, so a collection given up after it
+// leaves a heap the next one can start from.
+func prepareThreads(reason collectionReason) uint32 {
+	allocators := uint32(0)
+	for index := range threads {
+		t := &threads[index]
+		active := t.live && (t.allocated || t.counts.allocs != 0)
+		if active {
+			allocators++
+		}
+		if active && reason == collectAutomatic {
+			native.diag.preserved += native.drainCache(&t.cache, &t.counts)
+		} else {
+			native.diag.flushed += native.returnCache(&t.cache, &t.counts)
+		}
+		t.fold(&native)
+	}
+	native.foldStrayFrees()
+	return max(allocators, 1)
+}
+
+// othersIdle reports whether every live thread but slot waits in an idle
+// wait.
+func othersIdle(slot int) bool {
+	return idleQuorum(slot, len(threads), func(index int) *threadAlloc { return &threads[index].threadAlloc })
+}
+
+// releaseHeld lets the held threads go.
+func releaseHeld() {
+	clear(snapshots[:snapshotCount*int(kcall.ThreadSnapshotSize)])
+	snapshotCount = 0
+	if sys.ThreadResume() != kcall.StatusOK {
+		panic("arena: held threads could not be released")
+	}
+}
+
+// IdleEnter marks the calling thread as waiting with nothing to run, until
+// IdleLeave. wait.Any and the goroutine scheduler's idle wait call it, and
+// the scheduler clears it whenever it runs a goroutine. A thread marked
+// idle while it still runs only makes an idle collection more eager; roots
+// and marking do not depend on it.
+func IdleEnter() {
+	tls.Pin()
+	self().idle.Store(1)
+	tls.Unpin()
+}
+
+// IdleLeave clears the calling thread's idle mark.
+func IdleLeave() {
+	tls.Pin()
+	if t := self(); t.idle.Load() != 0 {
+		t.idle.Store(0)
+	}
+	tls.Unpin()
 }
 
 // suspendAttempts bounds how often a collection tries to hold the other
@@ -289,6 +362,7 @@ func suspendOthers() bool {
 }
 
 func noteRendezvous(elapsed uint64) {
+	native.diag.rendezvous[histBucket(elapsed)]++
 	lastRendezvous = elapsed
 	totalRendezvous += elapsed
 	if elapsed > maxRendezvous {
@@ -354,7 +428,7 @@ func markThreads() {
 }
 
 // allocCached is a small allocation once threads exist. It takes a slot
-// from the thread's own slab without a lock; when the slab is full, or a
+// from the thread's own slabs without a lock; when they are full, or a
 // collection is starting, it takes the heap lock and refills. The window
 // the fast path runs in is in window.go.
 func allocCached(t *threadState, size uintptr, noPointers bool) uintptr {
@@ -367,19 +441,20 @@ func allocCached(t *threadState, size uintptr, noPointers bool) uintptr {
 	t.fold(&native)
 	if native.liveBytes >= native.nextCollection && !collecting {
 		heapLock.unlock()
-		Collect()
+		collectPinned(collectAutomatic)
 		heapLock.lock()
 	}
 	address := uintptr(0)
-	if native.refill(&t.cache, &t.counts, class, owner) {
+	if native.refill(&t.cache, &t.counts, class, owner, cacheTarget(class)) {
 		address = native.cacheAlloc(&t.cache, &t.counts, class, noPointers)
 	}
 	if address == 0 && !collecting {
 		heapLock.unlock()
-		Collect()
+		collectPinned(collectPressure)
 		heapLock.lock()
 		native.trim()
-		if native.refill(&t.cache, &t.counts, class, owner) {
+		// One slab: a heap that ran out keeps what it has for others.
+		if native.refill(&t.cache, &t.counts, class, owner, 1) {
 			address = native.cacheAlloc(&t.cache, &t.counts, class, noPointers)
 		}
 	}
@@ -448,4 +523,10 @@ func threadDiagnostics(d *Diagnostics) {
 	d.AllocWindowRetries, d.RegionWindowRetries = allocWindowRetries.Load(), regionWindowRetries.Load()
 	d.RendezvousLast, d.RendezvousMax, d.RendezvousTotal = lastRendezvous, maxRendezvous, totalRendezvous
 	d.PauseLast, d.PauseMax, d.PauseTotal = lastPause, maxPause, totalPause
+	d.UnfoldedThreads = 0
+	for index := range threads {
+		if threads[index].unfolded.Load() != 0 {
+			d.UnfoldedThreads++
+		}
+	}
 }

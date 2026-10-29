@@ -191,14 +191,18 @@ to the stack top `_start` records, the callee-saved registers, and the used
 part of every region. ADR 0203 and ADR 0204 extend that root set to all held
 native-thread register/vector snapshots and to the runtime's G/M stack plan.
 It runs on
-`runtime.GC`, when live bytes reach `max(2 × live, live + 1 MiB)` of the last
+`runtime.GC`, when live bytes reach `live + max(live, floor)` of the last
 collection, when an allocation does not fit, and when a service has waited
 100 ms with nothing to do; `arena.OnExhausted` runs only after a collection
-and a retry fail. The collector first zeroes up to 4 KiB of stack below itself,
+and a retry fail. The floor is 1 MiB for each thread that allocated since the
+last collection, at most a sixteenth of the process's page quota and at least
+1 MiB (ADR 0205). The collector first zeroes up to 4 KiB of stack below itself,
 never past the bottom of the stack, so its own frames hold no stale address. Free pages go back with `VMDiscard`
 after each collection. `arena.SetRetained` can keep up to 256 of them for the
 allocations that follow, and an idle wait or a failed allocation gives those
-back too; by default none is kept, which a guest workload measured fastest.
+back too. Without that call a single-thread process keeps none, which a guest
+workload measured fastest, and an automatic collection after several threads
+allocated keeps 32 pages per such thread, up to 256.
 `arena.ReadDiagnostics` reports what the allocator counted, and
 `make allocator-report` puts host and guest measurements side by side.
 `arena.Region` serves scratch with one lifetime from its own reservation, and
@@ -209,13 +213,17 @@ paths.
 **Threads.** A native process may run up to 16 threads (ADR 0203). The kernel
 makes each thread's 512 KiB stack, pinned above its own 64 KiB guard, in a
 fixed slot below the main stack. Once a second thread exists, heap operations
-take the heap lock or run on the slabs the calling thread owns, one per size
-class, without a lock; a thread that frees into another's slab records the
+take the heap lock or run on the slabs the calling thread owns, without a
+lock: up to four per size class, enough for 16 free slots, at most 28 pages
+per thread (ADR 0205). A thread that frees into another's slab records the
 free in that slab's idle mark bitmap. A collection holds every other thread
-off its processor with `ThreadSuspend`, takes back every owned slab, and
-adds each held thread's saved general-purpose and XMM registers and its stack
-to the roots, as well as the part of another thread's region it has used so
-far.
+off its processor with `ThreadSuspend` and folds every remote free before it
+marks. An automatic collection leaves each thread that allocated its slabs;
+an explicit, idle, or pressure collection takes them all back. It adds each
+held thread's saved general-purpose and XMM registers and its stack to the
+roots, as well as the part of another thread's region it has used so far. An
+idle collection runs only when every thread waits in `wait.Any` or the
+goroutine scheduler's idle wait.
 
 **Goroutines.** Images built with the ADR 0204 goroutine target run Gs over
 native M threads on separate guarded G stacks. During stop-the-world

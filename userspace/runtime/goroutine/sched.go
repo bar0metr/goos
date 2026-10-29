@@ -297,6 +297,8 @@ func switchOut(m *M, g *G, reason uint8, when int64) {
 
 // execute runs g on m until it switches out.
 func execute(m *M, g *G) {
+	// A goroutine that parked in wait.Any left this thread marked idle.
+	arena.IdleLeave()
 	g.dispatchState()
 	g.m.Store(m.slot)
 	m.curG = g
@@ -664,7 +666,9 @@ func idle(m *M) {
 	}
 	sched.lock.unlock()
 	if !anyWork() && !timersDue() {
+		arena.IdleEnter()
 		wait(m)
+		arena.IdleLeave()
 	}
 	sched.lock.lock()
 	if m.idle {
@@ -742,7 +746,9 @@ func pinnedLoop(m *M) {
 			execute(m, g)
 			continue
 		}
+		arena.IdleEnter()
 		waitOwn(m, never)
+		arena.IdleLeave()
 	}
 }
 

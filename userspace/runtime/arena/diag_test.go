@@ -137,10 +137,35 @@ func TestProfileLinesFitAndParse(t *testing.T) {
 	if last != "ALLOC_PROFILE vfs end lines="+strconv.Itoa(len(profileLines)-1)+"\n" {
 		t.Fatalf("profile ends with %q after %d lines", last, len(profileLines)-1)
 	}
-	for _, key := range []string{"large", "new_slabs", "recommitted", "discards", "meta_pages", "dirty_free", "trims"} {
+	for _, key := range []string{"large", "new_slabs", "recommitted", "discards", "meta_pages", "dirty_free", "trims",
+		"hits", "misses", "batch_slabs", "bound", "preserved", "unfolded", "automatic", "abandoned_idle", "allocators",
+		"floor", "goal", "page_limit", "idle_skipped", "50us", "more"} {
 		if !fields[key] {
 			t.Fatalf("no %s in %q", key, profileLines)
 		}
+	}
+	labels := map[string]bool{}
+	for _, text := range profileLines {
+		labels[strings.Fields(text)[2]] = true
+	}
+	for _, label := range []string{"version=3", "threads", "cache", "gc", "pause_hist", "rendezvous_hist"} {
+		if !labels[label] {
+			t.Fatalf("no %s line in %q", label, profileLines)
+		}
+	}
+}
+
+func TestHistogramBuckets(t *testing.T) {
+	for _, c := range []struct {
+		ns     uint64
+		bucket int
+	}{{0, 0}, {50e3, 0}, {50e3 + 1, 1}, {1e6, 4}, {5e6, 6}, {5e6 + 1, 7}, {1 << 62, 7}} {
+		if got := histBucket(c.ns); got != c.bucket {
+			t.Errorf("%d ns in bucket %d, want %d", c.ns, got, c.bucket)
+		}
+	}
+	if len(histBounds)+1 != len(histNames) {
+		t.Fatal("histogram bounds and names disagree")
 	}
 }
 

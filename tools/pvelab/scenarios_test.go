@@ -337,9 +337,9 @@ func TestNetworkOutputParsing(t *testing.T) {
 func TestThreadBenchTable(t *testing.T) {
 	out := "THREADPROBE_BENCH mode=cache threads=2 ops=400000 ns=200000000 collections=9\n" +
 		"ALLOC_PROFILE threadprobe threads live=1 peak=2 local_allocs=400000 refills=3000 heap_locks=3100\n" +
-		"ALLOC_PROFILE threadprobe threads heap_contended=40 pause_max=900000\n"
+		"ALLOC_PROFILE threadprobe threads heap_contended=40 pause_max=900000 pause_total=20000000\n"
 	sample, ok := parseBench(out)
-	if !ok || sample.ns != 200000000 || sample.refills != 3000 || sample.contended != 40 || sample.pauseMax != 900000 || sample.collections != 9 {
+	if !ok || sample.ns != 200000000 || sample.refills != 3000 || sample.contended != 40 || sample.pauseMax != 900000 || sample.pauseTotal != 20000000 || sample.collections != 9 {
 		t.Fatalf("parsed %+v %v", sample, ok)
 	}
 	if _, ok := parseBench("THREADPROBE_BENCH_OK\n"); ok {
@@ -347,8 +347,10 @@ func TestThreadBenchTable(t *testing.T) {
 	}
 	lock := sample
 	lock.ns = 400000000
-	table := benchTable(map[benchKey][]benchSample{{2, "lock"}: {lock}, {2, "cache"}: {sample}}, 8)
-	if !strings.Contains(table, "| 2 | 400.0 | 200.0 | 1.00 | 2.00 | 2.00x | 9 | 40 | 3000 | 900 | - |") {
+	one := sample
+	one.ns = 50000000
+	table := benchTable(map[benchKey][]benchSample{{2, "lock"}: {lock}, {1, "cache"}: {one}, {2, "cache"}: {sample}}, 8)
+	if !strings.Contains(table, "| cache | 2 | 200.0 | 2000000 | 500 | 25% | 2.00x | 9 | 40 | 7.50 | 10.0% | 900 |") {
 		t.Fatalf("table:\n%s", table)
 	}
 }

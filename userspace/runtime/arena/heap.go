@@ -122,7 +122,20 @@ type heap struct {
 	// retain is how many dirty free pages a collection or an explicit free
 	// leaves undiscarded, so the allocations after it reuse them rather than
 	// have the kernel supply them again. trim gives every one back.
-	retain uint32
+	// retainSet records that SetRetained chose it; otherwise a collection
+	// that several threads' allocations started picks its own (retention).
+	retain    uint32
+	retainSet bool
+
+	// pageLimit is the process's page quota in bytes, zero when unknown.
+	// It caps how far the collection floor grows with allocating threads.
+	pageLimit uint64
+	// allocators is how many threads allocated since the last collection,
+	// at least one. The collector sets it before it sweeps; the sweep sets
+	// the next goal and the retention from it.
+	allocators uint32
+	// cachedPages is how many slabs the threads' caches own now.
+	cachedPages uint64
 
 	liveBytes, liveObjects uint64
 	totalAlloc, mallocs    uint64
@@ -186,8 +199,32 @@ type Stats struct {
 
 // collectionFloor is the growth below which no collection starts: a heap
 // holding little collects after another MiB of allocation, not after every
-// few objects.
-const collectionFloor = uint64(1 << 20)
+// few objects. Each thread that allocated since the last collection adds a
+// MiB, up to a quotaShare-th of the process's page quota (goal). With an
+// eighth, eight threads collected every 8 MiB and each pause swept that
+// much: over 1.5 ms on eight processors with validation poisoning
+// (ADR 0205).
+const (
+	collectionFloor = uint64(1 << 20)
+	quotaShare      = 16
+)
+
+// collectionReason is why a collection runs. It decides what the
+// collection gives back, never what it marks.
+type collectionReason uint8
+
+const (
+	// collectAutomatic: an allocation crossed the goal. It keeps the
+	// threads' slabs and may keep free pages for the allocations after it.
+	collectAutomatic collectionReason = iota
+	// collectExplicit: runtime.GC or Collect.
+	collectExplicit
+	// collectIdle: CollectIdle, once every thread waits.
+	collectIdle
+	// collectPressure: an allocation found no room.
+	collectPressure
+	collectReasons
+)
 
 // metaBytes is how many bytes of metadata a heap of pages pages needs.
 func metaBytes(pages uint32) uintptr { return uintptr(pages) * unsafe.Sizeof(pageMeta{}) }
@@ -205,7 +242,7 @@ func (h *heap) init(base uintptr, pages uint32, meta []pageMeta, work []uintptr,
 	// on the heap, and the native heap does not exist yet.
 	h.base, h.capacity, h.frontier, h.meta = base, pages, 0, meta[:pages]
 	h.work, h.workTop, h.workHigh, h.overflow, h.discard = work, 0, 0, false, discard
-	h.retain = defaultRetained
+	h.retain, h.retainSet, h.pageLimit, h.allocators, h.cachedPages = defaultRetained, false, 0, 1, 0
 	h.liveBytes, h.liveObjects, h.totalAlloc, h.mallocs = 0, 0, 0, 0
 	h.frees, h.released, h.inUsePages, h.dirtyFree = 0, 0, 0, 0
 	h.peakHeld, h.peakLive, h.collections, h.collectedMallocs = 0, 0, 0, 0
@@ -676,9 +713,16 @@ func (h *heap) release(page, slot uint32) uint32 {
 // the more it retained (ADR 0202): a retained page must be cleared before
 // reuse, while a discarded one comes back zeroed and untouched slots on it
 // need no clearing.
+//
+// A collection several threads' allocations started is the exception:
+// retainPerAllocator pages per allocating thread, up to maxRetained, unless
+// SetRetained chose a count. Eight threads allocating took 20% less time
+// keeping 256 pages (ADR 0203), and those pages go back at the next idle
+// wait or failed allocation.
 const (
-	maxRetained     = uint32(collectionFloor >> pageShift)
-	defaultRetained = uint32(0)
+	maxRetained        = uint32(collectionFloor >> pageShift)
+	defaultRetained    = uint32(0)
+	retainPerAllocator = uint32(32)
 )
 
 // freeAt is runtime.free's work: it frees the allocation at address and,
@@ -692,11 +736,60 @@ func (h *heap) freeAt(address uintptr) {
 }
 
 // setRetained sets how many free pages trimAfterCollection and freeAt leave.
-func (h *heap) setRetained(pages uint32) { h.retain = min(pages, maxRetained) }
+func (h *heap) setRetained(pages uint32) { h.retain, h.retainSet = min(pages, maxRetained), true }
 
-// trimAfterCollection gives back what a collection freed, except the
-// retained pages.
-func (h *heap) trimAfterCollection() { h.releaseDown(uint64(h.retain)) }
+// retention is how many free pages a collection of reason leaves.
+func (h *heap) retention(reason collectionReason) uint32 {
+	switch {
+	case reason == collectIdle || reason == collectPressure:
+		return 0
+	case reason == collectAutomatic && !h.retainSet && h.allocators > 1:
+		return min(retainPerAllocator*h.allocators, maxRetained)
+	}
+	return h.retain
+}
+
+// trimAfterCollection gives back what an automatic collection freed, except
+// the retained pages.
+func (h *heap) trimAfterCollection() { h.trimAfter(collectAutomatic) }
+
+// trimAfter gives back what a collection of reason freed, except what
+// retention keeps.
+func (h *heap) trimAfter(reason collectionReason) {
+	keep := h.retention(reason)
+	h.diag.retainTarget = keep
+	if keep == 0 && reason != collectAutomatic && reason != collectExplicit {
+		h.trim()
+		return
+	}
+	h.releaseDown(uint64(keep))
+}
+
+// goal sets the live bytes at which the next collection starts: twice what
+// the sweep left, and at least floor more. The heap's reservation caps it.
+func (h *heap) goal() {
+	floor := h.floor()
+	next := h.liveBytes + max(h.liveBytes, floor)
+	if limit := uint64(h.capacity) << pageShift; next < h.liveBytes || next > limit {
+		next = limit
+	}
+	h.nextCollection = next
+	c := &h.diag
+	c.lastFloor, c.lastLive, c.lastAllocators = floor, h.liveBytes, h.allocators
+	c.maxAllocators = max(c.maxAllocators, h.allocators)
+}
+
+// floor is the least growth before the next collection: collectionFloor
+// for every thread that allocated since the last one, up to a quotaShare-th
+// of the page quota and never below collectionFloor. Without a known quota it
+// is collectionFloor.
+func (h *heap) floor() uint64 {
+	if h.pageLimit == 0 {
+		return collectionFloor
+	}
+	scaled := uint64(max(h.allocators, 1)) * collectionFloor
+	return min(scaled, max(collectionFloor, h.pageLimit/quotaShare))
+}
 
 // trim gives back every free page: an idle process, or one that ran out of
 // room, keeps none.
