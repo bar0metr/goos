@@ -47,11 +47,14 @@ static int fails(long result, int expected)
 	return result == -1 && errno == expected;
 }
 
-static volatile sig_atomic_t caught;
+static volatile sig_atomic_t suspended;
 
+/* note records SIGTSTP apart from other signals: their handlers may run in
+ * either order. */
 static void note(int signal)
 {
-	caught = signal;
+	if (signal == SIGTSTP)
+		suspended = 1;
 }
 
 static int descriptors(void)
@@ -209,7 +212,7 @@ static int jobs(void)
 		sigaction(SIGTSTP, &action, NULL);
 		sigaction(SIGWINCH, &action, NULL);
 		write(fds[1], "r", 1);
-		while (caught != SIGTSTP)
+		while (!suspended)
 			pause();
 		write(fds[1], "t", 1);
 		_exit(0);
@@ -309,8 +312,18 @@ int main(int argc, char **argv)
 	if (argc > 1 && !strcmp(argv[1], "raw"))
 		return raw();
 	if (argc > 1 && !strcmp(argv[1], "identity")) {
-		if (descriptors() || settings() || groups() || jobs() || orphans() || durability())
-			return 1;
+		static const struct {
+			const char *name;
+			int (*check)(void);
+		} parts[] = {
+			{"descriptors", descriptors}, {"settings", settings}, {"groups", groups},
+			{"jobs", jobs}, {"orphans", orphans}, {"durability", durability},
+		};
+		for (size_t index = 0; index < sizeof parts / sizeof parts[0]; index++) {
+			if (parts[index].check())
+				return 1;
+			printf("tty %s ok\n", parts[index].name);
+		}
 		printf("tty identity ok\n");
 		return 0;
 	}

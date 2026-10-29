@@ -1017,6 +1017,29 @@ test-linux-busybox:
 	@$(MAKE) --no-print-directory test-disk VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX)) TEST_DISK=$(BUILD_DIR)/linux-busybox-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/linux_busybox.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-busybox-virtio-blk.img $(notdir $(BUSYBOX))
 
+# Linux terminals (ADR 0206). test-linux-tty drives the repository's
+# tty-probe on its terminal through the serial console: descriptor identity,
+# /dev/tty, termios, sessions and groups, stop and continue, fsync, and
+# canonical and raw keyboard input. It needs nothing outside the repository.
+test-linux-tty:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/linux-tty-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/linux_tty.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-tty-virtio-blk.img
+
+# The same run with a static BusyBox and a static GNU nano the caller
+# supplies: an interactive sh with job control and Ctrl-C, nano editing and
+# saving a file from that shell and from the native one. No part of
+# test-all: the repository carries neither program.
+#   make test-linux-nano BUSYBOX=/path/to/busybox NANO=/path/to/nano
+test-linux-interactive: test-linux-nano
+test-linux-nano:
+	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }
+	@test -n "$(NANO)" && test -f "$(NANO)" || { echo "NANO=/path/to/static/nano is required" >&2; exit 2; }
+	@tools/linuxfixture/check-static.sh "$(NANO)" "$(BUSYBOX)"
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX)):$(abspath $(NANO)) TEST_DISK=$(BUILD_DIR)/linux-nano-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/linux_tty.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-nano-virtio-blk.img $(notdir $(BUSYBOX)) $(notdir $(NANO))
+
 # A static 7-Zip the caller supplies archives, tests, and extracts
 # /system/linux on a diagnostic guest with SMP processors (four by default),
 # and every extracted file must hash as its source. The run writes

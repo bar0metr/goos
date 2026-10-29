@@ -339,6 +339,21 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   repository carries no BusyBox. See the
   [static application catalog](linux-application-compatibility.md) for the
   tested operations and limits.
+- `make test-linux-tty` boots a validation guest and drives
+  `/system/linux/tty-probe` on its terminal through the serial console
+  (ADR 0206): `tty-probe identity` checks descriptor identity, `/dev/tty`,
+  termios, geometry, sessions and groups, stop and continue, and `fsync`
+  itself, and the harness types a canonical line with erase and word erase
+  and three raw bytes. The same probe passes on a Linux 6.12 kernel run as a
+  session leader on its serial console. It needs nothing outside the
+  repository.
+- `make test-linux-nano BUSYBOX=/path/to/busybox NANO=/path/to/nano`, also
+  `make test-linux-interactive`, checks both binaries are static x86_64 ELF
+  files, prints their SHA-256, and runs the `test-linux-tty` steps plus an
+  interactive BusyBox `sh`: a command, Ctrl-C ending a foreground `sleep`
+  while the shell survives, nano editing and saving a file from that shell,
+  and nano reopening it from the native shell. The log is
+  `build/logs/linux-tty.log`.
 - `make test-linux-bench` times four Linux calls beside native `bench` cases
   into `build/reports/linux-abi-<variant>.md`. `QEMU_ACCEL=kvm` on an x86_64
   host times the guest on the host CPU; the default is `tcg`.
