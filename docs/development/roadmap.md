@@ -439,9 +439,10 @@ Current important areas include:
 - TUI/terminal redraw efficiency;
 - Linux syscall/descriptor overhead under practical workloads;
 - native allocation on several threads: thread caches of several slabs and
-  collection pacing by allocating threads (ADR 0205) are implemented; locks
-  per size class wait until the version 3 allocator profile shows the heap
-  lock still costs a material share of an eight-thread run after them.
+  collection pacing by allocating threads (ADR 0205) are implemented. A
+  third of the heap-lock acquisitions left at eight threads wait, all in
+  refills of the 384-byte and larger classes, which meets the gate for a
+  separate ADR on locks per size class.
 
 Avoid scheduler rewrites without evidence.
 

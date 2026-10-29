@@ -288,8 +288,13 @@ Against the targets this design set itself:
   threads fall by 46 to 55% depending on the run. Of about 50800
   heap-lock acquisitions per eight-thread run, 50600 are refills; the other
   250 are the 98 collections, thread starts and exits, and reading the
-  profile. The remaining contention is refills of the classes of 384 bytes
-  and up, not page runs or rendezvous, and does not justify locks per class.
+  profile; 17394 of them, 34%, had to wait. The remaining contention is
+  concentrated in refills of the 384-byte and larger classes, not in page
+  runs, rendezvous, or page faults. That satisfies the measurement gate for
+  considering locks per class in a separate ADR, and does not make them part
+  of this change: the design already meets its wall-time, refill, and
+  collection-count goals, and locks per class would add lock-order and
+  collector-rendezvous cases.
 - The pause share falls by 82% with poisoning compiled out and rises in
   validation images; the longest pause stays under 1 ms in both, except
   for `big` on eight threads (1.9 ms, validation).
@@ -317,8 +322,8 @@ Workloads in the same runs, 0.2.8 before ADR 0205:
   every thread gives both back.
 - The heap's frontier grows with the floor, and the page records up to the
   frontier stay charged: 128 bytes per heap page, one page of records per
-  32 heap pages. After the idle rounds of eight threads a process held about
-  135 pages where 0.2.8 held 104, steady from round to round.
+  32 heap pages. After the idle rounds of eight threads a process held 147
+  to 153 pages where 0.2.8 held 102 to 106, steady from round to round.
 - A process whose threads block outside `wait.Any` and the goroutine
   scheduler never counts as idle, and gets no idle collection.
 - A pressure collection runs when the 256 MiB reservation is full. The
@@ -331,8 +336,9 @@ Workloads in the same runs, 0.2.8 before ADR 0205:
 - A global byte counter on every allocation: it would share a cache line
   across every thread on the path this ADR keeps local. Fixed cache bounds
   already bound what the goal misses.
-- Locks per class: they add lock order and collector rendezvous cases, and
-  refills and collections, not the lock itself, dominated the measurements.
+- Locks per class in this change: they add lock-order and collector
+  rendezvous cases, and batching and pacing were measured first. The
+  measurements now meet the gate for a separate ADR on them.
 - A separate remote-free bitmap: it would grow the page record by 32 bytes,
   and holding the threads already lets the collector fold remote frees
   before marking.
