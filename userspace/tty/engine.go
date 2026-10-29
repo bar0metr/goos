@@ -7,16 +7,16 @@ import "goos/kernel/ipc"
 // sticky, so a frontend can close a blocked or disconnected session.
 // Calls must be serialized by the frontend.
 type Engine struct {
-	line                Discipline
-	screen              Screen
-	raw                 bool
+	line   Discipline
+	screen Screen
+	raw    bool
 	// transport marks raw mode entered for a program with a terminal of
 	// its own, whose end keeps the screen.
 	transport bool
 	// lineEnded says the last raw output ended a line; escaped says raw
 	// output held an escape sequence, which may have changed the colours or
 	// hidden the cursor.
-	lineEnded, escaped bool
+	lineEnded, escaped  bool
 	rawInput            RawInput
 	rawBuffer           [MaxPart]byte
 	reading             uint64
