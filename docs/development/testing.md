@@ -30,7 +30,8 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   reload, minimal SSH algorithm negotiation, public-key login and wrong-
   key/wrong-user/password refusal, stdout and stderr on the shared PTY,
   Ctrl-C/Ctrl-D, live resize of the same running raw viewer through 80x24,
-  120x40 and 100x30, four concurrent sessions and fifth-login refusal, two
+  120x40 and 100x30, a Linux `tty-probe winch` that sees 100x30 and then
+  SIGWINCH and 132x50 on the remote PTY, four concurrent sessions and fifth-login refusal, two
   pending native handshakes with an authenticated shell responsive, disconnect
   reaping, lower-limit reload with existing sessions preserved, reload rollback,
   port replacement, persisted configuration and host identity, and refusal to
@@ -516,7 +517,10 @@ command output prove the input traversed IRQ1, the decoder, the keyboard ring,
 `tty-fb`, and `shell-fb`. The test
 also runs `mount` and `df` through that framebuffer session and requires their
 validation markers, proving the filesystem-information commands use the same
-terminal-independent command path. The test
+terminal-independent command path. It runs `/system/linux/tty-probe raw`
+on the framebuffer session and requires the Up key's three bytes
+`1b 5b 41` to reach the Linux program and the shell to read the next line
+after it. The test
 also requires `FRAMEBUFFER_USER_ISOLATION_OK`; it does not inspect text or
 require OCR. Its log and image are retained as
 `build/logs/console-gui.log` and `build/reports/console-gui.ppm`.

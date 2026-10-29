@@ -277,7 +277,7 @@ Linux programs now have a terminal, sessions, process groups, and job
 control (ADR 0206): interactive BusyBox `sh` and GNU nano 9.2 run. Linux
 runtime and ABI work stays driven by real applications.
 
-## Done — Linux terminal support
+## Done: Linux terminal support
 
 [ADR 0206](../adr/0206-linux-terminals-and-job-control.md) records the
 design. A Linux program alone in a foreground job gets a terminal built on

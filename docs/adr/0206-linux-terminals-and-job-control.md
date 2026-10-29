@@ -45,10 +45,15 @@ description names the record by a generation-safe identity, never by a
 handle or stream endpoint.
 
 PID 1 marks the `Started` notice of such a job (exec protocol version 12).
-The native shell then puts its session in raw mode and writes every key to
-the job's input. Ctrl-C, which the terminal service reports out of band in
-raw mode, becomes byte `0x03`. The shell returns the session to line mode
-when the job ends, as it does for a native full-screen command.
+The native shell then puts its session in transport mode, a raw mode the
+terminal service gained for this, and writes every key to the job's input.
+Ctrl-C, which the terminal service reports out of band in raw mode, becomes
+byte `0x03`; a Ctrl-C typed right behind other keys can overtake them. The
+shell returns the session to line mode when the job ends. Unlike the end of
+raw mode, which clears the screen for a native full-screen command, the end
+of transport mode keeps it: the program's output stays, and only after
+output with escape sequences does the service reset the colours, show the
+cursor, and end an unfinished line before the prompt.
 
 A pipeline stage, a background job, a redirected job, and a remote exec
 session keep the stream descriptors they had: their `isatty` stays false.
@@ -167,6 +172,20 @@ each continuation is reported once with the Linux status words
 When the native session's input stream closes, the terminal hangs up: reads
 return end of file and the foreground group gets SIGHUP. The native job
 teardown still ends the whole Linux family when its root ends.
+
+### Processing input in the reader's own call
+
+A reader, poller, or `ioctl` caller that processes input can send a signal
+to its own group. The signal then becomes pending for the caller, and the
+call returns at once (`EINTR`, or a restart after a handler with
+SA_RESTART), so the signal acts at the return.
+
+### Diagnostics
+
+A `DIAG=1` dump prints one `DIAG linux-tty` line per terminal: identity,
+family, session, foreground group, size, the termios flags, the hangup
+flag, counts of interrupts, suspends, quits, and resizes, and the last
+refused ioctl.
 
 ### fsync
 

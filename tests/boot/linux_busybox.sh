@@ -141,7 +141,9 @@ run "$busybox cat /persist/busy.txt"
 expect '^read-by-busybox$' 'busybox cat'
 clean 'busybox cat'
 
-run "$busybox ls /persist"
+# Alone in the foreground ls has a terminal, so it asks for one name per
+# line and no colours, as it would print them to a pipe.
+run "$busybox ls -1 --color=never /persist"
 expect '^busy.txt$' 'busybox ls'
 clean 'busybox ls'
 
