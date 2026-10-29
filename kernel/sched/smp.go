@@ -58,13 +58,13 @@ type Core struct {
 	held        uint64
 	// stopped are the tasks a job-control stop keeps off every processor.
 	// It is apart from held, which the kernel's own holds set and clear.
-	stopped     uint64
-	pinned      uint64
-	running     uint64
-	home        [MaxCPUs]uint64
-	online      uint64
-	current     [MaxCPUs]int8
-	rotor       [MaxCPUs]int8
+	stopped uint64
+	pinned  uint64
+	running uint64
+	home    [MaxCPUs]uint64
+	online  uint64
+	current [MaxCPUs]int8
+	rotor   [MaxCPUs]int8
 	// affinity is each task's requested processor mask; zero means every
 	// processor. barred has, per processor, the tasks whose affinity leaves
 	// it out, so a steal or a placement tests a task with one AND.
