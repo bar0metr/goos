@@ -1,6 +1,7 @@
 // Package terminal is the userspace side of the GoOS terminal contract: the
 // bounded ANSI output subset the console renders (cursor addressing, erase,
-// 16 SGR colours) and the key sequences it delivers. Full-screen programs use
+// 16 SGR colours, bold, underline, reverse video, cursor visibility) and the
+// key sequences it delivers. Full-screen programs use
 // it instead of writing escape strings by hand. It knows nothing of the
 // framebuffer or COM1: the same bytes drive both (ADR 0124).
 package terminal
@@ -134,7 +135,7 @@ func (output *Output) EraseToEnd() { output.WriteString("\x1b[K") }
 // before the next MoveTo.
 func (output *Output) RequestSize() { output.WriteString("\x1b[999;999H\x1b[6n") }
 
-// HideCursor and ShowCursor are ignored by consoles without a visible cursor.
+// HideCursor and ShowCursor switch the console's block cursor off and on.
 func (output *Output) HideCursor() { output.WriteString("\x1b[?25l") }
 func (output *Output) ShowCursor() { output.WriteString("\x1b[?25h") }
 

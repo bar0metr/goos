@@ -46,7 +46,7 @@ func TestTerminalPlainControls(t *testing.T) {
 
 func TestTerminalIncrementalCSI(t *testing.T) {
 	terminal, _ := testTerminal(t, 16, 3, 0)
-	terminal.Write([]byte("abcdef"))
+	terminal.Write([]byte("\x1b[?25labcdef"))
 	terminal.Write([]byte("\x1b["))
 	terminal.Write([]byte("3"))
 	terminal.Write([]byte("D"))
@@ -193,6 +193,7 @@ func TestTerminalAbsoluteCursorPosition(t *testing.T) {
 
 func TestTerminalEraseLineAndDisplay(t *testing.T) {
 	terminal, _ := testTerminal(t, 10, 4, 0)
+	terminal.Write([]byte("\x1b[?25l"))
 	for row := 0; row < 4; row++ {
 		terminal.Write([]byte("\x1b[47m"))
 		terminal.Write([]byte("\x1b[" + string(rune('1'+row)) + ";1H##########"))
@@ -313,7 +314,7 @@ func TestTerminalRejectsMalformedParameterLists(t *testing.T) {
 
 func TestTerminalIgnoresUnsupportedSGR(t *testing.T) {
 	terminal, _ := testTerminal(t, 20, 2, 0)
-	terminal.Write([]byte("\x1b[32m\x1b[4;5;7;38;5;196;48;2;1;2;3m"))
+	terminal.Write([]byte("\x1b[32m\x1b[5;38;5;196;48;2;1;2;3m"))
 	if terminal.foreground != terminal.palette[2] || terminal.background != terminal.defaultBackground {
 		t.Fatal("unsupported SGR changed the colours")
 	}
@@ -333,5 +334,155 @@ func TestTerminalColourGuardsPadding(t *testing.T) {
 				t.Fatalf("padding changed at %d,%d", column, row)
 			}
 		}
+	}
+}
+
+// cellRow returns the pixels of one glyph row of cell column,row.
+func cellRow(terminal *Terminal, column, row, glyphRow int) []uint32 {
+	start := (row*GlyphHeight+glyphRow)*terminal.buffer.stride + column*GlyphWidth
+	return terminal.buffer.pixels[start : start+GlyphWidth]
+}
+
+func TestTerminalReverseVideoSwapsColours(t *testing.T) {
+	terminal, _ := testTerminal(t, 8, 2, 0)
+	terminal.Write([]byte("\x1b[?25l\x1b[7m \x1b[27m "))
+	if cellPixel(&terminal, 0, 0) != terminal.defaultForeground || cellPixel(&terminal, 1, 0) != terminal.defaultBackground {
+		t.Fatal("SGR 7/27 did not swap and restore the default colours")
+	}
+	terminal.Write([]byte("\x1b[1;31;44;7m \x1b[0m "))
+	if cellPixel(&terminal, 2, 0) != terminal.palette[9] {
+		t.Fatal("reverse did not draw the bold foreground as the background")
+	}
+	if cellPixel(&terminal, 3, 0) != terminal.defaultBackground || terminal.reverse {
+		t.Fatal("SGR 0 did not end reverse video")
+	}
+	terminal.Write([]byte("\x1b[7;92;49m \x1b[39m "))
+	if cellPixel(&terminal, 4, 0) != terminal.palette[10] || cellPixel(&terminal, 5, 0) != terminal.defaultForeground {
+		t.Fatal("reverse did not follow colour changes")
+	}
+	terminal.Write([]byte("\x1b[2;1H\x1b[44;7m\x1b[K"))
+	if cellPixel(&terminal, 7, 1) != terminal.palette[4] {
+		t.Fatal("erase under reverse video did not use the background colour")
+	}
+}
+
+func TestTerminalUnderline(t *testing.T) {
+	terminal, _ := testTerminal(t, 4, 1, 0)
+	terminal.Write([]byte("\x1b[?25l\x1b[4m \x1b[24m \x1b[4m\x1b[0m "))
+	for x, pixel := range cellRow(&terminal, 0, 0, terminalUnderlineRow) {
+		if pixel != terminal.foreground {
+			t.Fatalf("underline missing at x=%d", x)
+		}
+	}
+	if cellPixel(&terminal, 0, 0) != terminal.background {
+		t.Fatal("underline painted outside its row")
+	}
+	for _, column := range []int{1, 2} {
+		if cellRow(&terminal, column, 0, terminalUnderlineRow)[0] != terminal.background {
+			t.Fatalf("SGR 24 or 0 left the underline on in column %d", column)
+		}
+	}
+}
+
+func TestTerminalCursorIsDrawnHiddenAndRestored(t *testing.T) {
+	terminal, _ := testTerminal(t, 8, 3, 0)
+	inverted := terminal.defaultBackground ^ (terminal.buffer.red | terminal.buffer.green | terminal.buffer.blue)
+	terminal.Write([]byte("ab"))
+	if cellPixel(&terminal, 2, 0) != inverted {
+		t.Fatal("cursor was not drawn after the written text")
+	}
+	terminal.Write([]byte("\x1b[?25l"))
+	if cellPixel(&terminal, 2, 0) != terminal.defaultBackground {
+		t.Fatal("hidden cursor was left on the screen")
+	}
+	terminal.Write([]byte("\x1b[3;5Hx\x1b[1;1H"))
+	if cellPixel(&terminal, 0, 0) != terminal.defaultBackground {
+		t.Fatal("hidden cursor was drawn")
+	}
+	terminal.Write([]byte("\x1b[?25h"))
+	if cellPixel(&terminal, 0, 0) == terminal.defaultBackground {
+		t.Fatal("shown cursor was not drawn at the current position")
+	}
+	terminal.Write([]byte("\x1b[2;2H"))
+	if cellPixel(&terminal, 0, 0) != terminal.defaultBackground || cellPixel(&terminal, 1, 1) != inverted {
+		t.Fatal("moving the cursor did not restore the old cell")
+	}
+	terminal.ConsumeByte('z')
+	if cellPixel(&terminal, 2, 1) != inverted || cellPixel(&terminal, 1, 1) == inverted {
+		t.Fatal("ConsumeByte did not move the cursor")
+	}
+}
+
+func TestTerminalResetSequenceRestoresTheScreen(t *testing.T) {
+	terminal, _ := testTerminal(t, 8, 3, 0)
+	terminal.Write([]byte("\x1b[?25l\x1b[7;4;1;31;42mXYZ\x1b[3;3H"))
+	terminal.Write([]byte("\x1b[0m\x1b[?25h\x1b[2J\x1b[H"))
+	if terminal.reverse || terminal.underline || terminal.bold || terminal.cursorHidden ||
+		terminal.foreground != terminal.defaultForeground || terminal.background != terminal.defaultBackground {
+		t.Fatal("reset left a style or the hidden cursor behind")
+	}
+	if terminal.row != 0 || terminal.column != 0 {
+		t.Fatalf("reset cursor = %d,%d", terminal.column, terminal.row)
+	}
+	inverted := terminal.defaultBackground ^ (terminal.buffer.red | terminal.buffer.green | terminal.buffer.blue)
+	for row := 0; row < terminal.rows; row++ {
+		for column := 0; column < terminal.columns; column++ {
+			want := terminal.defaultBackground
+			if row == 0 && column == 0 {
+				want = inverted
+			}
+			if cellPixel(&terminal, column, row) != want {
+				t.Fatalf("cell %d,%d after reset", column, row)
+			}
+		}
+	}
+}
+
+func TestTerminalCursorLeavesTheValidationMarkerAlone(t *testing.T) {
+	terminal, pixels := testTerminal(t, 4, 2, 0)
+	if !terminal.EnableValidationMarker() {
+		t.Fatal("validation marker was not enabled")
+	}
+	magenta := terminal.buffer.Color(255, 0, 255)
+	cyan := terminal.buffer.Color(0, 255, 255)
+	for _, sequence := range []string{"\x1b[2;4H", "\x1b[2;3H", "\x1b[1;1H", "\x1b[2;4H"} {
+		terminal.Write([]byte(sequence))
+		x0, y0 := terminal.buffer.width-ValidationMarkerSize, terminal.buffer.height-ValidationMarkerSize
+		for y := 0; y < ValidationMarkerSize; y++ {
+			for x := 0; x < ValidationMarkerSize; x++ {
+				want := magenta
+				if (x+y)&1 != 0 {
+					want = cyan
+				}
+				if pixels[(y0+y)*terminal.buffer.stride+x0+x] != want {
+					t.Fatalf("after %q marker pixel %d,%d changed", sequence, x, y)
+				}
+			}
+		}
+	}
+}
+
+func TestTerminalNcursesSubset(t *testing.T) {
+	terminal, _ := testTerminal(t, 10, 4, 0)
+	terminal.Write([]byte("\x1b[?7l\x1b[?7h\x1b[?1049h\x1b[3;4f"))
+	if terminal.state != terminalGround || terminal.row != 2 || terminal.column != 3 {
+		t.Fatalf("HVP after private modes = %d,%d", terminal.column, terminal.row)
+	}
+	terminal.Write([]byte("\x1b[2A\x1b[3B\x1b[4C\x1b[2D\x1bA"))
+	if terminal.row != 3 || terminal.column != 5 {
+		t.Fatalf("relative moves = %d,%d", terminal.column, terminal.row)
+	}
+	terminal.Write([]byte("\x1b[1;1H\x1b[?25l\x1b[47m##########\x1b[0m\x1b[1;5H\x1b[0K"))
+	if cellPixel(&terminal, 3, 0) != terminal.palette[7] || cellPixel(&terminal, 4, 0) != terminal.defaultBackground {
+		t.Fatal("ESC[0K erased the wrong cells")
+	}
+	// The row filled to its last column has wrapped the cursor to the next row.
+	terminal.Write([]byte("\x1b[4;1H123456789"))
+	if terminal.row != 3 || terminal.column != 9 {
+		t.Fatalf("cursor before the last column = %d,%d", terminal.column, terminal.row)
+	}
+	terminal.Write([]byte("0"))
+	if terminal.row != 3 || terminal.column != 0 || cellPixel(&terminal, 0, 0) == terminal.palette[7] {
+		t.Fatalf("writing the bottom-right cell did not wrap and scroll: %d,%d", terminal.column, terminal.row)
 	}
 }
