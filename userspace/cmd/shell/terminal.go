@@ -211,8 +211,17 @@ func setTerminalMode(operation terminal.Operation) {
 func startRawJob() {
 	if rawJob && !rawActive {
 		rawActive = true
-		setTerminalMode(terminal.OperationRawMode)
+		setTerminalMode(rawOperation())
 	}
+}
+
+// rawOperation is the raw mode the foreground job needs: transport for a
+// Linux job, whose end keeps the screen.
+func rawOperation() terminal.Operation {
+	if linuxTerminalJob {
+		return terminal.OperationTransportMode
+	}
+	return terminal.OperationRawMode
 }
 
 // endRawJob returns the terminal to line mode after the job, which also
@@ -280,7 +289,7 @@ func installTerminal(session handle.ID) {
 	// A restarted service starts in line mode; a full-screen job still
 	// running needs raw mode again.
 	if rawActive {
-		setTerminalMode(terminal.OperationRawMode)
+		setTerminalMode(rawOperation())
 	}
 }
 

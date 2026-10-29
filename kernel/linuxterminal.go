@@ -57,14 +57,16 @@ func terminalStream(object uint64) (*stream.Stream, uint64, bool) {
 // on its control stream and typed bytes on its input. It echoes, sends the
 // signals the input asks for to the foreground group, and wakes the tasks
 // that wait for the terminal. The caller holds the stream lock and the lock
-// of the terminal's family.
-func pumpTerminal(id linuxcompat.TerminalID) {
+// of the terminal's family. caller is the process whose call processes the
+// input, or nil in the kernel loop: a signal the input sends to caller
+// itself becomes pending, and its call returns to take it.
+func pumpTerminal(id linuxcompat.TerminalID, caller *linuxcompat.ProcessState) {
 	scratch := &thisCPU().linuxTerminal
 	snapshot, found := linuxcompat.Terminal(id)
 	if !found {
 		return
 	}
-	changed := pumpTerminalControl(id, snapshot)
+	changed := pumpTerminalControl(id, snapshot, caller)
 	input, inputID, live := terminalStream(snapshot.Endpoints.Input)
 	for batch := 0; live && batch < linuxTerminalBatches; batch++ {
 		room := linuxcompat.TerminalInputCapacity - linuxcompat.TerminalPending(id)
@@ -76,7 +78,7 @@ func pumpTerminal(id linuxcompat.TerminalID) {
 			if linuxcompat.HangUpTerminal(id) {
 				changed = true
 				if snapshot.Foreground != 0 {
-					signalTerminalGroup(snapshot, linuxabi.SignalHangup)
+					signalTerminalGroup(snapshot, linuxabi.SignalHangup, caller)
 				}
 			}
 			break
@@ -93,7 +95,7 @@ func pumpTerminal(id linuxcompat.TerminalID) {
 		writeTerminalEcho(after)
 		for _, signal := range [...]uint64{linuxabi.SignalInterrupt, linuxabi.SignalQuit, linuxabi.SignalTermStop} {
 			if signals.Has(signal) && after.Foreground != 0 {
-				signalTerminalGroup(after, signal)
+				signalTerminalGroup(after, signal, caller)
 			}
 		}
 		changed = true
@@ -105,7 +107,7 @@ func pumpTerminal(id linuxcompat.TerminalID) {
 
 // pumpTerminalControl applies the geometry records PID 1 wrote. Only the
 // newest matters; a change sends SIGWINCH to the foreground group.
-func pumpTerminalControl(id linuxcompat.TerminalID, snapshot linuxcompat.TerminalSnapshot) bool {
+func pumpTerminalControl(id linuxcompat.TerminalID, snapshot linuxcompat.TerminalSnapshot, caller *linuxcompat.ProcessState) bool {
 	scratch := &thisCPU().linuxTerminal
 	control, controlID, live := terminalStream(snapshot.Endpoints.Control)
 	if !live {
@@ -127,7 +129,7 @@ func pumpTerminalControl(id linuxcompat.TerminalID, snapshot linuxcompat.Termina
 	wakeStreamWaiters(controlID, 1, ipc.WaitMessage)
 	changed, after := linuxcompat.ResizeTerminal(id, newest.Rows, newest.Columns)
 	if changed && after.Foreground != 0 {
-		signalTerminalGroup(after, linuxabi.SignalWinch)
+		signalTerminalGroup(after, linuxabi.SignalWinch, caller)
 	}
 	return changed
 }
@@ -165,7 +167,7 @@ func pumpLinuxTerminals() {
 		held := heldLocks{set: registryRead | linuxState | streams, family: snapshot.FamilyID}
 		held.take(nil)
 		if terminalHasInput(snapshot) {
-			pumpTerminal(id)
+			pumpTerminal(id, nil)
 		}
 		held.drop()
 	}
@@ -228,7 +230,12 @@ func (handler *linuxCallHandler) terminalRead(request linuxcompat.Request, descr
 	if errno != 0 || limit == 0 {
 		return linuxcompat.Result{Errno: errno}
 	}
-	pumpTerminal(id)
+	pumpTerminal(id, handler.state)
+	// Input that signalled the reader's own group ends the read so the
+	// signal is taken as the call returns.
+	if handler.state != nil && handler.state.Signals.Acting() {
+		return handler.interrupted(true)
+	}
 	count, ready, found := linuxcompat.ReadTerminal(id, local.linuxIOBuffer[:limit])
 	if !found {
 		return linuxErrno(linuxabi.EIO)
@@ -355,7 +362,7 @@ func (handler *linuxCallHandler) terminalWrite(request linuxcompat.Request, desc
 func (handler *linuxCallHandler) terminalIoctl(state *linuxcompat.ProcessState, description linuxcompat.FileDescription, command uint64, argument uint64) linuxcompat.Result {
 	scratch := &thisCPU().linuxTerminal
 	id := linuxcompat.TerminalID(description.Object)
-	pumpTerminal(id)
+	pumpTerminal(id, state)
 	snapshot, found := linuxcompat.Terminal(id)
 	if !found {
 		return linuxErrno(linuxabi.EIO)
@@ -391,7 +398,7 @@ func (handler *linuxCallHandler) terminalIoctl(state *linuxcompat.ProcessState, 
 			return linuxErrno(linuxabi.EFAULT)
 		}
 		if changed, after := linuxcompat.ResizeTerminal(id, uint16(wire[0])|uint16(wire[1])<<8, uint16(wire[2])|uint16(wire[3])<<8); changed && after.Foreground != 0 {
-			signalTerminalGroup(after, linuxabi.SignalWinch)
+			signalTerminalGroup(after, linuxabi.SignalWinch, state)
 		}
 		return linuxcompat.Result{}
 	case linuxabi.IoctlTIOCGPGRP, linuxabi.IoctlTIOCGSID:
@@ -445,13 +452,13 @@ func (handler *linuxCallHandler) terminalIoctl(state *linuxcompat.ProcessState, 
 // signalTerminalGroup sends signal from the terminal to every member of its
 // foreground group. The group lives in the terminal's family, whose lock
 // the caller holds; no signal leaves the family.
-func signalTerminalGroup(snapshot linuxcompat.TerminalSnapshot, signal uint64) {
+func signalTerminalGroup(snapshot linuxcompat.TerminalSnapshot, signal uint64, caller *linuxcompat.ProcessState) {
 	scratch := &thisCPU().linuxTerminal
 	count := linuxcompat.GroupMembers(snapshot.FamilyID, snapshot.Foreground, scratch.members[:])
 	info := linuxcompat.SignalInfo{Code: linuxabi.SignalCodeKernel}
 	for index := 0; index < count; index++ {
 		if receiver, found := linuxcompat.FindProcessByPID(scratch.members[index]); found && receiver.FamilyID == snapshot.FamilyID {
-			sendLinuxSignal(receiver, signal, info, nil)
+			sendLinuxSignal(receiver, signal, info, caller)
 		}
 	}
 }
@@ -468,6 +475,7 @@ func sendLinuxSignal(receiver *linuxcompat.ProcessState, signal uint64, info lin
 	}
 	if receiver.Signals.StopsNow(signal) {
 		if stopRefused(receiver, signal) {
+			continueRefusedRoot(receiver)
 			return
 		}
 		// A pending SIGCONT goes with the stop.
@@ -501,6 +509,16 @@ func stopRefused(receiver *linuxcompat.ProcessState, signal uint64) bool {
 		return true
 	}
 	return signal != linuxabi.SignalStop && linuxcompat.GroupOrphaned(receiver.FamilyID, record.PGID)
+}
+
+// continueRefusedRoot makes a stop a launch root refused look like a stop
+// and an immediate continue: SIGCONT reaches the root, so a program that
+// suspended itself, as nano does, restores its terminal in its handler.
+func continueRefusedRoot(receiver *linuxcompat.ProcessState) {
+	if record, found := linuxcompat.FindProcessRecord(receiver.PID); found && record.ParentPID == 1 &&
+		receiver.Signals.Raise(linuxabi.SignalContinue, linuxcompat.SignalInfo{Code: linuxabi.SignalCodeKernel}) {
+		interruptLinuxSleeper(receiver)
+	}
 }
 
 // stopLinuxProcess stops every task of a process. Each keeps its wait, its

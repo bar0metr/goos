@@ -40,6 +40,6 @@ func All() []Fixture {
 		{"fsprobe", fsprobe, "7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6"},
 		{"dirprobe", dirprobe, "6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca"},
 		{"abi-probe", abiProbe, "3649d8d9c01af4b54fa88ea9e5121e6453b24819339b0a88c98b61336dd0e0b2"},
-		{"tty-probe", ttyProbe, "cd175133a32903ac5bda49066cbf468fff31f7a3b9bbe31483c9d8f31a6a3f1a"},
+		{"tty-probe", ttyProbe, "4528c65742c67b329424bbdbf91c807f344731e835f3a9bf1ce3623c402276ec"},
 	}
 }

@@ -138,7 +138,9 @@ SIGCONT. A stop signal the receiver neither blocks nor catches stops it
 when it is sent; a blocked one stops it when it is delivered. As on Linux,
 SIGTSTP, SIGTTIN, and SIGTTOU sent to an orphaned group are discarded. GoOS
 also discards any stop of a launch root: its parent is PID 1, which never
-sends SIGCONT, so the stop would hold the terminal session for good.
+sends SIGCONT, so the stop would hold the terminal session for good. The
+root gets SIGCONT instead, as if it had stopped and continued at once, so
+nano launched from the native shell redraws after ^T^Z.
 
 A read of the controlling terminal from outside the foreground group sends
 SIGTTIN to the reader's group and restarts after it continues; a reader

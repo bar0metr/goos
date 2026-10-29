@@ -219,6 +219,19 @@ func (state *SignalState) Interrupting() bool {
 	return false
 }
 
+// Acting reports whether a pending signal the mask allows would do anything
+// when delivered: run a handler, end the process, or stop it.
+func (state *SignalState) Acting() bool {
+	ready := state.pending &^ (state.mask &^ uncatchable)
+	for signal := uint64(1); ready != 0; signal++ {
+		if ready&1 != 0 && state.Outcome(signal) != SignalDiscard {
+			return true
+		}
+		ready >>= 1
+	}
+	return false
+}
+
 // RestartsInterrupted reports whether a call an interrupting signal ended
 // restarts after the handler instead of failing with EINTR: the signal
 // delivered next has SA_RESTART, or no signal remains to deliver.

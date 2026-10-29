@@ -429,7 +429,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		writer.Handle([]byte("log"), 0)
 	}
 	if linuxTerminal {
-		writer.Handle([]byte(linuxTerminalRole), 0)
+		writer.Handle([]byte("linux-tty"), 0)
 	}
 	// The request was validated when it arrived, so what does not fit is its
 	// size: its strings need more room in the startup object's tables.
@@ -499,7 +499,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if linuxTerminal {
 		// The reader goes to the kernel, which keeps it inside the
 		// terminal; PID 1 keeps the writer.
-		grants = append(grants, supervisor.Capability{Name: linuxTerminalRole, Handle: handle.ID(ttyPair[0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait, Consume: true})
+		grants = append(grants, supervisor.Capability{Name: "linux-tty", Handle: handle.ID(ttyPair[0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait, Consume: true})
 	}
 	profile := supervisor.ProfileNormal
 	if linuxProcess {

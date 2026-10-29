@@ -651,6 +651,17 @@ try:
     session.wait(PROMPT, start)
     require("terminal.raw-exit", b"RAW_EXIT_OK" in session.command("echo RAW_EXIT_OK"),
             "raw viewer returned control to its own shell")
+    # A Linux program on the remote PTY has a terminal of its own: the
+    # window change reaches it as TIOCGWINSZ and SIGWINCH (ADR 0206).
+    start = len(session.stdout)
+    session.send(b"/system/linux/tty-probe winch\n")
+    session.wait(rb"size 30 100", start)
+    session.resize(132, 50)
+    session.wait(rb"winch 50 132", start)
+    session.wait(PROMPT, start)
+    require("terminal.linux-window-change", True,
+            "a Linux program on the remote PTY saw the 100x30 size, then SIGWINCH and 132x50")
+    session.resize(100, 30)
     start = len(session.stdout)
     session.send(b"\x04")
     wait_until(lambda: session.process.poll() is not None, "Ctrl-D disconnects shell")

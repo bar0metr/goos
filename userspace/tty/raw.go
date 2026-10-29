@@ -6,6 +6,10 @@ package tty
 // terminal unusable.
 const ResetSequence = "\x1b[0m\x1b[?25h\x1b[2J\x1b[H"
 
+// TransportResetSequence is what the service writes when transport mode
+// ends: default colours and a visible cursor, and the screen as it is.
+const TransportResetSequence = "\x1b[0m\x1b[?25h"
+
 // RawInput holds what was typed in raw mode until a read takes it. It is a
 // bounded ring that allocates nothing; a byte arriving when it is full is
 // dropped, as the kernel's input ring drops one.

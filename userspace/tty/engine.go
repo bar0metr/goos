@@ -10,6 +10,13 @@ type Engine struct {
 	line                Discipline
 	screen              Screen
 	raw                 bool
+	// transport marks raw mode entered for a program with a terminal of
+	// its own, whose end keeps the screen.
+	transport bool
+	// lineEnded says the last raw output ended a line; escaped says raw
+	// output held an escape sequence, which may have changed the colours or
+	// hidden the cursor.
+	lineEnded, escaped bool
 	rawInput            RawInput
 	rawBuffer           [MaxPart]byte
 	reading             uint64
@@ -131,6 +138,13 @@ func (engine *Engine) Output(data []byte) {
 	}
 	if engine.raw {
 		engine.emit(data)
+		engine.lineEnded = data[len(data)-1] == '\n'
+		for _, value := range data {
+			if value == 0x1b {
+				engine.escaped = true
+				break
+			}
+		}
 		return
 	}
 	engine.emit(engine.screen.Hide())
@@ -169,8 +183,9 @@ func (engine *Engine) Request(message *ipc.Message) {
 			engine.showLine()
 		}
 		engine.respond(ResultAccepted, nil, message.Correlation)
-	case OperationRawMode:
+	case OperationRawMode, OperationTransportMode:
 		engine.enterRaw()
+		engine.transport = operation == OperationTransportMode
 		engine.respond(ResultAccepted, nil, message.Correlation)
 		engine.deliverRaw()
 	case OperationLineMode:
@@ -243,7 +258,7 @@ func (engine *Engine) enterRaw() {
 		return
 	}
 	engine.emit(engine.screen.Hide())
-	engine.raw = true
+	engine.raw, engine.lineEnded, engine.escaped = true, true, false
 	engine.rawInput.Reset()
 }
 
@@ -253,8 +268,20 @@ func (engine *Engine) leaveRaw() {
 	}
 	engine.raw = false
 	engine.rawInput.Reset()
-	engine.emit([]byte(ResetSequence))
-	engine.screen.Cleared()
+	if engine.transport {
+		engine.transport = false
+		// A program that wrote plain text leaves the terminal as it was.
+		if engine.escaped {
+			engine.emit([]byte(TransportResetSequence))
+		}
+		if !engine.lineEnded {
+			engine.emit([]byte("\r\n"))
+		}
+		engine.screen.Cleared()
+	} else {
+		engine.emit([]byte(ResetSequence))
+		engine.screen.Cleared()
+	}
 	if engine.reading != 0 {
 		engine.showLine()
 	}

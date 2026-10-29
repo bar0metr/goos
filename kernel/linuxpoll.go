@@ -73,7 +73,7 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 	for index := 0; index < int(count); index++ {
 		fd, events := linuxcompat.PollEntry(wire, index)
 		if description, open := state.FDs.Lookup(int(fd)); fd >= 0 && open && description.Kind == linuxcompat.FDTerminal {
-			revents := pollTerminal(linuxcompat.TerminalID(description.Object), events)
+			revents := pollTerminal(state, linuxcompat.TerminalID(description.Object), events)
 			linuxcompat.SetPollRevents(wire, index, revents)
 			if revents != 0 {
 				ready++
@@ -98,8 +98,9 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 		}
 		return handler.pollReturn(state, request, end, linuxcompat.Result{Value: ready})
 	}
-	// A handled signal the mask lets through ends the call before it sleeps.
-	if state.Signals.Interrupting() {
+	// A handled signal the mask lets through ends the call before it sleeps,
+	// and so does one terminal input just raised for the caller's group.
+	if state.Signals.Interrupting() || state.Signals.Acting() {
 		return handler.pollReturn(state, request, end, linuxErrno(linuxabi.EINTR))
 	}
 	deadline := uint64(0)
@@ -244,8 +245,8 @@ func addPollInterest(count int, entry kernelwait.Entry) int {
 // pollTerminal evaluates a terminal for poll after processing what waits for
 // it: readable once a read would complete, hung up once its input has ended,
 // writable while its output has room.
-func pollTerminal(id linuxcompat.TerminalID, events uint16) uint16 {
-	pumpTerminal(id)
+func pollTerminal(state *linuxcompat.ProcessState, id linuxcompat.TerminalID, events uint16) uint16 {
+	pumpTerminal(id, state)
 	snapshot, found := linuxcompat.Terminal(id)
 	if !found {
 		return linuxcompat.PollRevents(events, linuxcompat.PollReadiness{Error: true})

@@ -36,6 +36,7 @@ func deliverLinuxSignals(frame *linuxabi.Frame, task sched.TaskID) {
 			// The task leaves the processor at the next scheduling point,
 			// with the call's return in its frame.
 			if stopRefused(state, signal) {
+				continueRefusedRoot(state)
 				continue
 			}
 			stopLinuxProcess(state, signal)

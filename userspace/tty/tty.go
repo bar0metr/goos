@@ -61,6 +61,13 @@ const (
 	// OperationGeometry asks for the terminal's size, answered with
 	// ResultGeometry.
 	OperationGeometry
+	// OperationTransportMode is raw mode for a program that keeps a
+	// terminal of its own, a Linux job (ADR 0206). Leaving it with
+	// OperationLineMode keeps the screen: the program drew it and restored
+	// it, and its output stays. After output with escape sequences it
+	// resets the colours and shows the cursor, and a line the program left
+	// unfinished is ended before the prompt.
+	OperationTransportMode
 )
 
 // Result says how a read ended.
@@ -143,7 +150,7 @@ func DecodeRequest(message *ipc.Message) (Operation, []byte, bool) {
 }
 
 func clientOperation(operation Operation) bool {
-	return operation >= OperationReadLine && operation <= OperationGeometry && operation != OperationSession
+	return operation >= OperationReadLine && operation <= OperationTransportMode && operation != OperationSession
 }
 
 // takesPrompt reports whether a request may carry a prompt; the others carry

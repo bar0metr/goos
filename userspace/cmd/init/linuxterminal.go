@@ -69,10 +69,6 @@ func linuxTerminalEntries(snapshot *tty.Snapshot, storage *[3][32]byte) [][]byte
 	return append(entries, term)
 }
 
-// linuxTerminalRole is the startup name the kernel accepts for the control
-// stream; it matches the kernel's own constant.
-const linuxTerminalRole = "linux-tty"
-
 // environmentHas reports whether a request names a variable, given with its
 // equals sign.
 func environmentHas(environment execproto.List, name string) bool {

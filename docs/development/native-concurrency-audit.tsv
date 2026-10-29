@@ -830,3 +830,8 @@ CA-1045	goos/userspace/bin/threadprobe	workerIDs	process	owned	threadprobe remot
 CA-1046	goos/userspace/runtime/arena	histBounds	process	immutable	runtime/arena tests
 CA-1047	goos/userspace/runtime/arena	histNames	process	immutable	runtime/arena tests
 CA-1048	goos/userspace/runtime/arena	processInfo	process	runtime	runtime/arena tests
+CA-1049	goos/userspace/cmd/init	launchingLinuxTerminal	process	owned	none
+CA-1050	goos/userspace/cmd/init	linuxGeometryWire	process	owned	none
+CA-1051	goos/userspace/cmd/shell	linuxTerminalJob	process	owned	none
+CA-1052	goos/userspace/linux	termInfo	process	immutable	none
+CA-1053	goos/userspace/linux	ttyProbe	process	immutable	none

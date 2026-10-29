@@ -3,7 +3,8 @@
  * sessions and process groups, stop and continue, and fsync. Run it from a
  * terminal: "tty-probe identity" prints "tty identity ok" or the first
  * check that failed. "tty-probe canon" and "tty-probe raw" read what the
- * caller types and print it back, for a harness that drives the keyboard.
+ * caller types and print it back, for a harness that drives the keyboard;
+ * "tty-probe winch" waits for a resize.
  * The same binary runs on Linux, where the reference results come from. */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -304,6 +305,41 @@ static int raw(void)
 	return got != 3;
 }
 
+static volatile sig_atomic_t resized;
+
+static void note_resize(int signal)
+{
+	(void)signal;
+	resized = 1;
+}
+
+/* winch prints the size, then waits in read for SIGWINCH, which must end
+ * the read with EINTR, and prints the size the terminal has then. */
+static int winch(void)
+{
+	struct sigaction action;
+	struct winsize window;
+	char byte;
+
+	memset(&action, 0, sizeof action);
+	action.sa_handler = note_resize;
+	sigaction(SIGWINCH, &action, NULL);
+	if (ioctl(0, TIOCGWINSZ, &window) != 0)
+		return failed("TIOCGWINSZ");
+	printf("size %d %d\n", window.ws_row, window.ws_col);
+	for (;;) {
+		ssize_t count = read(0, &byte, 1);
+		if (count < 0 && errno == EINTR && resized) {
+			if (ioctl(0, TIOCGWINSZ, &window) != 0)
+				return failed("TIOCGWINSZ after SIGWINCH");
+			printf("winch %d %d\n", window.ws_row, window.ws_col);
+			return 0;
+		}
+		if (count <= 0 || byte == 'q')
+			return failed("no SIGWINCH before the read ended");
+	}
+}
+
 int main(int argc, char **argv)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -311,6 +347,8 @@ int main(int argc, char **argv)
 		return canon();
 	if (argc > 1 && !strcmp(argv[1], "raw"))
 		return raw();
+	if (argc > 1 && !strcmp(argv[1], "winch"))
+		return winch();
 	if (argc > 1 && !strcmp(argv[1], "identity")) {
 		static const struct {
 			const char *name;
@@ -327,6 +365,6 @@ int main(int argc, char **argv)
 		printf("tty identity ok\n");
 		return 0;
 	}
-	printf("usage: tty-probe identity|canon|raw\n");
+	printf("usage: tty-probe identity|canon|raw|winch\n");
 	return 2;
 }

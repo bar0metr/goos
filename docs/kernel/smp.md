@@ -212,6 +212,8 @@ and check the order and recursion of every acquisition.
 | Futex waiters | their bucket's lock; a task's bucket index is atomic |
 | Linux tables: process states and records, threads, open descriptions, directories, VFS sessions, PID and family allocation | linux tables lock, one table operation at a time |
 | Fields of a Linux family's states, descriptions, and VFS session; its signals | the family's lock |
+| Linux terminals: records, line discipline, termios, size, session and foreground group (ADR 0206) | linux tables lock, one table operation at a time; a terminal call also holds its family's lock and the stream lock, which the kernel loop takes the same way when it processes input no task read |
+| Job-control stops (the scheduler's `stopped` mask) | the scheduler lock |
 | A Linux process's pending-signal summary | an atomic word, read without a lock |
 | Per-task Linux caller cache (state, thread ID, family) | written by the task itself and by its exit |
 | Lifecycle queue | lifecycle lock |

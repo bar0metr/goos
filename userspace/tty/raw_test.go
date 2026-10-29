@@ -3,6 +3,8 @@ package tty
 import (
 	"strings"
 	"testing"
+
+	"goos/kernel/ipc"
 )
 
 func TestRawInputReturnsWhatWasTypedUnedited(t *testing.T) {
@@ -78,7 +80,7 @@ func TestResetSequenceRestoresTheTerminal(t *testing.T) {
 }
 
 func TestModeRequestsCarryNoPrompt(t *testing.T) {
-	for _, operation := range []Operation{OperationRawMode, OperationLineMode, OperationGeometry, OperationContinue} {
+	for _, operation := range []Operation{OperationRawMode, OperationLineMode, OperationGeometry, OperationContinue, OperationTransportMode} {
 		message, ok := Request(operation, nil, 7)
 		if !ok {
 			t.Fatalf("operation %d refused", operation)
@@ -97,7 +99,7 @@ func TestModeRequestsCarryNoPrompt(t *testing.T) {
 	}
 	// A client cannot send the session notice, which only PID 1 hands over,
 	// as a request, nor an operation past the last.
-	for _, operation := range []Operation{OperationSession, OperationGeometry + 1, 0} {
+	for _, operation := range []Operation{OperationSession, OperationTransportMode + 1, 0} {
 		if _, ok := Request(operation, nil, 7); ok {
 			t.Fatalf("operation %d accepted", operation)
 		}
@@ -149,5 +151,29 @@ func TestRawAndGeometryReplies(t *testing.T) {
 	}
 	if _, ok := Reply(ResultAccepted, []byte("x"), 9); ok {
 		t.Fatal("accepted reply with data")
+	}
+}
+
+func TestTransportModeKeepsTheScreen(t *testing.T) {
+	var output []byte
+	engine := NewEngine(func(data []byte) bool { output = append(output, data...); return true }, func(ipc.Message) bool { return true })
+	engine.SetGeometry(Geometry{Columns: 80, Rows: 24, Authoritative: true})
+	request, _ := Request(OperationTransportMode, nil, 1)
+	engine.Request(&request)
+	engine.Output([]byte("hello\r\n"))
+	output = output[:0]
+	request, _ = Request(OperationLineMode, nil, 2)
+	engine.Request(&request)
+	if len(output) != 0 {
+		t.Fatalf("leaving after plain text wrote %q", output)
+	}
+	request, _ = Request(OperationTransportMode, nil, 3)
+	engine.Request(&request)
+	engine.Output([]byte("\x1b[24;1H"))
+	output = output[:0]
+	request, _ = Request(OperationLineMode, nil, 4)
+	engine.Request(&request)
+	if string(output) != TransportResetSequence+"\r\n" {
+		t.Fatalf("leaving mid-line wrote %q", output)
 	}
 }
