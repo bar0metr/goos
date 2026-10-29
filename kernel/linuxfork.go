@@ -240,6 +240,7 @@ func exitLinuxProcess(exited *process.Process, code uint64) {
 	// interrupt it, so wait4 returns the child.
 	wakeChildWaiter(parentPID)
 	raiseChildSignal(parentPID, pid, termination)
+	continueStoppedOrphans(familyID)
 	if _, shared := linuxcompat.VFSContext(familyID); shared {
 		exited.Handles().Close(vfsHandle)
 	}
@@ -307,4 +308,19 @@ func releaseDescriptions(released *linuxcompat.Released) {
 		releaseLinuxDescriptionReference(released.At(index))
 	}
 	released.Reset()
+}
+
+// continueStoppedOrphans sends SIGHUP and then SIGCONT to each stopped
+// process an exit left without a parent, as Linux does: no one is left to
+// continue it.
+func continueStoppedOrphans(familyID uint64) {
+	scratch := &thisCPU().linuxTerminal
+	count := linuxcompat.StoppedOrphans(familyID, scratch.members[:])
+	info := linuxcompat.SignalInfo{Code: linuxabi.SignalCodeKernel}
+	for index := 0; index < count; index++ {
+		if orphan, found := linuxcompat.FindProcessByPID(scratch.members[index]); found {
+			sendLinuxSignal(orphan, linuxabi.SignalHangup, info, nil)
+			sendLinuxSignal(orphan, linuxabi.SignalContinue, info, nil)
+		}
+	}
 }

@@ -243,3 +243,19 @@ func GroupOrphaned(familyID uint64, group int32) bool {
 	tablesLock.Unlock()
 	return orphaned
 }
+
+// StoppedOrphans writes to target the stopped running processes of a family
+// whose parent is gone, so PID 1 adopted them, and returns how many.
+func StoppedOrphans(familyID uint64, target []int32) int {
+	tablesLock.Lock()
+	count := 0
+	for index := range processRecords {
+		record := &processRecords[index]
+		if record.State == ProcessRunning && record.Stopped && record.ParentPID == 1 && record.FamilyID == familyID && count < len(target) {
+			target[count] = record.PID
+			count++
+		}
+	}
+	tablesLock.Unlock()
+	return count
+}

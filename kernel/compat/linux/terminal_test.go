@@ -243,3 +243,21 @@ func TestStopSignalsAndContinue(t *testing.T) {
 		t.Fatal("SIGCONT left a stop pending")
 	}
 }
+
+func TestStoppedOrphansAfterParentExit(t *testing.T) {
+	resetCompatibilityProcesses()
+	root, _ := installProcessRecord(500, 1, 0)
+	shell, _ := registerChildForTest(501, root.PID)
+	job, _ := registerChildForTest(502, shell.PID)
+	MarkStopped(job.PID, abi.SignalStop)
+	var target [4]int32
+	if StoppedOrphans(root.FamilyID, target[:]) != 0 {
+		t.Fatal("a stopped child with a parent counted as an orphan")
+	}
+	tablesLock.Lock()
+	markProcessExited(shell.PID, Termination{})
+	tablesLock.Unlock()
+	if count := StoppedOrphans(root.FamilyID, target[:]); count != 1 || target[0] != job.PID {
+		t.Fatalf("stopped orphans = %d %v", count, target)
+	}
+}
