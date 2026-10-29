@@ -32,9 +32,12 @@ const (
 	// (kcall.WaitAnyThreadEnd). Its object is the thread's task ID and its
 	// event Exited.
 	KindThreadEnd
+	// KindLinuxTerminal is a Linux terminal's processed input or geometry.
+	// Its object is the terminal's identity. Only Linux calls wait on it.
+	KindLinuxTerminal
 
 	// lastKind is the highest valid kind; validKey bounds keys by it.
-	lastKind = KindThreadEnd
+	lastKind = KindLinuxTerminal
 )
 
 type Event uint8

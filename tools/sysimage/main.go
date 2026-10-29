@@ -86,6 +86,13 @@ func main() {
 	for _, fixture := range linuxfixtures.All() {
 		write(output, "system/linux/"+fixture.Name, fixture.Image)
 	}
+	for _, entry := range linuxfixtures.TermInfo() {
+		path := "system/linux/terminfo/" + entry.Path
+		if err := os.MkdirAll(filepath.Join(output, filepath.Dir(path)), 0o755); err != nil {
+			fail(err)
+		}
+		write(output, path, entry.Image)
+	}
 	// LINUX_EXTRA adds Linux programs the repository does not carry, such as
 	// a BusyBox the interoperability test was given, each under its own
 	// name. Several paths are separated as in PATH.

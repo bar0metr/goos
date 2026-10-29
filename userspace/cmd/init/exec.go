@@ -103,7 +103,11 @@ func startPipeline(job *execJob) {
 	// end before the job's reply. If it cannot be delivered, closing it gives
 	// the job end of input instead of a stream no one will ever write.
 	if input := job.job.TakeInput(); input != 0 {
-		started, ok := execproto.EncodeStarted(job.slot, input, job.correlation)
+		flags := uint8(0)
+		if job.linuxTerminal != 0 {
+			flags = execproto.StartedLinuxTerminal
+		}
+		started, ok := execproto.EncodeStarted(job.slot, input, job.correlation, flags)
 		if !ok || !sendMessage(job.session.execServer, started) {
 			sys.HandleClose(input)
 		}
@@ -147,6 +151,10 @@ func finishJob(job *execJob) {
 	pid, launchStatus, exitCode := job.job.Result()
 	job.session.resizeOwner.Release(uint64(job.slot) + 1)
 	closeResize(&job.resize)
+	if job.linuxTerminal != 0 {
+		sys.HandleClose(handle.ID(job.linuxTerminal))
+		job.linuxTerminal = 0
+	}
 	closeLauncher(&job.launcher)
 	job.active = false
 	if job.orphaned {
@@ -339,8 +347,14 @@ func (nativePipelineRunner) Launch(stage execproto.Stage, cwd []byte, environmen
 			job.resizeParent = true
 		}
 	}
+	// The only stage of a foreground job reads the job's input and writes
+	// the session's output: if it is a Linux program, those become its
+	// terminal.
+	if job := launchingJob; job != nil && job.request.Count == 1 && !job.request.Background && !job.session.execMode && job.linuxTerminal == 0 {
+		launchingLinuxTerminal = job
+	}
 	pid, process, status := launchApplication(stage.Path, command, cwd, stage.Arguments, environment, streams, launch)
-	launchingResize, launchingResizeSession = nil, nil
+	launchingResize, launchingResizeSession, launchingLinuxTerminal = nil, nil, nil
 	return pid, process, status
 }
 

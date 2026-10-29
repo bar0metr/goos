@@ -12,9 +12,10 @@ import (
 // linuxWaitCorrelation marks the one wait a task blocked in wait4 has.
 const linuxWaitCorrelation = 1
 
-// Wait4 reaps a zombie child of the caller, or blocks until a matching child
-// exits. The status and rusage destinations are checked before the zombie is
-// consumed, so a bad pointer costs the caller no child.
+// Wait4 reaps a zombie child of the caller, or with WUNTRACED or WCONTINUED
+// reports a child that stopped or continued, or blocks until a matching child
+// does one of those. The status and rusage destinations are checked before
+// the report is consumed, so a bad pointer costs the caller no child.
 func (handler *linuxCallHandler) Wait4(request linuxcompat.Request) linuxcompat.Result {
 	local := thisCPU()
 	// A wake that no child exit caused leaves the caller waiting.
@@ -35,7 +36,7 @@ func (handler *linuxCallHandler) Wait4(request linuxcompat.Request) linuxcompat.
 	if !found {
 		return linuxErrno(linuxabi.ECHILD)
 	}
-	target, noHang, errno := linuxcompat.WaitRequest(request.Arguments[0], request.Arguments[2])
+	target, options, errno := linuxcompat.WaitRequest(request.Arguments[0], request.Arguments[2])
 	if errno != 0 {
 		return linuxErrno(errno)
 	}
@@ -44,9 +45,22 @@ func (handler *linuxCallHandler) Wait4(request linuxcompat.Request) linuxcompat.
 		usageAddress != 0 && !vm.CanCopyOut(handler.root, usageAddress, linuxabi.RusageSize) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
-	zombie, any := linuxcompat.WaitableChild(state.PID, target)
+	zombie, any := linuxcompat.WaitableChild(state.PID, target, options)
 	if !any {
 		return linuxErrno(linuxabi.ECHILD)
+	}
+	if zombie.State == linuxcompat.ProcessRunning {
+		reported, ok := linuxcompat.TakeChildReport(state.PID, zombie.PID)
+		if !ok {
+			return linuxErrno(linuxabi.ECHILD)
+		}
+		putUint32(local.linuxWaitStatus[:], reported.WaitStatus())
+		clear(local.linuxRusage[:])
+		if statusAddress != 0 && !vm.CopyOut(handler.root, statusAddress, local.linuxWaitStatus[:]) ||
+			usageAddress != 0 && !vm.CopyOut(handler.root, usageAddress, local.linuxRusage[:]) {
+			return linuxErrno(linuxabi.EFAULT)
+		}
+		return linuxcompat.Result{Value: uint64(reported.PID)}
 	}
 	if zombie.State == linuxcompat.ProcessZombie {
 		reaped, ok := linuxcompat.ReapChild(state.PID, zombie.PID)
@@ -61,7 +75,7 @@ func (handler *linuxCallHandler) Wait4(request linuxcompat.Request) linuxcompat.
 		}
 		return linuxcompat.Result{Value: uint64(reaped.PID)}
 	}
-	if noHang {
+	if options.NoHang {
 		return linuxcompat.Result{}
 	}
 	if interrupted {

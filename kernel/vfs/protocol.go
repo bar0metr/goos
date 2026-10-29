@@ -81,7 +81,11 @@ const (
 	// empty. Rights carries the Metadata flags; Offset and Size are the new
 	// time's seconds and nanoseconds.
 	OperationSetMetadata
-	lastOperation = OperationSetMetadata
+	// OperationSync makes every completed write durable, as the PID 1 sync
+	// control does, on behalf of the open file Handle. The flush covers the
+	// whole volume, which is more than one file needs and never less.
+	OperationSync
+	lastOperation = OperationSync
 )
 
 // The flags of OperationSetMetadata, in the request's Rights field.

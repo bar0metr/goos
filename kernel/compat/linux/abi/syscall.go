@@ -47,6 +47,8 @@ const (
 	SysKill          Syscall = 62
 	SysUname         Syscall = 63
 	SysFcntl         Syscall = 72
+	SysFsync         Syscall = 74
+	SysFdatasync     Syscall = 75
 	SysGetcwd        Syscall = 79
 	SysChdir         Syscall = 80
 	SysRename        Syscall = 82
@@ -63,7 +65,12 @@ const (
 	SysSetgid        Syscall = 106
 	SysGeteuid       Syscall = 107
 	SysGetegid       Syscall = 108
+	SysSetpgid       Syscall = 109
 	SysGetppid       Syscall = 110
+	SysGetpgrp       Syscall = 111
+	SysSetsid        Syscall = 112
+	SysGetpgid       Syscall = 121
+	SysGetsid        Syscall = 124
 	SysChmod         Syscall = 90
 	SysFchmod        Syscall = 91
 	SysGetgroups     Syscall = 115
@@ -218,7 +225,12 @@ const (
 	SignalAlarm     = uint64(14)
 	SignalTerm      = uint64(15)
 	SignalChild     = uint64(17)
+	SignalContinue  = uint64(18)
 	SignalStop      = uint64(19)
+	SignalTermStop  = uint64(20)
+	SignalTTYIn     = uint64(21)
+	SignalTTYOut    = uint64(22)
+	SignalWinch     = uint64(28)
 	SignalCount     = uint64(64)
 
 	// sigaction flags and the special handler values.
@@ -239,6 +251,12 @@ const (
 	SignalCodeThreadKill = int32(-6)
 	SignalCodeChildExit  = int32(1)
 	SignalCodeChildKill  = int32(2)
+	// SignalCodeKernel is SI_KERNEL, the code of a signal the terminal
+	// generates; SignalCodeChildStopped and SignalCodeChildContinued are
+	// CLD_STOPPED and CLD_CONTINUED.
+	SignalCodeKernel         = int32(0x80)
+	SignalCodeChildStopped   = int32(5)
+	SignalCodeChildContinued = int32(6)
 
 	// clone flags a process-creating call may carry. The low byte of the
 	// flags is the signal the parent receives when the child ends.
@@ -258,9 +276,13 @@ const (
 
 	// wait4 options. WaitAll and WaitNoThread change nothing for a
 	// single-task process that creates children only with SIGCHLD.
-	WaitNoHang   = uint64(1)
-	WaitNoThread = uint64(0x20000000)
-	WaitAll      = uint64(0x40000000)
+	WaitNoHang = uint64(1)
+	// WaitUntraced and WaitContinued also report a child that stopped or
+	// continued.
+	WaitUntraced  = uint64(2)
+	WaitContinued = uint64(8)
+	WaitNoThread  = uint64(0x20000000)
+	WaitAll       = uint64(0x40000000)
 	// RusageSize is the size of struct rusage on x86_64.
 	RusageSize = 144
 
@@ -290,12 +312,12 @@ func (number Syscall) Known() bool {
 	case SysRead, SysWrite, SysOpen, SysClose, SysStat, SysFstat, SysLstat, SysPoll, SysLseek, SysMmap,
 		SysMprotect, SysMunmap, SysBrk, SysRtSigaction, SysRtSigprocmask, SysRtSigreturn, SysRtSigsuspend, SysPause,
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
-		SysDup, SysDup2, SysFcntl, SysDup3, SysPread64, SysPwrite64, SysAccess, SysSetuid, SysSetgid,
+		SysDup, SysDup2, SysFcntl, SysFsync, SysFdatasync, SysDup3, SysPread64, SysPwrite64, SysAccess, SysSetuid, SysSetgid,
 		SysGetgroups, SysFaccessat,
 		SysNanosleep, SysGetpid, SysClone, SysFork, SysVfork, SysExecve, SysExit, SysWait4, SysKill, SysTkill, SysTgkill, SysUname, SysGetcwd, SysChdir,
 		SysRename, SysMkdir, SysRmdir, SysUnlink, SysMkdirat, SysRenameat,
 		SysRenameat2,
-		SysReadlink, SysUmask, SysGettimeofday, SysSysinfo, SysGetuid, SysGetgid, SysGeteuid, SysGetegid, SysGetppid,
+		SysReadlink, SysUmask, SysGettimeofday, SysSysinfo, SysGetuid, SysGetgid, SysGeteuid, SysGetegid, SysGetppid, SysSetpgid, SysGetpgrp, SysSetsid, SysGetpgid, SysGetsid,
 		SysArchPrctl, SysGettid, SysTime, SysFutex, SysGetdents64, SysSetTidAddress,
 		SysClockGettime,
 		SysExitGroup, SysOpenat, SysNewfstatat, SysUnlinkat, SysReadlinkat,

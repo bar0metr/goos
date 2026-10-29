@@ -6,9 +6,9 @@ import (
 )
 
 // Device is one of the character devices the compatibility layer serves
-// itself. No filesystem holds them: the kernel recognizes three canonical
+// itself. No filesystem holds them: the kernel recognizes these canonical
 // paths before it asks the VFS, so a Linux program can discard output, read
-// zeros, and find out that it has no terminal. Native programs do not see
+// zeros, and reach its controlling terminal. Native programs do not see
 // these names, and no directory lists them.
 type Device uint8
 
@@ -18,8 +18,9 @@ const (
 	DeviceNull
 	// DeviceZero is /dev/zero: reads return zero bytes, writes vanish.
 	DeviceZero
-	// DeviceTTY is /dev/tty, the controlling terminal. A GoOS Linux process
-	// has none, so the name has a status and no open.
+	// DeviceTTY is /dev/tty, the controlling terminal. An open gives a
+	// process of an interactive session another description of its
+	// terminal; any other process has none and gets ENXIO.
 	DeviceTTY
 	// DeviceCPUOnline and DeviceCPUPossible are the sysfs lists of online
 	// and present processors, read-only text such as "0-3". The C library

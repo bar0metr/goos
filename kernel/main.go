@@ -156,6 +156,11 @@ func putUint64(data []byte, value uint64) {
 	}
 }
 
+func putUint16(data []byte, value uint16) {
+	data[0] = byte(value)
+	data[1] = byte(value >> 8)
+}
+
 func putUint32(data []byte, value uint32) {
 	data[0] = byte(value)
 	data[1] = byte(value >> 8)
@@ -756,6 +761,7 @@ func serviceKernel() {
 	flushLifecycle()
 	held.drop()
 	deliverProcessExits()
+	pumpLinuxTerminals()
 	consumeInitControl()
 	amd64.RestoreInterrupts(flags)
 	amd64.KernelSleep()

@@ -528,6 +528,9 @@ func commitLinuxExec(handler *linuxCallHandler, state *linuxExecState, compat *l
 		amd64.InitialFPUArea(fpu)
 	}
 	compat.Signals.ResetForExec()
+	// A parent may no longer move a child that replaced its image to another
+	// process group.
+	linuxcompat.MarkExecuted(compat.PID)
 	released := &thisCPU().linuxReleased
 	released.Reset()
 	compat.CloseOnExec(released)

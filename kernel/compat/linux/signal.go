@@ -31,9 +31,9 @@ type SignalState struct {
 
 // supportedActionFlags are the sigaction flags whose Linux meaning GoOS
 // provides. SA_RESTART restarts an interrupted stream read or write that moved
-// nothing, and wait4; no completed effect is repeated. SA_NOCLDSTOP and
-// SA_ONSTACK hold because no child ever stops and no alternate stack can be
-// installed.
+// nothing, and wait4; no completed effect is repeated. SA_NOCLDSTOP keeps a
+// child's stop and continuation from raising SIGCHLD. SA_ONSTACK holds
+// because no alternate stack can be installed.
 const supportedActionFlags = abi.SignalActionNoChildStop | abi.SignalActionNoChildWait | abi.SignalActionInfo |
 	abi.SignalActionRestorer | abi.SignalActionOnStack | abi.SignalActionRestart | abi.SignalActionNoDefer |
 	abi.SignalActionResetHand
@@ -60,20 +60,35 @@ type SignalAction struct {
 
 // DeliverableSignal reports whether GoOS can generate and deliver signal:
 // SIGHUP, SIGINT, SIGQUIT, SIGABRT, SIGKILL, SIGUSR1, SIGUSR2, SIGPIPE,
-// SIGALRM, SIGTERM, and SIGCHLD.
+// SIGALRM, SIGTERM, SIGCHLD, the job-control signals SIGCONT, SIGSTOP,
+// SIGTSTP, SIGTTIN, and SIGTTOU, and SIGWINCH.
 // A CPU fault ends the process at once and cannot be caught.
 func DeliverableSignal(signal uint64) bool {
 	switch signal {
 	case abi.SignalHangup, abi.SignalInterrupt, abi.SignalQuit, abi.SignalAbort, abi.SignalKill,
-		abi.SignalUser1, abi.SignalUser2, abi.SignalPipe, abi.SignalAlarm, abi.SignalTerm, abi.SignalChild:
+		abi.SignalUser1, abi.SignalUser2, abi.SignalPipe, abi.SignalAlarm, abi.SignalTerm, abi.SignalChild,
+		abi.SignalContinue, abi.SignalStop, abi.SignalTermStop, abi.SignalTTYIn, abi.SignalTTYOut, abi.SignalWinch:
 		return true
 	}
 	return false
 }
 
 // DefaultIgnored reports whether the default action of a deliverable signal is
-// to discard it. Every other deliverable signal ends the process by default.
-func DefaultIgnored(signal uint64) bool { return signal == abi.SignalChild }
+// to discard it: SIGCHLD, SIGWINCH, and SIGCONT, whose continuing happens when
+// it is sent. The stop signals stop by default; every other deliverable
+// signal ends the process.
+func DefaultIgnored(signal uint64) bool {
+	return signal == abi.SignalChild || signal == abi.SignalWinch || signal == abi.SignalContinue
+}
+
+// StopSignal reports whether the default action of signal is to stop.
+func StopSignal(signal uint64) bool {
+	return signal == abi.SignalStop || signal == abi.SignalTermStop || signal == abi.SignalTTYIn || signal == abi.SignalTTYOut
+}
+
+// stopSignals are the mask bits of the four stop signals.
+const stopSignals = uint64(1)<<(abi.SignalStop-1) | uint64(1)<<(abi.SignalTermStop-1) |
+	uint64(1)<<(abi.SignalTTYIn-1) | uint64(1)<<(abi.SignalTTYOut-1)
 
 // CopyFrom gives state the mask and dispositions of source, as fork does.
 // Pending signals stay with source.
@@ -115,7 +130,14 @@ func (state *SignalState) Raise(signal uint64, info SignalInfo) bool {
 		return false
 	}
 	bit := uint64(1) << (signal - 1)
-	if signal != abi.SignalKill && state.mask&bit == 0 && state.ignored(signal) {
+	// A continue cancels pending stops and a stop a pending continue, as on
+	// Linux, whatever the signal's disposition.
+	if signal == abi.SignalContinue {
+		atomic.StoreUint64(&state.pending, state.pending&^stopSignals)
+	} else if StopSignal(signal) {
+		atomic.StoreUint64(&state.pending, state.pending&^(uint64(1)<<(abi.SignalContinue-1)))
+	}
+	if signal != abi.SignalKill && signal != abi.SignalStop && state.mask&bit == 0 && state.ignored(signal) {
 		return false
 	}
 	if state.pending&bit == 0 {
@@ -130,6 +152,32 @@ func (state *SignalState) Raise(signal uint64, info SignalInfo) bool {
 func (state *SignalState) ReapsChildren() bool {
 	action := state.ActionOf(abi.SignalChild)
 	return action.Handler == abi.SignalHandlerIgnore || action.Flags&abi.SignalActionNoChildWait != 0
+}
+
+// Blocked reports whether the mask holds signal back.
+func (state *SignalState) Blocked(signal uint64) bool {
+	return signal != 0 && signal <= abi.SignalCount && state.mask&(uint64(1)<<(signal-1)) != 0
+}
+
+// CancelContinue discards a pending SIGCONT, which a stop overrides.
+func (state *SignalState) CancelContinue() {
+	atomic.StoreUint64(&state.pending, state.pending&^(uint64(1)<<(abi.SignalContinue-1)))
+}
+
+// StopsNow reports whether signal sent now stops the process at once:
+// SIGSTOP always, and another stop signal that is neither blocked nor
+// handled nor ignored.
+func (state *SignalState) StopsNow(signal uint64) bool {
+	if signal == abi.SignalStop {
+		return true
+	}
+	return StopSignal(signal) && state.mask&(uint64(1)<<(signal-1)) == 0 && state.Outcome(signal) == SignalStopProcess
+}
+
+// NotifiesStops reports whether this process, as a parent, hears through
+// SIGCHLD that a child stopped or continued: SA_NOCLDSTOP asks not to.
+func (state *SignalState) NotifiesStops() bool {
+	return state.ActionOf(abi.SignalChild).Flags&abi.SignalActionNoChildStop == 0
 }
 
 // Fatal reports whether signal sent now would end the process by its default
@@ -214,6 +262,8 @@ const (
 	SignalDiscard SignalOutcome = iota + 1
 	SignalTerminate
 	SignalHandle
+	// SignalStopProcess stops the process until SIGCONT.
+	SignalStopProcess
 )
 
 // Outcome decides what a taken signal does under its current disposition.
@@ -221,11 +271,16 @@ func (state *SignalState) Outcome(signal uint64) SignalOutcome {
 	if signal == abi.SignalKill {
 		return SignalTerminate
 	}
+	if signal == abi.SignalStop {
+		return SignalStopProcess
+	}
 	switch handler := state.ActionOf(signal).Handler; {
 	case handler == abi.SignalHandlerIgnore:
 		return SignalDiscard
 	case handler == abi.SignalHandlerDefault && DefaultIgnored(signal):
 		return SignalDiscard
+	case handler == abi.SignalHandlerDefault && StopSignal(signal):
+		return SignalStopProcess
 	case handler == abi.SignalHandlerDefault:
 		return SignalTerminate
 	}

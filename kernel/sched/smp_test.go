@@ -470,3 +470,40 @@ func TestForgottenWakeDoesNotSkipTheNextSleep(t *testing.T) {
 	}
 	check(t, core)
 }
+
+func TestStoppedTaskStaysOffUntilContinued(t *testing.T) {
+	core := newCore(t, 2)
+	slot := startTask(t, core, 0)
+	if next := core.Switch(1, Preempt); next != slot {
+		t.Fatalf("processor 1 picked %d, want %d", next, slot)
+	}
+	// A task may stop itself: it leaves at its next scheduling point.
+	if _, ok := core.Stop(slot, 1); !ok || !core.MustLeave(1) {
+		t.Fatal("stop of the running task refused")
+	}
+	core.Switch(1, Block)
+	core.Finish(1, slot)
+	if core.Wake(slot, 0); core.Switch(1, Preempt) == slot || core.Switch(0, Preempt) == slot {
+		t.Fatal("a stopped task ran after a wake")
+	}
+	// A hold and its release leave the stop in force.
+	core.Hold(slot, 0)
+	core.Release(slot, 0)
+	if core.Switch(1, Preempt) == slot {
+		t.Fatal("a release ended the stop")
+	}
+	if core.Continue(slot, 0); core.Switch(1, Preempt) != slot && core.Switch(0, Preempt) != slot {
+		t.Fatal("continued task with a completed wake did not run")
+	}
+	check(t, core)
+}
+
+func TestTerminateEndsStoppedTask(t *testing.T) {
+	core := newCore(t, 2)
+	slot := startTask(t, core, 0)
+	core.Stop(slot, 0)
+	if _, ok := core.Terminate(slot, 0); !ok || core.Stopped(slot) {
+		t.Fatal("terminate of a stopped task refused or left it stopped")
+	}
+	check(t, core)
+}

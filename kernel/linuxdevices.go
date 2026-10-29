@@ -128,6 +128,13 @@ func (handler *linuxCallHandler) deviceWrite(request linuxcompat.Request, descri
 // openDevice gives the process a descriptor for a device. The description
 // holds the device and the access mode; there is no position to keep.
 func (handler *linuxCallHandler) openDevice(device linuxcompat.Device, intent linuxcompat.OpenIntent, trailing bool) linuxcompat.Result {
+	if device == linuxcompat.DeviceTTY {
+		state, found := linuxcompat.FindProcess(handler.root)
+		if !found {
+			return linuxErrno(linuxabi.ENXIO)
+		}
+		return handler.openTerminal(state, intent, trailing)
+	}
 	if errno := linuxcompat.DeviceOpenErrno(device, intent, trailing); errno != 0 {
 		return linuxErrno(errno)
 	}

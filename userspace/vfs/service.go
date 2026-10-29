@@ -421,6 +421,13 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 		default:
 			reply.Status = service.namespace.SetMetadata(request.Path, change)
 		}
+	case vfs.OperationSync:
+		// The handle must be one of the owner's open files.
+		if _, status := service.namespace.StatOpen(owner, request.Handle); status != vfs.StatusOK {
+			reply.Status = status
+		} else if !service.Sync() {
+			reply.Status = vfs.StatusBackendError
+		}
 	case vfs.OperationFilesystemInfo:
 		info, mountID, status := service.namespace.FilesystemInfo(request.Path, request.MountID)
 		reply.Status, reply.MountID, reply.Filesystem = status, mountID, info

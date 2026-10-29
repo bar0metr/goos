@@ -1,8 +1,14 @@
 package linux
 
 import (
+	"goos/kernel/compat/linux/abi"
 	"goos/kernel/process"
 )
+
+// terminalStandardStreams marks, in the output and error arguments of
+// initializeHeld, a table whose standard descriptors are the terminal the
+// input argument names.
+const terminalStandardStreams = ^uint64(0)
 
 const (
 	LinuxMaxFD          = 64
@@ -18,6 +24,9 @@ const (
 	FDVFSFile
 	FDVFSDirectory
 	FDSynthetic
+	// FDTerminal is a Linux terminal. Object is its TerminalID, never a
+	// native handle or stream endpoint.
+	FDTerminal
 )
 
 type FileDescription struct {
@@ -67,6 +76,17 @@ func (table *FDTable) initializeHeld(familyID uint64, input, output, errorOutput
 	}
 	*table = FDTable{}
 	table.familyID = familyID
+	if terminal := TerminalID(input); errorOutput == terminalStandardStreams && output == terminalStandardStreams {
+		// One read-write description on the terminal, as a login gets: the
+		// three integers share it.
+		if table.install(0, FileDescription{Kind: FDTerminal, Flags: abi.OpenReadWrite, Object: uint64(terminal)}) &&
+			table.duplicateAtHeld(0, 1, false) && table.duplicateAtHeld(0, 2, false) {
+			return true
+		}
+		table.closeAllHeld(nil)
+		*table = FDTable{}
+		return false
+	}
 	if table.install(0, FileDescription{Kind: FDStreamReader, Object: input}) &&
 		table.install(1, FileDescription{Kind: FDStreamWriter, Object: output}) &&
 		table.install(2, FileDescription{Kind: FDStreamWriter, Object: errorOutput}) {
@@ -244,7 +264,9 @@ func (table *FDTable) closeHeld(fd int) (FileDescription, bool, bool) {
 // caller releases once the Linux tables are no longer held.
 type Released struct {
 	count int
-	items [LinuxMaxFD]FileDescription
+	// One more than the descriptors: an exiting session leader also gives
+	// up its controlling terminal.
+	items [LinuxMaxFD + 1]FileDescription
 }
 
 func (released *Released) add(description FileDescription) {
@@ -303,7 +325,7 @@ func (table *FDTable) description(index uint16) (*descriptionSlot, bool) {
 }
 
 func (description FileDescription) valid() bool {
-	return description.Kind > FDInvalid && description.Kind <= FDSynthetic && description.Object != 0
+	return description.Kind > FDInvalid && description.Kind <= FDTerminal && description.Object != 0
 }
 
 // OpenDescriptionCount reports how many open-file descriptions exist in all

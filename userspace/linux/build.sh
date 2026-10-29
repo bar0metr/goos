@@ -90,7 +90,7 @@ tinygo clang --target=x86_64-unknown-linux-musl -c "$here/hello-pie/hello.S" -o 
 tinygo ld.lld -static -nostdlib -pie --no-dynamic-linker --strip-all --build-id=none \
 	-z noexecstack -z max-page-size=4096 -e _start -o "$out/hello-pie" "$work/hello-pie.o"
 
-for fixture in musl-hello fsprobe dirprobe abi-probe; do
+for fixture in musl-hello fsprobe dirprobe abi-probe tty-probe; do
 	# shellcheck disable=SC2086
 	tinygo clang $cflags -c "$here/$fixture/main.c" -o "$work/$fixture.o"
 	# shellcheck disable=SC2086
@@ -100,4 +100,4 @@ for fixture in musl-hello fsprobe dirprobe abi-probe; do
 		--start-lib $library --end-lib
 done
 
-(cd "$out" && shasum -a 256 hello hello-pie musl-hello fsprobe dirprobe abi-probe)
+(cd "$out" && shasum -a 256 hello hello-pie musl-hello fsprobe dirprobe abi-probe tty-probe)

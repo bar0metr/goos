@@ -47,6 +47,27 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		return linuxcompat.Result{Value: uint64(handler.tid)}
 	case linuxabi.SysGetppid:
 		return linuxcompat.Result{Value: uint64(linuxcompat.ParentPIDOf(state.PID))}
+	case linuxabi.SysSetsid:
+		sid, errno := linuxcompat.Setsid(state.PID)
+		if errno != 0 {
+			return linuxErrno(errno)
+		}
+		return linuxcompat.Result{Value: uint64(sid)}
+	case linuxabi.SysSetpgid:
+		return linuxErrno(linuxcompat.Setpgid(state.PID, int32(arguments[0]), int32(arguments[1])))
+	case linuxabi.SysGetpgrp, linuxabi.SysGetpgid, linuxabi.SysGetsid:
+		target := int32(0)
+		if request.Number != linuxabi.SysGetpgrp {
+			target = int32(arguments[0])
+		}
+		value, errno := linuxcompat.ProcessGroupOf(state.PID, target)
+		if request.Number == linuxabi.SysGetsid {
+			value, errno = linuxcompat.SessionOf(state.PID, target)
+		}
+		if errno != 0 {
+			return linuxErrno(errno)
+		}
+		return linuxcompat.Result{Value: uint64(value)}
 	case linuxabi.SysGetuid, linuxabi.SysGeteuid:
 		return linuxcompat.Result{Value: uint64(linuxcompat.StatUID)}
 	case linuxabi.SysGetgid, linuxabi.SysGetegid:

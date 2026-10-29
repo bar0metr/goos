@@ -32,6 +32,14 @@ func deliverLinuxSignals(frame *linuxabi.Frame, task sched.TaskID) {
 		case linuxcompat.SignalTerminate:
 			endLinuxProcessBySignal(frame, signal)
 			return
+		case linuxcompat.SignalStopProcess:
+			// The task leaves the processor at the next scheduling point,
+			// with the call's return in its frame.
+			if stopRefused(state, signal) {
+				continue
+			}
+			stopLinuxProcess(state, signal)
+			return
 		}
 		action := state.Signals.ActionOf(signal)
 		if action.Flags&linuxabi.SignalActionRestorer == 0 || !vm.ValidateUserRange(action.Restorer, 1) || !vm.ValidateUserRange(action.Handler, 1) {
@@ -169,9 +177,12 @@ func registersFromContext(registers *amd64.UserRegisters, context *linuxcompat.U
 
 // Kill serves kill, tkill, and tgkill for the caller and its descendants. A
 // positive PID names one process; a single-task process has one thread whose
-// ID is its PID, so tgkill needs both IDs equal. Process-group and broadcast
-// targets wait for process groups and are EINVAL. Signal 0 checks the target
-// and sends nothing, and a zombie target accepts a signal it never acts on.
+// ID is its PID, so tgkill needs both IDs equal. kill with 0 names the
+// caller's process group and with -pgid that group: every running member of
+// the caller's family and session in it receives the signal. A group never
+// reaches past the family, whatever PGID a program names. The broadcast
+// target -1 stays EINVAL. Signal 0 checks the target and sends nothing, and a
+// zombie target accepts a signal it never acts on.
 func (handler *linuxCallHandler) Kill(request linuxcompat.Request) linuxcompat.Result {
 	state, found := linuxcompat.FindProcess(handler.root)
 	if !found {
@@ -193,11 +204,18 @@ func (handler *linuxCallHandler) Kill(request linuxcompat.Request) linuxcompat.R
 			}
 		}
 	}
+	if signal > linuxabi.SignalCount || signal != 0 && !linuxcompat.DeliverableSignal(signal) {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	info := linuxcompat.SignalInfo{Code: code, PID: state.PID, UID: linuxcompat.StatUID}
+	if request.Number == linuxabi.SysKill && (target == 0 || target < -1) {
+		return handler.killGroup(state, int32(-target), signal, info)
+	}
 	// A thread's TID names its process: the threads share one signal state.
 	if group, isThread := linuxcompat.ThreadGroupOf(int32(target)); isThread {
 		target = int64(group)
 	}
-	if target <= 0 || signal > linuxabi.SignalCount || signal != 0 && !linuxcompat.DeliverableSignal(signal) {
+	if target <= 0 {
 		return linuxErrno(linuxabi.EINVAL)
 	}
 	record, errno := linuxcompat.SignalTarget(state.PID, int32(target))
@@ -211,21 +229,37 @@ func (handler *linuxCallHandler) Kill(request linuxcompat.Request) linuxcompat.R
 	if !found {
 		return linuxcompat.Result{}
 	}
-	info := linuxcompat.SignalInfo{Code: code, PID: state.PID, UID: linuxcompat.StatUID}
-	// A signal the target would die of ends it now, even while it sleeps in
-	// a system call. The caller's own fatal signal acts as this call returns.
-	if receiver != state && receiver.Signals.Fatal(signal) {
-		if owner, alive := processRegistry.ByRoot(receiver.Root); alive {
-			for _, task := range owner.Tasks() {
-				cancelTaskWaits(task)
-				amd64.TerminateTask(uint64(task), linuxcompat.SignalExitCode(signal))
-			}
-		}
-		return linuxcompat.Result{}
+	sendLinuxSignal(receiver, signal, info, state)
+	return linuxcompat.Result{}
+}
+
+// killGroup sends signal to every running member of group in the caller's
+// family and session. Zero names the caller's own group. A group with no
+// such member is ESRCH.
+func (handler *linuxCallHandler) killGroup(state *linuxcompat.ProcessState, group int32, signal uint64, info linuxcompat.SignalInfo) linuxcompat.Result {
+	scratch := &thisCPU().linuxTerminal
+	caller, found := linuxcompat.FindProcessRecord(state.PID)
+	if !found {
+		return linuxErrno(linuxabi.ESRCH)
 	}
-	receiver.Signals.Raise(signal, info)
-	if receiver != state {
-		interruptLinuxSleeper(receiver)
+	if group == 0 {
+		group = caller.PGID
+	}
+	count := linuxcompat.GroupMembers(state.FamilyID, group, scratch.members[:])
+	sent := 0
+	for index := 0; index < count; index++ {
+		member, known := linuxcompat.FindProcessRecord(scratch.members[index])
+		receiver, alive := linuxcompat.FindProcessByPID(scratch.members[index])
+		if !known || !alive || member.SID != caller.SID || receiver.FamilyID != state.FamilyID {
+			continue
+		}
+		sent++
+		if signal != 0 {
+			sendLinuxSignal(receiver, signal, info, state)
+		}
+	}
+	if sent == 0 {
+		return linuxErrno(linuxabi.ESRCH)
 	}
 	return linuxcompat.Result{}
 }
@@ -272,7 +306,9 @@ func interruptLinuxTask(state *linuxcompat.ProcessState, task sched.TaskID) bool
 	}
 	switch pending.Number {
 	case linuxabi.SysRead, linuxabi.SysReadv, linuxabi.SysWrite, linuxabi.SysWritev:
-		if !streamWaitSet.Cancel(task) {
+		// A pipe read or write waits on its stream; a terminal read on its
+		// streams and the terminal at once.
+		if !streamWaitSet.Cancel(task) && !waitAnyTable.Cancel(task) {
 			return false
 		}
 	case linuxabi.SysWait4:

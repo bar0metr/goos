@@ -12,13 +12,13 @@ import (
 
 const (
 	ProtocolID = uint64(0x4745584543303031)
-	Version    = uint16(11)
+	Version    = uint16(12)
 	// MaxPath is the native path limit (ADR 0110).
 	MaxPath     = limits.PathMax
 	MaxStages   = 4
 	replySize   = 25
 	submitSize  = 5
-	startedSize = 9
+	startedSize = 10
 	headerSize  = 12
 	// SearchRoot holds the installed native commands, BootstrapSearchRoot
 	// the archive's recovery commands, and UserSearchRoot the commands a
@@ -476,29 +476,38 @@ func validCWD(path []byte) bool { return len(path) == 1 && path[0] == '/' || val
 // job's reply and names the job's correlation in its payload: a notification
 // carries no correlation of its own, and version 8 put it in the header, where
 // the IPC layer refuses it, so the notice was never sent (ADR 0089).
-func EncodeStarted(slot uint8, input handle.ID, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || slot >= Slots || input == 0 {
+//
+// Version 12 adds a flags byte. StartedLinuxTerminal says the job is a Linux
+// program with a terminal of its own: the shell puts the session in raw mode
+// and passes every key to it, Ctrl-C as the byte it is (ADR 0206).
+func EncodeStarted(slot uint8, input handle.ID, correlation uint64, flags uint8) (ipc.Message, bool) {
+	if correlation == 0 || slot >= Slots || input == 0 || flags&^StartedLinuxTerminal != 0 {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindNotification, PayloadSize: startedSize, HandleCount: 1}
 	message.Payload[0] = slot
 	binary.LittleEndian.PutUint64(message.Payload[1:9], correlation)
+	message.Payload[9] = flags
 	message.Handles[0] = input
 	return message, true
 }
 
-// DecodeStarted returns the slot, the input handle as received, and the
-// correlation of the job it belongs to.
-func DecodeStarted(message ipc.Message) (uint8, handle.ID, uint64, bool) {
+// StartedLinuxTerminal is the Started flag of a Linux terminal job.
+const StartedLinuxTerminal = uint8(1)
+
+// DecodeStarted returns the slot, the input handle as received, the
+// correlation of the job it belongs to, and the flags.
+func DecodeStarted(message ipc.Message) (uint8, handle.ID, uint64, uint8, bool) {
 	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindNotification ||
-		message.Correlation != 0 || message.PayloadSize != startedSize || message.HandleCount != 1 || message.Handles[0] == 0 || message.Payload[0] >= Slots {
-		return 0, 0, 0, false
+		message.Correlation != 0 || message.PayloadSize != startedSize || message.HandleCount != 1 || message.Handles[0] == 0 || message.Payload[0] >= Slots ||
+		message.Payload[9]&^StartedLinuxTerminal != 0 {
+		return 0, 0, 0, 0, false
 	}
 	correlation := binary.LittleEndian.Uint64(message.Payload[1:9])
 	if correlation == 0 {
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, false
 	}
-	return message.Payload[0], message.Handles[0], correlation, true
+	return message.Payload[0], message.Handles[0], correlation, message.Payload[9], true
 }
 
 func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {

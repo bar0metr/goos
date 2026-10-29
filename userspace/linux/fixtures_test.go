@@ -55,3 +55,18 @@ func TestFixturesAreAcceptedStaticELF(t *testing.T) {
 		}
 	}
 }
+
+func TestTermInfoHoldsTheSupportedTerminals(t *testing.T) {
+	found := map[string]bool{}
+	for _, entry := range TermInfo() {
+		if len(entry.Image) == 0 {
+			t.Fatalf("%s is empty", entry.Path)
+		}
+		found[entry.Path] = true
+	}
+	for _, path := range []string{"g/goos", "x/xterm", "x/xterm-256color", "v/vt100"} {
+		if !found[path] {
+			t.Fatalf("%s missing from %v", path, found)
+		}
+	}
+}
