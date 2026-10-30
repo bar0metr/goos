@@ -254,6 +254,22 @@ go run ./tools/pvelab cleanup --stale 6h --yes
 Both read only local journals. A VM made from another checkout is invisible
 to them; remove it from that checkout or by hand.
 
+## Linux terminal workflow
+
+The `nano` scenario drives Linux programs on their terminal over the guest's
+serial console under KVM (ADR 0206). You supply static `busybox` and `nano`
+binaries; the repository carries neither.
+
+```sh
+make test-pve-nano BUSYBOX=/path/to/busybox NANO=/path/to/nano
+```
+
+It runs `tty-probe identity`, then an interactive BusyBox `sh` with a command
+and Ctrl-C on a foreground child. From that shell nano opens a file, saves an
+edit, suspends on ^T^Z, and redraws after `fg`. nano then reopens the file from
+the native shell, and `cat` reads the saved bytes. Any step that does not show
+its text within `--workload-timeout` fails the run.
+
 ## 7-Zip workflow
 
 The `7zip` scenario runs a static `7zzs` that you supply through a round

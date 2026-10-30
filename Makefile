@@ -202,7 +202,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-7zip pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -1142,6 +1142,16 @@ test-pve-7zip:
 	@test -n "$(LINUX_EXTRA)" && test -f "$(LINUX_EXTRA)" || { echo "LINUX_EXTRA=/path/to/7zzs is required" >&2; exit 2; }
 	@$(MAKE) --no-print-directory pve-artifacts DIAG=1 LINUX_EXTRA=$(abspath $(LINUX_EXTRA))
 	@$(PVELAB) run --scenario 7zip --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
+
+# Linux terminals under KVM: tty-probe, an interactive BusyBox sh, and GNU
+# nano over the guest's serial console (ADR 0206).
+#   make test-pve-nano BUSYBOX=/path/to/busybox NANO=/path/to/nano
+test-pve-nano:
+	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }
+	@test -n "$(NANO)" && test -f "$(NANO)" || { echo "NANO=/path/to/static/nano is required" >&2; exit 2; }
+	@tools/linuxfixture/check-static.sh "$(NANO)" "$(BUSYBOX)"
+	@$(MAKE) --no-print-directory pve-artifacts DIAG=1 LINUX_EXTRA=$(abspath $(BUSYBOX)):$(abspath $(NANO))
+	@$(PVELAB) run --scenario nano --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
 
 # Boots the smoke scenario and keeps the VM for debugging; pvelab prints the
 # run ID that pvelab destroy --run takes.
