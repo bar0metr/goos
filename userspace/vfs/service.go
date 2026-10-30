@@ -83,6 +83,7 @@ var persistentMounts = [...]struct{ path, directory string }{
 // leaves the namespace without persistent mounts rather than without a root.
 func (service *Service) AttachFilesystem(transport Transport) bool {
 	service.persistent.transport = transport
+	service.namespace.Invalidate()
 	root, status := service.persistent.Root()
 	if status != ramfs.StatusOK {
 		service.persistent.transport = nil
@@ -199,7 +200,10 @@ func (service *Service) AttachCache(memory []byte) bool {
 // DetachFilesystem forgets a filesystem service that has gone. Its mounts stay
 // in the namespace and answer with I/O errors until a restarted service is
 // attached.
-func (service *Service) DetachFilesystem() { service.persistent.transport = nil }
+func (service *Service) DetachFilesystem() {
+	service.persistent.transport = nil
+	service.namespace.Invalidate()
+}
 
 // UnmountFilesystem flushes and atomically removes every namespace alias of
 // the persistent backend. Open files make the operation busy; a flush failure
@@ -259,6 +263,7 @@ func (service *Service) persistentDirectory(root ramfs.NodeID, name string) (ram
 	node, status := service.persistent.OpenName(root, value)
 	if status == ramfs.StatusNotFound {
 		node, status = service.persistent.MkdirName(root, value)
+		service.namespace.Invalidate()
 	}
 	if status != ramfs.StatusOK {
 		return 0, false
@@ -335,6 +340,12 @@ func (service *Service) CloseSession(owner vfs.Owner) int {
 	closed := service.namespace.CloseOwner(owner)
 	service.namespace.ForgetAuthority(owner)
 	return closed
+}
+
+// ListingCounters reports the namespace's scope work and the directory
+// exchanges the persistent backend has made.
+func (service *Service) ListingCounters() (vfs.AuthorityCounters, uint64) {
+	return service.namespace.AuthorityCounters(), service.persistent.readDirs
 }
 
 // InstallScope and SetAuthority are PID 1 controls, not session operations.

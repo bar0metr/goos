@@ -194,6 +194,11 @@ type Namespace struct {
 	scopes      [MaxScopes]scope
 	authorities [MaxAuthorities]ownerAuthority
 	scopeNames  [2][ramfs.MaxName]byte
+	counters    AuthorityCounters
+	// scopeMemos answer repeated scope checks without walking the backend.
+	// Every change to a name, mount, or scope clears them through invalidate.
+	scopeMemos    [maxScopeMemos]scopeMemo
+	nextScopeMemo int
 }
 
 const maxReserved = 4
@@ -701,9 +706,8 @@ func (namespace *Namespace) Create(path []byte, directory bool) Status {
 	} else {
 		_, status = mapNodeResult(namespace.mounts[mountIndex].backend.CreateName(parent, name))
 	}
-	if status == StatusOK {
-		namespace.invalidate()
-	}
+	// A backend can leave the name behind when its durability step fails.
+	namespace.invalidate()
 	return status
 }
 
@@ -965,9 +969,7 @@ func (namespace *Namespace) Unlink(path []byte) Status {
 		return StatusPermissionDenied
 	}
 	status = mapStatus(namespace.mounts[mountIndex].backend.UnlinkName(parent, name))
-	if status == StatusOK {
-		namespace.invalidate()
-	}
+	namespace.invalidate()
 	return status
 }
 
@@ -1225,7 +1227,18 @@ func (namespace *Namespace) invalidate() {
 	for index := range namespace.cache {
 		namespace.cache[index] = cacheEntry{}
 	}
+	for index := range namespace.scopeMemos {
+		namespace.scopeMemos[index] = scopeMemo{}
+	}
+	for slot := range namespace.scopes {
+		namespace.scopes[slot].exactKnown = false
+	}
 }
+
+// Invalidate forgets resolved paths and scope decisions after a backend changed
+// outside this namespace: a filesystem service came or went, or its owner
+// changed the volume directly.
+func (namespace *Namespace) Invalidate() { namespace.invalidate() }
 
 // canonicalPath writes the canonical form of path into output, which the
 // caller owns. A ".." goes back over the last component written, so no table

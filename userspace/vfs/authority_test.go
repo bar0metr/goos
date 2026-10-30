@@ -1,6 +1,7 @@
 package vfsservice
 
 import (
+	"fmt"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	"testing"
@@ -270,4 +271,96 @@ func TestMissingExactScopeUsesFATUnicodeUpperMapping(t *testing.T) {
 	}
 	remoteOK(t, service, vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/state/ıkey")})
 	deny(t, service, testSession, vfs.Request{Operation: vfs.OperationOpen, Path: []byte("/state/IKEY"), Rights: vfs.Read})
+}
+
+func listNames(t *testing.T, service *Service, owner vfs.Owner, path string) map[string]bool {
+	t.Helper()
+	names := map[string]bool{}
+	for cursor := uint64(0); ; {
+		reply := service.Dispatch(owner, vfs.Request{Operation: vfs.OperationReadDir, Path: []byte(path), Offset: cursor})
+		if reply.Status == vfs.StatusNotFound {
+			return names
+		}
+		if reply.Status != vfs.StatusOK {
+			t.Fatalf("list %s: %d", path, reply.Status)
+		}
+		names[string(reply.Name)] = true
+		cursor = uint64(reply.Cursor)
+	}
+}
+
+// Listing many unrelated FAT32 entries costs one walk of a protected subtree
+// elsewhere on the volume, through the same requests a client sends.
+func TestFATListingAuthorityWorkIsBounded(t *testing.T) {
+	service, _ := protectedRemote(t)
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationMkdir, Path: []byte("/home/tools")})
+	const entries = 120
+	for index := 0; index < entries; index++ {
+		dispatchOK(t, service, vfs.Request{Operation: vfs.OperationCreate, Path: []byte(fmt.Sprintf("/home/tools/tool%d", index))})
+	}
+	before, readsBefore := service.ListingCounters()
+	if names := listNames(t, service, testSession, "/home/tools"); len(names) != entries {
+		t.Fatalf("listed %d", len(names))
+	}
+	after, reads := service.ListingCounters()
+	if walks := after.ScopeContains - before.ScopeContains; walks != 1 {
+		t.Fatalf("subtree walks = %d", walks)
+	}
+	if hidden := after.ScopeBackendReadDir - before.ScopeBackendReadDir; hidden > 8 {
+		t.Fatalf("authority directory reads = %d", hidden)
+	}
+	if opens := after.ScopeOpenName - before.ScopeOpenName; opens > 2 {
+		t.Fatalf("exact lookups = %d", opens)
+	}
+	if total := reads - readsBefore; total > entries+10 {
+		t.Fatalf("directory exchanges = %d for %d entries", total, entries)
+	}
+}
+
+func TestFATListingKeepsCaseInsensitiveIdentity(t *testing.T) {
+	service := startedService(t, testFAT32Device())
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationMkdir, Path: []byte("/state/keys")})
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationMkdir, Path: []byte("/state/keys/nested")})
+	writeFile(t, service, "/state/keys/secret", "PRIVATE")
+	writeFile(t, service, "/state/keys/public", "PUBLIC")
+	scopeOK(t, service, 0, "/persist/STATE/KEYS/SECRET", false, vfs.Read|vfs.Write)
+	scopeOK(t, service, 1, "/persist/STATE/KEYS/NESTED", true, vfs.Read|vfs.Write)
+	for _, path := range []string{"/state/keys", "/persist/state/KEYS", "/persist/STATE/keys"} {
+		names := listNames(t, service, testSession, path)
+		if len(names) != 1 || !names["public"] {
+			t.Fatalf("list %s = %v", path, names)
+		}
+	}
+	// A rename into the exact name takes its protection on the next listing.
+	authority := vfs.Authority{}
+	authority.Grants[0] = vfs.Read | vfs.Write
+	if status := service.SetAuthority(remoteOwner, authority); status != vfs.StatusOK {
+		t.Fatal(status)
+	}
+	remoteOK(t, service, vfs.Request{Operation: vfs.OperationUnlink, Path: []byte("/persist/state/keys/secret")})
+	remoteOK(t, service, vfs.Request{Operation: vfs.OperationRename, Path: []byte("/state/keys/public"), Target: []byte("/state/keys/SECRET")})
+	if names := listNames(t, service, testSession, "/state/keys"); len(names) != 0 {
+		t.Fatalf("renamed into exact scope: %v", names)
+	}
+}
+
+// A restarted filesystem service answers afresh: no scope decision survives it.
+func TestFATListingForgetsScopeWorkAcrossRestart(t *testing.T) {
+	service, device := protectedRemote(t)
+	listNames(t, service, testSession, "/state")
+	service.DetachFilesystem()
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationReadDir, Path: []byte("/state")}); reply.Status == vfs.StatusOK {
+		t.Fatal("detached backend listed")
+	}
+	if !service.AttachFilesystem(newLoopback(device)) {
+		t.Fatal("reattach")
+	}
+	before, _ := service.ListingCounters()
+	if names := listNames(t, service, testSession, "/state/security"); names["ssh"] {
+		t.Fatalf("restart exposed protected directory: %v", names)
+	}
+	after, _ := service.ListingCounters()
+	if after.ScopeContains == before.ScopeContains {
+		t.Fatal("scope decision survived the restart")
+	}
 }

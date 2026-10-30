@@ -836,3 +836,5 @@ CA-1050	goos/userspace/cmd/init	linuxGeometryWire	process	owned	none
 CA-1051	goos/userspace/cmd/shell	linuxTerminalJob	process	owned	none
 CA-1052	goos/userspace/linux	termInfo	process	immutable	none
 CA-1053	goos/userspace/linux	ttyProbe	process	immutable	none
+CA-1055	goos/userspace/cmd/vfs	listingReadDirs	process	owned	none
+CA-1056	goos/userspace/cmd/vfs	listingStart	process	owned	none
