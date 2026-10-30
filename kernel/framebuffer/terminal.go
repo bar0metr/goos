@@ -35,8 +35,9 @@ var terminalPalette = [16][3]uint8{
 // no history buffer and allocates no memory while consuming output.
 //
 // Writing the last column wraps at once: the cursor moves to the start of the
-// next row, scrolling when that was the bottom row. A newline right after that
-// wrap is ignored, so a full row and its newline end on the same row as on a
+// next row, scrolling when that was the bottom row. Right after that wrap a
+// newline is ignored and a carriage return goes back to the start of the full
+// row, so a full row followed by LF, CR, or CR LF ends where it does on a
 // terminal that defers the wrap. With autowrap off (?7l) the cursor stays on
 // the last column. Backspace in column 0 moves to the last column of the row
 // above.
@@ -66,7 +67,7 @@ type Terminal struct {
 	// cursorColumn, cursorRow is currently inverted.
 	cursorHidden bool
 	// noAutowrap is set by CSI ?7l; wrapped records that the last character
-	// wrapped the cursor, so a newline right behind it is ignored.
+	// wrapped the cursor, which changes what LF and CR right behind it do.
 	noAutowrap   bool
 	wrapped      bool
 	cursorDrawn  bool
@@ -181,6 +182,9 @@ func (terminal *Terminal) consumeScalar(scalar rune) {
 		terminal.nextRow()
 	case '\r':
 		terminal.column = 0
+		if wrapped && terminal.row > 0 {
+			terminal.row--
+		}
 	case '\b':
 		if terminal.column > 0 {
 			terminal.column--

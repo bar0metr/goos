@@ -228,7 +228,12 @@ next row, and on COM1 its next relative move lands one row too high: ncdu's
 first row after the full-width selection bar overwrote that bar. The entry has
 `xenl`, so ncurses treats the cursor as unknown and moves it absolutely, which
 is right on both. The framebuffer ignores a newline right behind a wrap, which
-is what `xenl` promises. `rmam` and `smam` (DECAWM, also new on the framebuffer)
+is what `xenl` promises, and a carriage return there goes back to the full row,
+so a row of exact width followed by CR LF ends on the same row on both outputs.
+Other controls after a full row still differ: the native line editor relies on
+`\b` and `ESC[A` starting from the next row. On the bottom row the framebuffer
+has already scrolled. ncurses moves absolutely there and meets neither case.
+`rmam` and `smam` (DECAWM, also new on the framebuffer)
 let ncurses fill the bottom-right cell, which it otherwise leaves blank. The
 service turns autowrap back on when transport mode ends.
 

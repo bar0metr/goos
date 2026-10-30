@@ -229,9 +229,53 @@ func TestTerminalIgnoresANewlineBehindAWrap(t *testing.T) {
 	if terminal.row != 2 {
 		t.Fatalf("a second newline stayed on row %d", terminal.row)
 	}
-	terminal.Write([]byte("\x1b[1;1Habcd\r\n"))
-	if terminal.row != 2 {
-		t.Fatalf("CR clears the wrap, and its LF moves: row %d", terminal.row)
+}
+
+// After a full row, LF, CR, and what follows them must leave the framebuffer
+// where a terminal that defers the wrap leaves it. Every LF here follows a CR:
+// a lone LF keeps the column on a terminal and returns to 0 on the framebuffer.
+func TestTerminalMatchesDeferredWrapAfterAFullRow(t *testing.T) {
+	for _, sequence := range []string{
+		"abcd\r",
+		"abcd\r\n",
+		"abcd\rX",
+		"abcd\r\nX",
+		"abcd\r\r\n",
+		"abcd\r\n\r\n",
+		"abcdX",
+		"abcdXY\r\n",
+		"abcd\r\nefgh\r\n",
+		"abcdefgh\r\n",
+	} {
+		framebuffer, _ := testTerminal(t, 4, 4, 0)
+		model := newDeferredTerminal(4, 4)
+		framebuffer.Write([]byte(sequence))
+		model.write([]byte(sequence))
+		if framebuffer.row != model.row || framebuffer.column != model.column {
+			t.Errorf("%q: cursor = %d,%d, deferred terminal %d,%d", sequence,
+				framebuffer.column, framebuffer.row, model.column, model.row)
+		}
+		reference, _ := testTerminal(t, 1, 1, 0)
+		for row, line := range model.cells {
+			for column, value := range line {
+				reference.Write([]byte("\x1b[?7l\x1b[H" + string(value)))
+				if cellMask(&framebuffer, column, row) != cellMask(&reference, 0, 0) {
+					t.Errorf("%q: cell %d,%d is not %q", sequence, column, row, value)
+				}
+			}
+		}
+	}
+}
+
+// On the bottom row the wrap has already scrolled, which a deferred terminal
+// has not, but the cursor still returns to the row that holds the text.
+func TestTerminalCarriageReturnAfterABottomRowWrap(t *testing.T) {
+	terminal, _ := testTerminal(t, 4, 2, 0)
+	reference, _ := testTerminal(t, 1, 1, 0)
+	terminal.Write([]byte("\x1b[2;1Habcd\rX"))
+	reference.Write([]byte("\x1b[?7l\x1b[HX"))
+	if terminal.row != 0 || terminal.column != 1 || cellMask(&terminal, 0, 0) != cellMask(&reference, 0, 0) {
+		t.Fatalf("cursor = %d,%d", terminal.column, terminal.row)
 	}
 }
 

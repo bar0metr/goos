@@ -7,8 +7,9 @@
 #   with 0 1 4 7 24 27, 30-37 39 40-47 49; DECTCEM (?25l, ?25h); DECAWM
 #   (?7l, ?7h).
 # The two differ after the last column. The framebuffer wraps at once and
-# ignores a newline right behind the wrap; a terminal on COM1 keeps the cursor
-# on the row until the next character. am and xenl hold for both: ncurses then
+# treats LF and CR right behind the wrap as if it had not happened; a terminal
+# on COM1 keeps the cursor on the row until the next character. am and xenl
+# hold for both: ncurses then
 # treats the cursor as unknown and moves it absolutely. Without xenl it moves
 # relative to a row the terminal never reached. rmam and smam let it fill the
 # bottom-right cell. bw is not set, as terminals on COM1 do not wrap backwards.
