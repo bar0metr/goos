@@ -768,8 +768,8 @@ test-remote:
 
 test-console-gui:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
-	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/console-gui-virtio-blk.img
-	@MEMORY=$(MEMORY) tests/boot/console_gui.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/console-gui-virtio-blk.img
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 LINUX_EXTRA=$(if $(NANO),$(abspath $(NANO))) TEST_DISK=$(BUILD_DIR)/console-gui-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/console_gui.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/console-gui-virtio-blk.img "$(if $(NANO),$(shell printf '%s' '$(notdir $(NANO))' | sed 's/./& /g'))"
 
 STRESS_RUNS ?= 4
 STRESS_JOBS ?= 4

@@ -49,24 +49,16 @@ func sendLinuxGeometry(writer uint64, snapshot *tty.Snapshot) {
 	sys.StreamWrite(handle.ID(writer), linuxGeometryWire[:])
 }
 
-// linuxTerminalEntries builds the terminal environment of an interactive
-// Linux launch from the session: the current size and terminal type. They
-// replace whatever the request carried, which may be stale.
-func linuxTerminalEntries(snapshot *tty.Snapshot, storage *[3][32]byte) [][]byte {
-	entries := make([][]byte, 0, 3)
+// linuxTerminalEntry builds the TERM of an interactive Linux launch from the
+// session. COLUMNS and LINES stay out: ncurses prefers them to TIOCGWINSZ, so
+// they would pin a program to its starting size through every SIGWINCH.
+func linuxTerminalEntry(snapshot *tty.Snapshot, storage *[32]byte) []byte {
 	geometry, valid := snapshot.Current()
-	if valid && geometry.Rows > 0 && geometry.Columns > 0 {
-		entries = append(entries, appendDecimal(append(storage[0][:0], "COLUMNS="...), uint64(geometry.Columns)))
-		entries = append(entries, appendDecimal(append(storage[1][:0], "LINES="...), uint64(geometry.Rows)))
+	term := append(storage[:0], "TERM="...)
+	if valid && len(geometry.Term) != 0 && len(geometry.Term) <= len(storage)-len("TERM=") {
+		return append(term, geometry.Term...)
 	}
-	term := storage[2][:0]
-	term = append(term, "TERM="...)
-	if valid && len(geometry.Term) != 0 && len(geometry.Term) <= len(storage[2])-len("TERM=") {
-		term = append(term, geometry.Term...)
-	} else {
-		term = append(term, linuxTerminalDefaultTerm...)
-	}
-	return append(entries, term)
+	return append(term, linuxTerminalDefaultTerm...)
 }
 
 // environmentHas reports whether a request names a variable, given with its

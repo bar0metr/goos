@@ -326,7 +326,9 @@ static int winch(void)
 	sigaction(SIGWINCH, &action, NULL);
 	if (ioctl(0, TIOCGWINSZ, &window) != 0)
 		return failed("TIOCGWINSZ");
-	printf("size %d %d\n", window.ws_row, window.ws_col);
+	/* A sequence marks this as a program that draws, as a full-screen one
+	 * does: the terminal service then asks a serial terminal for its size. */
+	printf("size %d %d\n\033[0m", window.ws_row, window.ws_col);
 	for (;;) {
 		ssize_t count = read(0, &byte, 1);
 		if (count < 0 && errno == EINTR && resized) {

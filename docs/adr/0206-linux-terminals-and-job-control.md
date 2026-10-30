@@ -64,7 +64,23 @@ The control stream carries 16-byte records from `internal/terminalwire`:
 magic, version, rows, columns, and a sequence. PID 1 writes the session's
 geometry before the program starts and again on each change; the kernel
 keeps the newest record. A change sends `SIGWINCH` to the foreground group.
-`TIOCGWINSZ` returns the latest size with zero pixel fields.
+`TIOCGWINSZ` returns the latest size with zero pixel fields. PID 1 sets
+neither `COLUMNS` nor `LINES` for such a program: ncurses prefers them to
+`TIOCGWINSZ`, and they would pin it to its starting size.
+
+An SSH PTY and the framebuffer report their size. A terminal on the serial
+console does not, and a Linux program expects the kernel to know it. Once a
+program in a serial transport session has written an escape sequence, the
+terminal service asks once a second; plain output stays free of questions. It
+saves the cursor, sends `ESC [ 999 ; 999 H ESC [ 6 n`, and restores the
+cursor, always between two of the program's sequences. The answer never
+reaches the program, and a size that differs takes the path of any other
+change: a notice to the shell, the shell's notice to PID 1, a record on the
+control stream, `SIGWINCH`. Input is held back only while a question is out,
+half a second at most, so an Escape key typed then waits for the rest of that
+time on a terminal that does not answer. After three unanswered questions the
+service stops asking until the next job. A program that uses the terminal's
+one saved cursor loses it to the question.
 
 ### The terminal record
 

@@ -13,6 +13,7 @@ type Engine struct {
 	// transport marks raw mode entered for a program with a terminal of
 	// its own, whose end keeps the screen.
 	transport bool
+	probe     sizeProbe
 	// lineEnded says the last raw output ended a line; escaped says raw
 	// output held an escape sequence, which may have changed the colours or
 	// hidden the cursor.
@@ -97,9 +98,13 @@ func (engine *Engine) GeometryPending() bool {
 // Feed accepts transport bytes. Ctrl-C takes the same path as an out-of-band
 // console interrupt, including in raw mode.
 func (engine *Engine) Feed(value byte) {
-	if engine.failed {
+	if engine.failed || engine.feedProbe(value) {
 		return
 	}
+	engine.feedTyped(value)
+}
+
+func (engine *Engine) feedTyped(value byte) {
 	if value == keyInterrupt {
 		engine.Interrupt()
 		return
@@ -138,19 +143,27 @@ func (engine *Engine) Output(data []byte) {
 	}
 	if engine.raw {
 		engine.emit(data)
+		engine.noteOutput(data)
 		engine.lineEnded = data[len(data)-1] == '\n'
-		for _, value := range data {
-			if value == 0x1b {
-				engine.escaped = true
-				break
-			}
-		}
 		return
 	}
+	// A job can write before its session leaves line mode; what it wrote
+	// since its command line counts for transport mode.
+	engine.noteOutput(data)
 	engine.emit(engine.screen.Hide())
 	engine.emit(data)
 	engine.screen.Output(data)
 	engine.showLine()
+}
+
+func (engine *Engine) noteOutput(data []byte) {
+	engine.probe.track(data)
+	for _, value := range data {
+		if value == 0x1b {
+			engine.escaped = true
+			return
+		}
+	}
 }
 
 // Request validates and executes one client operation. Malformed messages
@@ -186,6 +199,7 @@ func (engine *Engine) Request(message *ipc.Message) {
 	case OperationRawMode, OperationTransportMode:
 		engine.enterRaw()
 		engine.transport = operation == OperationTransportMode
+		engine.probe.begin()
 		engine.respond(ResultAccepted, nil, message.Correlation)
 		engine.deliverRaw()
 	case OperationLineMode:
@@ -258,7 +272,7 @@ func (engine *Engine) enterRaw() {
 		return
 	}
 	engine.emit(engine.screen.Hide())
-	engine.raw, engine.lineEnded, engine.escaped = true, true, false
+	engine.raw, engine.lineEnded = true, true
 	engine.rawInput.Reset()
 }
 
@@ -267,11 +281,13 @@ func (engine *Engine) leaveRaw() {
 		return
 	}
 	engine.raw = false
+	escaped := engine.escaped
+	engine.escaped = false
 	engine.rawInput.Reset()
 	if engine.transport {
 		engine.transport = false
 		// A program that wrote plain text leaves the terminal as it was.
-		if engine.escaped {
+		if escaped {
 			engine.emit([]byte(TransportResetSequence))
 		}
 		if !engine.lineEnded {
@@ -298,6 +314,7 @@ func (engine *Engine) deliverLine() {
 		engine.reading = 0
 		return
 	}
+	engine.escaped = false
 	engine.respond(ResultLine, text[engine.sent:], engine.reading)
 	engine.reading, engine.sent = 0, 0
 	engine.line.Next()

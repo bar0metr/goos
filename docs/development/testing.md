@@ -524,6 +524,8 @@ after it. The test
 also requires `FRAMEBUFFER_USER_ISOLATION_OK`; it does not inspect text or
 require OCR. Its log and image are retained as
 `build/logs/console-gui.log` and `build/reports/console-gui.ppm`.
+With `NANO=/path/to/static/nano` the run also starts GNU nano on the framebuffer
+terminal and leaves it with ^X.
 
 `go test ./userspace/tui` drives the reusable TUI layer with a host model
 terminal. It checks clipped geometry, the protected bottom-right cell, dirty-row

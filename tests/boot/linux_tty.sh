@@ -54,8 +54,12 @@ prompts() { grep -ac 'goos> ' "$log" 2>/dev/null || true; }
 # mark records where the output of the next step starts.
 mark() { start=$(wc -c <"$log"); }
 
-# since prints the output since the last mark, without carriage returns.
-since() { tail -c "+$((start + 1))" "$log" | tr -d '\r'; }
+# since prints the output since the last mark, without carriage returns. The
+# service's size question lands anywhere on a line, so it is cut out once it
+# is complete; answer_probe looks for it in the raw output.
+question=$(printf '\0337\033[999;999H\033[6n\0338')
+since() { tail -c "+$((start + 1))" "$log" | tr -d '\r' | sed "s/$(printf '%s' "$question" | sed 's/\[/\\[/g')//g"; }
+raw_since() { tail -c "+$((start + 1))" "$log"; }
 
 # await waits until the output since the mark matches pattern.
 await() {
@@ -85,6 +89,19 @@ await_prompt() {
 keys() {
 	printf "$1" >&3
 	sleep 0.3
+}
+
+# answer_probe waits for the service's next size question and answers as a
+# terminal of that size does. The question must come after the last mark.
+answer_probe() {
+	elapsed=0
+	until raw_since | grep -aq '\[6n'; do
+		[ "$elapsed" -lt $((command_timeout * 20)) ] || fail 'the service never asked the terminal for its size'
+		sleep 0.05
+		elapsed=$((elapsed + 1))
+	done
+	checks=$((checks + 1))
+	printf '\033[%s;%sR' "$1" "$2" >&3
 }
 
 qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
@@ -130,6 +147,16 @@ keys 'q\r'
 keys '\003'
 await '^raw bytes 3: 71 0d 03$' 'non-canonical input'
 await_prompt 'tty-probe raw'
+
+# A serial terminal is resized silently. The service asks it for its size
+# while a Linux program runs; the answer becomes TIOCGWINSZ and SIGWINCH, and
+# the program never reads it.
+mark
+keys '/system/linux/tty-probe winch\n'
+await '^size ' 'tty-probe winch starts'
+answer_probe 37 101
+await 'winch 37 101$' 'a probe answer reaches the program as SIGWINCH'
+await_prompt 'tty-probe winch'
 
 if [ -n "$busybox_name" ]; then
 	busybox=/system/linux/$busybox_name
@@ -198,6 +225,11 @@ if [ -n "$nano_name" ]; then
 	mark
 	keys "/system/linux/$nano_name -I /persist/nano.txt\n"
 	await 'from nano first line' 'nano launched from the native shell reopens the file'
+	# nano follows the terminal: it started at the size the last program left
+	# and draws its bottom rows at the new one after a resize.
+	mark
+	answer_probe 30 90
+	await '\[30;[0-9]*H' 'nano redraws at the new size'
 	keys '\030'
 	await_prompt 'nano exits to the native shell'
 	mark

@@ -264,7 +264,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	linuxTerminal := linuxProcess && launchingLinuxTerminal != nil && streams.Input.Type == handle.TypeStream
 	var ttyPair [2]uint64
 	var linuxEntries [][]byte
-	var linuxStorage [3][32]byte
+	var linuxStorage [32]byte
 	if linuxTerminal {
 		if !createStream(&ttyPair) {
 			closePair(launchPair)
@@ -279,7 +279,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			return 0, 0, supervisor.LaunchResourceExhausted
 		}
 		sendLinuxGeometry(ttyPair[1], &launchingLinuxTerminal.session.geometry)
-		linuxEntries = linuxTerminalEntries(&launchingLinuxTerminal.session.geometry, &linuxStorage)
+		linuxEntries = [][]byte{linuxTerminalEntry(&launchingLinuxTerminal.session.geometry, &linuxStorage)}
 	}
 	addHome := linuxTerminal && !environmentHas(environment, "HOME=")
 	addTermInfo := linuxTerminal && !environmentHas(environment, "TERMINFO=")
