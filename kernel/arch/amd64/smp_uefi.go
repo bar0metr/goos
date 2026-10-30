@@ -552,6 +552,44 @@ func ReleaseTasks(tasks []sched.TaskID) {
 	}
 }
 
+// StopTask keeps a task off every processor until ContinueTask, for a
+// Linux job-control stop. The calling processor's own task may stop itself:
+// it leaves at its next scheduling point, which the Linux return takes. A
+// task in a wait stays in it; a wake that comes meanwhile is kept for when it
+// continues.
+func StopTask(task sched.TaskID) bool {
+	cpu := CPUIndex()
+	flags := lockScheduler()
+	target, ok := sched.Idle, false
+	if slot, alive := runState.Alive(task); alive && slot >= kernelTasks {
+		target, ok = runState.Stop(slot, cpu)
+	}
+	if target != sched.Idle {
+		atomic.StoreUint64(&cpuData[target][cpuKill], 1)
+	}
+	schedulerLock.Unlock()
+	if target != sched.Idle {
+		kickCPU(target, cpu)
+	}
+	RestoreInterrupts(flags)
+	return ok
+}
+
+// ContinueTask ends the stop of a task.
+func ContinueTask(task sched.TaskID) {
+	cpu := CPUIndex()
+	flags := lockScheduler()
+	target := sched.Idle
+	if slot, ok := runState.Resolve(task); ok {
+		target = runState.Continue(slot, cpu)
+	}
+	schedulerLock.Unlock()
+	if target != sched.Idle && target != cpu {
+		kickCPU(target, cpu)
+	}
+	RestoreInterrupts(flags)
+}
+
 // SetTaskAffinity limits a live task to the processors in mask. A processor
 // that runs it outside the mask is asked to reschedule and leaves it at its
 // next scheduling point. It refuses a mask with no online processor, a dead

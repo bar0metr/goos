@@ -273,50 +273,27 @@ See [ADR 0201](../adr/0201-reclaimable-userspace-memory.md),
 
 # Next priorities
 
-The next major compatibility milestone is the Linux terminal and interactive
-BusyBox. Linux runtime and ABI work remains driven by real applications after
-that.
+Linux programs now have a terminal, sessions, process groups, and job
+control (ADR 0206): interactive BusyBox `sh` and GNU nano 9.2 run. Linux
+runtime and ABI work stays driven by real applications.
 
-## Priority 1 — Linux terminal support
+## Done: Linux terminal support
 
-The next major compatibility milestone is to give Linux programs a real terminal.
+[ADR 0206](../adr/0206-linux-terminals-and-job-control.md) records the
+design. A Linux program alone in a foreground job gets a terminal built on
+the native session; `isatty`, termios, `TIOCGWINSZ` with `SIGWINCH`,
+`/dev/tty`, sessions, process groups, the foreground group, `SIGINT`,
+`SIGTSTP`, `SIGSTOP`, `SIGCONT`, `SIGTTIN`, and `wait4` with `WUNTRACED` and
+`WCONTINUED` work, and `fsync` reaches the volume flush. `make test-linux-tty`
+and `make test-linux-nano` are the gates.
 
-This should not be implemented as a broad `/dev/pts` clone first. Build the smallest coherent Linux terminal contract on top of the existing native terminal/session model.
+Still open from that milestone:
 
-Required work:
-
-1. Add a Linux terminal-backed descriptor type.
-2. Implement `isatty` behavior.
-3. Add `TIOCGWINSZ` and terminal geometry propagation.
-4. Add the minimal termios subset needed by real interactive programs.
-5. Add Linux sessions and process groups.
-6. Track one foreground process group per terminal.
-7. Generate terminal signals: `SIGINT`, `SIGTSTP`, `SIGCONT`.
-8. Connect Linux foreground job lifetime to the existing native terminal/session lifecycle.
-9. Add an interactive BusyBox `sh` gate.
-
-Acceptance target:
-
-```text
-goos> /system/linux/busybox sh
-/ # echo hello
-hello
-/ # stty
-...
-```
-
-Interactive shell editing, Ctrl-C and terminal resize must work without granting Linux processes native terminal or console authority directly.
-
-### After the first Linux terminal
-
-Once the terminal contract is stable:
-
-- run `nano`;
-- add missing terminal ioctls only when a real application requires them;
-- add missing file timestamp/metadata semantics only where real editors expose a gap;
-- consider additional static CLI/TUI applications as compatibility probes.
-
-Do not turn this milestone into full Linux TTY subsystem emulation unless an actual application demonstrates the need.
+- a resize gate through an SSH PTY window change;
+- the nano suspend and `fg` round trip from BusyBox `sh` as an automated
+  gate;
+- a framebuffer gate that draws nano and inspects the terminal state;
+- further ioctls, `TOSTOP`, and `VTIME` only when an application needs them.
 
 ## Priority 2 — Linux runtime completeness
 

@@ -109,6 +109,15 @@ func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 						closeInput(&input)
 					}
 				case terminal.ResultInterrupt:
+					// A Linux job has a terminal of its own: Ctrl-C is the
+					// byte its line discipline turns into SIGINT for the
+					// foreground group, or passes on in raw mode.
+					if linuxTerminalJob {
+						if input != 0 && !writeStream(input, []byte{0x03}, inputDeadline) {
+							closeInput(&input)
+						}
+						break
+					}
 					controlExchange(execproto.ControlKill, uint8(foreground))
 				case terminal.ResultEndOfInput:
 					closeInput(&input)
@@ -144,9 +153,12 @@ func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 			installSettings(session)
 			continue
 		}
-		if _, started, job, ok := execproto.DecodeStarted(message); ok {
+		if _, started, job, flags, ok := execproto.DecodeStarted(message); ok {
 			if job == correlation && input == 0 {
 				input = started
+				if flags&execproto.StartedLinuxTerminal != 0 && !oneShot {
+					rawJob, linuxTerminalJob = true, true
+				}
 				startRawJob()
 			} else {
 				sys.HandleClose(started)

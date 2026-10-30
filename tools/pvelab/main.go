@@ -5,7 +5,7 @@
 // no part of make release-check. See docs/development/proxmox-lab.md.
 //
 //	pvelab doctor
-//	pvelab run --scenario smoke|linux|7zip [--keep] [--cores N] ...
+//	pvelab run --scenario smoke|linux|7zip|nano [--keep] [--cores N] ...
 //	pvelab resume --run RUN_ID
 //	pvelab destroy --run RUN_ID
 //	pvelab cleanup --stale 6h [--yes]

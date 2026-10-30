@@ -300,7 +300,9 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 			// The shared descriptions now own these endpoint references. The
 			// process table keeps only the VFS channel used by its requests.
 			for _, id := range streamHandles {
-				spawned.Handles().Close(id)
+				if id != 0 {
+					spawned.Handles().Close(id)
+				}
 			}
 			loaded.StackTop = stack.Pointer
 		} else {
@@ -435,27 +437,38 @@ func abandonSpawn(root uint64, spawned *process.Process, registered bool) {
 // linuxStandardStreams resolves the endpoint objects installed for the three
 // conventional descriptors. Their references can then move from native
 // handles into compatibility-owned open-file descriptions.
-func linuxStandardStreams(owner *process.Process, data startup.Data) (linuxcompat.StandardStreams, [3]handle.ID, bool) {
+func linuxStandardStreams(owner *process.Process, data startup.Data) (linuxcompat.StandardStreams, [4]handle.ID, bool) {
 	if owner == nil {
-		return linuxcompat.StandardStreams{}, [3]handle.ID{}, false
+		return linuxcompat.StandardStreams{}, [4]handle.ID{}, false
 	}
 	input, inputOK := data.Handle("in")
 	output, outputOK := data.Handle("stdout")
 	errorOutput, errorOK := data.Handle("stderr")
 	if !inputOK || !outputOK || !errorOK {
-		return linuxcompat.StandardStreams{}, [3]handle.ID{}, false
+		return linuxcompat.StandardStreams{}, [4]handle.ID{}, false
 	}
 	inputCapability, inputAllowed := owner.Handles().Lookup(input, handle.TypeStream, capability.Read)
 	outputCapability, outputAllowed := owner.Handles().Lookup(output, handle.TypeStream, capability.Write)
 	errorCapability, errorAllowed := owner.Handles().Lookup(errorOutput, handle.TypeStream, capability.Write)
 	if !inputAllowed || !outputAllowed || !errorAllowed {
-		return linuxcompat.StandardStreams{}, [3]handle.ID{}, false
+		return linuxcompat.StandardStreams{}, [4]handle.ID{}, false
 	}
-	return linuxcompat.StandardStreams{
+	streams := linuxcompat.StandardStreams{
 		Input:  inputCapability.Object(),
 		Output: outputCapability.Object(),
 		Error:  errorCapability.Object(),
-	}, [3]handle.ID{input, output, errorOutput}, true
+	}
+	handles := [4]handle.ID{input, output, errorOutput}
+	// The control stream of an interactive launch becomes part of its
+	// terminal, like the standard streams; its handle goes with theirs.
+	if control, interactive := data.Handle(linuxcompat.TerminalRole); interactive {
+		controlCapability, allowed := owner.Handles().Lookup(control, handle.TypeStream, capability.Read)
+		if !allowed {
+			return linuxcompat.StandardStreams{}, [4]handle.ID{}, false
+		}
+		streams.Control, handles[3] = controlCapability.Object(), control
+	}
+	return streams, handles, true
 }
 
 func abandonHandle(typeID handle.Type, cap capability.Capability) {
@@ -499,20 +512,24 @@ func classifyExecutable(source loader.Source) supervisor.ExecutableFormat {
 // the startup template bind each grant to its role; no device or management
 // authority can be smuggled into a Linux process as an extra grant.
 func validLinuxLaunch(grants []supervisor.Capability, profile supervisor.ResourceProfile, template []byte) bool {
-	if profile != supervisor.ProfileLarge || len(grants) != 4 || len(template) == 0 {
+	// An interactive launch has one more role, its terminal's control
+	// stream, and nothing else; the fifth grant is accepted only under that
+	// name and with exactly those rights.
+	if profile != supervisor.ProfileLarge || len(grants) != 4 && len(grants) != 5 || len(template) == 0 {
 		return false
 	}
 	data, ok := startup.DecodeTemplate(template)
-	if !ok || data.HandleCount() != 4 {
+	if !ok || data.HandleCount() != len(grants) {
 		return false
 	}
-	names := [...]string{"in", "stdout", "stderr", "vfs"}
-	types := [...]handle.Type{handle.TypeStream, handle.TypeStream, handle.TypeStream, handle.TypeChannel}
+	names := [...]string{"in", "stdout", "stderr", "vfs", linuxcompat.TerminalRole}
+	types := [...]handle.Type{handle.TypeStream, handle.TypeStream, handle.TypeStream, handle.TypeChannel, handle.TypeStream}
 	rights := [...]capability.Rights{
 		capability.Read | capability.Wait,
 		capability.Write | capability.Wait,
 		capability.Write | capability.Wait,
 		capability.Read | capability.Write | capability.Wait,
+		capability.Read | capability.Wait,
 	}
 	for index := range grants {
 		name, id := data.HandleAt(index)

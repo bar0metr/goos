@@ -4,6 +4,9 @@ set -eu
 iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
 disk=${3:?test disk path required}
+# A static GNU nano the build placed under /system/linux, named by the keys
+# that type its name; without it the nano step is skipped.
+nano_keys=${4:-}
 memory=${MEMORY:-512M}
 # SMP is the guest's processor count, as a QEMU -smp argument.
 smp=${SMP:-1}
@@ -230,3 +233,30 @@ wait_for_count 'SHELL_TERMINAL_RESTORED_OK' $((restored + 1)) 'line mode after t
 type_word c a t spc slash h o m e slash g v slash n o t e ret
 wait_for_log '^Xhello' 'edited file read back by the shell'
 printf 'PASS console-nested-launch\n'
+
+# A Linux program on the framebuffer terminal reads the PS/2 keys as bytes
+# with its line discipline off, and the shell gets the terminal back after it
+# (ADR 0206).
+restored=$(count_in_log 'SHELL_TERMINAL_RESTORED_OK')
+type_word slash s y s t e m slash l i n u x slash t t y minus p r o b e spc r a w ret
+wait_for_log '^raw ready' 'Linux tty-probe on the framebuffer terminal'
+type_word up
+wait_for_log 'raw bytes 3: 1b 5b 41' 'arrow key bytes reaching the Linux program'
+wait_for_count 'SHELL_TERMINAL_RESTORED_OK' $((restored + 1)) 'line mode after the Linux program'
+type_word e c h o spc a f t e r minus l i n u x minus o k ret
+wait_for_log '^after-linux-ok' 'shell input after the Linux program'
+printf 'PASS console-linux-terminal\n'
+
+# GNU nano draws on the framebuffer terminal and takes the PS/2 keys. The log
+# holds the same bytes through the serial mirror.
+if [ -n "$nano_keys" ]; then
+	restored=$(count_in_log 'SHELL_TERMINAL_RESTORED_OK')
+	# shellcheck disable=SC2086
+	type_word slash s y s t e m slash l i n u x slash $nano_keys ret
+	wait_for_log 'GNU nano' 'nano on the framebuffer terminal'
+	send_key ctrl-x
+	wait_for_count 'SHELL_TERMINAL_RESTORED_OK' $((restored + 1)) 'line mode after nano'
+	type_word e c h o spc a f t e r minus n a n o minus o k ret
+	wait_for_log '^after-nano-ok' 'shell input after nano'
+	printf 'PASS console-linux-nano\n'
+fi

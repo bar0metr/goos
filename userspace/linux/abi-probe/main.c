@@ -622,7 +622,8 @@ static int names_ok(int read_only_image)
 }
 
 /* /dev/null and /dev/zero are character devices the kernel serves; /dev/tty
- * has a status, and no open for a process without a controlling terminal. */
+ * has a status, and opens only for a process with a controlling terminal,
+ * which on GoOS is one whose standard input is its terminal. */
 static int devices_ok(int goos, int strict)
 {
 	struct extended_status wide;
@@ -674,11 +675,11 @@ static int devices_ok(int goos, int strict)
 	    close(fd) != 0)
 		return 0;
 
-	/* A run with a controlling terminal, which no reference run has, may
-	 * open it. */
+	/* A run with a controlling terminal may open it. On GoOS a process
+	 * has one exactly when its standard input is that terminal. */
 	errno = 0;
 	tty = open("/dev/tty", O_RDWR | O_NOCTTY);
-	if (tty >= 0 ? (goos || close(tty) != 0) : errno != ENXIO)
+	if (tty >= 0 ? (goos && !isatty(0)) || !isatty(tty) || close(tty) != 0 : errno != ENXIO || (goos && isatty(0)))
 		return 0;
 	errno = 0;
 	return syscall(SYS_stat, "/dev/tty", &status) == 0 && S_ISCHR(status.st_mode) &&
@@ -2037,7 +2038,10 @@ static int kill_test(void)
 	fflush(stdout);
 	if (kill(getpid(), 0) != 0 || !fails(kill(getpid(), 65), EINVAL) || !fails(kill(30000, 0), ESRCH))
 		return kill_fail("probes");
-	if (on_goos() && (!fails(kill(0, SIGTERM), EINVAL) || !fails(kill(-1, SIGTERM), EINVAL) ||
+	/* Signal 0 to the caller's own group reaches at least the caller. */
+	if (kill(0, 0) != 0 || kill(-getpgrp(), 0) != 0)
+		return kill_fail("own process group");
+	if (on_goos() && (!fails(kill(-1, SIGTERM), EINVAL) ||
 	    !fails(kill(getppid(), 0), ESRCH) || !fails(kill(1, SIGKILL), ESRCH)))
 		return kill_fail("targets outside the tree");
 

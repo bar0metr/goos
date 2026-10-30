@@ -257,6 +257,32 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			terminalEntries = terminalEnvironment.Entries(nil)
 		}
 	}
+	// The only stage of a foreground job, when it is a Linux program, gets a
+	// terminal: the kernel joins its standard streams and this control
+	// stream into one. The first record is in the stream before the program
+	// starts, so its first TIOCGWINSZ already sees the session's size.
+	linuxTerminal := linuxProcess && launchingLinuxTerminal != nil && streams.Input.Type == handle.TypeStream
+	var ttyPair [2]uint64
+	var linuxEntries [][]byte
+	var linuxStorage [32]byte
+	if linuxTerminal {
+		if !createStream(&ttyPair) {
+			closePair(launchPair)
+			closeOpen(hostnameConfig)
+			closeOpen(remoteAdmin)
+			closeOpen(netSession)
+			closeOpen(resolveSession)
+			closeUDP(udpSession)
+			closeUDP(tcpSession)
+			sys.HandleClose(handle.ID(pair[0]))
+			sys.HandleClose(checkBlock)
+			return 0, 0, supervisor.LaunchResourceExhausted
+		}
+		sendLinuxGeometry(ttyPair[1], &launchingLinuxTerminal.session.geometry)
+		linuxEntries = [][]byte{linuxTerminalEntry(&launchingLinuxTerminal.session.geometry, &linuxStorage)}
+	}
+	addHome := linuxTerminal && !environmentHas(environment, "HOME=")
+	addTermInfo := linuxTerminal && !environmentHas(environment, "TERMINFO=")
 	slot, staging := stagingSlot()
 	handles := 3
 	if useHostname {
@@ -292,6 +318,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useLog {
 		handles++
 	}
+	if linuxTerminal {
+		handles++
+	}
 	// A Linux program searches the Linux fixture directory, never the
 	// native one: its execve refuses native images.
 	addLinuxPath := linuxProcess && execproto.LinuxPathMissing(environment)
@@ -309,6 +338,22 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if addLinuxPath {
 		entries++
 	}
+	if linuxTerminal {
+		for offset, index := 0, 0; index < environment.Count(); index++ {
+			var variable []byte
+			variable, offset = environment.Next(offset)
+			if tty.GeometryVariable(variable) {
+				entries--
+			}
+		}
+		entries += len(linuxEntries)
+	}
+	if addHome {
+		entries++
+	}
+	if addTermInfo {
+		entries++
+	}
 	writer := startup.NewWriter(staging, arguments.Count(), entries, handles)
 	writer.Command(command)
 	writer.CWD(cwd)
@@ -320,7 +365,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	for offset, index := 0, 0; index < environment.Count(); index++ {
 		var variable []byte
 		variable, offset = environment.Next(offset)
-		if useResize && tty.GeometryVariable(variable) {
+		if (useResize || linuxTerminal) && tty.GeometryVariable(variable) {
 			continue
 		}
 		if linuxProcess {
@@ -333,6 +378,15 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	if addLinuxPath {
 		writer.Entry(execproto.LinuxPathVariable())
+	}
+	for _, variable := range linuxEntries {
+		writer.Entry(variable)
+	}
+	if addHome {
+		writer.Entry([]byte("HOME=/home/user"))
+	}
+	if addTermInfo {
+		writer.Entry([]byte(linuxTerminalInfo))
 	}
 	writer.Handle([]byte("in"), 0)
 	writer.Handle([]byte("stdout"), 0)
@@ -374,6 +428,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useLog {
 		writer.Handle([]byte("log"), 0)
 	}
+	if linuxTerminal {
+		writer.Handle([]byte("linux-tty"), 0)
+	}
 	// The request was validated when it arrived, so what does not fit is its
 	// size: its strings need more room in the startup object's tables.
 	startupData, ok := writer.Finish()
@@ -387,6 +444,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closeUDP(tcpSession)
 		closePair(launchPair)
 		closePair(resizePair)
+		closePair(ttyPair)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
 		if useBlockCheck {
@@ -438,6 +496,11 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useLog {
 		grants = append(grants, supervisor.Capability{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write})
 	}
+	if linuxTerminal {
+		// The reader goes to the kernel, which keeps it inside the
+		// terminal; PID 1 keeps the writer.
+		grants = append(grants, supervisor.Capability{Name: "linux-tty", Handle: handle.ID(ttyPair[0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait, Consume: true})
+	}
 	profile := supervisor.ProfileNormal
 	if linuxProcess {
 		profile = supervisor.ProfileLarge
@@ -458,6 +521,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closePair(launchPair)
 		closeOpen(hostnameConfig)
 		closePair(resizePair)
+		closePair(ttyPair)
 		closeOpen(remoteAdmin)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
@@ -476,6 +540,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	if useBlockCheck {
 		filesystemChecker = event.Process
+	}
+	if linuxTerminal {
+		launchingLinuxTerminal.linuxTerminal = ttyPair[1]
 	}
 	if useLaunch {
 		launch.server, launch.input = handle.ID(launchPair[0]), streams.Input.ID

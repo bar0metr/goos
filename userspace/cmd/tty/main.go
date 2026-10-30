@@ -6,6 +6,7 @@ package main
 
 import (
 	"goos/internal/validation"
+	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -36,6 +37,11 @@ var (
 
 // Bound each output pass so streaming output cannot starve console interrupts.
 const outputBatch = 16
+
+// probeTicks is half the period of the terminal size probe.
+const probeTicks = clock.TicksPerSecond / 2
+
+var nextProbe uint64
 
 //export userspaceMain
 func userspaceMain() {
@@ -75,6 +81,8 @@ func userspaceMain() {
 		serveOutput()
 		serveControl()
 		serveSession()
+		serveProbe()
+		engine.FlushGeometry()
 		if engine.Failed() {
 			// PID 1 renews sessions after process exits, not after an endpoint
 			// is merely closed. Restart rather than strand a live shell.
@@ -181,6 +189,18 @@ func serveSession() {
 	}
 }
 
+// serveProbe paces the engine's size probe by the clock: any other work also
+// wakes this loop.
+func serveProbe() {
+	if !engine.ProbeActive() {
+		return
+	}
+	if now, status := sys.ClockRead(); status == kcall.StatusOK && now >= nextProbe {
+		nextProbe = now + probeTicks
+		engine.ProbeTick()
+	}
+}
+
 func reportLineDelivery() {
 	if lineDelivered {
 		lineDelivered = false
@@ -222,7 +242,11 @@ func awaitWork() {
 		interests[count] = userwait.Interest{Handle: controlHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 		count++
 	}
-	if _, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout); status != kcall.StatusOK {
+	timeout := uint64(kcall.WaitAnyInfiniteTimeout)
+	if engine.ProbeActive() {
+		timeout = probeTicks
+	}
+	if _, status := userwait.Any(&interests, count, timeout); status != kcall.StatusOK && status != kcall.StatusTimeout {
 		userwait.Sleep(1)
 	}
 }

@@ -20,11 +20,15 @@ func (handler *linuxCallHandler) Descriptor(request linuxcompat.Request) linuxco
 	fd := descriptorIndex(arguments[0])
 	switch request.Number {
 	case linuxabi.SysIoctl:
-		// No descriptor of a GoOS Linux process is a terminal or a device:
-		// the standard streams are FIFOs, as fstat reports them. ENOTTY is
-		// what Linux answers any ioctl a file does not take.
-		if _, open := state.FDs.Lookup(fd); !open {
+		// A terminal takes the terminal requests. Pipes, files, and devices
+		// take none: ENOTTY is what Linux answers any ioctl a file does not
+		// take, and what makes isatty false for them.
+		description, open := state.FDs.Lookup(fd)
+		if !open {
 			return linuxErrno(linuxabi.EBADF)
+		}
+		if description.Kind == linuxcompat.FDTerminal {
+			return handler.terminalIoctl(state, description, arguments[1], arguments[2])
 		}
 		return linuxErrno(linuxabi.ENOTTY)
 	case linuxabi.SysDup:
@@ -112,7 +116,7 @@ func (handler *linuxCallHandler) duplicateOnto(request linuxcompat.Request, stat
 // the caller must run.
 func (handler *linuxCallHandler) releaseDescription(released linuxcompat.FileDescription) bool {
 	switch released.Kind {
-	case linuxcompat.FDStreamReader, linuxcompat.FDStreamWriter:
+	case linuxcompat.FDStreamReader, linuxcompat.FDStreamWriter, linuxcompat.FDTerminal:
 		releaseLinuxDescriptionReference(released)
 	case linuxcompat.FDVFSDirectory:
 		if state, found := linuxcompat.FindProcess(handler.root); found {
@@ -127,6 +131,10 @@ func (handler *linuxCallHandler) releaseDescription(released linuxcompat.FileDes
 // releaseLinuxDescriptionReference releases kernel objects owned by a shared
 // open-file description after its last descriptor closes.
 func releaseLinuxDescriptionReference(released linuxcompat.FileDescription) {
+	if released.Kind == linuxcompat.FDTerminal {
+		releaseTerminal(linuxcompat.TerminalID(released.Object))
+		return
+	}
 	if released.Kind != linuxcompat.FDStreamReader && released.Kind != linuxcompat.FDStreamWriter {
 		return
 	}

@@ -523,6 +523,7 @@ CA-0517	goos/userspace/cmd/tty	lineDelivered	process	owned	none
 CA-0518	goos/userspace/cmd/tty	mirrorHandle	process	owned	none
 CA-0519	goos/userspace/cmd/tty	mirroring	process	owned	none
 CA-0520	goos/userspace/cmd/tty	outputBuffer	process	owned	none
+CA-1054	goos/userspace/cmd/tty	nextProbe	process	owned	none
 CA-0521	goos/userspace/cmd/tty	outputClosed	process	owned	none
 CA-0522	goos/userspace/cmd/tty	outputHandle	process	owned	none
 CA-0523	goos/userspace/cmd/tty	outputReported	process	owned	none
@@ -830,3 +831,8 @@ CA-1045	goos/userspace/bin/threadprobe	workerIDs	process	owned	threadprobe remot
 CA-1046	goos/userspace/runtime/arena	histBounds	process	immutable	runtime/arena tests
 CA-1047	goos/userspace/runtime/arena	histNames	process	immutable	runtime/arena tests
 CA-1048	goos/userspace/runtime/arena	processInfo	process	runtime	runtime/arena tests
+CA-1049	goos/userspace/cmd/init	launchingLinuxTerminal	process	owned	none
+CA-1050	goos/userspace/cmd/init	linuxGeometryWire	process	owned	none
+CA-1051	goos/userspace/cmd/shell	linuxTerminalJob	process	owned	none
+CA-1052	goos/userspace/linux	termInfo	process	immutable	none
+CA-1053	goos/userspace/linux	ttyProbe	process	immutable	none

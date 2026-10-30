@@ -73,7 +73,21 @@ type StandardStreams struct {
 	Input  uint64
 	Output uint64
 	Error  uint64
+	// Control is the read end of the terminal control stream of an
+	// interactive launch, or zero. With it the three standard streams
+	// become one Linux terminal.
+	Control uint64
 }
+
+// TerminalRole is the startup name of the terminal control stream PID 1
+// grants an interactive Linux launch.
+const TerminalRole = "linux-tty"
+
+// Initial geometry of a terminal until PID 1's first control record.
+const (
+	DefaultTerminalRows    = 24
+	DefaultTerminalColumns = 80
+)
 
 // ProcessLifecycle is the part of Linux process lifetime retained after the
 // GoOS Process has released its address space and handles.
@@ -99,11 +113,33 @@ type ProcessRecord struct {
 	SignalTermination int32
 	// CPUTicks is the run time the process accumulated, in timer ticks.
 	CPUTicks uint64
+	// SID and PGID are the session and process group. A process launched
+	// by PID 1 leads a session and a group of its own; fork copies both.
+	// They are Linux job-control identities and separate from FamilyID,
+	// which bounds what a process may reach.
+	SID  int32
+	PGID int32
+	// Executed records that a forked child replaced its image, after which
+	// its parent may no longer move it to another group.
+	Executed bool
+	// Stopped is set while a stop signal holds the process. StopSignal is
+	// the signal that stopped it. stopReport and continueReport are the
+	// changes wait4 has yet to report to the parent, once each.
+	Stopped        bool
+	StopSignal     uint8
+	stopReport     bool
+	continueReport bool
 }
 
 // WaitStatus encodes how the process ended as wait4 reports it: the exit
 // status in bits 8 to 15, or the terminating signal in the low seven bits.
 func (record ProcessRecord) WaitStatus() uint32 {
+	if record.State == ProcessRunning && record.stopReport {
+		return uint32(record.StopSignal)<<8 | 0x7f
+	}
+	if record.State == ProcessRunning && record.continueReport {
+		return 0xffff
+	}
 	if record.SignalTermination != 0 {
 		return uint32(record.SignalTermination) & 0x7f
 	}
@@ -236,7 +272,7 @@ var processRecords [process.MaxProcesses]ProcessRecord
 func installProcessHeld(root uint64, goosProcessID process.ID, data startup.Data, streams StandardStreams, brkBase uint64, brkLimit uint64) bool {
 	guard.Check()
 	if root == 0 || goosProcessID == 0 || brkBase == 0 || brkBase >= brkLimit || brkBase%LinuxPageSize != 0 || brkLimit%LinuxPageSize != 0 ||
-		data.HandleCount() != 4 || len(data.CWD()) == 0 || data.CWD()[0] != '/' || len(data.CWD()) > limits.PathMax ||
+		data.HandleCount() != 4 && (data.HandleCount() != 5 || streams.Control == 0) || len(data.CWD()) == 0 || data.CWD()[0] != '/' || len(data.CWD()) > limits.PathMax ||
 		streams.Input == 0 || streams.Output == 0 || streams.Error == 0 {
 		return false
 	}
@@ -281,7 +317,35 @@ func installProcessHeld(root uint64, goosProcessID process.ID, data startup.Data
 	state.PID, state.FamilyID = record.PID, record.FamilyID
 	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
 	state.umask = DefaultUmask
-	if !state.FDs.initializeHeld(record.FamilyID, streams.Input, streams.Output, streams.Error) {
+	standardIn, standardOut, standardErr := streams.Input, streams.Output, streams.Error
+	terminal := TerminalID(0)
+	if streams.Control != 0 {
+		if _, named := data.Handle(TerminalRole); !named {
+			releaseVFSContextHeld(record.FamilyID)
+			processRecords[recordIndex(record.PID)] = ProcessRecord{}
+			*state = ProcessState{}
+			return false
+		}
+		endpoints := TerminalEndpoints{Input: streams.Input, Output: streams.Output, Error: streams.Error, Control: streams.Control}
+		created, ok := createTerminalHeld(record.FamilyID, endpoints, DefaultTerminalRows, DefaultTerminalColumns, record.PID)
+		if !ok {
+			releaseVFSContextHeld(record.FamilyID)
+			processRecords[recordIndex(record.PID)] = ProcessRecord{}
+			*state = ProcessState{}
+			return false
+		}
+		// The description takes a reference of its own beside the session's.
+		terminal = created
+		retainTerminalHeld(terminal)
+		standardIn, standardOut, standardErr = uint64(terminal), terminalStandardStreams, terminalStandardStreams
+	}
+	if !state.FDs.initializeHeld(record.FamilyID, standardIn, standardOut, standardErr) {
+		if terminal != 0 {
+			// Nothing else names the new terminal; its endpoints stay with
+			// the caller, which still owns the launch.
+			releaseTerminalHeld(terminal)
+			releaseTerminalHeld(terminal)
+		}
 		releaseVFSContextHeld(record.FamilyID)
 		processRecords[recordIndex(record.PID)] = ProcessRecord{}
 		*state = ProcessState{}
@@ -411,8 +475,11 @@ func installProcessRecord(goosProcessID process.ID, parentPID int32, familyID ui
 		return ProcessRecord{}, false
 	}
 	pid := allocatePID()
+	sid, pgid := pid, pid
 	if familyID == 0 {
 		familyID = allocateFamilyID()
+	} else if parent, found := findProcessRecordHeld(parentPID); found {
+		sid, pgid = parent.SID, parent.PGID
 	}
 	processRecords[free] = ProcessRecord{
 		PID:           pid,
@@ -420,6 +487,8 @@ func installProcessRecord(goosProcessID process.ID, parentPID int32, familyID ui
 		ParentPID:     parentPID,
 		FamilyID:      familyID,
 		State:         ProcessRunning,
+		SID:           sid,
+		PGID:          pgid,
 	}
 	return processRecords[free], true
 }
@@ -637,6 +706,9 @@ func removeProcessHeld(root uint64, released *Released) bool {
 				}
 				processStates[index] = ProcessState{}
 				forgetThreads(root)
+				if record, found := findProcessRecordHeld(pid); found && record.SID == pid {
+					detachSessionHeld(pid, released)
+				}
 				if record := recordIndex(pid); record >= 0 {
 					processRecords[record] = ProcessRecord{}
 				}
@@ -664,6 +736,9 @@ func exitProcessHeld(root uint64, termination Termination, released *Released) b
 		}
 		processStates[index] = ProcessState{}
 		forgetThreads(root)
+		if record, found := findProcessRecordHeld(pid); found && record.SID == pid {
+			detachSessionHeld(pid, released)
+		}
 		return markProcessExited(pid, termination)
 	}
 	return false

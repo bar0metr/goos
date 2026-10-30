@@ -279,9 +279,9 @@ is `EBUSY`, and a directory moves only onto a free name.
 The kernel compares a resolved path with `/dev/null`, `/dev/zero`, and
 `/dev/tty` before it asks the VFS (ADR 0150). The first two open as
 descriptors of a synthetic kind: a read of `/dev/null` is at its end, a read
-of `/dev/zero` returns zeros, and both discard writes. `/dev/tty` has a
-status and opens with `ENXIO`, because a GoOS Linux process has no
-controlling terminal. All three stat as character devices. No VFS node
+of `/dev/zero` returns zeros, and both discard writes. `/dev/tty` opens a
+new description of the caller's controlling terminal, and `ENXIO` for a
+process that has none (ADR 0206). All three stat as character devices. No VFS node
 stands behind them, so native programs and directory listings do not show
 them, and the names cannot be removed or renamed.
 
@@ -372,9 +372,14 @@ directory a program can list, and a program that opens `/proc/mounts` gets
 ### Descriptors and the terminal
 
 `dup`, `dup2`, `dup3`, and `fcntl` rearrange descriptors over shared
-descriptions (ADR 0146). `ioctl` answers `ENOTTY`: the standard streams are
-byte streams, and no descriptor is a terminal even when the terminal service
-is at the other end. libc therefore buffers output in blocks.
+descriptions (ADR 0146). A Linux program alone in a foreground job gets a
+terminal (ADR 0206): PID 1 grants a `linux-tty` control stream, and the
+kernel joins it with the job's input and the session's output into one
+terminal record, whose description stands at descriptors 0, 1, and 2. The
+line discipline, termios, the foreground group, and the job-control signals
+are kernel state of the personality; the native shell keeps the session in
+raw mode and passes every key on. Every other descriptor answers `ioctl`
+with `ENOTTY`, so libc buffers output in blocks there.
 
 ## Launch and security boundary
 
@@ -432,7 +437,8 @@ I/O port, recurse into the stack guard, and replace the probe image while
 checking PID, cwd, descriptors, signal state, and a second musl startup.
 
 musl startup needs `arch_prctl`, `set_tid_address`, and `writev`. Its
-terminal probe, `ioctl(TIOCGWINSZ)`, gets `ENOTTY`.
+terminal probe, `ioctl(TIOCGWINSZ)`, gets `ENOTTY` on a stream and the
+session's size on a terminal.
 
 BusyBox 1.35.0, static musl, SHA-256
 `6e123e7f3202a8c1e9b1f94d8941580a25135382b99e8d3e34fb858bba311348`, is the
@@ -458,11 +464,12 @@ launch root ends every other member of its family with `SIGKILL` (ADR 0170).
 GoOS runs static x86_64 programs, musl or glibc, position-independent
 or not, with threads (ADR 0176, ADR 0177). A thread has its own TID, TLS, and
 signal mask and shares the process's pending signals; all threads share one
-CPU, and a process holds at most 8 tasks. Dynamic linking, process groups,
-`select`, nonblocking pipes, networking, `/proc`, termios, file-backed
-`mmap`, setting file times, and address-space randomization are outside it. BusyBox `sh` runs
-programs, pipelines, redirections, scripts, and background jobs without a
-terminal (ADR 0172), and `nano` does not run. `fork`, `vfork`, and two process forms of `clone` create a child from
+CPU, and a process holds at most 8 tasks. Dynamic linking, `select`,
+nonblocking pipes, networking, `/proc`, file-backed `mmap`, and
+address-space randomization are outside it. BusyBox `sh` runs programs,
+pipelines, redirections, scripts, and background jobs without a terminal
+(ADR 0172), and interactively with job control on one, where GNU nano runs
+too (ADR 0206). `fork`, `vfork`, and two process forms of `clone` create a child from
 a private copy of the caller (ADR 0158, ADR 0159), the thread form of `clone`
 a thread in the caller's address space (ADR 0177), and `wait4` reaps it
 (ADR 0161). Pipes connect them (ADR 0162), and `SIGCHLD` and `SIGPIPE`

@@ -373,6 +373,29 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("vfs-failures", sessions.Failures)
 	out.uint("vfs-stale", sessions.Stale)
 	out.end()
+	for index := 0; index < linuxcompat.MaxTerminals; index++ {
+		id, terminal, live := linuxcompat.TerminalAt(index)
+		if !live {
+			continue
+		}
+		out.text("DIAG linux-tty")
+		out.hex("id", uint64(id))
+		out.uint("family", terminal.FamilyID)
+		out.uint("session", uint64(terminal.Session))
+		out.uint("foreground", uint64(terminal.Foreground))
+		out.uint("rows", uint64(terminal.Rows))
+		out.uint("columns", uint64(terminal.Columns))
+		out.hex("iflag", uint64(terminal.Settings.Input))
+		out.hex("oflag", uint64(terminal.Settings.Output))
+		out.hex("lflag", uint64(terminal.Settings.Local))
+		out.uint("hangup", boolDiag(terminal.Hangup))
+		out.uint("interrupts", terminal.Stats.Interrupts)
+		out.uint("suspends", terminal.Stats.Suspends)
+		out.uint("quits", terminal.Stats.Quits)
+		out.uint("resizes", terminal.Stats.Resizes)
+		out.hex("last-refused-ioctl", terminal.Stats.LastUnsupported)
+		out.end()
+	}
 	dumpTiming(out)
 	out.text("DIAG events")
 	out.uint("total", diagRing.Total())
@@ -494,6 +517,13 @@ func sideName(side uint8) string {
 }
 
 func boolValue(value bool) uint64 {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func boolDiag(value bool) uint64 {
 	if value {
 		return 1
 	}

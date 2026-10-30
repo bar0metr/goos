@@ -72,6 +72,16 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 	ready, interests := uint64(0), 0
 	for index := 0; index < int(count); index++ {
 		fd, events := linuxcompat.PollEntry(wire, index)
+		if description, open := state.FDs.Lookup(int(fd)); fd >= 0 && open && description.Kind == linuxcompat.FDTerminal {
+			revents := pollTerminal(state, linuxcompat.TerminalID(description.Object), events)
+			linuxcompat.SetPollRevents(wire, index, revents)
+			if revents != 0 {
+				ready++
+			} else {
+				interests = addTerminalInterests(interests, linuxcompat.TerminalID(description.Object), events)
+			}
+			continue
+		}
 		revents, entry, watch := pollDescriptor(state, fd, events)
 		linuxcompat.SetPollRevents(wire, index, revents)
 		if revents != 0 {
@@ -88,8 +98,9 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 		}
 		return handler.pollReturn(state, request, end, linuxcompat.Result{Value: ready})
 	}
-	// A handled signal the mask lets through ends the call before it sleeps.
-	if state.Signals.Interrupting() {
+	// A handled signal the mask lets through ends the call before it sleeps,
+	// and so does one terminal input just raised for the caller's group.
+	if state.Signals.Interrupting() || state.Signals.Acting() {
 		return handler.pollReturn(state, request, end, linuxErrno(linuxabi.EINTR))
 	}
 	deadline := uint64(0)
@@ -229,4 +240,53 @@ func addPollInterest(count int, entry kernelwait.Entry) int {
 	}
 	local.linuxPollEntries[count] = entry
 	return count + 1
+}
+
+// pollTerminal evaluates a terminal for poll after processing what waits for
+// it: readable once a read would complete, hung up once its input has ended,
+// writable while its output has room.
+func pollTerminal(state *linuxcompat.ProcessState, id linuxcompat.TerminalID, events uint16) uint16 {
+	pumpTerminal(id, state)
+	snapshot, found := linuxcompat.Terminal(id)
+	if !found {
+		return linuxcompat.PollRevents(events, linuxcompat.PollReadiness{Error: true})
+	}
+	var readiness linuxcompat.PollReadiness
+	readiness.Readable = linuxcompat.TerminalReadable(id, 1)
+	readiness.Hangup = snapshot.Hangup
+	if output, _, live := terminalStream(snapshot.Endpoints.Output); live {
+		switch output.WriteStatusFor(linuxcompat.LinuxPipeBuf) {
+		case stream.StatusOK:
+			readiness.Writable = true
+		case stream.StatusWouldBlock:
+		default:
+			readiness.Error = true
+		}
+	}
+	return linuxcompat.PollRevents(events, readiness)
+}
+
+// addTerminalInterests adds the waits that change a terminal's readiness:
+// its input, geometry, and processed input for a reader, its output for a
+// writer.
+func addTerminalInterests(count int, id linuxcompat.TerminalID, events uint16) int {
+	local := thisCPU()
+	snapshot, found := linuxcompat.Terminal(id)
+	if !found {
+		return count
+	}
+	var entries [3]kernelwait.Entry
+	for index, total := 0, terminalInterests(snapshot, id, entries[:]); index < total; index++ {
+		if count >= len(local.linuxPollEntries) {
+			return count
+		}
+		count = addPollInterest(count, entries[index])
+	}
+	if events&linuxcompat.PollOut != 0 {
+		if _, outputID, live := terminalStream(snapshot.Endpoints.Output); live && count < len(local.linuxPollEntries) {
+			count = addPollInterest(count, kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindStream, Object: outputID, Side: 1},
+				Events: kernelwait.Writable | kernelwait.PeerClosed})
+		}
+	}
+	return count
 }

@@ -52,6 +52,8 @@ func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) 
 			return linuxcompat.Result{Errno: linuxabi.EISDIR}
 		case linuxcompat.FDSynthetic:
 			return handler.deviceRead(request, description, vector)
+		case linuxcompat.FDTerminal:
+			return handler.terminalRead(request, description, vector)
 		}
 	}
 	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {
@@ -245,6 +247,8 @@ func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.
 			return linuxcompat.Result{Errno: linuxabi.EBADF}
 		case linuxcompat.FDSynthetic:
 			return handler.deviceWrite(request, *description, false)
+		case linuxcompat.FDTerminal:
+			return handler.terminalWrite(request, description, false)
 		}
 	}
 	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {
@@ -332,6 +336,8 @@ func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat
 			return linuxcompat.Result{Errno: linuxabi.EBADF}
 		case linuxcompat.FDSynthetic:
 			return handler.deviceWrite(request, *description, true)
+		case linuxcompat.FDTerminal:
+			return handler.terminalWrite(request, description, true)
 		}
 	}
 	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {

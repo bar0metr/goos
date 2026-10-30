@@ -56,12 +56,15 @@ type Core struct {
 	wakePending uint64
 	killed      uint64
 	held        uint64
-	pinned      uint64
-	running     uint64
-	home        [MaxCPUs]uint64
-	online      uint64
-	current     [MaxCPUs]int8
-	rotor       [MaxCPUs]int8
+	// stopped are the tasks a job-control stop keeps off every processor.
+	// It is apart from held, which the kernel's own holds set and clear.
+	stopped uint64
+	pinned  uint64
+	running uint64
+	home    [MaxCPUs]uint64
+	online  uint64
+	current [MaxCPUs]int8
+	rotor   [MaxCPUs]int8
 	// affinity is each task's requested processor mask; zero means every
 	// processor. barred has, per processor, the tasks whose affinity leaves
 	// it out, so a steal or a placement tests a task with one AND.
@@ -151,6 +154,7 @@ func (core *Core) Install() (int, uint32, bool) {
 	core.wakePending &^= bit(slot)
 	core.killed &^= bit(slot)
 	core.held &^= bit(slot)
+	core.stopped &^= bit(slot)
 	core.pinned &^= bit(slot)
 	core.affinity[slot] = 0
 	for cpu := range core.barred {
@@ -256,7 +260,7 @@ func (core *Core) Killed(cpu int) bool {
 // held, so that it should leave the processor at once.
 func (core *Core) MustLeave(cpu int) bool {
 	slot := int(core.current[cpu])
-	return slot != Idle && (core.killed|core.held)&bit(slot) != 0
+	return slot != Idle && (core.killed|core.held|core.stopped)&bit(slot) != 0
 }
 
 // Hold keeps a live task off every processor until Release: no processor
@@ -282,10 +286,43 @@ func (core *Core) Release(slot int, self int) int {
 		return Idle
 	}
 	core.held &^= bit(slot)
-	if core.runnable&bit(slot) == 0 || core.dead&bit(slot) != 0 || core.running&bit(slot) != 0 {
+	if core.runnable&bit(slot) == 0 || core.dead&bit(slot) != 0 || core.running&bit(slot) != 0 || core.stopped&bit(slot) != 0 {
 		return Idle
 	}
 	return core.place(slot, self)
+}
+
+// Stop keeps a live task off every processor until Continue, as Hold does,
+// for a job-control stop. Unlike Hold it takes the calling processor's own
+// task, which leaves at its next scheduling point; the returned processor is
+// the one to interrupt.
+func (core *Core) Stop(slot int, self int) (int, bool) {
+	if !core.inRange(slot) || core.live&bit(slot) == 0 || core.dead&bit(slot) != 0 || core.pinned&bit(slot) != 0 {
+		return Idle, false
+	}
+	core.stopped |= bit(slot)
+	if core.running&bit(slot) != 0 {
+		return core.runningOn(slot), true
+	}
+	return Idle, true
+}
+
+// Continue ends a stop. A runnable task is placed as a wake would place it;
+// a wait that completed while it was stopped is kept.
+func (core *Core) Continue(slot int, self int) int {
+	if !core.inRange(slot) || core.stopped&bit(slot) == 0 {
+		return Idle
+	}
+	core.stopped &^= bit(slot)
+	if core.runnable&bit(slot) == 0 || core.dead&bit(slot) != 0 || core.running&bit(slot) != 0 || core.held&bit(slot) != 0 {
+		return Idle
+	}
+	return core.place(slot, self)
+}
+
+// Stopped reports whether a job-control stop holds a task.
+func (core *Core) Stopped(slot int) bool {
+	return core.inRange(slot) && core.stopped&bit(slot) != 0
 }
 
 // Switch leaves the task cpu runs for the given reason and picks the next one,
@@ -339,7 +376,7 @@ func (core *Core) Finish(cpu int, previous int) int {
 		}
 		return Housekeeping
 	}
-	if core.runnable&bit(previous) == 0 || (core.pinned|core.held)&bit(previous) != 0 {
+	if core.runnable&bit(previous) == 0 || (core.pinned|core.held|core.stopped)&bit(previous) != 0 {
 		return Idle
 	}
 	if home := core.homeOf(previous); home != cpu && home >= 0 {
@@ -468,7 +505,7 @@ func (core *Core) SetAffinity(slot int, mask uint64, self int) (int, bool) {
 			target = core.leastLoaded(slot)
 		}
 		core.move(slot, target)
-		if core.runnable&bit(slot) != 0 && core.held&bit(slot) == 0 {
+		if core.runnable&bit(slot) != 0 && (core.held|core.stopped)&bit(slot) == 0 {
 			kick = target
 		}
 	}
@@ -557,7 +594,7 @@ func (core *Core) pick(cpu int, previous int) int {
 	if previous != Idle {
 		queue |= core.runnable & core.home[cpu] & bit(previous)
 	}
-	queue &^= core.held
+	queue &^= core.held | core.stopped
 	if queue != 0 {
 		next := nextAfter(queue, int(core.rotor[cpu]))
 		core.rotor[cpu] = int8(next)
@@ -570,7 +607,7 @@ func (core *Core) pick(cpu int, previous int) int {
 		if core.online&bit(other) == 0 {
 			continue
 		}
-		candidates := core.runnable & core.home[other] &^ core.running &^ core.pinned &^ core.held &^ core.barred[cpu]
+		candidates := core.runnable & core.home[other] &^ core.running &^ core.pinned &^ core.held &^ core.stopped &^ core.barred[cpu]
 		if candidates == 0 {
 			continue
 		}
@@ -647,7 +684,7 @@ func (core *Core) leastLoaded(slot int) int {
 // idle reports whether cpu runs its idle loop with nothing else queued.
 func (core *Core) idle(cpu int, except int) bool {
 	return core.online&bit(cpu) != 0 && core.current[cpu] == Idle &&
-		core.runnable&core.home[cpu]&^core.held&^bit(except) == 0
+		core.runnable&core.home[cpu]&^core.held&^core.stopped&^bit(except) == 0
 }
 
 // idleCPUFor returns an idle processor slot may run on, searching from
@@ -677,6 +714,7 @@ func (core *Core) retire(slot int) {
 	core.wakePending &^= bit(slot)
 	core.killed &^= bit(slot)
 	core.held &^= bit(slot)
+	core.stopped &^= bit(slot)
 	core.dead |= bit(slot)
 	if home := core.homeOf(slot); home >= 0 {
 		core.home[home] &^= bit(slot)

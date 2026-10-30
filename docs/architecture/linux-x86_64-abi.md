@@ -38,7 +38,7 @@ an errno; nothing is accepted and ignored.
 | `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
 | `rt_sigaction(13)`, `rt_sigprocmask(14)` | partial | dispositions per process and the blocked mask per thread; handlers run at system call returns; unblocking delivers what is pending; flags GoOS cannot honor `EINVAL` |
 | `rt_sigreturn(15)` | implemented | restores registers and mask from the handler's frame; a frame returning outside the user half ends the process with `SIGSEGV` |
-| `ioctl(16)` | implemented | `ENOTTY` for every request: no descriptor is a terminal |
+| `ioctl(16)` | partial | a terminal takes `TCGETS`, `TCSETS`, `TCSETSW`, `TCSETSF`, `TIOCGWINSZ`, `TIOCSWINSZ`, `TIOCGPGRP`, `TIOCSPGRP`, `TIOCGSID`, `FIONREAD`, `TCFLSH`, and `TCSBRK` (ADR 0206); any other request, and every request on a pipe, file, or device, is `ENOTTY` |
 | `pread64(17)`, `pwrite64(18)` | implemented | files at an offset, position unchanged; three VFS exchanges; streams are `ESPIPE` |
 | `readv(19)`, `writev(20)` | implemented | streams and files; at most 16 elements and 64 KiB per call; a stream vector of at most 4096 bytes lands whole |
 | `pipe(22)`, `pipe2(293)` | partial | a native stream with an 8176-byte ring; `pipe2` takes `O_CLOEXEC`, other flags `EINVAL`; `EPIPE` and `SIGPIPE` with no reader |
@@ -56,8 +56,10 @@ an errno; nothing is accepted and ignored.
 | `fork(57)` | implemented | a private copy of every touched page; descriptors share open-file descriptions; family and global process budgets give `EAGAIN` |
 | `vfork(58)` | partial | a private copy as `fork`; the parent waits until the child replaces its image or exits |
 | `execve(59)` | implemented | replaces the current image with a static Linux `ET_EXEC` or supported static PIE; no interpreter, shebang, PATH search, or native GoOS image |
-| `wait4(61)` | partial | a child by PID or any child; `WNOHANG`; process-group targets, `WUNTRACED`, and `WCONTINUED` `EINVAL`; `rusage` holds user time only |
-| `kill(62)`, `tkill(200)`, `tgkill(234)` | partial | the caller and its descendants only; process-group targets `EINVAL`; a fatal signal ends a sleeping target at once |
+| `wait4(61)` | partial | a child by PID, any child, or the children of a process group; `WNOHANG`, `WUNTRACED`, and `WCONTINUED` (ADR 0206); `rusage` holds user time only |
+| `kill(62)`, `tkill(200)`, `tgkill(234)` | partial | a PID names the caller or a descendant; `0` and `-pgid` name a group in the caller's family and session; `-1` is `EINVAL`; a fatal signal ends a sleeping target at once, a stop signal stops it |
+| `fsync(74)`, `fdatasync(75)` | implemented | a regular file flushes the whole persistent volume through the VFS and succeeds only when the flush did; a directory succeeds; a pipe, terminal, or device is `EINVAL` |
+| `setpgid(109)`, `getpgrp(111)`, `setsid(112)`, `getpgid(121)`, `getsid(124)` | implemented | sessions and groups within the caller's family (ADR 0206); another family's process is `ESRCH` |
 | `exit(60)`, `exit_group(231)` | implemented | end the task, or every task of the process |
 | `uname(63)` | implemented | `Linux`, `goos`, `6.0.0-goos`, the GoOS release, `x86_64` |
 | `fcntl(72)` | partial | `F_DUPFD`, `F_DUPFD_CLOEXEC`, `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL` for `O_APPEND` and `O_NONBLOCK`; others `EINVAL` |
@@ -96,7 +98,7 @@ BusyBox does about it:
 | `sigaltstack(131)` | no alternate signal stack |
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)` | a program that uses them in place of `utimensat` cannot set a time |
-| `ftruncate(77)`, `fsync(74)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
+| `ftruncate(77)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
 | `socket(41)` and the network calls | no networking for Linux programs; the native network service (ADR 0191) offers no socket interface |
 
 Wrong-ABI Linux entry returns `-EPERM`. A noncanonical or non-user return RIP
@@ -298,7 +300,7 @@ never changes (ADR 0150). A transfer that fails still restores it. A
 descriptor opened with `O_APPEND` writes at the end of the file whatever
 offset `pwrite64` names, which is the Linux behavior.
 
-`ftruncate` and `fsync` return `ENOSYS`.
+`ftruncate` returns `ENOSYS`.
 
 ## Devices
 
@@ -310,7 +312,7 @@ and a relative path that resolves there name the same device.
 | --- | --- | --- | --- | --- |
 | `/dev/null` | a descriptor | 0, end of file | the count, bytes discarded | 1, 3 |
 | `/dev/zero` | a descriptor | zero bytes, at most 64 KiB per call | the count, bytes discarded | 1, 5 |
-| `/dev/tty` | `ENXIO`: the process has no controlling terminal | | | 5, 0 |
+| `/dev/tty` | a new description of the controlling terminal; `ENXIO` without one | as the terminal | as the terminal | 5, 0 |
 
 `stat`, `fstat`, and `statx` report `S_IFCHR\|0666` with the device number in
 `st_rdev`, and `access` answers from that mode. `readv`, `writev`, `pread64`,
@@ -629,10 +631,34 @@ direction alone for a stream. `F_SETFL` changes `O_APPEND` on a file and
 `O_NOATIME` with `EINVAL`. `open` accepts `O_NONBLOCK` and changes nothing:
 Linux ignores it for files and directories, and the devices never block.
 
-`ioctl` returns `ENOTTY` on an open descriptor and `EBADF` on a closed one.
-The standard streams are FIFOs to `fstat` and no terminal to `ioctl`, whatever
-is at their other end. musl's `isatty` is false and its stdio buffers output
-until the buffer fills or the program exits.
+`ioctl` returns `EBADF` on a closed descriptor and `ENOTTY` on anything but
+a terminal. The standard streams of a pipeline stage, a background job, or a
+redirected job are FIFOs to `fstat` and no terminal to `ioctl`; musl's
+`isatty` is false there and its stdio buffers output until the buffer fills
+or the program exits.
+
+## Terminals
+
+A Linux program that is the only stage of a foreground job gets a terminal
+(ADR 0206). Descriptors 0, 1, and 2 share one read-write description of it;
+`fstat` reports a character device, major 136, mode `0620`. The program
+leads a session and a process group, and the terminal is its controlling
+terminal with that group in the foreground. `/dev/tty` opens another
+description of it.
+
+| Aspect | Behavior |
+| --- | --- |
+| initial termios | `ICRNL\|IUTF8`, `OPOST\|ONLCR`, `B38400\|CS8\|CREAD`, `ISIG\|ICANON\|ECHO\|ECHOE\|ECHOK\|ECHOCTL\|ECHOKE\|IEXTEN`; `VINTR` ^C, `VQUIT` ^\\, `VERASE` DEL, `VKILL` ^U, `VEOF` ^D, `VSUSP` ^Z, `VMIN` 1, `VTIME` 0 |
+| canonical input | erase, word erase, kill, end of file, `VEOL`, `VEOL2`; one line per read; a 4095-byte line and 4 KiB waiting |
+| non-canonical input | a read completes with `VMIN` bytes, or at once with `VMIN` 0; `VTIME` is kept and not acted on |
+| signals | `VINTR`, `VQUIT`, and `VSUSP` under `ISIG` send `SIGINT`, `SIGQUIT`, and `SIGTSTP` to the foreground group and flush input unless `NOFLSH` |
+| output | `OPOST\|ONLCR` turns LF into CR LF; nothing else is rewritten |
+| geometry | `TIOCGWINSZ` returns the native session's size with zero pixel fields; a change sends `SIGWINCH` to the foreground group |
+| background read | `SIGTTIN` to the reader's group, then the read restarts; `EIO` when the reader ignores or blocks it or its group is orphaned |
+| hangup | the native session's input closing gives end of file and `SIGHUP` to the foreground group |
+| `TCSETSW`, `TCSETSF` | apply at once; GoOS keeps no output queue to drain |
+| `O_NONBLOCK` | a read with no input is `EAGAIN` |
+| `fsync` | `EINVAL` |
 
 ## Memory and pointers
 
@@ -657,8 +683,8 @@ Results a correct Linux program can observe to differ:
 
 | Area | GoOS 0.2.1 | Linux |
 | --- | --- | --- |
-| terminal | no descriptor is a terminal; `ioctl` is `ENOTTY` | a terminal answers `TIOCGWINSZ` and termios |
-| signals | delivered at system call returns; `kill` reaches the caller and its descendants only; Ctrl-C ends the process whatever handles `SIGINT`; file I/O is never interrupted | sent by UID, delivered at any return to user mode |
+| terminal | a foreground job's only stage has one; no PTY pairs, flow control, `VTIME`, or `TOSTOP` | PTYs and the full termios set |
+| signals | delivered at system call returns; `kill` reaches the caller, its descendants, and groups of its family; file I/O is never interrupted; a launch root never stops | sent by UID, delivered at any return to user mode |
 | devices | `/dev/null`, `/dev/zero`, and `/dev/tty` only; `/dev` is no directory | a populated `/dev` |
 | random bytes | 256 bytes per call; seeded from jitter alone on a CPU without RDRAND | 32 MiB per call |
 | positioned I/O | three VFS exchanges per call | one atomic operation |
@@ -684,13 +710,13 @@ GoOS 0.2.1 runs x86_64, statically linked ELF programs, position-independent
 or not, musl or glibc (ADR 0176), with threads (ADR 0177) that have their own
 signal masks and share the process's pending signals. It has no `PT_INTERP` or dynamic
 linker; no copy-on-write and no shared-memory
-`vfork`; no process groups, sessions, or job control; no process-group
-`kill`, `select`, `epoll`, or alternate signal stack; no nonblocking pipes;
+`vfork`; no `select`, `epoll`, or alternate signal stack; no nonblocking pipes;
 no networking; no `/proc` or `/sys`, and of `/dev` three names; no
 file-backed `mmap`; no address-space randomization; no ownership or
-permission enforcement; no root; no termios. BusyBox `sh` runs programs,
-pipelines, redirections, scripts, and background jobs non-interactively.
-`nano` does not run.
+permission enforcement; no root. A Linux program alone in the foreground has
+a terminal with termios, sessions, process groups, and job control
+(ADR 0206): BusyBox `sh` runs interactively with job control, and GNU nano
+9.2 edits and saves files.
 
 ## Bounds
 

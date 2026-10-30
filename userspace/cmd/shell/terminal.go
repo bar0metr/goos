@@ -191,6 +191,10 @@ func terminalEnvironment() [][]byte { return childTerminalEnvironment.Entries(pa
 var (
 	rawJob    bool
 	rawActive bool
+	// linuxTerminalJob marks a foreground Linux job with a terminal of its
+	// own. The session stays in raw mode as a transport and every key,
+	// Ctrl-C included, goes to the job's input (ADR 0206).
+	linuxTerminalJob bool
 )
 
 func setTerminalMode(operation terminal.Operation) {
@@ -207,14 +211,23 @@ func setTerminalMode(operation terminal.Operation) {
 func startRawJob() {
 	if rawJob && !rawActive {
 		rawActive = true
-		setTerminalMode(terminal.OperationRawMode)
+		setTerminalMode(rawOperation())
 	}
+}
+
+// rawOperation is the raw mode the foreground job needs: transport for a
+// Linux job, whose end keeps the screen.
+func rawOperation() terminal.Operation {
+	if linuxTerminalJob {
+		return terminal.OperationTransportMode
+	}
+	return terminal.OperationRawMode
 }
 
 // endRawJob returns the terminal to line mode after the job, which also
 // resets whatever the program left on the screen.
 func endRawJob() {
-	rawJob = false
+	rawJob, linuxTerminalJob = false, false
 	if rawActive {
 		rawActive = false
 		sendResizeState(terminal.RawReleaseNotice())
@@ -276,7 +289,7 @@ func installTerminal(session handle.ID) {
 	// A restarted service starts in line mode; a full-screen job still
 	// running needs raw mode again.
 	if rawActive {
-		setTerminalMode(terminal.OperationRawMode)
+		setTerminalMode(rawOperation())
 	}
 }
 

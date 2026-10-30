@@ -661,6 +661,8 @@ func (handler *linuxCallHandler) Filesystem(request linuxcompat.Request) linuxco
 		return handler.changeMetadata(request, linuxabi.AtFDCWD, arguments[0], false)
 	case linuxabi.SysFchmod:
 		return handler.changeMetadata(request, int32(arguments[0]), 0, true)
+	case linuxabi.SysFsync, linuxabi.SysFdatasync:
+		return handler.sync(request)
 	case linuxabi.SysFchmodat:
 		return handler.changeMetadata(request, int32(arguments[0]), arguments[1], false)
 	case linuxabi.SysUtimensat:
@@ -874,6 +876,8 @@ func (handler *linuxCallHandler) beginDescriptorStatus(request linuxcompat.Reque
 		errno = handler.vfsBegin(request, path, nil, 0)
 	case linuxcompat.FDSynthetic:
 		return handler.deliverStatus(request, buffer, linuxcompat.DeviceStatus(linuxcompat.DeviceOf(description))), true
+	case linuxcompat.FDTerminal:
+		return handler.deliverStatus(request, buffer, linuxcompat.TerminalStatus(linuxcompat.TerminalID(description.Object))), true
 	default:
 		identity, _, _ := stream.DecodeEndpointObject(description.Object)
 		return handler.deliverStatus(request, buffer, linuxcompat.StreamStatus(identity)), true

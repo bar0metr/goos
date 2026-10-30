@@ -58,6 +58,10 @@ func updateSessionGeometry(session *terminalSession, geometry tty.Geometry) {
 		if !job.active || job.session != session || job.resizeReleased {
 			continue
 		}
+		if job.linuxTerminal != 0 {
+			sendLinuxGeometry(job.linuxTerminal, &session.geometry)
+			continue
+		}
 		if session.resizeOwner.Allows(uint64(job.slot)+1, true) {
 			sendResize(&job.launcher.resize, &session.geometry)
 		} else if session.resizeOwner.Allows(uint64(job.slot)+1, false) {

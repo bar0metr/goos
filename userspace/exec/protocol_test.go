@@ -326,13 +326,16 @@ func TestReplyNamesTheFailedStage(t *testing.T) {
 }
 
 func TestStartedCarriesTheInputHandle(t *testing.T) {
-	message, ok := EncodeStarted(2, 0x100000009, 5)
+	message, ok := EncodeStarted(2, 0x100000009, 5, StartedLinuxTerminal)
 	if !ok {
 		t.Fatal("started refused")
 	}
-	slot, input, correlation, ok := DecodeStarted(message)
-	if !ok || slot != 2 || input != 0x100000009 || correlation != 5 {
-		t.Fatalf("started = %d %#x %d %v", slot, input, correlation, ok)
+	slot, input, correlation, flags, ok := DecodeStarted(message)
+	if !ok || slot != 2 || input != 0x100000009 || correlation != 5 || flags != StartedLinuxTerminal {
+		t.Fatalf("started = %d %#x %d %d %v", slot, input, correlation, flags, ok)
+	}
+	if _, refused := EncodeStarted(2, 0x100000009, 5, 2); refused {
+		t.Fatal("an unknown flag encoded")
 	}
 	// The notice has to survive the IPC layer: version 8 carried the
 	// correlation in a notification's header, which ipc.Encode refuses, and
@@ -350,17 +353,17 @@ func TestStartedCarriesTheInputHandle(t *testing.T) {
 		slot  uint8
 		input uint64
 	}{{Slots, 1}, {0, 0}} {
-		if _, ok := EncodeStarted(bad.slot, handle.ID(bad.input), 5); ok {
+		if _, ok := EncodeStarted(bad.slot, handle.ID(bad.input), 5, 0); ok {
 			t.Fatalf("%+v encoded", bad)
 		}
 	}
 	message.HandleCount = 0
-	if _, _, _, ok := DecodeStarted(message); ok {
+	if _, _, _, _, ok := DecodeStarted(message); ok {
 		t.Fatal("started without a handle decoded")
 	}
 	message.HandleCount = 1
 	message.Payload[1] = 0
-	if _, _, _, ok := DecodeStarted(message); ok {
+	if _, _, _, _, ok := DecodeStarted(message); ok {
 		t.Fatal("started without a job correlation decoded")
 	}
 }

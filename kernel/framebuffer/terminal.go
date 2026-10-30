@@ -15,6 +15,9 @@ const (
 	// terminalDefaultColor selects the terminal's own foreground or
 	// background instead of a palette entry.
 	terminalDefaultColor = -1
+	// terminalUnderlineRow is the glyph row SGR 4 sets, the one '_' uses.
+	terminalUnderlineRow  = GlyphHeight - 2
+	terminalUnderlineBits = uint16(0xfff0)
 )
 
 // terminalPalette is the standard 16-colour ANSI palette: colours 0-7 are the
@@ -30,6 +33,18 @@ var terminalPalette = [16][3]uint8{
 
 // Terminal renders the bounded console control subset used by GoOS. It owns
 // no history buffer and allocates no memory while consuming output.
+//
+// Writing the last column wraps at once: the cursor moves to the start of the
+// next row, scrolling when that was the bottom row. Right after that wrap a
+// newline is ignored and a carriage return goes back to the start of the full
+// row, so a full row followed by LF, CR, or CR LF ends where it does on a
+// terminal that defers the wrap. With autowrap off (?7l) the cursor stays on
+// the last column. Backspace in column 0 moves to the last column of the row
+// above.
+//
+// The cursor is a block drawn by inverting its cell's colour bits after each
+// write and inverted back before the next one, so the cell's own pixels never
+// need to be stored.
 type Terminal struct {
 	buffer            Buffer
 	columns           int
@@ -46,8 +61,20 @@ type Terminal struct {
 	foregroundIndex int8
 	backgroundIndex int8
 	bold            bool
-	utf8            UTF8Decoder
-	state           uint8
+	reverse         bool
+	underline       bool
+	// cursorHidden is set by CSI ?25l; cursorDrawn records that the cell at
+	// cursorColumn, cursorRow is currently inverted.
+	cursorHidden bool
+	// noAutowrap is set by CSI ?7l; wrapped records that the last character
+	// wrapped the cursor, which changes what LF and CR right behind it do.
+	noAutowrap   bool
+	wrapped      bool
+	cursorDrawn  bool
+	cursorColumn int
+	cursorRow    int
+	utf8         UTF8Decoder
+	state        uint8
 	// parameters counts the parameters of the sequence being parsed, digits
 	// those of its last one; private marks a sequence begun with '?'.
 	parameter        [terminalMaxParameters]uint16
@@ -76,15 +103,29 @@ func NewTerminal(buffer Buffer) (Terminal, bool) {
 }
 
 func (terminal *Terminal) Write(data []byte) {
-	for _, value := range data {
-		terminal.ConsumeByte(value)
+	if !terminal.usable() {
+		return
 	}
+	terminal.eraseCursor()
+	for _, value := range data {
+		terminal.consumeByte(value)
+	}
+	terminal.drawCursor()
 }
 
 func (terminal *Terminal) WriteString(data string) {
-	for index := 0; index < len(data); index++ {
-		terminal.ConsumeByte(data[index])
+	if !terminal.usable() {
+		return
 	}
+	terminal.eraseCursor()
+	for index := 0; index < len(data); index++ {
+		terminal.consumeByte(data[index])
+	}
+	terminal.drawCursor()
+}
+
+func (terminal *Terminal) usable() bool {
+	return terminal != nil && terminal.columns != 0 && terminal.rows != 0
 }
 
 // EnableValidationMarker pins the validation-only checkerboard across terminal
@@ -105,9 +146,15 @@ func (terminal *Terminal) RefreshValidationMarker() {
 }
 
 func (terminal *Terminal) ConsumeByte(value byte) {
-	if terminal == nil || terminal.columns == 0 || terminal.rows == 0 {
+	if !terminal.usable() {
 		return
 	}
+	terminal.eraseCursor()
+	terminal.consumeByte(value)
+	terminal.drawCursor()
+}
+
+func (terminal *Terminal) consumeByte(value byte) {
 	if terminal.state != terminalGround {
 		terminal.consumeEscape(value)
 		return
@@ -122,14 +169,22 @@ func (terminal *Terminal) ConsumeByte(value byte) {
 }
 
 func (terminal *Terminal) consumeScalar(scalar rune) {
+	wrapped := terminal.wrapped
+	terminal.wrapped = false
 	switch scalar {
 	case 0x1b:
 		terminal.state = terminalEscape
 	case '\n':
+		if wrapped {
+			return
+		}
 		terminal.column = 0
 		terminal.nextRow()
 	case '\r':
 		terminal.column = 0
+		if wrapped && terminal.row > 0 {
+			terminal.row--
+		}
 	case '\b':
 		if terminal.column > 0 {
 			terminal.column--
@@ -149,15 +204,27 @@ func (terminal *Terminal) consumeScalar(scalar rune) {
 		if scalar < 0x20 || scalar == 0x7f {
 			return
 		}
+		glyph := GlyphFor(scalar)
+		if terminal.underline {
+			glyph[terminalUnderlineRow] |= terminalUnderlineBits
+		}
+		foreground, background := terminal.foreground, terminal.background
+		if terminal.reverse {
+			foreground, background = background, foreground
+		}
 		terminal.buffer.DrawGlyph(terminal.column*GlyphWidth, terminal.row*GlyphHeight,
-			GlyphFor(scalar), terminal.foreground, terminal.background)
+			glyph, foreground, background)
 		if terminal.validationMarker && terminal.row == terminal.rows-1 && terminal.column >= terminal.columns-2 {
 			DrawValidationMarker(&terminal.buffer)
+		}
+		if terminal.column == terminal.columns-1 && terminal.noAutowrap {
+			return
 		}
 		terminal.column++
 		if terminal.column == terminal.columns {
 			terminal.column = 0
 			terminal.nextRow()
+			terminal.wrapped = true
 		}
 	}
 }
@@ -205,7 +272,9 @@ func (terminal *Terminal) consumeEscape(value byte) {
 		terminal.resetEscape()
 		return
 	}
-	if !terminal.private {
+	if terminal.private {
+		terminal.dispatchPrivate(value)
+	} else {
 		terminal.dispatch(value)
 	}
 	terminal.resetEscape()
@@ -240,6 +309,22 @@ func (terminal *Terminal) dispatch(final byte) {
 		terminal.eraseLine(terminal.argument(0, 0))
 	case 'm':
 		terminal.selectGraphicRendition()
+	}
+}
+
+// dispatchPrivate handles the DEC private modes: ?25 shows and hides the
+// cursor, ?7 turns autowrap on and off. Other modes are ignored.
+func (terminal *Terminal) dispatchPrivate(final byte) {
+	if final != 'h' && final != 'l' {
+		return
+	}
+	for index := 0; index < int(terminal.parameters); index++ {
+		switch terminal.parameter[index] {
+		case 25:
+			terminal.cursorHidden = final == 'l'
+		case 7:
+			terminal.noAutowrap = final == 'l'
+		}
 	}
 }
 
@@ -301,8 +386,9 @@ func (terminal *Terminal) fillRows(first, last int) {
 	}
 }
 
-// selectGraphicRendition applies SGR parameters in order. Unsupported ones
-// are ignored; the extended colour forms 38 and 48 have their operands
+// selectGraphicRendition applies SGR parameters in order. Reverse video (7)
+// swaps the colours of the glyphs written afterwards; erasing and scrolling
+// keep using the background colour itself. Unsupported parameters are ignored; the extended colour forms 38 and 48 have their operands
 // skipped so they are not read as other attributes.
 func (terminal *Terminal) selectGraphicRendition() {
 	count := int(terminal.parameters)
@@ -319,6 +405,14 @@ func (terminal *Terminal) selectGraphicRendition() {
 			terminal.bold = true
 		case value == 22:
 			terminal.bold = false
+		case value == 4:
+			terminal.underline = true
+		case value == 24:
+			terminal.underline = false
+		case value == 7:
+			terminal.reverse = true
+		case value == 27:
+			terminal.reverse = false
 		case value >= 30 && value <= 37:
 			terminal.foregroundIndex = int8(value - 30)
 		case value == 39:
@@ -345,7 +439,8 @@ func (terminal *Terminal) selectGraphicRendition() {
 }
 
 func (terminal *Terminal) resetStyle() {
-	terminal.foregroundIndex, terminal.backgroundIndex, terminal.bold = terminalDefaultColor, terminalDefaultColor, false
+	terminal.foregroundIndex, terminal.backgroundIndex = terminalDefaultColor, terminalDefaultColor
+	terminal.bold, terminal.reverse, terminal.underline = false, false, false
 	terminal.applyStyle()
 }
 
@@ -360,6 +455,41 @@ func (terminal *Terminal) applyStyle() {
 	terminal.background = terminal.defaultBackground
 	if terminal.backgroundIndex != terminalDefaultColor {
 		terminal.background = terminal.palette[terminal.backgroundIndex]
+	}
+}
+
+// drawCursor inverts the cursor cell unless the cursor is hidden. Pixels under
+// the validation marker are left alone so the marker stays exact.
+func (terminal *Terminal) drawCursor() {
+	if terminal.cursorHidden || terminal.cursorDrawn {
+		return
+	}
+	terminal.cursorColumn, terminal.cursorRow = terminal.column, terminal.row
+	terminal.invertCursorCell()
+	terminal.cursorDrawn = true
+}
+
+// eraseCursor restores the cell drawCursor inverted.
+func (terminal *Terminal) eraseCursor() {
+	if !terminal.cursorDrawn {
+		return
+	}
+	terminal.invertCursorCell()
+	terminal.cursorDrawn = false
+}
+
+func (terminal *Terminal) invertCursorCell() {
+	buffer := &terminal.buffer
+	mask := buffer.red | buffer.green | buffer.blue
+	x0, y0 := terminal.cursorColumn*GlyphWidth, terminal.cursorRow*GlyphHeight
+	markerX, markerY := buffer.width-ValidationMarkerSize, buffer.height-ValidationMarkerSize
+	for y := y0; y < y0+GlyphHeight && y < buffer.height; y++ {
+		for x := x0; x < x0+GlyphWidth && x < buffer.width; x++ {
+			if terminal.validationMarker && x >= markerX && y >= markerY {
+				continue
+			}
+			buffer.pixels[y*buffer.stride+x] ^= mask
+		}
 	}
 }
 

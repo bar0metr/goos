@@ -68,6 +68,7 @@ type cpuScratch struct {
 	linuxSignalFPU      [linuxcompat.FPUStateSize]byte
 	linuxHandler        linuxCallHandler
 	linuxIOBuffer       [stream.AtomicWrite]byte
+	linuxTerminal       linuxTerminalScratch
 	linuxIOVecWire      [linuxcompat.MaxIOVec * linuxabi.IOVecSize]byte
 	linuxProbe          [1]byte
 	linuxTimespec       [linuxcompat.TimespecSize]byte

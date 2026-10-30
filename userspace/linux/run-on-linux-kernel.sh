@@ -33,6 +33,20 @@ mkdir -p "$root/bin" "$root/dev" "$root/tmp" "$root/system/linux"
 cp "$busybox" "$root/bin/busybox"
 cp "$here/prebuilt/$fixture" "$root/system/linux/$fixture"
 chmod 755 "$root/bin/busybox" "$root/system/linux/$fixture"
+if [ "$fixture" = tty-probe ]; then
+	# The probe needs a terminal: it runs as a session leader with the
+	# serial console as its controlling terminal, as an interactive GoOS
+	# launch runs on its own.
+	cat > "$root/init" <<INIT
+#!/bin/busybox sh
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+/bin/busybox stty -F /dev/ttyS0 rows 30 cols 100
+echo "== default"
+/bin/busybox setsid -c /system/linux/tty-probe identity 0<>/dev/ttyS0 1>&0 2>&0
+echo "== done"
+/bin/busybox poweroff -f
+INIT
+else
 cat > "$root/init" <<INIT
 #!/bin/busybox sh
 /bin/busybox mount -t devtmpfs devtmpfs /dev
@@ -61,6 +75,7 @@ echo "== process"
 echo "== done"
 /bin/busybox poweroff -f
 INIT
+fi
 chmod 755 "$root/init"
 (cd "$root" && find . | LC_ALL=C sort | cpio -o -H newc 2>/dev/null | gzip -9 > "$work/initramfs.cpio.gz")
 
@@ -84,8 +99,12 @@ done
 
 tr -d '\r' < "$log" | sed -n '/^== default/,/^== done/p'
 status=0
-tr -d '\r' < "$log" | grep -q '^abi-probe ok$' || { echo "FAIL default mode" >&2; status=1; }
-tr -d '\r' < "$log" | grep -q '^hostile ok$' || { echo "FAIL hostile mode" >&2; status=1; }
+if [ "$fixture" = tty-probe ]; then
+	tr -d '\r' < "$log" | grep -q '^tty identity ok$' || { echo "FAIL tty-probe identity" >&2; status=1; }
+else
+	tr -d '\r' < "$log" | grep -q '^abi-probe ok$' || { echo "FAIL default mode" >&2; status=1; }
+	tr -d '\r' < "$log" | grep -q '^hostile ok$' || { echo "FAIL hostile mode" >&2; status=1; }
+fi
 if [ "$fixture" = abi-probe ]; then
 	tr -d '\r' < "$log" | grep -q '^exec ok pid [0-9]*$' || { echo "FAIL process mode: no exec ok" >&2; status=1; }
 	for line in 'fork parent ok' 'vfork ok' 'clone ok' 'orphan ok' 'wait ok' 'pipe ok' 'signal ok' 'kill ok' 'eintr ok' 'poll ok' 'ppoll ok' 'hardening ok' 'fpstate ok' 'libc ok' 'threads ok'; do

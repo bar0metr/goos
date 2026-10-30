@@ -190,6 +190,7 @@ var scenarios = map[string]Scenario{
 	"smp":                smpScenario{},
 	"linux":              linuxScenario{},
 	"7zip":               sevenZipScenario{},
+	"nano":               nanoScenario{},
 	"network":            networkScenario{},
 	"remote-admin":       remoteAdminScenario{},
 	"threads":            threadsScenario{},

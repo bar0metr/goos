@@ -103,6 +103,9 @@ type execJob struct {
 	resize         resizeDelivery
 	resizeReleased bool
 	resizeParent   bool
+	// linuxTerminal is the writer of the control stream of the job's Linux
+	// terminal, when its only stage has one.
+	linuxTerminal uint64
 }
 
 // launchingJob is the job whose pipeline is starting, whose prepared
