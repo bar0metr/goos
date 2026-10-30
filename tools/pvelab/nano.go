@@ -34,7 +34,7 @@ var nanoSteps = []nanoStep{
 	{name: "nano-draws", send: "printf 'first line\\n' > " + nanoFile + "; /system/linux/nano -I " + nanoFile + "\n", want: "GNU nano"},
 	{name: "nano-shows-file", want: "first line"},
 	{name: "nano-types", send: "from nano ", want: "from nano"},
-	{name: "nano-asks-name", send: "\x0f", want: "File Name"},
+	{name: "nano-asks-name", send: "\x0f", want: "Write to File:"},
 	{name: "nano-saves", send: "\r", want: "Wrote 1 line"},
 	{name: "nano-exits", send: "\x18", want: "$ "},
 	{name: "saved-bytes", send: "/system/linux/busybox cat " + nanoFile + "\n", want: "\nfrom nano first line"},

@@ -160,7 +160,7 @@ if [ -n "$busybox_name" ]; then
 		await 'first line' 'nano shows the file'
 		keys 'from nano '
 		keys '\017'
-		await 'Write\|File Name' 'nano asks where to write'
+		await 'Write to File:' 'nano asks where to write'
 		keys '\r'
 		await 'Wrote 1 line' 'nano saves'
 		keys '\030'
