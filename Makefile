@@ -1030,15 +1030,15 @@ test-linux-tty:
 # supplies: an interactive sh with job control and Ctrl-C, nano editing and
 # saving a file from that shell and from the native one. No part of
 # test-all: the repository carries neither program.
-#   make test-linux-nano BUSYBOX=/path/to/busybox NANO=/path/to/nano
+#   make test-linux-nano BUSYBOX=/path/to/busybox NANO=/path/to/nano [NCDU=/path/to/ncdu]
 test-linux-interactive: test-linux-nano
 test-linux-nano:
 	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }
 	@test -n "$(NANO)" && test -f "$(NANO)" || { echo "NANO=/path/to/static/nano is required" >&2; exit 2; }
 	@tools/linuxfixture/check-static.sh "$(NANO)" "$(BUSYBOX)"
 	@$(MAKE) --no-print-directory iso VALIDATION=1
-	@$(MAKE) --no-print-directory test-disk VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX)):$(abspath $(NANO)) TEST_DISK=$(BUILD_DIR)/linux-nano-virtio-blk.img
-	@MEMORY=$(MEMORY) tests/boot/linux_tty.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-nano-virtio-blk.img $(notdir $(BUSYBOX)) $(notdir $(NANO))
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX)):$(abspath $(NANO))$(if $(NCDU),:$(abspath $(NCDU))) TEST_DISK=$(BUILD_DIR)/linux-nano-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/linux_tty.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-nano-virtio-blk.img $(notdir $(BUSYBOX)) $(notdir $(NANO)) $(notdir $(NCDU))
 
 # A static 7-Zip the caller supplies archives, tests, and extracts
 # /system/linux on a diagnostic guest with SMP processors (four by default),

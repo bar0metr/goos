@@ -4,13 +4,18 @@
 # console accept the same CSI subset. Output capabilities list only what that
 # subset implements:
 #   CUU CUD CUF CUB (A B C D), CHA (G), CUP (H, f), ED (J), EL (K), SGR (m)
-#   with 0 1 4 7 24 27, 30-37 39 40-47 49; DECTCEM (?25l, ?25h).
-# Writing the last column wraps at once and a write past the bottom row
-# scrolls, so am is set and xenl is not. Erases use the current background,
-# hence bce. There is no scroll region, insert or delete of lines or
-# characters, reverse index, saved cursor, alternate screen, line drawing set
-# or 256-colour support, so none of csr il dl ich dch ri sc rc smcup rmcup
-# acsc u7 is listed.
+#   with 0 1 4 7 24 27, 30-37 39 40-47 49; DECTCEM (?25l, ?25h); DECAWM
+#   (?7l, ?7h).
+# The two differ after the last column. The framebuffer wraps at once and
+# ignores a newline right behind the wrap; a terminal on COM1 keeps the cursor
+# on the row until the next character. am and xenl hold for both: ncurses then
+# treats the cursor as unknown and moves it absolutely. Without xenl it moves
+# relative to a row the terminal never reached. rmam and smam let it fill the
+# bottom-right cell. bw is not set, as terminals on COM1 do not wrap backwards.
+# Erases use the current background, hence bce. There is no scroll region,
+# insert or delete of lines or characters, reverse index, saved cursor,
+# alternate screen, line drawing set or 256-colour support, so none of csr il
+# dl ich dch ri sc rc smcup rmcup acsc u7 is listed.
 #
 # Key capabilities are the bytes kernel/keyboard/decoder.go produces from
 # PS/2 scan codes: arrows ESC [ A-D, Home ESC [ H, End ESC [ F, the editing
@@ -20,14 +25,14 @@
 #
 # Rebuild the compiled tree with userspace/linux/terminfo/build.sh.
 goos|GoOS console,
-	am, bce, bw, msgr,
+	am, bce, msgr, xenl,
 	colors#8, cols#80, it#8, lines#24, pairs#64,
 	bel=^G, cr=\r, ht=^I, ind=\n, nel=\r\n,
 	clear=\E[H\E[2J, ed=\E[J, el=\E[K, el1=\E[1K,
 	home=\E[H, cup=\E[%i%p1%d;%p2%dH, hpa=\E[%i%p1%dG,
 	cub1=^H, cud1=\n, cuf1=\E[C, cuu1=\E[A,
 	cub=\E[%p1%dD, cud=\E[%p1%dB, cuf=\E[%p1%dC, cuu=\E[%p1%dA,
-	civis=\E[?25l, cnorm=\E[?25h,
+	civis=\E[?25l, cnorm=\E[?25h, rmam=\E[?7l, smam=\E[?7h,
 	sgr0=\E[0m, bold=\E[1m, rev=\E[7m,
 	smso=\E[7m, rmso=\E[27m, smul=\E[4m, rmul=\E[24m,
 	setaf=\E[3%p1%dm, setab=\E[4%p1%dm, op=\E[39;49m,

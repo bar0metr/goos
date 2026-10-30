@@ -348,7 +348,7 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   and three raw bytes. The same probe passes on a Linux 6.12 kernel run as a
   session leader on its serial console. It needs nothing outside the
   repository.
-- `make test-linux-nano BUSYBOX=/path/to/busybox NANO=/path/to/nano`, also
+- `make test-linux-nano BUSYBOX=/path/to/busybox NANO=/path/to/nano [NCDU=/path/to/ncdu]`, also
   `make test-linux-interactive`, checks both binaries are static x86_64 ELF
   files, prints their SHA-256, and runs the `test-linux-tty` steps plus an
   interactive BusyBox `sh`: a command, Ctrl-C ending a foreground `sleep`

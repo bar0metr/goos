@@ -35,8 +35,11 @@ var terminalPalette = [16][3]uint8{
 // no history buffer and allocates no memory while consuming output.
 //
 // Writing the last column wraps at once: the cursor moves to the start of the
-// next row, scrolling when that was the bottom row. There is no deferred
-// wrap. Backspace in column 0 moves to the last column of the row above.
+// next row, scrolling when that was the bottom row. A newline right after that
+// wrap is ignored, so a full row and its newline end on the same row as on a
+// terminal that defers the wrap. With autowrap off (?7l) the cursor stays on
+// the last column. Backspace in column 0 moves to the last column of the row
+// above.
 //
 // The cursor is a block drawn by inverting its cell's colour bits after each
 // write and inverted back before the next one, so the cell's own pixels never
@@ -62,6 +65,10 @@ type Terminal struct {
 	// cursorHidden is set by CSI ?25l; cursorDrawn records that the cell at
 	// cursorColumn, cursorRow is currently inverted.
 	cursorHidden bool
+	// noAutowrap is set by CSI ?7l; wrapped records that the last character
+	// wrapped the cursor, so a newline right behind it is ignored.
+	noAutowrap   bool
+	wrapped      bool
 	cursorDrawn  bool
 	cursorColumn int
 	cursorRow    int
@@ -161,10 +168,15 @@ func (terminal *Terminal) consumeByte(value byte) {
 }
 
 func (terminal *Terminal) consumeScalar(scalar rune) {
+	wrapped := terminal.wrapped
+	terminal.wrapped = false
 	switch scalar {
 	case 0x1b:
 		terminal.state = terminalEscape
 	case '\n':
+		if wrapped {
+			return
+		}
 		terminal.column = 0
 		terminal.nextRow()
 	case '\r':
@@ -201,10 +213,14 @@ func (terminal *Terminal) consumeScalar(scalar rune) {
 		if terminal.validationMarker && terminal.row == terminal.rows-1 && terminal.column >= terminal.columns-2 {
 			DrawValidationMarker(&terminal.buffer)
 		}
+		if terminal.column == terminal.columns-1 && terminal.noAutowrap {
+			return
+		}
 		terminal.column++
 		if terminal.column == terminal.columns {
 			terminal.column = 0
 			terminal.nextRow()
+			terminal.wrapped = true
 		}
 	}
 }
@@ -293,15 +309,17 @@ func (terminal *Terminal) dispatch(final byte) {
 }
 
 // dispatchPrivate handles the DEC private modes: ?25 shows and hides the
-// cursor. ?7 (autowrap) is accepted and ignored, since wrapping is always on.
-// Other modes are ignored.
+// cursor, ?7 turns autowrap on and off. Other modes are ignored.
 func (terminal *Terminal) dispatchPrivate(final byte) {
 	if final != 'h' && final != 'l' {
 		return
 	}
 	for index := 0; index < int(terminal.parameters); index++ {
-		if terminal.parameter[index] == 25 {
+		switch terminal.parameter[index] {
+		case 25:
 			terminal.cursorHidden = final == 'l'
+		case 7:
+			terminal.noAutowrap = final == 'l'
 		}
 	}
 }

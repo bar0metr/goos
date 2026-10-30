@@ -193,8 +193,8 @@ to ship a database; `userspace/linux/terminfo/` builds one.
 
 `userspace/linux/terminfo/goos.src` describes `TERM=goos`: the CSI subset
 of the framebuffer and serial console (cursor moves, `CUP`, `CHA`, `ED`,
-`EL`, SGR 0 1 4 7 24 27 and 8 colours, `?25l`/`?25h`), `am bce` without
-`xenl`, and the key bytes of `kernel/keyboard/decoder.go`.
+`EL`, SGR 0 1 4 7 24 27 and 8 colours, `?25l`/`?25h`, `?7l`/`?7h`),
+`am bce xenl`, and the key bytes of `kernel/keyboard/decoder.go`.
 `userspace/linux/terminfo/build.sh` compiles it with `tic` in an Alpine
 container, together with the stock `xterm`, `xterm-256color` and `vt100`,
 into `userspace/linux/terminfo/db/` (about 7 KB):

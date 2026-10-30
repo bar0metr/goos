@@ -1,11 +1,12 @@
 #!/bin/sh
 # Boots one validation guest and drives Linux programs on their terminal
 # through the serial console: the repository's tty-probe, and when the build
-# placed them under /system/linux, an interactive BusyBox sh and GNU nano.
+# placed them under /system/linux, an interactive BusyBox sh, GNU nano and
+# ncdu.
 # Keys go in as a terminal sends them; checks read the console output, escape
 # sequences and all.
 #
-# usage: linux_tty.sh ISO OVMF DISK [BUSYBOX_NAME [NANO_NAME]]
+# usage: linux_tty.sh ISO OVMF DISK [BUSYBOX_NAME [NANO_NAME [NCDU_NAME]]]
 set -eu
 
 iso=${1:?ISO path required}
@@ -13,6 +14,7 @@ firmware=${2:?OVMF path required}
 disk=${3:?disk path required}
 busybox_name=${4:-}
 nano_name=${5:-}
+ncdu_name=${6:-}
 memory=${MEMORY:-512M}
 smp=${SMP:-1}
 command_timeout=${COMMAND_TIMEOUT:-60}
@@ -236,6 +238,19 @@ if [ -n "$nano_name" ]; then
 	keys 'cat /persist/nano.txt\n'
 	await 'from nano first line' 'the native shell reads the file nano saved'
 	await_prompt 'cat'
+fi
+
+# ncdu draws the whole list after its scan with no key pressed, and fills the
+# bottom-right cell. The screen itself is checked by kernel/framebuffer tests.
+if [ -n "$ncdu_name" ]; then
+	mark
+	keys "/system/linux/$ncdu_name /system/linux\n"
+	await 'Total disk usage' 'ncdu finishes the scan'
+	await 'tty-probe' 'ncdu lists the directory'
+	raw_since | grep -aq '\[?7l' || fail 'ncdu never filled the bottom-right cell'
+	checks=$((checks + 1))
+	keys 'q'
+	await_prompt 'ncdu exits'
 fi
 
 printf 'PASS linux-tty (%s checks)\n' "$checks"

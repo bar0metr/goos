@@ -221,6 +221,17 @@ negotiated. The `goos` entry lists only what the framebuffer and serial
 console implement, including reverse video, underline, and cursor
 visibility, which this change added to the framebuffer terminal.
 
+The two outputs differ after the last column of a row. The framebuffer wraps
+at once; the terminal on COM1 keeps the cursor on the row until the next
+character. An entry with `am` and no `xenl` tells ncurses the cursor is on the
+next row, and on COM1 its next relative move lands one row too high: ncdu's
+first row after the full-width selection bar overwrote that bar. The entry has
+`xenl`, so ncurses treats the cursor as unknown and moves it absolutely, which
+is right on both. The framebuffer ignores a newline right behind a wrap, which
+is what `xenl` promises. `rmam` and `smam` (DECAWM, also new on the framebuffer)
+let ncurses fill the bottom-right cell, which it otherwise leaves blank. The
+service turns autowrap back on when transport mode ends.
+
 ## Consequences
 
 `isatty` is true for an interactive Linux launch and false for pipes,
