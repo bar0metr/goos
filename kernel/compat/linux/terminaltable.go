@@ -87,8 +87,10 @@ func createTerminalHeld(familyID uint64, endpoints TerminalEndpoints, rows, colu
 		if generation == 0 {
 			generation = 1
 		}
-		*record = terminalRecord{generation: generation, live: true, familyID: familyID, references: 1, endpoints: endpoints,
-			rows: rows, columns: columns, session: session, foreground: session}
+		record.generation, record.live, record.familyID, record.references = generation, true, familyID, 1
+		record.endpoints, record.rows, record.columns = endpoints, rows, columns
+		record.session, record.foreground, record.hangup = session, session, false
+		record.stats = TerminalStats{}
 		record.discipline.Reset()
 		return terminalID(index, generation), true
 	}
@@ -116,7 +118,11 @@ func releaseTerminalHeld(id TerminalID) (TerminalEndpoints, bool) {
 	endpoints := record.endpoints
 	// The slot keeps its generation, so a stale identity never names the
 	// record that reuses it.
-	*record = terminalRecord{generation: record.generation}
+	record.live, record.familyID, record.references = false, 0, 0
+	record.endpoints, record.rows, record.columns = TerminalEndpoints{}, 0, 0
+	record.session, record.foreground, record.hangup = 0, 0, false
+	record.stats = TerminalStats{}
+	record.discipline.Reset()
 	return endpoints, true
 }
 

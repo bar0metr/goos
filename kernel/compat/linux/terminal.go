@@ -155,9 +155,15 @@ type Discipline struct {
 	segOpen   bool
 }
 
-// Reset gives the discipline its default state with nothing waiting.
+// Reset gives the discipline its default state with nothing waiting, field by
+// field: a composite literal of this size is a kernel heap allocation.
 func (discipline *Discipline) Reset() {
-	*discipline = Discipline{Settings: DefaultTermios()}
+	discipline.Settings = DefaultTermios()
+	clear(discipline.line[:])
+	clear(discipline.ready[:])
+	clear(discipline.segments[:])
+	discipline.lineSize, discipline.readyHead, discipline.readySize = 0, 0, 0
+	discipline.segHead, discipline.segCount, discipline.segOpen = 0, 0, false
 }
 
 func (discipline *Discipline) canonical() bool {

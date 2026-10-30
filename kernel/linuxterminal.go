@@ -40,6 +40,8 @@ type linuxTerminalScratch struct {
 	control [terminalwire.RecordSize]byte
 	members [linuxcompat.LinuxFamilyMaxProcesses]int32
 	wire    [linuxabi.TermiosSize]byte
+	// settings keeps a snapshot off the heap: Encode takes its address.
+	settings linuxcompat.Termios
 }
 
 func terminalKey(id linuxcompat.TerminalID) kernelwait.Key {
@@ -370,7 +372,8 @@ func (handler *linuxCallHandler) terminalIoctl(state *linuxcompat.ProcessState, 
 	caller, _ := linuxcompat.FindProcessRecord(state.PID)
 	switch command {
 	case linuxabi.IoctlTCGETS:
-		snapshot.Settings.Encode(&scratch.wire)
+		scratch.settings = snapshot.Settings
+		scratch.settings.Encode(&scratch.wire)
 		if !vm.CopyOut(handler.root, argument, scratch.wire[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
@@ -385,7 +388,7 @@ func (handler *linuxCallHandler) terminalIoctl(state *linuxcompat.ProcessState, 
 		linuxcompat.SetTerminalSettings(id, linuxcompat.DecodeTermios(&scratch.wire), command == linuxabi.IoctlTCSETSF)
 		return linuxcompat.Result{}
 	case linuxabi.IoctlTIOCGWINSZ:
-		var wire [linuxabi.WinsizeSize]byte
+		wire := scratch.wire[:linuxabi.WinsizeSize]
 		putUint16(wire[0:2], snapshot.Rows)
 		putUint16(wire[2:4], snapshot.Columns)
 		if !vm.CopyOut(handler.root, argument, wire[:]) {
@@ -393,7 +396,7 @@ func (handler *linuxCallHandler) terminalIoctl(state *linuxcompat.ProcessState, 
 		}
 		return linuxcompat.Result{}
 	case linuxabi.IoctlTIOCSWINSZ:
-		var wire [linuxabi.WinsizeSize]byte
+		wire := scratch.wire[:linuxabi.WinsizeSize]
 		if !vm.CopyIn(handler.root, argument, wire[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
@@ -410,21 +413,21 @@ func (handler *linuxCallHandler) terminalIoctl(state *linuxcompat.ProcessState, 
 		if command == linuxabi.IoctlTIOCGSID {
 			value = snapshot.Session
 		}
-		var wire [4]byte
+		wire := scratch.wire[:4]
 		putUint32(wire[:], uint32(value))
 		if !vm.CopyOut(handler.root, argument, wire[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
 		return linuxcompat.Result{}
 	case linuxabi.IoctlTIOCSPGRP:
-		var wire [4]byte
+		wire := scratch.wire[:4]
 		if !vm.CopyIn(handler.root, argument, wire[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
 		group := int32(uint32(wire[0]) | uint32(wire[1])<<8 | uint32(wire[2])<<16 | uint32(wire[3])<<24)
 		return linuxErrno(linuxcompat.SetTerminalForeground(id, state.PID, group))
 	case linuxabi.IoctlFIONREAD:
-		var wire [4]byte
+		wire := scratch.wire[:4]
 		putUint32(wire[:], uint32(linuxcompat.TerminalPending(id)))
 		if !vm.CopyOut(handler.root, argument, wire[:]) {
 			return linuxErrno(linuxabi.EFAULT)
