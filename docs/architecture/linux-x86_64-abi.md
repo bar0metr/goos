@@ -79,7 +79,7 @@ an errno; nothing is accepted and ignored.
 | `futex(202)` | partial | `FUTEX_WAIT`, `FUTEX_WAKE`, and their bitset forms, private or shared, with relative or absolute timeouts; `FUTEX_REQUEUE` and `FUTEX_CMP_REQUEUE`, which musl's condition variables use; a handled signal ends a wait with `EINTR`; priority inheritance, wake-op, and multi-word waits `ENOSYS` |
 | `rt_sigsuspend(130)` | implemented | a temporary mask until a handled signal, then `EINTR`; the handler's return restores the mask |
 | `arch_prctl(158)` | partial | `ARCH_SET_FS` and `ARCH_GET_FS`; GS operations refused |
-| `getdents64(217)` | implemented | one VFS exchange per entry; whole records only; no `.` or `..` |
+| `getdents64(217)` | implemented | one VFS exchange per directory batch; whole records only; no `.` or `..` |
 | `set_tid_address(218)` | implemented | stores the address per thread and returns the TID; when a thread ends while its process lives, the word is zeroed and one waiter woken |
 | `clock_gettime(228)` | implemented | realtime and monotonic clocks and their variants; CPU-time clocks `EINVAL` |
 | `openat(257)` | implemented | files, directories, `/dev/null`, and `/dev/zero`; `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`, `O_CLOEXEC`; other flags `EOPNOTSUPP` |
@@ -356,11 +356,11 @@ keeps nothing.
 ## Directory listing
 
 `getdents64` fills the buffer with whole `linux_dirent64` records, one VFS
-exchange per entry (ADR 0143). `d_ino` is the identity `st_ino` reports,
+exchange per directory batch (ADR 0143, ADR 0208). `d_ino` is the identity `st_ino` reports,
 `d_off` the position after the entry, `d_type` `DT_REG` or `DT_DIR`. The
 position lives in the directory's description: `lseek` to 0 rewinds and to a
-`d_off` resumes. A name over 152 bytes comes back through the calling
-thread's I/O memory object. GoOS directories have no `.` and `..`, and the listing has
+`d_off` resumes. Each batch comes back through the calling thread's I/O memory
+object. GoOS directories have no `.` and `..`, and the listing has
 none.
 
 A buffer too small for the next record is `EINVAL` when nothing was written

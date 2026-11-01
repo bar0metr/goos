@@ -137,3 +137,43 @@ func TestFilesystemInfoProtocolRoundTrip(t *testing.T) {
 		t.Fatal("unknown filesystem flag accepted")
 	}
 }
+
+func TestDirectoryBatchProtocol(t *testing.T) {
+	message, ok := EncodeRequest(Request{Operation: OperationReadDirBatch, Path: []byte("/tmp"), Offset: 9, NameReturn: true}, 2)
+	if !ok {
+		t.Fatal("encode request")
+	}
+	if request, ok := DecodeRequest(message); !ok || request.Offset != 9 || !request.Attaches() {
+		t.Fatalf("decoded %+v, %v", request, ok)
+	}
+	// A batch has nowhere else to go, so a request without an object is refused.
+	if _, ok := EncodeRequest(Request{Operation: OperationReadDirBatch, Path: []byte("/tmp")}, 2); ok {
+		t.Fatal("encoded a batch with no object")
+	}
+	message.Payload[28] = 0
+	if _, ok := DecodeRequest(message); ok {
+		t.Fatal("decoded a batch with no object")
+	}
+	reply, ok := EncodeReply(Reply{Operation: OperationReadDirBatch, Size: MaxDirBatch, Cursor: 12, BatchCount: 50, BatchEnd: true}, 2)
+	if !ok {
+		t.Fatal("encode reply")
+	}
+	decoded, ok := DecodeReply(reply)
+	if !ok || decoded.Size != MaxDirBatch || decoded.Cursor != 12 || decoded.BatchCount != 50 || !decoded.BatchEnd {
+		t.Fatalf("decoded %+v, %v", decoded, ok)
+	}
+	if _, ok := EncodeReply(Reply{Operation: OperationReadDirBatch, Size: MaxDirBatch + 1}, 2); ok {
+		t.Fatal("encoded an oversized batch")
+	}
+	if _, ok := EncodeReply(Reply{Operation: OperationStat, BatchCount: 1}, 2); ok {
+		t.Fatal("encoded batch fields on a stat")
+	}
+	stat, ok := EncodeReply(Reply{Operation: OperationStat}, 2)
+	if !ok {
+		t.Fatal("encode stat")
+	}
+	stat.Payload[57] |= replyBatchEnd
+	if _, ok := DecodeReply(stat); ok {
+		t.Fatal("decoded a batch end on a stat")
+	}
+}

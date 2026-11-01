@@ -109,8 +109,7 @@ const (
 	attachSource
 	// attachSink lends the I/O buffer for the VFS to fill: a file read.
 	attachSink
-	// attachName lends the I/O buffer for a listed name too long for a
-	// reply message. It also carries the request's path when that is too
+	// attachName lends the I/O buffer for a directory batch. It also carries the request's path when that is too
 	// long for the request message, as a native client's path page does.
 	attachName
 	// attachExecutable lends the executable snapshot being filled.

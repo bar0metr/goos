@@ -261,7 +261,7 @@ is `EBUSY`, and a directory moves only onto a free name.
 - `readv` reads once and fills its elements in order, from a stream or a
   file.
 
-- `getdents64` lists a directory descriptor one VFS entry per exchange and
+- `getdents64` lists a directory descriptor one VFS batch per exchange and
   packs whole `linux_dirent64` records (ADR 0143). The listing position is
   the VFS cursor in the directory's description.
 - `readv` and `writev` take 16 elements and 64 KiB per call, with every

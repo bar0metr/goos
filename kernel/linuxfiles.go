@@ -8,7 +8,6 @@ package main
 // from the continuation and keeps nothing in locals across an exchange.
 
 import (
-	"goos/internal/limits"
 	linuxcompat "goos/kernel/compat/linux"
 	linuxabi "goos/kernel/compat/linux/abi"
 	"goos/kernel/mm/vm"
@@ -902,20 +901,15 @@ func (handler *linuxCallHandler) deliverStatus(request linuxcompat.Request, buff
 	return linuxcompat.Result{}
 }
 
-// direntRetry marks, in the value one stage hands the next, that the entry
-// at the current position has a name too long for a reply message and must
-// be asked for again with a memory object to return it in. The rest of the
-// value is the bytes already written to the caller's buffer.
-const direntRetry = uint64(1) << 63
-
 // getdents fills the caller's buffer with whole linux_dirent64 records, one
-// VFS exchange per entry. The listing position is the VFS cursor, kept in
-// the directory's description and returned as each record's d_off, so lseek
-// can rewind or resume it. GoOS directories hold no "." or ".." entries and
-// none are made up.
+// VFS exchange per directory batch. The listing position is the VFS cursor,
+// kept in the directory's description and returned as each record's d_off, so
+// lseek can rewind or resume it. GoOS directories hold no "." or ".." entries
+// and none are made up.
 //
 // A record that does not fit ends the call: EINVAL when it is the first,
-// the bytes so far otherwise. Its entry stays unread for the next call.
+// the bytes so far otherwise. Its entry stays unread for the next call, and so
+// do the records after it in the batch, which the next call asks for again.
 func (handler *linuxCallHandler) getdents(request linuxcompat.Request) linuxcompat.Result {
 	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
@@ -943,50 +937,48 @@ func (handler *linuxCallHandler) getdents(request linuxcompat.Request) linuxcomp
 	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
 	for {
 		pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
-		written, retry := pending.Partial&^direntRetry, pending.Partial&direntRetry != 0
-		attachment := attachPaths
-		if retry {
-			attachment = attachName
-		}
-		reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationReadDir, Path: path, Offset: description.Offset, NameReturn: retry}, attachment)
+		written := pending.Partial
+		reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationReadDirBatch, Path: path, Offset: description.Offset, NameReturn: true}, attachName)
 		if blocked {
 			return linuxBlocked
 		}
 		if errno != 0 {
 			return direntResult(written, errno)
 		}
-		name := reply.Name
-		switch {
-		case reply.Status == vfs.StatusNotFound:
-			// The end of the directory.
+		switch reply.Status {
+		case vfs.StatusOK:
+		case vfs.StatusNotFound:
+			// The directory went away during the listing.
 			handler.vfsFinish()
 			return linuxcompat.Result{Value: written}
-		case reply.Status == vfs.StatusNameTooLong && !retry:
-			if errno := handler.vfsNext(pending.Stage, pending.Stage+1, written|direntRetry); errno != 0 {
-				return direntResult(written, errno)
-			}
-			continue
-		case reply.Status != vfs.StatusOK:
+		default:
 			handler.vfsFinish()
 			return direntResult(written, linuxcompat.VFSErrno(reply.Status, linuxcompat.VFSPermissionAccess, linuxabi.ENOMEM))
-		case reply.AttachedName != 0:
-			name = handler.returnedName(int(reply.AttachedName))
 		}
-		size, encoded := linuxcompat.EncodeDirent(local.linuxDirent[:], reply.Node, uint64(reply.Cursor), reply.Kind, name)
-		switch {
-		case !encoded:
-			errno = linuxabi.EIO
-		case uint64(size) > capacity || written > capacity-uint64(size):
-			errno = linuxabi.EINVAL
-		case !vm.CopyOut(handler.root, buffer+written, local.linuxDirent[:size]):
-			errno = linuxabi.EFAULT
-		}
-		if errno != 0 {
+		batch, mapped := handler.returnedBatch(reply.Size)
+		if !mapped {
 			handler.vfsFinish()
-			return direntResult(written, errno)
+			return direntResult(written, linuxabi.EIO)
 		}
-		description.Offset, written = uint64(reply.Cursor), written+uint64(size)
-		if pending.Stage >= linuxcompat.MaxDirentExchanges {
+		for len(batch) != 0 {
+			size, consumed, next, valid := linuxcompat.EncodeBatchDirent(local.linuxDirent[:], batch)
+			switch {
+			case !valid:
+				errno = linuxabi.EIO
+			case size == 0 || uint64(size) > capacity || written > capacity-uint64(size):
+				errno = linuxabi.EINVAL
+			case !vm.CopyOut(handler.root, buffer+written, local.linuxDirent[:size]):
+				errno = linuxabi.EFAULT
+			}
+			if errno != 0 {
+				handler.vfsFinish()
+				return direntResult(written, errno)
+			}
+			batch = batch[consumed:]
+			description.Offset, written = next, written+uint64(size)
+		}
+		description.Offset = uint64(reply.Cursor)
+		if reply.BatchEnd || pending.Stage >= linuxcompat.MaxDirentExchanges {
 			handler.vfsFinish()
 			return linuxcompat.Result{Value: written}
 		}
@@ -1005,24 +997,24 @@ func direntResult(written uint64, errno linuxabi.Errno) linuxcompat.Result {
 	return linuxErrno(errno)
 }
 
-// returnedName reads a listed name the VFS wrote to the start of the I/O
-// buffer.
-func (handler *linuxCallHandler) returnedName(size int) []byte {
+// returnedBatch finds the directory records the VFS wrote to the start of the
+// I/O buffer. A batch fits the buffer's first page.
+func (handler *linuxCallHandler) returnedBatch(size uint64) ([]byte, bool) {
 	state, found := linuxcompat.FindProcess(handler.root)
 	owner, owned := handler.self()
-	if !found || !owned || size > limits.NameMax {
-		return nil
+	if !found || !owned || size > vfs.MaxDirBatch {
+		return nil, false
 	}
 	object, ready := ioBuffer(handler.task, state, owner)
 	if !ready {
-		return nil
+		return nil, false
 	}
 	frame, located := object.Frame(vm.PhysicalPage, 0)
 	page, mapped := vm.PhysicalPage(frame)
 	if !located || !mapped {
-		return nil
+		return nil, false
 	}
-	return page[:size]
+	return page[:size], true
 }
 
 // A seek from the end is two exchanges: the file length, then the seek.

@@ -51,7 +51,7 @@ func TestEncodeRefusesWhatCannotBeSent(t *testing.T) {
 	var message ipc.Message
 	for _, request := range []Request{
 		{},
-		{Operation: OperationSetMetadata + 1},
+		{Operation: OperationReadDirBatch + 1},
 		{Operation: OperationOpen, Name: []byte("a/b")},
 		{Operation: OperationOpen, Name: []byte("..")},
 		{Operation: OperationRead, Size: CacheSize + 1},
@@ -87,7 +87,7 @@ func TestDecodeRefusesMalformedMessages(t *testing.T) {
 		func(m *ipc.Message) { m.Correlation = 0 },
 		func(m *ipc.Message) { m.HandleCount = 1 },
 		func(m *ipc.Message) { m.Payload[0] = 0 },
-		func(m *ipc.Message) { m.Payload[0] = byte(OperationSetMetadata + 1) },
+		func(m *ipc.Message) { m.Payload[0] = byte(OperationReadDirBatch + 1) },
 		func(m *ipc.Message) { m.Payload[1] = 200 },
 		func(m *ipc.Message) { m.Payload[3] = 1 },
 		func(m *ipc.Message) { m.Payload[2] = 1 }, // a name in the page, with no page
@@ -309,5 +309,37 @@ func TestMetadataRequestRoundTrip(t *testing.T) {
 		if decoded, valid := MetadataChangeOf(request); !valid || decoded != change || request.Node != 7 {
 			t.Fatalf("%+v: decoded %+v %v", change, decoded, valid)
 		}
+	}
+}
+
+func TestDirectoryBatchReplyRoundTrip(t *testing.T) {
+	var message ipc.Message
+	reply := Reply{Operation: OperationReadDirBatch, Value: 4000, Cursor: 77, Count: 50, End: true}
+	if !EncodeReply(reply, 3, &message, nil) {
+		t.Fatal("encode")
+	}
+	decoded, ok := DecodeReply(&message, nil, nil)
+	if !ok || decoded.Value != 4000 || decoded.Cursor != 77 || decoded.Count != 50 || !decoded.End {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	if EncodeReply(Reply{Operation: OperationStat, Count: 1}, 3, &message, nil) || EncodeReply(Reply{Operation: OperationStat, End: true}, 3, &message, nil) {
+		t.Fatal("encoded batch fields on another operation")
+	}
+	if !EncodeReply(Reply{Operation: OperationStat}, 3, &message, nil) {
+		t.Fatal("encode stat")
+	}
+	for _, offset := range []int{6, 30} {
+		damaged := message
+		damaged.Payload[offset] = 1
+		if _, ok := DecodeReply(&damaged, nil, nil); ok {
+			t.Fatalf("batch field at %d accepted on a stat", offset)
+		}
+	}
+	if !EncodeReply(reply, 3, &message, nil) {
+		t.Fatal("encode")
+	}
+	message.Payload[30] = 2
+	if _, ok := DecodeReply(&message, nil, nil); ok {
+		t.Fatal("unknown end flag accepted")
 	}
 }

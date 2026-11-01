@@ -126,6 +126,59 @@ func (fs *FileSystem) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int
 	return ramfs.Entry{}, cursor, ramfs.StatusNotFound
 }
 
+// ReadDirBatch writes the listed entries at or after cursor to target as
+// directory records, in one pass over the directory, under the rules of
+// ReadDir. Next stays just past the last short entry written, so a record that
+// does not fit is scanned again from the start of its long chain. A failure
+// after a record ends the batch early and the next call reports it.
+func (fs *FileSystem) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byte) (ramfs.DirBatch, ramfs.Status) {
+	batch := ramfs.DirBatch{Next: cursor}
+	if cursor < 0 {
+		return batch, ramfs.StatusInvalidArgument
+	}
+	dir, status := fs.directoryOf(parent)
+	if status != ramfs.StatusOK {
+		return batch, status
+	}
+	fs.scan.reset()
+	for index := cursor; index < fs.entries(&dir); index++ {
+		entry, status := fs.readEntry(&dir, index)
+		if status != ramfs.StatusOK {
+			if batch.Count != 0 {
+				return batch, ramfs.StatusOK
+			}
+			return batch, status
+		}
+		if entry[0] == entryEnd {
+			break
+		}
+		if isLongEntry(entry) {
+			fs.scan.long(entry, index)
+			continue
+		}
+		if !listed(entry) {
+			fs.scan.reset()
+			continue
+		}
+		size, _, _ := fs.resolveName(entry, index)
+		if size == 0 {
+			fs.scan.reset()
+			continue
+		}
+		stat := entryStat(dir.node(index), entry)
+		written := ramfs.AppendDirRecord(target[batch.Used:], &stat, index+1, fs.name[:size])
+		if written == 0 {
+			return batch, ramfs.StatusOK
+		}
+		batch.Used += written
+		batch.Count++
+		batch.Next = index + 1
+		fs.scan.reset()
+	}
+	batch.End = true
+	return batch, ramfs.StatusOK
+}
+
 // RenameName gives an entry a new name in parent, which may be another
 // directory. Within one directory the short entry keeps its index whenever
 // the new chain fits the run the old one occupied, which keeps the node ID. A

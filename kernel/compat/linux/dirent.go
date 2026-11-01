@@ -22,16 +22,33 @@ const (
 	// MaxDirentSize is the record of the longest name GoOS stores. A kernel
 	// scratch buffer of this size holds any entry.
 	MaxDirentSize = (direntHeader + limits.NameMax + 1 + direntAlignment - 1) &^ (direntAlignment - 1)
-	// MaxDirentExchanges bounds the VFS exchanges one getdents64 call runs:
-	// one per entry, and a second for a name too long for a reply message.
-	// A listing shorter than the buffer could hold is a valid answer, and
-	// the next call continues it.
+	// MaxDirentExchanges bounds the VFS exchanges one getdents64 call runs,
+	// one per directory batch. A listing shorter than the buffer could hold
+	// is a valid answer, and the next call continues it.
 	MaxDirentExchanges = 128
 )
 
 // DirentSize returns the record length for a name of nameSize bytes.
 func DirentSize(nameSize int) int {
 	return (direntHeader + nameSize + 1 + direntAlignment - 1) &^ (direntAlignment - 1)
+}
+
+// EncodeBatchDirent turns the directory record at the start of batch into one
+// linux_dirent64 record at the start of target. It returns the bytes of target
+// and of batch it took, and the listing position after the entry. No fit
+// returns a target size of zero and a valid result, so the entry stays unread;
+// valid false means the record is malformed.
+func EncodeBatchDirent(target, batch []byte) (written, consumed int, next uint64, valid bool) {
+	var record ramfs.DirRecord
+	consumed, valid = record.Decode(batch)
+	if !valid {
+		return 0, 0, 0, false
+	}
+	if DirentSize(len(record.Name)) > len(target) {
+		return 0, 0, 0, true
+	}
+	written, valid = EncodeDirent(target, uint64(record.Stat.ID), uint64(record.Next), record.Stat.Kind, record.Name)
+	return written, consumed, uint64(record.Next), valid
 }
 
 // EncodeDirent writes one record at the start of target and returns its

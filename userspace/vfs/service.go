@@ -342,10 +342,47 @@ func (service *Service) CloseSession(owner vfs.Owner) int {
 	return closed
 }
 
+// BackendBatchCounters counts the batched listing exchanges with a filesystem
+// service and the records they brought back.
+type BackendBatchCounters struct {
+	Requests uint64
+	Entries  uint64
+}
+
 // ListingCounters reports the namespace's scope work and the directory
 // exchanges the persistent backend has made.
 func (service *Service) ListingCounters() (vfs.AuthorityCounters, uint64) {
 	return service.namespace.AuthorityCounters(), service.persistent.readDirs
+}
+
+// BackendBatchCounters reports the persistent backend's batched exchanges.
+func (service *Service) BackendBatchCounters() BackendBatchCounters {
+	return service.persistent.batch
+}
+
+// ReadDirBatch serves one batched listing, writing records to the start of
+// target, the object the client attached. Its limit is the smaller of the two
+// sizes and the protocol's; a client too small for the longest record is
+// refused rather than handed a listing that could never advance.
+func (service *Service) ReadDirBatch(owner vfs.Owner, request vfs.Request, target []byte) vfs.Reply {
+	reply := vfs.Reply{Operation: request.Operation}
+	if tooLong(request.Path) {
+		reply.Status = vfs.StatusNameTooLong
+		return reply
+	}
+	if request.Offset > uint64(^uint32(0)) {
+		reply.Status = vfs.StatusInvalidArgument
+		return reply
+	}
+	if len(target) > vfs.MaxDirBatch {
+		target = target[:vfs.MaxDirBatch]
+	}
+	batch, status := service.namespace.ReadDirBatchFor(owner, request.Path, int(request.Offset), target)
+	reply.Status = status
+	if status == vfs.StatusOK {
+		reply.Size, reply.Cursor, reply.BatchCount, reply.BatchEnd = uint64(batch.Used), uint32(batch.Next), uint16(batch.Count), batch.End
+	}
+	return reply
 }
 
 // InstallScope and SetAuthority are PID 1 controls, not session operations.

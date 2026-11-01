@@ -197,6 +197,28 @@ func (s *vfsSession[T, P]) call(request vfs.Request, ticks uint64, attempts int)
 	return reply, ok
 }
 
+// callBatch runs a batched listing and copies its records into target while it
+// still holds the page. It reports the record bytes in the reply's Size.
+func (s *vfsSession[T, P]) callBatch(request vfs.Request, target []byte, ticks uint64, attempts int) (vfs.Reply, bool) {
+	s.hold()
+	defer s.end()
+	s.paths.Hold()
+	defer s.paths.Release()
+	request.Operation, request.NameReturn = vfs.OperationReadDirBatch, true
+	reply, ok := s.exchange(request, 0, ticks, attempts)
+	if !ok || reply.Status != vfs.StatusOK {
+		return reply, ok
+	}
+	records := s.paths.Name(int(reply.Size))
+	if reply.Size > uint64(len(target)) || len(records) != int(reply.Size) {
+		s.abandon()
+		s.paths.Abandon()
+		return vfs.Reply{}, false
+	}
+	copy(target, records)
+	return reply, true
+}
+
 func (s *vfsSession[T, P]) callAttached(request vfs.Request, attached handle.ID, ticks uint64, attempts int) (vfs.Reply, bool) {
 	s.hold()
 	defer s.end()

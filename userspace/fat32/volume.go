@@ -141,6 +141,13 @@ func (volume *Volume) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int
 	return volume.fs.ReadDir(parent, cursor)
 }
 
+func (volume *Volume) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byte) (ramfs.DirBatch, ramfs.Status) {
+	if !volume.mounted {
+		return ramfs.DirBatch{}, ramfs.StatusIOError
+	}
+	return volume.fs.ReadDirBatch(parent, cursor, target)
+}
+
 func (volume *Volume) RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
 	if !volume.mounted {
 		return ramfs.StatusIOError

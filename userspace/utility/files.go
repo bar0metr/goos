@@ -39,29 +39,48 @@ type DirVisitor interface {
 	Visit(name []byte, kind ramfs.Kind, size uint64, modified ramfs.Timestamp) bool
 }
 
+// ReadDirBatch lists path from cursor into target, which must hold
+// vfs.MaxDirBatch bytes. The reply's Size is the bytes of records, BatchEnd
+// whether the listing ended, and Cursor where it continues; the second result
+// reports whether a reply came.
+func ReadDirBatch(path []byte, cursor uint32, target []byte) (vfs.Reply, bool) {
+	return files.callBatch(vfs.Request{Path: path, Offset: uint64(cursor)}, target, vfsReplyDeadline, vfsReplyAttempts)
+}
+
 // ReadDir gives visitor each entry of the directory at path, in the order the
 // filesystem lists them. A listing that ends normally, or that the visitor
-// ends, reports StatusOK.
+// ends, reports StatusOK. A visitor may start another listing.
 func ReadDir(path []byte, visitor DirVisitor) vfs.Status {
 	var cursor uint32
+	batch := make([]byte, vfs.MaxDirBatch)
+	var record ramfs.DirRecord
 	for {
-		reply, status := Request(vfs.Request{Operation: vfs.OperationReadDir, Path: path, Offset: uint64(cursor)})
-		if status == vfs.StatusNotFound && cursor != 0 {
+		reply, received := ReadDirBatch(path, cursor, batch)
+		if !received {
+			return vfs.StatusPeerDied
+		}
+		if reply.Status == vfs.StatusNotFound && cursor != 0 {
 			return vfs.StatusOK
 		}
-		if status == vfs.StatusNotFound {
-			// An empty directory answers its first read the same way a missing
-			// one does; Stat tells them apart.
-			if _, _, statStatus := Stat(path); statStatus != vfs.StatusOK {
-				return statStatus
+		if reply.Status != vfs.StatusOK {
+			return reply.Status
+		}
+		records := batch[:reply.Size]
+		for len(records) != 0 {
+			size, valid := record.Decode(records)
+			if !valid {
+				return vfs.StatusBackendError
 			}
+			records = records[size:]
+			if !visitor.Visit(record.Name, record.Stat.Kind, record.Stat.Size, record.Stat.Modified) {
+				return vfs.StatusOK
+			}
+		}
+		if reply.BatchEnd {
 			return vfs.StatusOK
 		}
-		if status != vfs.StatusOK {
-			return status
-		}
-		if !visitor.Visit(reply.Name, reply.Kind, reply.Size, reply.Modified) {
-			return vfs.StatusOK
+		if reply.Cursor <= cursor {
+			return vfs.StatusBackendError
 		}
 		cursor = reply.Cursor
 	}

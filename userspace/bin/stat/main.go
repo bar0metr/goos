@@ -135,41 +135,63 @@ func appendPadded(target []byte, value uint64, width int) []byte {
 	return append(target, digits[index:]...)
 }
 
+var walkBatch [vfs.MaxDirBatch]byte
+
 // walk adds up the directory at walkPath[:length] and everything below it.
 // Mounts inside it are counted as the directories they appear as.
 func walk(path []byte, length int) {
 	depth := 0
 	levelCursor[0], levelLength[0] = 0, uint16(length)
-	// The walk keeps its state in package arrays; each exchange's reply is
-	// garbage once its entry is counted.
+	// The walk keeps its state in package arrays. A subdirectory ends the use of
+	// the current batch: the walk records the position after it, descends, and
+	// asks for the rest of this level when it comes back.
+	var record ramfs.DirRecord
 	for depth >= 0 {
 		current := walkPath[:levelLength[depth]]
-		reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationReadDir, Path: current, Offset: uint64(levelCursor[depth])})
+		reply, received := utility.ReadDirBatch(current, levelCursor[depth], walkBatch[:])
 		if received && reply.Status == vfs.StatusNotFound {
 			depth--
 			continue
 		}
 		utility.Check(reply, received, current, false)
-		levelCursor[depth] = reply.Cursor
-		if reply.Kind != ramfs.KindDirectory {
-			total += reply.Size
-			files++
-			continue
-		}
-		directories++
-		child := len(current)
-		if walkPath[child-1] != '/' {
-			if child == len(walkPath) {
+		descended := false
+		for records := walkBatch[:reply.Size]; len(records) != 0; {
+			size, valid := record.Decode(records)
+			if !valid {
+				utility.Fail(current, "malformed directory listing")
+			}
+			records = records[size:]
+			levelCursor[depth] = uint32(record.Next)
+			if record.Stat.Kind != ramfs.KindDirectory {
+				total += record.Stat.Size
+				files++
+				continue
+			}
+			directories++
+			child := len(current)
+			if walkPath[child-1] != '/' {
+				if child == len(walkPath) {
+					utility.Fail(path, "path too long")
+				}
+				walkPath[child] = '/'
+				child++
+			}
+			if child+len(record.Name) > len(walkPath) || depth+1 == maxDepth {
 				utility.Fail(path, "path too long")
 			}
-			walkPath[child] = '/'
-			child++
+			child += copy(walkPath[child:], record.Name)
+			depth++
+			levelCursor[depth], levelLength[depth] = 0, uint16(child)
+			descended = true
+			break
 		}
-		if child+len(reply.Name) > len(walkPath) || depth+1 == maxDepth {
-			utility.Fail(path, "path too long")
+		if descended {
+			continue
 		}
-		child += copy(walkPath[child:], reply.Name)
-		depth++
-		levelCursor[depth], levelLength[depth] = 0, uint16(child)
+		if reply.BatchEnd {
+			depth--
+			continue
+		}
+		levelCursor[depth] = reply.Cursor
 	}
 }
