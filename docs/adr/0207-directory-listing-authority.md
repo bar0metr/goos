@@ -15,84 +15,95 @@ over although the two directories share nothing but a volume.
 
 ## Decision
 
-### The namespace remembers scope decisions
+### A scope remembers its nodes
 
-`nodeScopes` keeps its last 16 answers per backend and node. An exact scope keeps
-the node its name resolved to, or that the name was missing. Lookup failures stay
-unremembered, so a check that cannot establish identity still fails closed.
+The first check after an invalidation walks a subtree scope once, with the same
+bounds as before, and records each node it reaches. Later checks compare against
+that record. An exact scope likewise remembers the node its name resolved to, or
+that the name was missing, and each check compares against it. Each of the eight
+scope slots holds up to `maxScopeWalk` node IDs, about 16 KiB in all.
 
-The memos record which scopes hold a node. `permits` still applies the session's
+The three outcomes of the old walk keep their meaning:
+
+- A complete walk answers for every node.
+- A walk stopped by `maxScopeWalk` or `maxScopeDepth` recognizes the nodes it
+  reached and denies any other. The bound stays hit until something changes, so
+  this result is remembered.
+- A backend failure denies the check, and the next check walks again. A failed
+  exact lookup behaves the same way.
+
+The record says which scopes hold a node. `permits` still applies the session's
 grants on each request, so a changed authority takes effect at once.
 
-### A listed entry takes its mask from its directory
+### Identity alone decides membership
 
-`ReadDirFor` computes the directory's mask once and derives each entry's mask:
+An entry's membership comes from its own node ID, never from the directory that
+listed it. Deriving it from the parent would be cheaper to state and wrong: FAT32
+mount does not look for cross-links (ADR 0117), and `fsck-fat` runs separately on
+an unmounted volume. With `/apps/foo` sharing a cluster with the protected
+`/state/security/ssh`, `/apps/foo` itself lies outside the scope, but its children
+have the node IDs of the protected children, because a FAT32 node ID is a directory
+cluster and an entry index. An early version of this change derived masks from the
+parent, and `TestCrossLinkedDirectoryListingHidesScopedChildren` shows the names it
+leaked through such a directory.
 
-- The entry lies in a subtree scope when the directory does, or when it is the
-  scope's root.
-- The entry matches an exact scope only when the directory is the scope's parent
-  and the scope's name resolves to the entry's node.
-
-Comparison stays by node identity, so the backend's own rules decide case folding
-and short-name aliases. An entry from the mount phase of a scan can alias any node
-of its backend, so it still takes a full `nodeScopes` check.
+Comparison by node ID also lets the backend's own rules decide case folding and
+short-name aliases.
 
 ### Invalidation
 
-`Namespace.invalidate` clears the memos with the resolved paths. It runs on mount,
-unmount, protection changes, scope installation, rename, and replace. Create and
-unlink now invalidate on failure as well, because a backend can leave the name
+`Namespace.invalidate` clears the records with the resolved paths. It runs on
+mount, unmount, protection changes, scope installation, rename, and replace. Create
+and unlink now invalidate on failure as well, because a backend can leave the name
 behind when its durability step fails. The service invalidates when a filesystem
-service attaches or detaches and when it creates a volume directory directly.
-These paths are complete because the VFS is the filesystem service's only client
+service attaches or detaches and when it creates a volume directory directly. These
+paths are complete because the VFS is the filesystem service's only client
 (ADR 0096).
+
+Rename and move checks keep an unrecorded ancestor walk from the moved node, which
+runs only on the requests that change names.
 
 ### Diagnostics
 
 A `DIAG=1` build prints one line when a directory scan ends:
 
 ```text
-VFS_LISTING requests=120 scope_checks=373 scope_contains=3 scope_openname=1 scope_backend_readdir=9 fat32_readdir=129
+VFS_LISTING requests=120 scope_checks=372 scope_contains=1 scope_openname=1 scope_backend_readdir=3 fat32_readdir=123
 ```
 
-The counts cover the time since the previous line, including other requests that
-checked scopes. The line goes out before the final reply, so it cannot join the
-next shell prompt.
+`scope_contains` counts subtree walks. The counts cover the time since the previous
+line, including other requests that checked scopes. The line goes out before the
+final reply, so it cannot join the next shell prompt.
 
 ## Measurements
 
-One boot each, DIAG build, TCG, one processor, the same disk with
-`LINUX_APPS_DIR=/Volumes/Data/linux_static`. Counts and times come from the third
-`time ls /apps > /tmp/apps-list`, once caches have settled.
+One boot each, DIAG build, TCG, one processor, a disk built with
+`LINUX_APPS_DIR=/Volumes/Data/linux_static`. The Before column is the third
+`time ls /apps > /tmp/apps-list` of its boot. The After column gives the second and
+third, because the redirect's create on `/tmp` invalidates the records and each run
+pays for one or two walks.
 
 | Measure | Before | After |
 | --- | --- | --- |
-| `time ls /apps > /tmp/apps-list` | 1413 ms | 549 ms |
-| Subtree walks (`scope_contains`) | 368 | 3 |
-| Authority directory reads (`scope_backend_readdir`) | 1104 | 9 |
-| Exact lookups (`scope_openname`) | 368 | 1 |
-| FAT32 directory exchanges (`fat32_readdir`) | 1224 | 129 |
-| `time cat /tmp/apps-list` | 115 ms | 137 ms |
-| `bench vfs 100` | 783 us/op | 1028 us/op |
+| `time ls /apps > /tmp/apps-list` | 1413 ms | 384, 424 ms |
+| Subtree walks (`scope_contains`) | 368 | 1, 2 |
+| Authority directory reads (`scope_backend_readdir`) | 1104 | 3, 6 |
+| Exact lookups (`scope_openname`) | 368 | 1, 2 |
+| FAT32 directory exchanges (`fat32_readdir`) | 1224 | 123, 126 |
+| `time cat /tmp/apps-list` | 115 ms | 109 ms |
+| `bench vfs 100` | 783 us/op | 899 us/op |
 
-`bench vfs` stats `/` on the volatile root, which holds no scopes, and `cat` writes
-to the serial console. Neither reads scopes on the persistent volume in its hot
-path, so this change does not explain their difference. Single runs under TCG vary
-by this much: the first report of this problem measured `bench vfs` at 610 us/op
-on an unchanged tree.
+`bench vfs` stats `/` on the volatile root, which holds no scopes, so this change
+does not reach its hot path. Single runs under TCG vary by this much: the first
+report of this problem measured it at 610 us/op on an unchanged tree.
 
 ## Consequences
 
-The remaining 549 ms is about 4.5 ms per entry: one VFS request and one FAT32
-exchange each, plus launching `ls`. Batched enumeration is the next thing to
-measure and stays a separate change.
+The remaining 400 ms is about 3.4 ms per entry: one VFS request and one FAT32
+exchange each, plus launching `ls`. Batched enumeration is the next thing to measure
+and stays a separate change.
 
-Deriving a mask assumes a backend's directories form a tree. RAMFS, the initramfs
-archive, and a valid FAT32 volume satisfy that. A corrupt FAT32 volume with two
-directory entries sharing a cluster breaks it: a listing through the unprotected
-name could show names that a full walk would hide. Opening one of those files still
-takes the full check and is refused. Such a volume can already be read outside the
-VFS by whoever wrote it, so this ADR accepts the limit.
-
-Rename and move checks keep their uncached ancestor walk, which runs only on the
-requests that change names.
+A mutation on any backend, `/tmp` included, clears the records of every backend, so
+a workload that creates files while listing a large directory walks once per
+mutation. Each of those walks is still bounded, and the old code walked for each
+check regardless.

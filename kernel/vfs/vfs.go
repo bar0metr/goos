@@ -195,10 +195,10 @@ type Namespace struct {
 	authorities [MaxAuthorities]ownerAuthority
 	scopeNames  [2][ramfs.MaxName]byte
 	counters    AuthorityCounters
-	// scopeMemos answer repeated scope checks without walking the backend.
-	// Every change to a name, mount, or scope clears them through invalidate.
-	scopeMemos    [maxScopeMemos]scopeMemo
-	nextScopeMemo int
+	// scopeMembers answer repeated subtree checks without walking the backend,
+	// one per scope slot. Every change to a name, mount, or scope clears them
+	// through invalidate.
+	scopeMembers [MaxScopes]scopeMembers
 }
 
 const maxReserved = 4
@@ -1227,11 +1227,9 @@ func (namespace *Namespace) invalidate() {
 	for index := range namespace.cache {
 		namespace.cache[index] = cacheEntry{}
 	}
-	for index := range namespace.scopeMemos {
-		namespace.scopeMemos[index] = scopeMemo{}
-	}
 	for slot := range namespace.scopes {
 		namespace.scopes[slot].exactKnown = false
+		namespace.scopeMembers[slot].known = false
 	}
 }
 

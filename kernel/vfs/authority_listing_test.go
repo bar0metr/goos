@@ -80,7 +80,7 @@ func TestListingAuthorityWorkIsBoundedByDirectory(t *testing.T) {
 		t.Fatalf("requests = %d", requests)
 	}
 	if walks := first.ScopeContains - before.ScopeContains; walks != 1 {
-		t.Fatalf("subtree walks = %d, want one for the directory", walks)
+		t.Fatalf("subtree walks = %d, want one", walks)
 	}
 	if reads := first.ScopeBackendReadDir - before.ScopeBackendReadDir; reads > 4 {
 		t.Fatalf("subtree directory reads = %d", reads)
@@ -230,5 +230,75 @@ func TestFailedCreateDropsRememberedExactName(t *testing.T) {
 	wantListing(t, namespace, listingOwner, "/open")
 	if _, status := namespace.Open(listingOwner, []byte("/open/secret"), Read); status != StatusPermissionDenied {
 		t.Fatalf("open = %d", status)
+	}
+}
+
+// A walk stopped by its bound still knows the nodes it reached. Any other node
+// stays undecided, and the walk does not run again for each check.
+func TestScopeMembersOverWalkLimitFailClosed(t *testing.T) {
+	namespace, fs := mountedNamespace(t)
+	createAll(t, namespace, true, "/private")
+	createAll(t, namespace, false, "/public")
+	_, directory, _ := namespace.Resolve([]byte("/private"))
+	for index := 0; index < maxScopeWalk+1; index++ {
+		if _, status := fs.Create(directory, []byte(fmt.Sprintf("entry%d", index))); status != ramfs.StatusOK {
+			t.Fatal(status)
+		}
+	}
+	installAll(t, namespace, true, 0, "/private")
+	granted := Authority{Confined: true}
+	granted.Grants[0] = Read
+	if namespace.SetAuthority(listingOwner, granted) != StatusOK {
+		t.Fatal("authority")
+	}
+	first, status := namespace.Open(listingOwner, []byte("/private/entry0"), Read)
+	if status != StatusOK {
+		t.Fatalf("reached member = %d", status)
+	}
+	namespace.Close(listingOwner, first)
+	walks := namespace.AuthorityCounters().ScopeContains
+	last := fmt.Sprintf("/private/entry%d", maxScopeWalk)
+	if _, status := namespace.Open(listingOwner, []byte(last), Read); status != StatusPermissionDenied {
+		t.Fatalf("unreached member = %d", status)
+	}
+	if _, status := namespace.Open(listingOwner+1, []byte("/public"), Read); status != StatusPermissionDenied {
+		t.Fatalf("undecided node = %d", status)
+	}
+	if after := namespace.AuthorityCounters().ScopeContains; after != walks {
+		t.Fatalf("bounded walk ran %d more times", after-walks)
+	}
+}
+
+type failingReadDirBackend struct {
+	*ramfs.FileSystem
+	fail bool
+}
+
+func (backend *failingReadDirBackend) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int, ramfs.Status) {
+	if backend.fail {
+		return ramfs.Entry{}, cursor, ramfs.StatusIOError
+	}
+	return backend.FileSystem.ReadDir(parent, cursor)
+}
+
+// A failed walk denies now and proves nothing about the next check.
+func TestScopeWalkFailureIsNotRemembered(t *testing.T) {
+	fs := &ramfs.FileSystem{}
+	root := fs.Init()
+	backend := &failingReadDirBackend{FileSystem: fs}
+	namespace := &Namespace{}
+	if namespace.Mount([]byte("/"), backend, root) != StatusOK {
+		t.Fatal("mount")
+	}
+	createAll(t, namespace, true, "/private")
+	createAll(t, namespace, false, "/public")
+	installAll(t, namespace, true, 0, "/private")
+	backend.fail = true
+	if status := namespace.AuthorizePath(listingOwner, []byte("/public"), Read, false); status != StatusPermissionDenied {
+		t.Fatalf("failed walk = %d", status)
+	}
+	backend.fail = false
+	if status := namespace.AuthorizePath(listingOwner, []byte("/public"), Read, false); status != StatusOK {
+		t.Fatalf("recovered walk = %d", status)
 	}
 }

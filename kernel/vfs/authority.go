@@ -11,9 +11,6 @@ const (
 	MaxAuthorities = 64
 	maxScopeWalk   = 256
 	maxScopeDepth  = 32
-	// maxScopeMemos bounds the remembered node decisions. Directories being
-	// listed and files being opened share them; a miss only costs a walk.
-	maxScopeMemos = 16
 )
 
 // Authority grants access to installed scope slots. Confined sessions have no
@@ -46,11 +43,16 @@ type scope struct {
 	exactKnown bool
 }
 
-// scopeMemo remembers nodeScopes for one node until Namespace.invalidate.
-type scopeMemo struct {
-	backend Backend
-	node    ramfs.NodeID
-	mask    uint8
+// scopeMembers remembers the nodes one walk of a subtree scope reached, until
+// Namespace.invalidate clears known. It decides membership by node identity, as
+// the walk does, so it needs no assumption that a backend's directories form a
+// tree: FAT32 mounts do not look for cross-links (ADR 0117). A walk stopped by
+// its bound leaves complete false, and a node it did not reach stays undecided.
+type scopeMembers struct {
+	nodes    [maxScopeWalk]ramfs.NodeID
+	count    int
+	known    bool
+	complete bool
 }
 
 type ownerAuthority struct {
@@ -200,16 +202,18 @@ type AuthorityCounters struct {
 
 func (namespace *Namespace) AuthorityCounters() AuthorityCounters { return namespace.counters }
 
-// contains is bounded and fails closed when ancestry cannot be established.
+// scopeWalk is bounded and fails closed when ancestry cannot be established.
 // Backend/node identity covers case-insensitive names and directory mounts.
-func (namespace *Namespace) scopeContains(backend Backend, root, node ramfs.NodeID) (bool, Status) {
+// With members it records every node it reaches and looks for none. Hitting a
+// bound answers StatusResourceExhausted, a backend failure any other status.
+func (namespace *Namespace) scopeWalk(backend Backend, root, node ramfs.NodeID, members *scopeMembers) (bool, Status) {
 	namespace.counters.ScopeContains++
-	if root == node {
+	if members == nil && root == node {
 		return true, StatusOK
 	}
 	stat, result := backend.Stat(root)
 	if result != ramfs.StatusOK {
-		return false, mapStatus(result)
+		return false, StatusPermissionDenied
 	}
 	if stat.Kind != ramfs.KindDirectory {
 		return false, StatusOK
@@ -232,18 +236,47 @@ func (namespace *Namespace) scopeContains(backend Backend, root, node ramfs.Node
 			return false, StatusPermissionDenied
 		}
 		cursors[depth] = next
-		if entry.Stat.ID == node {
+		if members != nil {
+			members.nodes[members.count] = entry.Stat.ID
+			members.count++
+		} else if entry.Stat.ID == node {
 			return true, StatusOK
 		}
 		if entry.Stat.Kind == ramfs.KindDirectory {
 			if depth+1 == maxScopeDepth {
-				return false, StatusPermissionDenied
+				return false, StatusResourceExhausted
 			}
 			depth++
 			nodes[depth], cursors[depth] = entry.Stat.ID, 0
 		}
 	}
-	return false, StatusPermissionDenied
+	return false, StatusResourceExhausted
+}
+
+// subtreeContains answers from one walk of the scope per namespace state. A
+// backend failure is not remembered: it denies this check and the next one
+// walks again. Nodes the walk reached before stopping still count as members.
+func (namespace *Namespace) subtreeContains(slot int, node ramfs.NodeID) (bool, Status) {
+	entry := &namespace.scopes[slot]
+	if entry.root == node {
+		return true, StatusOK
+	}
+	members := &namespace.scopeMembers[slot]
+	if !members.known {
+		members.count = 0
+		_, status := namespace.scopeWalk(entry.backend, entry.root, 0, members)
+		members.known = status == StatusOK || status == StatusResourceExhausted
+		members.complete = status == StatusOK
+	}
+	for _, member := range members.nodes[:members.count] {
+		if member == node {
+			return true, StatusOK
+		}
+	}
+	if !members.complete {
+		return false, StatusPermissionDenied
+	}
+	return false, StatusOK
 }
 
 // exactNode resolves an exact scope once per namespace state, by identity, so
@@ -270,23 +303,16 @@ func (namespace *Namespace) exactNode(entry *scope) (ramfs.NodeID, Status) {
 
 func (namespace *Namespace) nodeScopes(backend Backend, node ramfs.NodeID) (uint8, Status) {
 	namespace.counters.ScopeChecks++
-	for index := range namespace.scopeMemos {
-		if memo := &namespace.scopeMemos[index]; memo.backend == backend && memo.node == node && memo.backend != nil {
-			return memo.mask, StatusOK
-		}
-	}
 	mask := uint8(0)
-	guarded := false
 	for slot := range namespace.scopes {
 		entry := &namespace.scopes[slot]
 		if entry.backend != backend {
 			continue
 		}
-		guarded = true
 		matched := false
 		if entry.subtree {
 			var status Status
-			matched, status = namespace.scopeContains(backend, entry.root, node)
+			matched, status = namespace.subtreeContains(slot, node)
 			if status != StatusOK {
 				return 0, StatusPermissionDenied
 			}
@@ -299,38 +325,6 @@ func (namespace *Namespace) nodeScopes(backend Backend, node ramfs.NodeID) (uint
 		}
 		if matched {
 			mask |= 1 << slot
-		}
-	}
-	if guarded {
-		namespace.scopeMemos[namespace.nextScopeMemo] = scopeMemo{backend: backend, node: node, mask: mask}
-		namespace.nextScopeMemo = (namespace.nextScopeMemo + 1) % maxScopeMemos
-	}
-	return mask, StatusOK
-}
-
-// childScopes decides nodeScopes for an entry the backend listed directly in
-// directory, whose own mask is known. A backend's directories form a tree, so
-// the entry lies in a subtree scope when the directory does or when it is the
-// scope's root, and it can be an exact scope's file only in that scope's parent.
-func (namespace *Namespace) childScopes(backend Backend, directory ramfs.NodeID, directoryMask uint8, child ramfs.NodeID) (uint8, Status) {
-	mask := uint8(0)
-	for slot := range namespace.scopes {
-		entry := &namespace.scopes[slot]
-		if entry.backend != backend {
-			continue
-		}
-		if entry.subtree {
-			if directoryMask&(1<<slot) != 0 || entry.root == child {
-				mask |= 1 << slot
-			}
-		} else if entry.parent == directory {
-			exact, status := namespace.exactNode(entry)
-			if status != StatusOK && status != StatusNotFound {
-				return 0, StatusPermissionDenied
-			}
-			if status == StatusOK && exact == child {
-				mask |= 1 << slot
-			}
 		}
 	}
 	return mask, StatusOK
@@ -363,7 +357,7 @@ func (namespace *Namespace) AuthorizePath(owner Owner, path []byte, rights Right
 				if entry.subtree {
 					anchor = entry.root
 				}
-				carries, result := namespace.scopeContains(backend, node, anchor)
+				carries, result := namespace.scopeWalk(backend, node, anchor, nil)
 				if result != StatusOK || carries {
 					return StatusPermissionDenied
 				}
@@ -458,15 +452,6 @@ func (namespace *Namespace) ReadDirFor(owner Owner, path []byte, cursor int) (ra
 	if status := namespace.AuthorizePath(owner, path, Read, false); status != StatusOK {
 		return ramfs.Entry{}, cursor, status
 	}
-	directoryMount, directory, resolved := namespace.Resolve(path)
-	var directoryMask uint8
-	if resolved == StatusOK {
-		var status Status
-		directoryMask, status = namespace.nodeScopes(namespace.mounts[directoryMount].backend, directory)
-		if status != StatusOK {
-			return ramfs.Entry{}, cursor, status
-		}
-	}
 	for skipped := 0; skipped < maxScopeWalk; skipped++ {
 		entry, next, status := namespace.ReadDir(path, cursor)
 		if status != StatusOK {
@@ -476,13 +461,7 @@ func (namespace *Namespace) ReadDirFor(owner Owner, path []byte, cursor int) (ra
 		if !valid {
 			return ramfs.Entry{}, cursor, StatusPermissionDenied
 		}
-		// Another mount's entry is an alias of a node anywhere on its backend.
-		var mask uint8
-		if resolved == StatusOK && mount == int(directoryMount) {
-			mask, status = namespace.childScopes(namespace.mounts[mount].backend, directory, directoryMask, entry.Stat.ID)
-		} else {
-			mask, status = namespace.nodeScopes(namespace.mounts[mount].backend, entry.Stat.ID)
-		}
+		mask, status := namespace.nodeScopes(namespace.mounts[mount].backend, entry.Stat.ID)
 		if status != StatusOK {
 			return ramfs.Entry{}, cursor, status
 		}
