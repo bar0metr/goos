@@ -37,6 +37,22 @@ type scope struct {
 	name    ramfs.Name
 	denied  Rights
 	subtree bool
+	// exact remembers what an exact name resolved to, zero when it was
+	// missing, while exactKnown holds. Namespace.invalidate clears exactKnown.
+	exact      ramfs.NodeID
+	exactKnown bool
+}
+
+// scopeMembers remembers the nodes one walk of a subtree scope reached, until
+// Namespace.invalidate clears known. It decides membership by node identity, as
+// the walk does, so it needs no assumption that a backend's directories form a
+// tree: FAT32 mounts do not look for cross-links (ADR 0117). A walk stopped by
+// its bound leaves complete false, and a node it did not reach stays undecided.
+type scopeMembers struct {
+	nodes    [maxScopeWalk]ramfs.NodeID
+	count    int
+	known    bool
+	complete bool
 }
 
 type ownerAuthority struct {
@@ -95,6 +111,7 @@ func (namespace *Namespace) InstallScope(slot uint8, path []byte, subtree bool, 
 		}
 	}
 	namespace.scopes[slot] = entry
+	namespace.invalidate()
 	for index := range namespace.files {
 		file := &namespace.files[index]
 		if namespace.openOn(file, entry.backend) {
@@ -104,7 +121,6 @@ func (namespace *Namespace) InstallScope(slot uint8, path []byte, subtree bool, 
 			}
 		}
 	}
-	namespace.invalidate()
 	return StatusOK
 }
 
@@ -174,15 +190,30 @@ func (namespace *Namespace) permits(owner Owner, mask uint8, rights Rights) bool
 	return !authority.Confined || granted&rights == rights
 }
 
-// contains is bounded and fails closed when ancestry cannot be established.
+// AuthorityCounters counts the backend work scope checks cost since the
+// namespace started. A DIAG build reports them after each directory listing.
+type AuthorityCounters struct {
+	ReadDirRequests     uint64
+	ScopeChecks         uint64
+	ScopeContains       uint64
+	ScopeOpenName       uint64
+	ScopeBackendReadDir uint64
+}
+
+func (namespace *Namespace) AuthorityCounters() AuthorityCounters { return namespace.counters }
+
+// scopeWalk is bounded and fails closed when ancestry cannot be established.
 // Backend/node identity covers case-insensitive names and directory mounts.
-func scopeContains(backend Backend, root, node ramfs.NodeID) (bool, Status) {
-	if root == node {
+// With members it records every node it reaches and looks for none. Hitting a
+// bound answers StatusResourceExhausted, a backend failure any other status.
+func (namespace *Namespace) scopeWalk(backend Backend, root, node ramfs.NodeID, members *scopeMembers) (bool, Status) {
+	namespace.counters.ScopeContains++
+	if members == nil && root == node {
 		return true, StatusOK
 	}
 	stat, result := backend.Stat(root)
 	if result != ramfs.StatusOK {
-		return false, mapStatus(result)
+		return false, StatusPermissionDenied
 	}
 	if stat.Kind != ramfs.KindDirectory {
 		return false, StatusOK
@@ -192,6 +223,7 @@ func scopeContains(backend Backend, root, node ramfs.NodeID) (bool, Status) {
 	nodes[0] = root
 	depth := 0
 	for scanned := 0; scanned < maxScopeWalk; scanned++ {
+		namespace.counters.ScopeBackendReadDir++
 		entry, next, result := backend.ReadDir(nodes[depth], cursors[depth])
 		if result == ramfs.StatusNotFound {
 			if depth == 0 {
@@ -204,26 +236,73 @@ func scopeContains(backend Backend, root, node ramfs.NodeID) (bool, Status) {
 			return false, StatusPermissionDenied
 		}
 		cursors[depth] = next
-		if entry.Stat.ID == node {
+		if members != nil {
+			members.nodes[members.count] = entry.Stat.ID
+			members.count++
+		} else if entry.Stat.ID == node {
 			return true, StatusOK
 		}
 		if entry.Stat.Kind == ramfs.KindDirectory {
 			if depth+1 == maxScopeDepth {
-				return false, StatusPermissionDenied
+				return false, StatusResourceExhausted
 			}
 			depth++
 			nodes[depth], cursors[depth] = entry.Stat.ID, 0
 		}
 	}
-	return false, StatusPermissionDenied
+	return false, StatusResourceExhausted
 }
 
-func (entry *scope) exactNode() (ramfs.NodeID, Status) {
-	node, status := entry.backend.OpenName(entry.parent, entry.name)
-	return node, mapStatus(status)
+// subtreeContains answers from one walk of the scope per namespace state. A
+// backend failure is not remembered: it denies this check and the next one
+// walks again. Nodes the walk reached before stopping still count as members.
+func (namespace *Namespace) subtreeContains(slot int, node ramfs.NodeID) (bool, Status) {
+	entry := &namespace.scopes[slot]
+	if entry.root == node {
+		return true, StatusOK
+	}
+	members := &namespace.scopeMembers[slot]
+	if !members.known {
+		members.count = 0
+		_, status := namespace.scopeWalk(entry.backend, entry.root, 0, members)
+		members.known = status == StatusOK || status == StatusResourceExhausted
+		members.complete = status == StatusOK
+	}
+	for _, member := range members.nodes[:members.count] {
+		if member == node {
+			return true, StatusOK
+		}
+	}
+	if !members.complete {
+		return false, StatusPermissionDenied
+	}
+	return false, StatusOK
+}
+
+// exactNode resolves an exact scope once per namespace state, by identity, so
+// the backend's own rules decide case folding and short-name aliases. Failures
+// other than a missing name are not remembered.
+func (namespace *Namespace) exactNode(entry *scope) (ramfs.NodeID, Status) {
+	if entry.exactKnown {
+		if entry.exact == 0 {
+			return 0, StatusNotFound
+		}
+		return entry.exact, StatusOK
+	}
+	namespace.counters.ScopeOpenName++
+	node, result := entry.backend.OpenName(entry.parent, entry.name)
+	status := mapStatus(result)
+	if status == StatusNotFound {
+		node = 0
+	}
+	if status == StatusOK || status == StatusNotFound {
+		entry.exact, entry.exactKnown = node, true
+	}
+	return node, status
 }
 
 func (namespace *Namespace) nodeScopes(backend Backend, node ramfs.NodeID) (uint8, Status) {
+	namespace.counters.ScopeChecks++
 	mask := uint8(0)
 	for slot := range namespace.scopes {
 		entry := &namespace.scopes[slot]
@@ -233,12 +312,12 @@ func (namespace *Namespace) nodeScopes(backend Backend, node ramfs.NodeID) (uint
 		matched := false
 		if entry.subtree {
 			var status Status
-			matched, status = scopeContains(backend, entry.root, node)
+			matched, status = namespace.subtreeContains(slot, node)
 			if status != StatusOK {
 				return 0, StatusPermissionDenied
 			}
 		} else {
-			exact, status := entry.exactNode()
+			exact, status := namespace.exactNode(entry)
 			if status != StatusOK && status != StatusNotFound {
 				return 0, StatusPermissionDenied
 			}
@@ -278,7 +357,7 @@ func (namespace *Namespace) AuthorizePath(owner Owner, path []byte, rights Right
 				if entry.subtree {
 					anchor = entry.root
 				}
-				carries, result := scopeContains(backend, node, anchor)
+				carries, result := namespace.scopeWalk(backend, node, anchor, nil)
 				if result != StatusOK || carries {
 					return StatusPermissionDenied
 				}
@@ -369,6 +448,7 @@ func (namespace *Namespace) AuthorizeDirectory(owner Owner, path []byte, moving 
 // ReadDirFor omits entries the session cannot read, including scoped files in
 // otherwise ordinary directories and mounted aliases of protected directories.
 func (namespace *Namespace) ReadDirFor(owner Owner, path []byte, cursor int) (ramfs.Entry, int, Status) {
+	namespace.counters.ReadDirRequests++
 	if status := namespace.AuthorizePath(owner, path, Read, false); status != StatusOK {
 		return ramfs.Entry{}, cursor, status
 	}

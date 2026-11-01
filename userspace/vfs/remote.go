@@ -40,6 +40,8 @@ type Remote struct {
 	// set before any read and never changes, so workers may read it.
 	copyFault   CopyFaultHandler
 	copyContext CopyFault
+	// readDirs counts directory exchanges for the DIAG listing report.
+	readDirs uint64
 }
 
 // AttachCache gives the backend the file-cache mapping it shares with its
@@ -466,6 +468,7 @@ func (remote *Remote) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int
 	if cursor < 0 || uint64(cursor) > uint64(^uint32(0)) {
 		return ramfs.Entry{}, 0, ramfs.StatusInvalidArgument
 	}
+	remote.readDirs++
 	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationReadDir, Parent: parent, Size: uint32(cursor)})
 	if status != ramfs.StatusOK {
 		return ramfs.Entry{}, 0, status

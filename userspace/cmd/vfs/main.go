@@ -6,6 +6,7 @@ import (
 	"goos/internal/limits"
 	"goos/internal/timekeeping"
 	"goos/internal/validation"
+	"goos/kernel/diag"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -342,6 +343,9 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 		answer = serveExecutable(owner, request)
 	} else {
 		answer = service.Dispatch(owner, request)
+		if diag.Enabled && request.Operation == vfs.OperationReadDir {
+			reportListing(answer.Status)
+		}
 		if len(answer.Name) > vfs.MaxInlineName {
 			answer = returnName(answer, request, object)
 		}
