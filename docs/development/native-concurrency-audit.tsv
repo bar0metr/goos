@@ -842,3 +842,9 @@ CA-1057	goos/userspace/bin/bench	listing	process	owned	none
 CA-1058	goos/userspace/bin/ls	batch	process	owned	none
 CA-1059	goos/userspace/bin/stat	walkBatch	process	owned	none
 CA-1060	goos/userspace/cmd/vfs	listingBackend	process	owned	none
+CA-1061	goos/userspace/cmd/remoted-worker	sftpMode	process	owned	none
+CA-1062	goos/userspace/cmd/sftpd	bulk	process	owned	none
+CA-1063	goos/userspace/cmd/sftpd	stdin	process	owned	none
+CA-1064	goos/userspace/cmd/sftpd	stdout	process	owned	none
+CA-1065	goos/userspace/sftp	ErrFilesystem	process	immutable	none
+CA-1066	goos/userspace/sftp	ErrFraming	process	immutable	none

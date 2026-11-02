@@ -25,6 +25,9 @@ type Config struct {
 	AuthorizedKeys  []ed25519.PublicKey
 	Banner          string
 	MaxAuthAttempts int
+	// Subsystem is the one subsystem name a session may request, or empty for
+	// none. Any other name is refused and leaves the channel usable.
+	Subsystem string
 	// Rand is used only by host tests. Native builds always use cryptosys.Reader.
 	Rand io.Reader
 }
@@ -41,9 +44,11 @@ const (
 	Close
 	Rekey
 	Exec
+	Subsystem
 )
 
-// Data is borrowed until the next Poll. Term is inline so events never retain
+// Data and Command, which holds an exec command or a subsystem name, are
+// borrowed until the next Poll. Term is inline so events never retain
 // transient packet allocations. Use string(event.Term[:event.TermLen]) locally.
 type Event struct {
 	Kind          EventKind

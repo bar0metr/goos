@@ -28,18 +28,22 @@ var (
 
 // copyRemotePolicy removes the controller's writable alias before launching a
 // worker. The original snapshot is never mapped in a shell or a command.
-func copyRemotePolicy(source handle.ID) (handle.ID, uint8, bool) {
+//
+// It also returns the admitted SFTP root, empty when SFTP is disabled. The
+// connection keeps this root through later reloads, and the worker's memory of
+// the policy never decides it.
+func copyRemotePolicy(source handle.ID, root *[remoteapi.MaxSFTPRoot]byte) (handle.ID, uint8, uint8, bool) {
 	base, size, status := sys.MemoryMapAnywhere(source, false)
 	if status != kcall.StatusOK {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	defer sys.VMUnmap(base, size)
 	if size != remoteapi.PolicyPageSize {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	memory, status := sys.MemoryCreate(1)
 	if status != kcall.StatusOK {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	target, targetSize, status := sys.MemoryMapAnywhere(memory, true)
 	if status != kcall.StatusOK || targetSize != remoteapi.PolicyPageSize {
@@ -47,21 +51,25 @@ func copyRemotePolicy(source handle.ID) (handle.ID, uint8, bool) {
 			sys.VMUnmap(target, targetSize)
 		}
 		closeOpen(memory)
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	page := sys.Window(target, targetSize)
 	copy(page, sys.Window(base, size))
 	valid := remoteapi.DecodePolicy(page, &remotePolicyScratch)
 	limit := remotePolicyScratch.MaxSessions
+	rootSize := uint8(0)
+	if valid && remotePolicyScratch.SFTPEnabled {
+		rootSize = uint8(copy(root[:], remotePolicyScratch.SFTPRoot[:remotePolicyScratch.SFTPRootLen]))
+	}
 	for index := range remotePolicyScratch.Keys {
 		clear(remotePolicyScratch.Keys[index][:])
 	}
 	sys.VMUnmap(target, targetSize)
 	if !valid {
 		closeOpen(memory)
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
-	return memory, limit, true
+	return memory, limit, rootSize, true
 }
 
 func remotePaths() (string, string, bool) {

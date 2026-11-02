@@ -28,7 +28,7 @@ var server *sshserver.Server
 var engine *tty.Engine
 var output, errorOutput remoteservice.Queue
 var pendingInput inputQueue
-var execMode, inputEOF, nextError bool
+var execMode, sftpMode, inputEOF, nextError bool
 var newlines ptyNewlines
 var policy remoteapi.WorkerPolicy
 var conn remoteservice.RelayConn
@@ -97,8 +97,12 @@ func userspaceMain() {
 		sys.Exit(1)
 	}
 	username := string(policy.Username[:policy.UserLen])
+	subsystem := ""
+	if policy.SFTPEnabled {
+		subsystem = sftpSubsystem
+	}
 	var err error
-	server, err = sshserver.New(&conn, sshserver.Config{HostPublicKey: ed25519.PublicKey(policy.HostPublicKey[:]), SignHost: signingClient.Sign, Username: username, AuthorizedKeys: keys, MaxAuthAttempts: int(policy.MaxAuthAttempts)})
+	server, err = sshserver.New(&conn, sshserver.Config{HostPublicKey: ed25519.PublicKey(policy.HostPublicKey[:]), SignHost: signingClient.Sign, Username: username, AuthorizedKeys: keys, MaxAuthAttempts: int(policy.MaxAuthAttempts), Subsystem: subsystem})
 	if err != nil {
 		finish(1)
 	}
@@ -187,6 +191,14 @@ func userspaceMain() {
 				}
 				execMode = true
 				if !openExec(event.Command) {
+					finish(1)
+				}
+			case sshserver.Subsystem:
+				if terminal != 0 || execMode || string(event.Command) != sftpSubsystem {
+					finish(1)
+				}
+				execMode, sftpMode = true, true
+				if !openSFTP() {
 					finish(1)
 				}
 			case sshserver.Data:
@@ -335,13 +347,25 @@ func userspaceMain() {
 
 const stdoutBatch = 8
 
+// Stream calls move at most kcall.MaxStreamIO bytes, so a file transfer takes a
+// larger bite of its streams between SSH events than a terminal's stdout does.
+const sftpStreamBatch = 64
+const sftpSubsystem = "sftp"
+
+func streamBatch() int {
+	if sftpMode {
+		return sftpStreamBatch
+	}
+	return stdoutBatch
+}
+
 // serviceStdout returns true while stdout may still precede a prompt. The
 // caller continues SSH input and control processing between batches.
 func serviceStdout() (pending, activity bool) {
 	if stdout == 0 {
 		return false, false
 	}
-	pending, activity, closed, ok := drainStdoutBatch(readWorkerStdout, consumeWorkerStdout, workerOutputFree, scratch[:], stdoutBatch)
+	pending, activity, closed, ok := drainStdoutBatch(readWorkerStdout, consumeWorkerStdout, workerOutputFree, scratch[:], streamBatch())
 	if !ok {
 		finish(1)
 	}
@@ -518,12 +542,25 @@ func openExec(command []byte) bool {
 	return true
 }
 
+// openSFTP asks PID 1 for the fixed file service of this session. The worker
+// names no root and receives only the two streams, never a filesystem session.
+func openSFTP() bool {
+	opened, attachments, ok := call(remoteapi.Request{Operation: remoteapi.OperationOpen, Mode: remoteapi.ModeSFTP})
+	if !ok || opened.Session != token || opened.Mode != remoteapi.ModeSFTP {
+		syslog.Warn("remote SFTP open failed", syslog.Uint("result", uint64(opened.Result)), syslog.Uint("session", token))
+		return false
+	}
+	stdin, stdout = attachments[0], attachments[1]
+	syslog.Info("remote SFTP opened", syslog.Uint("session", token))
+	return true
+}
+
 func serviceStdin() bool {
 	if !execMode || stdin == 0 {
 		return false
 	}
 	activity := false
-	for budget := 0; budget < 8 && pendingInput.size > 0; budget++ {
+	for budget := 0; budget < streamBatch() && pendingInput.size > 0; budget++ {
 		data := pendingInput.peek()
 		count, status := sys.StreamWrite(stdin, data)
 		if count < 0 || count > len(data) {

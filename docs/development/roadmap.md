@@ -221,7 +221,9 @@ Implemented:
 - dedicated exact-SHA Proxmox/KVM remote-admin validation;
 - repository-local portable build/test scratch space under `build/tmp`.
 
-The remote shell still intentionally excludes SFTP/SCP, SSH forwarding, agent/X11 forwarding, POSIX shell semantics and Linux PTYs.
+Native SFTP version 3 runs in a confined per-session service ([ADR 0209](../adr/0209-native-sftp-service.md)).
+
+The remote shell still intentionally excludes SCP, SSH forwarding, agent/X11 forwarding, POSIX shell semantics and Linux PTYs.
 
 See [remote access](remote-access.md), [ADR 0199](../adr/0199-native-remote-terminal-sessions.md), and [ADR 0200](../adr/0200-native-administration-contracts.md).
 

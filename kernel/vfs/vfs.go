@@ -186,6 +186,9 @@ type Namespace struct {
 	// own requested.
 	resolved  [MaxPath]byte
 	requested [MaxPath]byte
+	// rooted exists once a session has a root. Native images carry this
+	// structure, so what most of them never use stays out of it.
+	rooted *rootedSessions
 	// guard and guarded name the one protected directory: a node of one
 	// backend, below which no path may be changed (ADR 0175). The check is
 	// made on the node a walk reaches, not on the path that reached it, so

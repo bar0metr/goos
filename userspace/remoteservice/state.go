@@ -124,6 +124,8 @@ func (s *State) Prepare(policy remotepolicy.Policy, host *remotepolicy.HostKey, 
 	next := &Snapshot{Policy: policy, Fingerprint: host.Fingerprint, Worker: remoteapi.WorkerPolicy{Generation: generation, MaxSessions: policy.MaxSessions, MaxAuthAttempts: policy.MaxAuthAttempts, HandshakeTimeoutMS: policy.HandshakeTimeoutMS, IdleTimeoutSeconds: policy.IdleTimeoutSec, KeyCount: uint8(len(keys))}}
 	copy(next.Worker.HostPublicKey[:], host.Public)
 	next.Worker.UserLen = uint8(copy(next.Worker.Username[:], policy.User))
+	next.Worker.SFTPEnabled = policy.SFTPEnabled
+	next.Worker.SFTPRootLen = uint8(copy(next.Worker.SFTPRoot[:], policy.SFTPRoot))
 	for i, key := range keys {
 		if len(key) != ed25519.PublicKeySize {
 			return nil, errors.New("invalid authorized key")
@@ -166,6 +168,7 @@ func (s *State) Status(pending, authenticated int) []byte {
 	text += " sessions=" + strconv.Itoa(authenticated) + " pending=" + strconv.Itoa(pending) + " fingerprint=" + current.Fingerprint
 	text += " max-sessions=" + strconv.Itoa(int(p.MaxSessions)) + " settings=configured"
 	text += " user=" + p.User + " authorized-keys=" + p.AuthorizedKeys + " key-count=" + strconv.Itoa(int(current.Worker.KeyCount))
+	text += " sftp=" + strconv.FormatBool(p.SFTPEnabled) + " sftp-root=" + p.SFTPRoot
 	text += " kex=" + remotepolicy.KEXAlgorithm + " cipher=" + remotepolicy.CipherAlgorithm + " host-key=" + remotepolicy.KeyAlgorithm + " user-key=" + remotepolicy.KeyAlgorithm + " source=system.remote generation=" + strconv.FormatUint(current.Worker.Generation, 10) + "\n"
 	return []byte(text)
 }

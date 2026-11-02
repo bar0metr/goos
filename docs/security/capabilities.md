@@ -442,3 +442,19 @@ Fetch gains no new grant and exposes no trust-install operation. Its existing
 broad `GrantVFS` can already write output files; it is not a path-scoped authority.
 A future VFS grant could separate bootstrap/key reads from `/state/security`
 writes. Signature verification protects trust even when a process corrupts state.
+
+## SFTP service
+
+PID 1 starts one `sftpd` per SFTP session with exactly these grants:
+
+| Grant | Rights |
+|---|---|
+| `stdin` stream | Read, Wait |
+| `stdout` stream | Write, Wait |
+| `vfs` session rooted at the admitted `system.remote.sftp-root` | Read, Write, Wait on the channel |
+| `log` device | Write |
+
+`vfs.Authority.Root` limits every path the session names to that directory and what
+lies below it, and it denies the mount table. Scopes inside the root still apply. The
+worker receives the far ends of the two streams and no VFS session. See
+[ADR 0209](../adr/0209-native-sftp-service.md).

@@ -3,7 +3,7 @@
 # Run from the repository root: remote.sh ISO OVMF_CODE SYSTEM_TREE.
 set -eu
 [ "$#" = 3 ] || { echo 'usage: remote.sh ISO OVMF_CODE SYSTEM_TREE' >&2; exit 2; }
-for tool in python3 ssh ssh-keygen ssh-keyscan qemu-system-x86_64 go; do
+for tool in python3 ssh sftp ssh-keygen ssh-keyscan qemu-system-x86_64 go; do
  command -v "$tool" >/dev/null || { echo "remote: $tool required" >&2; exit 2; }
 done
 read -r _hz _diag validation _opt _variant <build/config/build
@@ -15,7 +15,10 @@ printf 'remote report: %s\n' "$work"
 cat >"$work/requests.go" <<'GO'
 package main
 import (
+ "encoding/binary"
+ "encoding/hex"
  "fmt"
+ "io"
  "net"
  "os"
  "strings"
@@ -62,6 +65,49 @@ func main() {
   if e!=nil||accepted{die(fmt.Errorf("%s: require failure reply accepted=%v error=%v",mode,accepted,e))}
   fmt.Printf("REJECT %s\n",mode);ch.Close();c.Close();return
  }
+ name:=func(s string)[]byte{return ssh.Marshal(struct{Name string}{s})}
+ pty:=ssh.Marshal(struct{Term string;Columns,Rows,Width,Height uint32;Modes string}{"xterm",80,24,0,0,"\x00"})
+ steps:=map[string][]struct{request string;data []byte;accept bool}{
+  "subsystem-unknown":{{"subsystem",name("netconf"),false},{"subsystem",name("sftp"),true}},
+  "pty-subsystem":{{"pty-req",pty,true},{"subsystem",name("sftp"),false}},
+  "exec-subsystem":{{"exec",ssh.Marshal(struct{Command string}{"sleep 60"}),true},{"subsystem",name("sftp"),false}},
+  "subsystem-shell":{{"subsystem",name("sftp"),true},{"shell",nil,false}},
+  "subsystem-exec":{{"subsystem",name("sftp"),true},{"exec",ssh.Marshal(struct{Command string}{"uname"}),false}},
+  "subsystem-pty":{{"subsystem",name("sftp"),true},{"pty-req",pty,false}},
+  "subsystem-second":{{"subsystem",name("sftp"),true},{"subsystem",name("sftp"),false}},
+ }
+ if script,found:=steps[mode];found {
+  c:=dial();ch,requests,e:=c.OpenChannel("session",nil);if e!=nil{die(e)};go ssh.DiscardRequests(requests)
+  for _,step:=range script {
+   accepted,e:=ch.SendRequest(step.request,true,step.data)
+   if e!=nil||accepted!=step.accept{die(fmt.Errorf("%s: %s accepted=%v error=%v",mode,step.request,accepted,e))}
+  }
+  fmt.Printf("REJECT %s\n",mode);ch.Close();c.Close();return
+ }
+ // stale-open prints a live handle; stale-read presents it to a new session.
+ if strings.HasPrefix(mode,"stale-") {
+  c:=dial();ch,requests,e:=c.OpenChannel("session",nil);if e!=nil{die(e)};go ssh.DiscardRequests(requests)
+  if accepted,e:=ch.SendRequest("subsystem",true,name("sftp"));e!=nil||!accepted{die(fmt.Errorf("sftp refused: %v",e))}
+  exchange:=func(body []byte)[]byte{
+   frame:=binary.BigEndian.AppendUint32(nil,uint32(len(body)));if _,e:=ch.Write(append(frame,body...));e!=nil{die(e)}
+   var size [4]byte;if _,e:=io.ReadFull(ch,size[:]);e!=nil{die(e)}
+   reply:=make([]byte,binary.BigEndian.Uint32(size[:]));if _,e:=io.ReadFull(ch,reply);e!=nil{die(e)};return reply
+  }
+  if reply:=exchange([]byte{1,0,0,0,3});reply[0]!=2{die(fmt.Errorf("handshake %x",reply))}
+  if mode=="stale-open" {
+   body:=binary.BigEndian.AppendUint32([]byte{3,0,0,0,9},uint32(len("sftp-persist.bin")));body=append(body,"sftp-persist.bin"...);body=append(body,0,0,0,1,0,0,0,0)
+   reply:=exchange(body);if reply[0]!=102{die(fmt.Errorf("open %x",reply))}
+   fmt.Printf("%x\n",reply[9:]);ch.Close();c.Close();return
+  }
+  old,e:=hex.DecodeString(strings.TrimPrefix(mode,"stale-read-"));if e!=nil{die(e)}
+  // Fill the slots a reused table would hand out before presenting the handle.
+  body:=binary.BigEndian.AppendUint32([]byte{3,0,0,0,8},uint32(len("sftp-persist.bin")));body=append(body,"sftp-persist.bin"...);body=append(body,0,0,0,1,0,0,0,0)
+  if reply:=exchange(body);reply[0]!=102{die(fmt.Errorf("open %x",reply))}
+  body=binary.BigEndian.AppendUint32([]byte{5,0,0,0,10},uint32(len(old)));body=append(body,old...);body=append(body,0,0,0,0,0,0,0,0,0,0,0,16)
+  reply:=exchange(body)
+  if reply[0]!=101||binary.BigEndian.Uint32(reply[5:])!=4{die(fmt.Errorf("stale handle answered %x",reply))}
+  fmt.Println("REJECT stale-handle");ch.Close();c.Close();return
+ }
  if mode=="second-session" {
  c:=dial()
  ch,requests,err:=c.OpenChannel("session",nil);if err!=nil{die(err)};go ssh.DiscardRequests(requests)
@@ -88,6 +134,7 @@ go build -o "$work/requests" "$work/requests.go"
 python3 -I - "$1" "$2" "$3" "$work" <<'PY'
 import errno
 import fcntl
+import hashlib
 import os
 from pathlib import Path
 import pty
@@ -106,7 +153,7 @@ iso, firmware, source, work = map(lambda p: Path(p).resolve(), sys.argv[1:])
 for path in (iso, firmware, source):
     if not path.exists():
         raise SystemExit(f"remote: missing input {path}")
-for name in ("remoted", "remoted-worker", "shell"):
+for name in ("remoted", "remoted-worker", "shell", "sftpd"):
     if not (source / "system/services" / name).is_file():
         raise SystemExit(f"remote: missing service {name}")
 for name in ("remote", "gview", "gfm", "sleep", "cat", "echo", "ps", "head", "tail",
@@ -210,6 +257,14 @@ persisted_config.write_bytes(previous + (
 (work / "tree/home/user/remote-view.txt").write_text("G" * 150 + "\nREMOTE_VIEW_BODY\n")
 (work / "tree/home/user/admin-lines.txt").write_bytes(b"one\ntwo\nthree\n")
 (work / "tree/home/user/admin-bytes.bin").write_bytes(b"\x00\x01ABC\xff")
+# Long names make this listing span several VFS directory batches.
+SFTP_MANY = 120
+many = work / "tree/home/user/sftp-many"
+many.mkdir()
+for index in range(SFTP_MANY):
+    (many / f"entry-{index:03d}-{'n' * 80}").write_bytes(b"m")
+(work / "tree/home/user/sftp-second-root").mkdir()
+(work / "tree/home/user/sftp-second-root/second-root-marker").write_bytes(b"second")
 require("image.no-private-key", not (work / "tree/state/security/ssh/ssh_host_ed25519_key").exists(),
         "the image does not supply a server identity")
 result = run(["go", "run", "./tools/mkfat32", "-new", "-tree", work / "tree", work / "disk.img"], timeout=120)
@@ -345,6 +400,38 @@ def ssh_exec(port, name, command, key="login", input_data=None, expected=0, sess
             "one-shot command has no prompt or PTY newline conversion")
     counts(sessions=sessions)
     return result
+
+
+def sftp_args(port, name, extra=()):
+    return ["sftp", "-F", "/dev/null", "-vv", "-P", str(port), "-i", str(work / "login"),
+            "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known}",
+            "-o", "GlobalKnownHostsFile=/dev/null", "-o", "HostKeyAlias=goos-remote-test",
+            "-o", "KexAlgorithms=curve25519-sha256", "-o", "Ciphers=aes128-gcm@openssh.com",
+            "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "PubkeyAcceptedAlgorithms=ssh-ed25519",
+            *extra, f"{REMOTE_USER}@127.0.0.1"]
+
+
+def sftp_batch(port, name, commands, expected=0, extra=(), sessions=0, timeout=300):
+    """Run one standard OpenSSH batch. A leading - lets a command fail and go on."""
+    script = work / f"{name}.batch"
+    script.write_text("\n".join(commands) + "\n")
+    result = run(sftp_args(port, name, ("-b", script, *extra)), timeout)
+    (work / f"{name}.stdout.log").write_bytes(result.stdout)
+    (work / f"{name}.stderr.log").write_bytes(result.stderr)
+    require(name + ".status", result.returncode == expected,
+            f"sftp exit {expected}, received {result.returncode}; stderr tail={result.stderr[-400:]!r}")
+    counts(sessions=sessions)
+    return result
+
+
+def sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def sftp_failed(result, command, message):
+    # sftp echoes each batch command to stdout, and reports failures on stderr.
+    return message.encode() in result.stderr and f"sftp> {command}".encode() in result.stdout
 
 
 def log_records(data):
@@ -725,6 +812,131 @@ try:
                 "explicit negative SSH reply/channel-open failure")
         counts()  # Reaping is proved before the next independent connection.
 
+    # Native SFTP. The subsystem stays refused while disabled, as probed above.
+    probe = run([work / "requests", f"127.0.0.1:{ports[0]}", work / "login", known, "goos-remote-test", REMOTE_USER, "subsystem"], 20)
+    require("sftp.disabled-refused", probe.returncode == 0, "disabled SFTP gets an explicit channel failure")
+    counts()
+    config("sftp-enabled", "true")
+    reload_ok()
+    status(sftp="true", **{"sftp-root": "/home/user"})
+    for name in ("subsystem-unknown", "pty-subsystem", "exec-subsystem", "subsystem-shell", "subsystem-exec", "subsystem-pty", "subsystem-second"):
+        result = run([work / "requests", f"127.0.0.1:{ports[0]}", work / "login", known, "goos-remote-test", REMOTE_USER, name], 30)
+        (work / f"sftp-{name}.log").write_bytes(result.stdout + result.stderr)
+        require(f"sftp.mode.{name}", result.returncode == 0, "one execution mode per connection")
+        counts()
+    # Files for transfer, from the host's own random source.
+    local = work / "sftp-local"
+    local.mkdir()
+    fetched = work / "sftp-fetched"
+    fetched.mkdir()
+    long_name = "L" * 200 + ".bin"
+    utf8_name = "файл-данные-é.bin"
+    samples = {"sftp-zero.bin": b"", "sftp-block.bin": os.urandom(3 * 32768 + 123),
+               "sftp-persist.bin": os.urandom((1 << 20) + 4097), long_name: os.urandom(5000), utf8_name: os.urandom(70000)}
+    for filename, content in samples.items():
+        (local / filename).write_bytes(content)
+    commands = ["pwd", "ls", "mkdir sftp-archive", "cd sftp-archive", "pwd", "cd .."]
+    for filename in samples:
+        commands.append(f'put "{local / filename}" "{filename}"')
+    for filename in samples:
+        commands.append(f'get "{filename}" "{fetched / filename}"')
+    # OpenSSH has no stat command; ls -l asks for a name's attributes.
+    commands += ['ls -l sftp-block.bin', 'rename sftp-block.bin sftp-archive/moved.bin', 'ls -l sftp-archive/moved.bin',
+                 'rm sftp-archive/moved.bin', 'rmdir sftp-archive', 'ls -1 sftp-many', 'rm sftp-zero.bin', f'rm "{long_name}"', f'rm "{utf8_name}"']
+    result = sftp_batch(ports[0], "sftp.workflow", commands)
+    require("sftp.stat", f"{32768 * 3 + 123}".encode() in result.stdout and b"-rw-r--r--" in result.stdout,
+            "ls -l reports the size and synthetic mode from the server's attributes")
+    require("sftp.pwd", b"Remote working directory: /\n" in result.stdout, "the configured root is presented as /")
+    require("sftp.pwd-subdirectory", b"Remote working directory: /sftp-archive\n" in result.stdout, "client directories stay relative to /")
+    for filename, content in samples.items():
+        require(f"sftp.sha256.{len(content)}", sha256(fetched / filename) == hashlib.sha256(content).hexdigest(),
+                f"{len(content)} bytes round-trip to the same SHA-256")
+    listed = [line for line in result.stdout.split(b"\n") if line.startswith(b"sftp-many/entry-") or line.startswith(b"entry-")]
+    require("sftp.directory-pagination", len(listed) == SFTP_MANY, f"all {SFTP_MANY} long names, {len(listed)} listed")
+    # A rekey in the middle of the byte stream leaves the stream exact.
+    rekey_name = "sftp-rekey.bin"
+    rekey_back = fetched / "rekeyed.bin"
+    samples_rekey = os.urandom(600000)
+    (local / rekey_name).write_bytes(samples_rekey)
+    sftp_batch(ports[0], "sftp.rekey", [f'put "{local / rekey_name}" {rekey_name}', f'get {rekey_name} "{rekey_back}"', f"rm {rekey_name}"],
+               extra=("-o", "RekeyLimit=128K"))
+    require("sftp.rekey-exact", sha256(rekey_back) == hashlib.sha256(samples_rekey).hexdigest(), "SSH rekeys during transfer preserve SHA-256")
+    # Security: a root's edge, protected objects, and the root itself.
+    keys_copy = fetched / "authorized_keys"
+    result = sftp_batch(ports[0], "sftp.security", [
+        "-ls /system", "-ls /state", "-ls /bootstrap", "-ls ../..", "-ls /../../state",
+        f'-get /../../state/config "{fetched / "escaped"}"', f'-get ../../../state/security/ssh/recovered_host_ed25519_key "{fetched / "key"}"',
+        f'-get {RECOVERED_HOST_KEY_PATH} "{fetched / "key2"}"',
+        f'get remote-keys/authorized_keys "{keys_copy}"',
+        f'-put "{local / "sftp-persist.bin"}" remote-keys/authorized_keys',
+        "-rm remote-keys/authorized_keys", "-rename remote-keys/authorized_keys moved-keys", "-rename remote-keys moved-dir",
+        f'-rename admin-lines.txt remote-keys/authorized_keys',
+        "-rmdir /", "-rename / /x", "-symlink admin-lines.txt link", "-chmod 777 admin-lines.txt", "-chown 0 admin-lines.txt"])
+    require("sftp.security-no-escape", not any((fetched / name).exists() for name in ("escaped", "key", "key2")),
+            "paths above the root reach no file above it")
+    require("sftp.security-root-listing", b"/home/user" not in result.stdout + result.stderr, "the client never sees the host-side prefix")
+    require("sftp.security-keys-unchanged", keys_copy.read_bytes() == (work / "login.pub").read_bytes(),
+            "the configured authorized_keys is exactly the installed key")
+    for command in ("rm remote-keys/authorized_keys", "rename remote-keys/authorized_keys moved-keys", "rename remote-keys moved-dir",
+                    "rename admin-lines.txt remote-keys/authorized_keys", "rmdir /"):
+        require("sftp.security-denied." + command.split()[0], sftp_failed(result, "-" + command, "denied"), f"{command}: permission denied")
+    require("sftp.security-unsupported", sftp_failed(result, "-symlink admin-lines.txt link", "unsupported") and
+            sftp_failed(result, "-chmod 777 admin-lines.txt", "unsupported"), "symlink and chmod are refused as unsupported")
+    result = sftp_batch(ports[0], "sftp.security-after", [f'get remote-keys/authorized_keys "{keys_copy}"', "ls -l admin-lines.txt"])
+    require("sftp.security-keys-still", keys_copy.read_bytes() == (work / "login.pub").read_bytes(), "keys survive the attempts")
+    ssh_exec(ports[0], "sftp.login-still-works", "uname")
+    # A handle dies with its session and means nothing to the next one.
+    opened = run([work / "requests", f"127.0.0.1:{ports[0]}", work / "login", known, "goos-remote-test", REMOTE_USER, "stale-open"], 30)
+    require("sftp.stale-open", opened.returncode == 0 and len(opened.stdout.strip()) == 32, "a live handle in one session")
+    counts()
+    stale = run([work / "requests", f"127.0.0.1:{ports[0]}", work / "login", known, "goos-remote-test", REMOTE_USER, "stale-read-" + opened.stdout.strip().decode()], 30)
+    (work / "sftp-stale.log").write_bytes(stale.stdout + stale.stderr)
+    require("sftp.stale-refused", stale.returncode == 0 and b"REJECT stale-handle" in stale.stdout, "a closed session's handle fails in a new one")
+    counts()
+    # An interactive client: a reload changes new sessions, never an open one.
+    interactive = subprocess.Popen(sftp_args(ports[0], "sftp.interactive"), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    children.append(interactive)
+    interactive.stdin.write(b"pwd\n")
+    interactive.stdin.flush()
+    counts(sessions=1)
+    config("sftp-root", "/home/user/sftp-second-root")
+    reload_ok()
+    result = sftp_batch(ports[0], "sftp.new-root", ["ls -1", "-get /../admin-lines.txt " + str(fetched / "above-new-root")], sessions=1)
+    require("sftp.reload-new-root", b"second-root-marker" in result.stdout and not (fetched / "above-new-root").exists(),
+            "a new session after reload gets the new root, and only it")
+    interactive_out, interactive_err = interactive.communicate(b"ls -1 admin-lines.txt\nbye\n", timeout=120)
+    (work / "sftp.interactive.stdout.log").write_bytes(interactive_out)
+    (work / "sftp.interactive.stderr.log").write_bytes(interactive_err)
+    require("sftp.reload-existing-root", interactive.returncode == 0 and b"admin-lines.txt" in interactive_out,
+            "a session open across the reload keeps the root it was admitted with")
+    counts()
+    config("sftp-root", "/home/user/sftp-missing-root")
+    reload_ok()
+    result = run(sftp_args(ports[0], "sftp.missing-root", ("-b", "/dev/null")), 60)
+    require("sftp.missing-root", result.returncode != 0, "a root that does not exist admits no session")
+    counts()
+    config("sftp-root", "/state/x")
+    refused = console("remote reload")
+    require("sftp.root-outside-home", b"exit status: 2" in refused, "a root outside /home fails the whole reload")
+    config("sftp-root", "/home/user")
+    reload_ok()
+    # A killed client leaves nothing behind, and a process with no peer exits.
+    transfer = subprocess.Popen(sftp_args(ports[0], "sftp.abrupt"), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    children.append(transfer)
+    transfer.stdin.write(f'put "{local / "sftp-persist.bin"}" sftp-abrupt.bin\n'.encode())
+    transfer.stdin.flush()
+    wait_until(lambda: any(name.rsplit("/", 1)[-1] == "sftpd" for name in inventory().values()), "sftpd running during transfer", 60)
+    transfer.kill()
+    transfer.wait(timeout=5)
+    counts()
+    wait_until(lambda: not any(name.rsplit("/", 1)[-1] == "sftpd" for name in inventory().values()), "disconnected sftpd reaped", 30)
+    require("sftp.disconnect-reaped", True, "PID 1 reaps sftpd and releases its session when the client dies")
+    sftp_batch(ports[0], "sftp.after-disconnect", ["-rm sftp-abrupt.bin", "pwd"])
+    # The worker owns no filesystem authority while it relays a session.
+    records = console("log -n 200 --component sftpd")
+    require("sftp.counters", b"sftp session closed" in records and b"uploaded=" in records and b"dir-batches=" in records,
+            "the service logs bounded counters, and no content")
+
     occupied = []
     # Authenticate each connection before the next handshake; all four shells
     # remain open together. Pending-handshake capacity has a separate check.
@@ -899,6 +1111,10 @@ try:
     require("reboot.key-removal-persisted", second_fingerprint.encode() not in result.stdout,
             "removed key remains absent after reboot")
     rejected_login("reboot.removed-key-refused", ports[1], key="second")
+    persisted_back = work / "sftp-fetched" / "persisted-after-reboot.bin"
+    sftp_batch(ports[1], "reboot.sftp", ["pwd", "ls -1 sftp-many", f'get sftp-persist.bin "{persisted_back}"', "rm sftp-persist.bin"])
+    require("reboot.sftp-sha256", sha256(persisted_back) == sha256(work / "sftp-local" / "sftp-persist.bin"),
+            "the uploaded file survives a reboot of the same disk byte for byte")
     rebooted = Terminal(ports[1], "reboot-shell")
     rebooted.wait(PROMPT)
     require("reboot.login", b"REBOOT_LOGIN_OK" in rebooted.command("echo REBOOT_LOGIN_OK"),

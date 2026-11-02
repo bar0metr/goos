@@ -72,3 +72,33 @@ func TestWorkerPolicyMaximumAndEmptyKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestPolicyCarriesSFTPSettings(t *testing.T) {
+	policy := WorkerPolicy{Generation: 1, MaxSessions: 1, MaxAuthAttempts: 1, HandshakeTimeoutMS: 1000, UserLen: 1, KeyCount: MaxKeys, SFTPEnabled: true}
+	policy.Username[0] = 'u'
+	policy.HostPublicKey[0] = 1
+	policy.SFTPRootLen = uint8(copy(policy.SFTPRoot[:], "/home/user"))
+	page := make([]byte, PolicyPageSize)
+	if !EncodePolicy(&policy, page) {
+		t.Fatal("encode")
+	}
+	var decoded WorkerPolicy
+	if !DecodePolicy(page, &decoded) || !decoded.SFTPEnabled || string(decoded.SFTPRoot[:decoded.SFTPRootLen]) != "/home/user" {
+		t.Fatalf("decode: %+v", decoded)
+	}
+	for _, root := range []string{"/state/x", "/home", "/home/", "/home/../state", "/system"} {
+		invalid := policy
+		invalid.SFTPRoot = [MaxSFTPRoot]byte{}
+		invalid.SFTPRootLen = uint8(copy(invalid.SFTPRoot[:], root))
+		if EncodePolicy(&invalid, page) {
+			t.Fatalf("encoded root %q", root)
+		}
+	}
+	if !EncodePolicy(&policy, page) {
+		t.Fatal("encode")
+	}
+	page[policySFTPOffset+2] = 'x' // The root no longer starts with /home/.
+	if DecodePolicy(page, &decoded) {
+		t.Fatal("decoded a root outside /home")
+	}
+}

@@ -375,6 +375,21 @@ every other process running the same image, but never writable by any of them
 (ADR 0081). Images are not signed or measured, so whoever controls the ISO
 controls the system ([boot-chain.md](boot-chain.md)).
 
+### Authenticated or compromised SFTP party
+
+| Compromised party | Reach |
+|---|---|
+| `remoted-worker` | The SSH connection and its plaintext, and the byte streams of its own `sftpd`. No VFS session. |
+| `sftpd` | Files its rooted VFS session permits, below the configured root. No host key, signer, listener, launch, terminal or configuration authority. |
+| SFTP client | The authenticated session's root, through `sftpd`'s requests. |
+
+Inside the root, a client can read, replace and delete ordinary files, including
+readable copies of public keys. It cannot write the configured `authorized_keys` or
+move a directory holding it. A compromised `remoted` could name another directory
+below `/home` in the policy page; PID 1 refuses any root outside `/home`.
+A cross-linked FAT32 directory inside the root can alias another directory's files,
+as it can for any session (ADR 0117); scopes on that target still apply by node.
+
 ## Containment summary
 
 | Failure | Contained by |

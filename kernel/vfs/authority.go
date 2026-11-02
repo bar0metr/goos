@@ -11,14 +11,24 @@ const (
 	MaxAuthorities = 64
 	maxScopeWalk   = 256
 	maxScopeDepth  = 32
+	// MaxRootPath is the longest path a session can be rooted at.
+	MaxRootPath = 64
 )
 
 // Authority grants access to installed scope slots. Confined sessions have no
 // access outside their grants, and overlapping grants intersect. An ordinary
 // session still obeys scope denials.
+//
+// A nonzero RootSize also limits every path the session names to the canonical
+// directory in Root and what lies under it, whatever else it is granted. The
+// root is a path, not a scope slot: a subtree slot records every node it covers
+// and stops at maxScopeWalk, which a user's own directory can exceed, and a slot
+// lives as long as the namespace, which a configurable root must not.
 type Authority struct {
 	Confined bool
 	Grants   [MaxScopes]Rights
+	Root     [MaxRootPath]byte
+	RootSize uint8
 }
 
 func (authority Authority) Valid() bool {
@@ -26,6 +36,47 @@ func (authority Authority) Valid() bool {
 		if rights & ^(Read|Write) != 0 {
 			return false
 		}
+	}
+	if int(authority.RootSize) > len(authority.Root) {
+		return false
+	}
+	for _, value := range authority.Root[authority.RootSize:] {
+		if value != 0 {
+			return false
+		}
+	}
+	return authority.RootSize == 0 || ValidRootPath(authority.Root[:authority.RootSize])
+}
+
+// RootedAuthority returns the authority of a session limited to root. The
+// session keeps the ordinary treatment of scopes inside it.
+func RootedAuthority(root []byte) (Authority, bool) {
+	var authority Authority
+	if !ValidRootPath(root) {
+		return authority, false
+	}
+	authority.RootSize = uint8(copy(authority.Root[:], root))
+	return authority, true
+}
+
+// ValidRootPath accepts an absolute path in canonical form, other than "/".
+func ValidRootPath(path []byte) bool {
+	if len(path) < 2 || len(path) > MaxRootPath || path[0] != '/' || path[len(path)-1] == '/' {
+		return false
+	}
+	start := 1
+	for index := 1; index <= len(path); index++ {
+		if index < len(path) && path[index] != '/' {
+			if path[index] == 0 {
+				return false
+			}
+			continue
+		}
+		component := path[start:index]
+		if len(component) == 0 || len(component) == 1 && component[0] == '.' || len(component) == 2 && component[0] == '.' && component[1] == '.' {
+			return false
+		}
+		start = index + 1
 	}
 	return true
 }
@@ -55,9 +106,31 @@ type scopeMembers struct {
 	complete bool
 }
 
+// ownerAuthority keeps a session's grants. Its root, if any, is in the same
+// entry of Namespace.rooted, and the Root of authority here stays empty.
 type ownerAuthority struct {
 	owner     Owner
 	authority Authority
+}
+
+// rootedSessions holds the sessions' roots by authority entry. check is the
+// canonical path insideRoot compares; resolve keeps Namespace.requested.
+type rootedSessions struct {
+	roots [MaxAuthorities][MaxRootPath]byte
+	sizes [MaxAuthorities]uint8
+	check [MaxPath]byte
+}
+
+// setRoot records entry's root, or that it has none.
+func (namespace *Namespace) setRoot(entry int, authority *Authority) {
+	if authority.RootSize == 0 && namespace.rooted == nil {
+		return
+	}
+	if namespace.rooted == nil {
+		namespace.rooted = new(rootedSessions)
+	}
+	namespace.rooted.sizes[entry] = uint8(copy(namespace.rooted.roots[entry][:], authority.Root[:authority.RootSize]))
+	authority.Root, authority.RootSize = [MaxRootPath]byte{}, 0
 }
 
 // InstallScope binds an unused slot to an existing directory or an exact name
@@ -138,6 +211,7 @@ func (namespace *Namespace) SetAuthority(owner Owner, authority Authority) Statu
 		entry := &namespace.authorities[index]
 		if entry.owner == owner {
 			namespace.CloseOwner(owner)
+			namespace.setRoot(index, &authority)
 			entry.authority = authority
 			return StatusOK
 		}
@@ -149,6 +223,7 @@ func (namespace *Namespace) SetAuthority(owner Owner, authority Authority) Statu
 		return StatusResourceExhausted
 	}
 	namespace.CloseOwner(owner)
+	namespace.setRoot(free, &authority)
 	namespace.authorities[free] = ownerAuthority{owner: owner, authority: authority}
 	return StatusOK
 }
@@ -158,6 +233,9 @@ func (namespace *Namespace) ForgetAuthority(owner Owner) {
 	for index := range namespace.authorities {
 		if namespace.authorities[index].owner == owner {
 			namespace.authorities[index] = ownerAuthority{}
+			if namespace.rooted != nil {
+				namespace.rooted.sizes[index] = 0
+			}
 		}
 	}
 }
@@ -334,11 +412,58 @@ func (namespace *Namespace) nodeScopes(backend Backend, node ramfs.NodeID) (uint
 	return mask, StatusOK
 }
 
+// insideRoot reports whether a session without a root, or one whose root
+// contains path, may name it. It compares the canonical path the namespace goes
+// on to resolve, so ".." cannot leave the root. A path spelled differently from
+// the root, as a case-insensitive filesystem would accept, is refused. A moved
+// path must lie strictly below the root: the root itself stays where it is.
+func (namespace *Namespace) insideRoot(owner Owner, path []byte, moving bool) bool {
+	rooted := namespace.rooted
+	if rooted == nil {
+		return true
+	}
+	for index := range namespace.authorities {
+		if namespace.authorities[index].owner != owner {
+			continue
+		}
+		size := int(rooted.sizes[index])
+		if size == 0 {
+			return true
+		}
+		canonical, ok := canonicalPath(&rooted.check, path)
+		if !ok || canonical < size || string(rooted.check[:size]) != string(rooted.roots[index][:size]) {
+			return false
+		}
+		if canonical == size {
+			return !moving
+		}
+		return rooted.check[size] == '/'
+	}
+	return true
+}
+
+// Rooted reports whether the owner's session is limited to a root. Such a
+// session cannot describe mounts, which are named outside it.
+func (namespace *Namespace) Rooted(owner Owner) bool {
+	if namespace.rooted == nil {
+		return false
+	}
+	for index := range namespace.authorities {
+		if namespace.authorities[index].owner == owner {
+			return namespace.rooted.sizes[index] != 0
+		}
+	}
+	return false
+}
+
 // AuthorizePath checks an existing node or a name to be created. Moving also
 // refuses directory ancestors of scopes, even for a granted session.
 func (namespace *Namespace) AuthorizePath(owner Owner, path []byte, rights Rights, moving bool) Status {
 	if rights == 0 || rights & ^(Read|Write) != 0 || owner == 0 {
 		return StatusInvalidArgument
+	}
+	if !namespace.insideRoot(owner, path, moving) {
+		return StatusPermissionDenied
 	}
 	if rights&Write != 0 && namespace.reservedTarget(path) {
 		return StatusPermissionDenied

@@ -136,7 +136,7 @@ func TestSysimageMainProcess(t *testing.T) {
 func TestSystemCAInstallAndFailBeforeDeletion(t *testing.T) {
 	root := t.TempDir()
 	var args []string
-	for _, name := range []string{"shell", "config", "log", "netd", "virtio-net", "resolved", "remoted", "remoted-worker"} {
+	for _, name := range []string{"shell", "config", "log", "netd", "virtio-net", "resolved", "remoted", "remoted-worker", "sftpd"} {
 		path := filepath.Join(root, name)
 		if err := os.WriteFile(path, []byte(name), 0644); err != nil {
 			t.Fatal(err)
@@ -167,7 +167,7 @@ func TestSystemCAInstallAndFailBeforeDeletion(t *testing.T) {
 	if log, err := invoke(fixture); err != nil {
 		t.Fatalf("sysimage: %v\n%s", err, log)
 	}
-	for _, name := range []string{"shell", "config", "log", "netd", "virtio-net", "resolved", "remoted", "remoted-worker"} {
+	for _, name := range []string{"shell", "config", "log", "netd", "virtio-net", "resolved", "remoted", "remoted-worker", "sftpd"} {
 		got, err := os.ReadFile(filepath.Join(output, "system/services", name))
 		if err != nil || string(got) != name {
 			t.Fatalf("installed service %s: data=%q err=%v", name, got, err)

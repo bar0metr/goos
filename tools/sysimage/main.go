@@ -36,9 +36,9 @@ import (
 	"goos/userspace/release"
 )
 
-const usage = "usage: sysimage SHELL CONFIG LOG NETD VIRTIO_NET RESOLVED REMOTED REMOTED_WORKER COMMAND_DIR COMMAND_INDEX OUTPUT_DIR"
+const usage = "usage: sysimage SHELL CONFIG LOG NETD VIRTIO_NET RESOLVED REMOTED REMOTED_WORKER SFTPD COMMAND_DIR COMMAND_INDEX OUTPUT_DIR"
 
-var services = []string{"shell", "config", "log", "netd", "virtio-net", "resolved", "remoted", "remoted-worker"}
+var services = []string{"shell", "config", "log", "netd", "virtio-net", "resolved", "remoted", "remoted-worker", "sftpd"}
 
 func main() {
 	if len(os.Args) != len(services)+4 {

@@ -98,7 +98,7 @@ func (registry *RemoteRegistry) CheckOpen(id, owner uint64, mode remoteapi.Execu
 	if result != remoteapi.ResultOK {
 		return result
 	}
-	if record.State != RemoteAuthenticated || mode > remoteapi.ModeExec || mode == remoteapi.ModeTerminal && !geometry.Valid() || mode == remoteapi.ModeExec && geometry != (remoteapi.Geometry{}) {
+	if record.State != RemoteAuthenticated || mode > remoteapi.ModeSFTP || mode == remoteapi.ModeTerminal && !geometry.Valid() || mode != remoteapi.ModeTerminal && geometry != (remoteapi.Geometry{}) {
 		return remoteapi.ResultInvalidArgument
 	}
 	return remoteapi.ResultOK

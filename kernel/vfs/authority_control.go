@@ -12,7 +12,8 @@ func AddSessionWithAuthorityRequest(server handle.ID, authority Authority, corre
 	if !ok || !authority.Valid() {
 		return ipc.Message{}, false
 	}
-	message.PayloadSize = 2 + MaxScopes
+	message.PayloadSize = 2 + MaxScopes + uint16(authority.RootSize)
+	copy(message.Payload[2+MaxScopes:], authority.Root[:authority.RootSize])
 	if authority.Confined {
 		message.Payload[1] = 1
 	}
@@ -31,9 +32,10 @@ func DecodeAddSessionAuthority(message ipc.Message) (handle.ID, Authority, bool)
 	if message.PayloadSize == 1 {
 		return message.Handles[0], authority, true
 	}
-	if message.PayloadSize != 2+MaxScopes || message.Payload[1] > 1 {
+	if message.PayloadSize < 2+MaxScopes || message.PayloadSize > 2+MaxScopes+MaxRootPath || message.Payload[1] > 1 {
 		return 0, authority, false
 	}
+	authority.RootSize = uint8(copy(authority.Root[:], message.Payload[2+MaxScopes:message.PayloadSize]))
 	authority.Confined = message.Payload[1] == 1
 	for slot := range authority.Grants {
 		authority.Grants[slot] = Rights(message.Payload[2+slot])

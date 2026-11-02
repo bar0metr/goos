@@ -240,3 +240,44 @@ func TestGoOSHostSignerActualInitialAndRekeyInput(t *testing.T){
  }
  if bytes.Equal(signer.inputs[0],signer.inputs[1]) {t.Fatal("rekey reused initial exchange hash")}
 }
+// subsystemPump is an established channel with a sink for replies.
+func subsystemPump(allowed string)(*Pump,*bytes.Buffer){
+ wire:=&bytes.Buffer{};return &Pump{channel:true,peer:7,subsystem:allowed,transport:&transport{bufWriter:bufio.NewWriter(wire),rand:rand.Reader,writer:connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}}}},wire
+}
+func subsystemReply(t *testing.T,wire *bytes.Buffer)byte{
+ t.Helper();reader:=connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}};reply,err:=reader.readPacket(bufio.NewReader(wire),false);if err!=nil || len(reply)!=5 || binary.BigEndian.Uint32(reply[1:])!=7{t.Fatalf("reply: %x %v",reply,err)};return reply[0]
+}
+func subsystemRequest(p *Pump,request string,data []byte)(PumpEvent,error){return p.application(Marshal(&channelRequestMsg{PeersID:0,Request:request,WantReply:true,RequestSpecificData:data}))}
+func TestGoOSPumpSubsystemAcceptedOnce(t *testing.T){
+ name:=Marshal(struct{Name string}{"sftp"});p,wire:=subsystemPump("sftp")
+ e,err:=subsystemRequest(p,"subsystem",name);if err!=nil || e.Kind!=PumpSubsystem || string(e.Command)!="sftp" || !p.exec || !p.started{t.Fatalf("accept: %+v %v",e,err)}
+ if subsystemReply(t,wire)!=msgChannelSuccess{t.Fatal("no success reply")}
+ // Once a mode is accepted, no other request can change it.
+ for _,request:=range []struct{name string;data []byte}{{"subsystem",name},{"shell",nil},{"exec",Marshal(struct{C string}{"uname"})},{"pty-req",Marshal(struct{Term string;C,R,W,H uint32;Modes string}{"xterm",80,24,0,0,"\x00"})}}{
+  p.transport.bufWriter.Flush();wire.Reset()
+  e,err:=subsystemRequest(p,request.name,request.data);if err!=nil || e.Kind!=PumpProgress{t.Fatalf("%s after subsystem: %+v %v",request.name,e,err)}
+  if subsystemReply(t,wire)!=msgChannelFailure{t.Fatalf("%s accepted after subsystem",request.name)}
+ }
+}
+func TestGoOSPumpSubsystemRejections(t *testing.T){
+ name:=Marshal(struct{Name string}{"sftp"})
+ for _,test:=range []struct{label,allowed string;data []byte;prepare func(*Pump)}{
+  {"disabled","",name,nil},
+  {"unknown","sftp",Marshal(struct{Name string}{"netconf"}),nil},
+  {"case","sftp",Marshal(struct{Name string}{"SFTP"}),nil},
+  {"trailing","sftp",append(append([]byte(nil),name...),0),nil},
+  {"truncated","sftp",name[:5],nil},
+  {"empty","sftp",nil,nil},
+  {"after pty","sftp",name,func(p *Pump){p.pty=true}},
+  {"after shell","sftp",name,func(p *Pump){p.pty,p.started=true,true}},
+  {"after exec","sftp",name,func(p *Pump){p.started,p.exec=true,true}},
+ }{
+  p,wire:=subsystemPump(test.allowed);if test.prepare!=nil{test.prepare(p)}
+  started:=p.started
+  e,err:=subsystemRequest(p,"subsystem",test.data);if err!=nil || e.Kind!=PumpProgress{t.Fatalf("%s: %+v %v",test.label,e,err)}
+  if subsystemReply(t,wire)!=msgChannelFailure || p.started!=started || p.closed{t.Fatalf("%s: not refused cleanly",test.label)}
+ }
+ // A refused name leaves the channel able to take a mode.
+ p,wire:=subsystemPump("sftp");subsystemRequest(p,"subsystem",Marshal(struct{Name string}{"other"}));subsystemReply(t,wire);wire.Reset()
+ e,err:=subsystemRequest(p,"subsystem",name);if err!=nil || e.Kind!=PumpSubsystem{t.Fatalf("after refusal: %+v %v",e,err)}
+}

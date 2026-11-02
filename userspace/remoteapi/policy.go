@@ -1,13 +1,22 @@
 package remoteapi
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"goos/userspace/remotepolicy"
+)
 
 const (
 	PolicyPageSize   = 4096
 	MaxKeys          = 64
 	MaxUsername      = 32
 	policyHeaderSize = 104
-	policyVersion    = 2
+	policyVersion    = 3
+	// MaxSFTPRoot is the longest configured SFTP root.
+	MaxSFTPRoot = remotepolicy.MaxPath
+	// The SFTP record follows the largest key table at a fixed place, so its
+	// presence never depends on the number of keys.
+	policySFTPOffset = policyHeaderSize + 32*MaxKeys
+	policySFTPSize   = 2 + MaxSFTPRoot
 )
 
 // WorkerPolicy is a public, immutable per-connection snapshot.
@@ -22,6 +31,9 @@ type WorkerPolicy struct {
 	UserLen            uint8
 	Keys               [MaxKeys][32]byte
 	KeyCount           uint8
+	SFTPEnabled        bool
+	SFTPRoot           [MaxSFTPRoot]byte
+	SFTPRootLen        uint8
 }
 
 func ValidUsername(user []byte) bool {
@@ -37,7 +49,12 @@ func ValidUsername(user []byte) bool {
 }
 
 func (policy *WorkerPolicy) Valid() bool {
-	return policy.Generation != 0 && policy.MaxSessions >= 1 && policy.MaxSessions <= MaxSessions && policy.MaxAuthAttempts >= 1 && policy.MaxAuthAttempts <= 10 && policy.HandshakeTimeoutMS >= 1000 && policy.HandshakeTimeoutMS <= 120000 && policy.IdleTimeoutSeconds <= 86400 && int(policy.KeyCount) <= len(policy.Keys) && policy.UserLen <= MaxUsername && ValidUsername(policy.Username[:policy.UserLen]) && zero(policy.Username[policy.UserLen:]) && !zero(policy.HostPublicKey[:])
+	return policy.Generation != 0 && policy.MaxSessions >= 1 && policy.MaxSessions <= MaxSessions && policy.MaxAuthAttempts >= 1 && policy.MaxAuthAttempts <= 10 && policy.HandshakeTimeoutMS >= 1000 && policy.HandshakeTimeoutMS <= 120000 && policy.IdleTimeoutSeconds <= 86400 && int(policy.KeyCount) <= len(policy.Keys) && policy.UserLen <= MaxUsername && ValidUsername(policy.Username[:policy.UserLen]) && zero(policy.Username[policy.UserLen:]) && !zero(policy.HostPublicKey[:]) && int(policy.SFTPRootLen) <= len(policy.SFTPRoot) && validSFTPRecord(policy.SFTPEnabled, policy.SFTPRoot[:policy.SFTPRootLen]) && zero(policy.SFTPRoot[policy.SFTPRootLen:])
+}
+
+// validSFTPRecord lets a policy with SFTP disabled name no root at all.
+func validSFTPRecord(enabled bool, root []byte) bool {
+	return !enabled && len(root) == 0 || remotepolicy.ValidSFTPRoot(string(root))
 }
 
 func EncodePolicy(policy *WorkerPolicy, page []byte) bool {
@@ -58,6 +75,11 @@ func EncodePolicy(policy *WorkerPolicy, page []byte) bool {
 	for index := 0; index < int(policy.KeyCount); index++ {
 		copy(page[policyHeaderSize+index*32:], policy.Keys[index][:])
 	}
+	if policy.SFTPEnabled {
+		page[policySFTPOffset] = 1
+	}
+	page[policySFTPOffset+1] = policy.SFTPRootLen
+	copy(page[policySFTPOffset+2:], policy.SFTPRoot[:policy.SFTPRootLen])
 	return true
 }
 
@@ -67,7 +89,11 @@ func DecodePolicy(page []byte, out *WorkerPolicy) bool {
 	}
 	count := int(page[8])
 	size := policyHeaderSize + 32*count
-	if int(binary.LittleEndian.Uint16(page[6:8])) != size || !zero(page[size:]) {
+	if int(binary.LittleEndian.Uint16(page[6:8])) != size || !zero(page[size:policySFTPOffset]) || !zero(page[policySFTPOffset+policySFTPSize:]) {
+		return false
+	}
+	sftpRootLen := int(page[policySFTPOffset+1])
+	if page[policySFTPOffset] > 1 || sftpRootLen > MaxSFTPRoot || !validSFTPRecord(page[policySFTPOffset] == 1, page[policySFTPOffset+2:policySFTPOffset+2+sftpRootLen]) || !zero(page[policySFTPOffset+2+sftpRootLen:policySFTPOffset+policySFTPSize]) {
 		return false
 	}
 	generation := binary.LittleEndian.Uint64(page[24:32])
@@ -87,5 +113,8 @@ func DecodePolicy(page []byte, out *WorkerPolicy) bool {
 	for index := 0; index < count; index++ {
 		copy(out.Keys[index][:], page[policyHeaderSize+32*index:policyHeaderSize+32*(index+1)])
 	}
+	out.SFTPEnabled, out.SFTPRootLen = page[policySFTPOffset] == 1, uint8(sftpRootLen)
+	clear(out.SFTPRoot[:])
+	copy(out.SFTPRoot[:], page[policySFTPOffset+2:policySFTPOffset+2+sftpRootLen])
 	return true
 }

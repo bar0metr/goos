@@ -45,6 +45,7 @@ func TestLoadDefaults(t *testing.T) {
 		MaxSessions: 4, MaxAuthAttempts: 3, HandshakeTimeoutMS: 15000,
 		KEX: []string{KEXAlgorithm}, Ciphers: []string{CipherAlgorithm},
 		HostKeyAlgorithms: []string{KeyAlgorithm}, UserKeyAlgorithms: []string{KeyAlgorithm},
+		SFTPRoot: "/home/user",
 	}
 	if !reflect.DeepEqual(policy, want) {
 		t.Fatalf("policy = %+v, want %+v", policy, want)
@@ -174,6 +175,19 @@ func TestRemoteLoginLabelAndIndependentKeyPath(t *testing.T) {
 		}
 		if _, err := Load(getter(values)); err == nil {
 			t.Fatal("invalid candidate", user)
+		}
+	}
+}
+
+func TestSFTPRootBounds(t *testing.T) {
+	for _, root := range []string{"/home/user", "/home/a/b"} {
+		if !ValidSFTPRoot(root) {
+			t.Fatalf("refused %q", root)
+		}
+	}
+	for _, root := range []string{"", "/", "/home", "/home/", "/home/user/", "home/user", "/home//user", "/home/./user", "/home/../state", "/state/x", "/system", "/homeless/x", "/home/" + strings.Repeat("a", MaxPath)} {
+		if ValidSFTPRoot(root) {
+			t.Fatalf("accepted %q", root)
 		}
 	}
 }

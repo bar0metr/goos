@@ -37,10 +37,17 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   port replacement, persisted configuration and host identity, and refusal to
   read the server private key through the login VFS scope. A host Go probe uses
   the pinned `golang.org/x/crypto/ssh` dependency to check non-PTY exec and
-  refusal of malformed, oversized, or conflicting exec requests, SFTP,
+  refusal of malformed, oversized, or conflicting exec requests, disabled SFTP,
   environment, agent/X11 forwarding, TCP forwarding and a second session
   channel. The harness pins `known_hosts` to the fingerprint from the serial
-  admin status; it keeps strict host-key checks enabled across both boots. Logs
+  admin status; it keeps strict host-key checks enabled across both boots. The
+  gate drives OpenSSH `sftp` through upload, download and directory management,
+  compares SHA-256 for zero-byte, multi-block, 1 MiB, long-named and UTF-8-named
+  files, and lists a directory spanning several VFS batches. It also transfers
+  across SSH rekeys, proves one execution mode per connection, attempts root
+  escapes and changes to `authorized_keys`, presents a closed session's handle to
+  a new one, checks reload behavior on open and new sessions, kills a client
+  mid-transfer, and downloads the uploaded file after the reboot. Logs
   and `checks.tsv` remain under `build/tmp/goos-remote-test.*`. A missing reply
   or observation fails the test. This target does not replace the host protocol
   parser and policy tests. Both SSH services build through `tools/build-ssh.sh`,

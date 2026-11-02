@@ -40,8 +40,39 @@ The default login name is `user`; `system.remote.user` selects the SSH login
 label. It does not select an account or home directory. Password and
 keyboard-interactive authentication are
 unavailable. GoOS accepts one interactive PTY shell or one non-PTY command
-execution per connection. SFTP/SCP, forwarding, agent, and X11 requests remain
-unavailable.
+execution or one SFTP session per connection. SCP, forwarding, agent, and X11
+requests remain unavailable.
+
+## File transfer
+
+Enable SFTP and choose the directory clients see as `/`:
+
+```sh
+config set system.remote.sftp-enabled true
+config set system.remote.sftp-root /home/user
+remote reload
+```
+
+Then use a standard client, interactively or with `-b commands.txt`:
+
+```sh
+sftp -i ~/.ssh/id_ed25519 user@GOOS_ADDRESS
+```
+
+`pwd`, `ls`, `ls -l`, `cd`, `mkdir`, `put`, `get`, `rename`, `rm` and `rmdir` work.
+SFTP is off by default. The root must exist, be canonical and lie strictly below
+`/home`. A bad value fails `remote reload`, and a missing directory closes each new
+SFTP connection. A reload changes new sessions; an open session keeps its root.
+
+Clients cannot reach anything outside the root, and the VFS enforces that limit. The
+configured `authorized_keys` stays read only when it lies inside the root. `symlink`,
+`chmod`, `chown` and `put -p` report an unsupported operation. Listed modes are
+fixed at 0644 and 0755 and grant nothing. A session holds at most 32 open handles,
+and a transfer block is at most 32 KiB. `sftpd` logs byte and request counts when a
+session ends; read them with `log --component sftpd`. See
+[ADR 0209](../adr/0209-native-sftp-service.md).
+
+## Algorithms
 
 To test the minimum algorithm set:
 

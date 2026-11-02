@@ -541,6 +541,11 @@ func (service *Service) authorize(owner vfs.Owner, request vfs.Request) vfs.Stat
 		rights = vfs.Write
 	case vfs.OperationUnlink, vfs.OperationRename, vfs.OperationReplace:
 		rights, moving = vfs.Write, true
+	case vfs.OperationFilesystemInfo, vfs.OperationReadMount:
+		if service.namespace.Rooted(owner) {
+			return vfs.StatusPermissionDenied
+		}
+		return vfs.StatusOK
 	default:
 		return vfs.StatusOK
 	}

@@ -9,6 +9,8 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/ramfs"
+	"goos/kernel/vfs"
 	configproto "goos/userspace/config"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
@@ -38,6 +40,8 @@ type remoteWorker struct {
 	mode                  remoteapi.ExecutionMode
 	command               []byte
 	commandSize           int
+	sftpRoot              [remoteapi.MaxSFTPRoot]byte
+	sftpRootSize          uint8
 	grace                 supervisor.RemoteGrace
 }
 
@@ -170,7 +174,8 @@ func pollRemoteListener() {
 		replyWorker(request.Operation, 0, remoteapi.ResultLimit, message.Correlation)
 		return
 	}
-	policy, limit, valid := copyRemotePolicy(message.Handles[0])
+	var sftpRoot [remoteapi.MaxSFTPRoot]byte
+	policy, limit, sftpRootSize, valid := copyRemotePolicy(message.Handles[0], &sftpRoot)
 	closeOpen(message.Handles[0])
 	message.Handles[0] = 0
 	if !valid {
@@ -192,7 +197,7 @@ func pollRemoteListener() {
 		replyWorker(request.Operation, 0, result, message.Correlation)
 		return
 	}
-	*worker = remoteWorker{id: id, owner: remoteOwner, policy: policy, limit: limit, requestCorrelation: message.Correlation}
+	*worker = remoteWorker{id: id, owner: remoteOwner, policy: policy, limit: limit, requestCorrelation: message.Correlation, sftpRoot: sftpRoot, sftpRootSize: sftpRootSize}
 	notifyRemoteCounts()
 	if !beginRemoteImage(worker, []byte(supervisor.ServicePath("remoted-worker", boot.Mode()))) {
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
@@ -242,7 +247,9 @@ func completeRemoteFill(worker *remoteWorker) {
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
 		return
 	}
-	if worker.opening {
+	if worker.opening && worker.mode == remoteapi.ModeSFTP {
+		launchRemoteSFTP(worker, executable)
+	} else if worker.opening {
 		launchRemoteShell(worker, executable)
 	} else {
 		launchRemoteWorker(worker, executable)
@@ -311,13 +318,18 @@ func launchRemoteExecutable(executable supervisor.Executable, name string, grant
 	arguments := 1
 	if len(command) != 0 {
 		arguments = 3
+		if !shell {
+			arguments = 2
+		}
 	}
 	writer := startup.NewWriter(staging, arguments, variables, len(grants))
 	writer.Command([]byte(name))
 	writer.CWD([]byte("/"))
 	writer.Argument([]byte(name))
 	if len(command) != 0 {
-		writer.Argument([]byte("-c"))
+		if shell {
+			writer.Argument([]byte("-c"))
+		}
 		writer.Argument(command)
 	}
 	if shell {
@@ -362,6 +374,10 @@ func pollRemoteWorker(worker *remoteWorker) {
 		if result != remoteapi.ResultOK {
 			break
 		}
+		if request.Mode == remoteapi.ModeSFTP && worker.sftpRootSize == 0 {
+			result = remoteapi.ResultPermissionDenied
+			break
+		}
 		if remoteTasks()+1 > supervisor.RemoteTaskLimit {
 			result = remoteapi.ResultLimit
 			break
@@ -380,7 +396,11 @@ func pollRemoteWorker(worker *remoteWorker) {
 			}
 			worker.opening = true
 			worker.requestCorrelation = message.Correlation
-			if !beginRemoteImage(worker, []byte(supervisor.ServicePath("shell", boot.Mode()))) {
+			image := "shell"
+			if request.Mode == remoteapi.ModeSFTP {
+				image = "sftpd"
+			}
+			if !beginRemoteImage(worker, []byte(supervisor.ServicePath(image, boot.Mode()))) {
 				failRemoteOpen(worker, remoteapi.ResultUnavailable)
 			}
 			return
@@ -501,6 +521,59 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 	}
 	clear(worker.command[:])
 	worker.commandSize = 0
+	worker.opening = false
+	worker.requestCorrelation = 0
+}
+
+// launchRemoteSFTP starts the fixed sftpd image with its two streams and a VFS
+// session rooted at the directory this connection was admitted with. It grants
+// no terminal, launcher, configuration, network, or signing authority. The
+// process is the session's "shell" for reaping, so every path that ends a
+// connection ends it too.
+func launchRemoteSFTP(worker *remoteWorker, executable supervisor.Executable) {
+	session := &worker.session
+	session.execMode = true
+	root := worker.sftpRoot[:worker.sftpRootSize]
+	authority, valid := vfs.RootedAuthority(root)
+	if !valid || !createStream(&session.output) || !createStream(&session.input) {
+		syslog.Warn("remote SFTP stream allocation failed", syslog.Uint("session", worker.id))
+		failRemoteOpen(worker, remoteapi.ResultUnavailable)
+		return
+	}
+	files, reason := openRemoteAuthoritySession(authority)
+	if reason != "" {
+		syslog.Warn("remote SFTP filesystem session failed", syslog.Str("reason", reason), syslog.Uint("session", worker.id))
+		failRemoteOpen(worker, remoteapi.ResultUnavailable)
+		return
+	}
+	stat, ok := callSession(files, vfs.Request{Operation: vfs.OperationStat, Path: root})
+	if !ok || stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindDirectory {
+		syslog.Warn("remote SFTP root is not a directory", syslog.Uint("session", worker.id))
+		closeOpen(files)
+		failRemoteOpen(worker, remoteapi.ResultUnavailable)
+		return
+	}
+	grants := []supervisor.Capability{
+		{Name: "stdin", Handle: handle.ID(session.input[0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait},
+		{Name: "stdout", Handle: handle.ID(session.output[1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait},
+		{Name: "vfs", Handle: files, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+	}
+	event, result := launchRemoteExecutable(executable, "sftpd", grants, false, root)
+	if result != supervisor.LaunchOK {
+		syslog.Warn("remote SFTP launch failed", syslog.Uint("status", uint64(result)), syslog.Uint("session", worker.id))
+		closeOpen(files)
+		failRemoteOpen(worker, remoteapi.ResultUnavailable)
+		return
+	}
+	session.shellProcess, session.shellPID = event.ProcessHandle, event.Process
+	session.active = true
+	attachments := []handle.ID{handle.ID(session.input[1]), handle.ID(session.output[0])}
+	if remoteRegistry.CommitOpen(worker.id, worker.owner) != remoteapi.ResultOK || !replyRemote(worker, remoteapi.OperationOpen, remoteapi.ResultOK, attachments, worker.requestCorrelation) {
+		closeRemoteWorker(worker)
+		return
+	}
+	session.input[1], session.output[0] = 0, 0
 	worker.opening = false
 	worker.requestCorrelation = 0
 }
