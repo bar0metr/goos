@@ -140,10 +140,13 @@ const (
 	launchLoad
 	launchSetup
 	launchTask
+	// launchImagePage is one page a process faulted in from a file-backed
+	// executable, from the request to the reply.
+	launchImagePage
 	launchStageCount
 )
 
-var launchStageNames = [launchStageCount]string{"image-lookup", "address-space", "image-load", "process-setup", "task-install"}
+var launchStageNames = [launchStageCount]string{"image-lookup", "address-space", "image-load", "process-setup", "task-install", "image-page"}
 
 // launchProfile accumulates spawnExecutable stage durations in diagnostic
 // builds. Lookups that find nothing are counted too.

@@ -44,7 +44,7 @@ const (
 	// PageSize is the size of one file-cache slot.
 	PageSize = 4096
 	// CachePages is the number of slots in the file cache.
-	CachePages = 32
+	CachePages = 128
 	// NamePage is the page after the slots, which carries a name too long for
 	// a message. One exchange is in flight at a time, so one page serves both
 	// directions: the VFS writes a request's name there before sending it, and

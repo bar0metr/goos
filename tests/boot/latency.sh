@@ -107,6 +107,27 @@ echo a | readline | readline
 missing-stage
 EOF
 
+# LATENCY_DIRECTORY adds the breakdown of one listing. The cases separate
+# launch, the redirection stage and printing; the bench lines below separate
+# enumeration, the map and unmap of the batch object, stream writes and file
+# writes.
+listing=${LATENCY_DIRECTORY:-}
+if [ -n "$listing" ]; then
+	run 'mkdir /tmp/latency-empty'
+	dirprobe=/system/linux/dirprobe
+	cat >>"$work/cases" <<EOF
+echo x > /tmp/latency-out
+ls /tmp/latency-empty
+ls /tmp/latency-empty > /tmp/latency-out
+ls $listing
+ls $listing > /tmp/latency-out
+ls $listing | cat
+$dirprobe /tmp/latency-empty 4096 > /tmp/latency-out
+$dirprobe $listing 4096 > /tmp/latency-out
+$dirprobe $listing 512 > /tmp/latency-out
+EOF
+fi
+
 # The warm-up pass creates the file the persistent cases use and runs each
 # case once, so first-use costs do not land in the samples.
 run 'echo payload > /persist/latency.txt'
@@ -135,6 +156,35 @@ for command in 'bench vfs 200' 'bench read /persist/latency.txt 50'; do
 	run "$command"
 	grep '^bench ' "$work/output" >>"$work/bench" || fail "no result from: $command"
 done
+if [ -n "$listing" ]; then
+	while IFS= read -r command; do
+		round=0
+		while [ "$round" -lt 3 ]; do
+			run "$command"
+			printf '%s\n' "$command" >>"$work/bench"
+			grep '^bench ' "$work/output" >>"$work/bench" || fail "no result from: $command"
+			round=$((round + 1))
+		done
+	done <<EOF
+bench vfs 200
+bench list /tmp/latency-empty 200
+bench list $listing 20
+bench lines 119 16 > /tmp/latency-out
+bench lines 119 16
+bench send 119 16 | bench recv 119 16
+bench file /tmp/latency-out 119 16
+bench file /tmp/latency-out 16 120
+EOF
+	for buffer in 4096 512; do
+		run "$dirprobe $listing $buffer > /tmp/latency-out"
+		printf 'dirprobe %s: ' "$buffer" >>"$work/bench"
+		grep '^VFS_LISTING' "$work/output" | tr ' ' '\n' | awk -F= '$2 != "" { sum[$1] += $2 }
+			END { printf "batch_requests=%d batch_entries=%d fat32_batch_requests=%d scope_checks=%d\n", sum["batch_requests"], sum["batch_entries"], sum["fat32_batch_requests"], sum["scope_checks"] }' >>"$work/bench"
+	done
+	run "ls $listing > /tmp/latency-out"
+	printf 'ls: ' >>"$work/bench"
+	grep '^VFS_LISTING' "$work/output" | tail -n 1 >>"$work/bench" || printf 'no counters\n' >>"$work/bench"
+fi
 
 if [ "$diag_build" = 1 ]; then
 	run diag

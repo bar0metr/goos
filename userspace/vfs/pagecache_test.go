@@ -149,7 +149,8 @@ func TestPageCacheForgetsRemovedFiles(t *testing.T) {
 // More pages than the cache holds are read correctly, the oldest giving way.
 func TestPageCacheEvictsTheOldestPage(t *testing.T) {
 	service, _ := cachedService(t)
-	first, second := pattern(16*fsproto.PageSize, 0), pattern(16*fsproto.PageSize, 1)
+	half := (scratchSlot/2 + 1) * fsproto.PageSize
+	first, second := pattern(half, 0), pattern(half, 1)
 	for path, payload := range map[string]string{"/persist/one": first, "/persist/two": second} {
 		service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationCreate, Path: []byte(path)})
 		writeAt(t, service, path, 0, payload)

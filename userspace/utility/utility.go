@@ -139,7 +139,10 @@ func Run(manifest commands.Manifest, main func(startup.Data)) {
 }
 
 // Exit ends the command with code. It does not return.
-func Exit(code uint64) { finish(code, "") }
+func Exit(code uint64) {
+	Flush()
+	finish(code, "")
+}
 
 // Usage ends a malformed invocation with the command's synopsis.
 func Usage() {
@@ -462,7 +465,7 @@ func (line *Line) Pad(column int, width int) {
 // End ends the line and writes it to standard output as one record.
 func (line *Line) End() {
 	line.PrintText("\n")
-	standard.writeRecord(standard.stdout, line.buffer[:line.size])
+	standard.writeLine(line.buffer[:line.size])
 	line.size = 0
 }
 
@@ -499,6 +502,15 @@ func Pad(column int, width int) { currentLine.Pad(column, width) }
 
 // EndLine ends the current line and writes it to standard output.
 func EndLine() { currentLine.End() }
+
+// GatherLines lets lines printed from here on wait and leave in one stream
+// write, for a command that prints a burst of lines and never waits between
+// them for anything but the filesystem. Exit, any other output, and Flush send
+// them; ReadDirBatch sends them first, so they appear batch by batch.
+func GatherLines() { standard.gatherLines() }
+
+// Flush sends gathered lines.
+func Flush() { standard.flush() }
 
 // Write sends value to standard output as it is, outside the line buffer, as
 // one record.

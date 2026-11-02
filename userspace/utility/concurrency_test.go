@@ -347,3 +347,85 @@ func TestFatalOutputDropsRecordWhenWriterCannotProgress(t *testing.T) {
 	}
 	o.mu.Unlock()
 }
+
+// chunkRecorder keeps each stream write apart and takes at most what one native
+// write does.
+type chunkRecorder struct {
+	chunks  [][]byte
+	targets []uint64
+}
+
+func (c *chunkRecorder) write(target uint64, value []byte) int {
+	size := min(len(value), gatheredLines)
+	c.chunks = append(c.chunks, append([]byte(nil), value[:size]...))
+	c.targets = append(c.targets, target)
+	return size
+}
+
+// Gathered lines leave whole, in order, in stream writes of at most the
+// atomic size, and another record sends them first.
+func TestGatheredLinesKeepOrderAndStayWhole(t *testing.T) {
+	var sink chunkRecorder
+	o := output[*chunkRecorder]{stdout: 1, stderr: 2, io: &sink}
+	o.gatherLines()
+	line := []byte("0123456789abcde\n")
+	const lines = 40
+	for index := 0; index < lines; index++ {
+		o.writeLine(line)
+	}
+	if count := len(sink.chunks); count != lines*len(line)/gatheredLines {
+		t.Fatalf("%d writes for %d lines", count, lines)
+	}
+	o.writeRecord(2, []byte("failure\n"))
+	o.writeLine(line)
+	o.flush()
+	o.flush()
+	var stdout []byte
+	for index, chunk := range sink.chunks {
+		if sink.targets[index] == 2 {
+			if index == 0 || len(stdout) != lines*len(line) {
+				t.Fatalf("diagnostic after %d bytes", len(stdout))
+			}
+			continue
+		}
+		if len(chunk) > gatheredLines || len(chunk)%len(line) != 0 {
+			t.Fatalf("write of %d bytes splits a line", len(chunk))
+		}
+		stdout = append(stdout, chunk...)
+	}
+	if want := bytes.Repeat(line, lines+1); !bytes.Equal(stdout, want) {
+		t.Fatalf("got %q", stdout)
+	}
+}
+
+// A line longer than a stream write still goes out, after what was gathered.
+func TestGatheringPassesLongLines(t *testing.T) {
+	var sink chunkRecorder
+	o := output[*chunkRecorder]{stdout: 1, io: &sink}
+	o.gatherLines()
+	o.writeLine([]byte("short\n"))
+	long := bytes.Repeat([]byte{'x'}, gatheredLines+1)
+	o.writeLine(long)
+	var stdout []byte
+	for _, chunk := range sink.chunks {
+		stdout = append(stdout, chunk...)
+	}
+	if !bytes.Equal(stdout, append([]byte("short\n"), long...)) {
+		t.Fatalf("got %d bytes", len(stdout))
+	}
+}
+
+// The fatal path sends gathered lines before the diagnostic when it can.
+func TestFatalOutputSendsGatheredLines(t *testing.T) {
+	var o output[chunkSink]
+	o.stdout = 1
+	o.gathered = copy(o.pending[:], "line\n")
+	var got []string
+	ok := o.tryRecord(2, []byte("failure\n"), func(target uint64, value []byte) int {
+		got = append(got, string(value))
+		return len(value)
+	})
+	if !ok || len(got) != 2 || got[0] != "line\n" || got[1] != "failure\n" {
+		t.Fatalf("%v %v", ok, got)
+	}
+}

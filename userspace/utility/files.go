@@ -44,6 +44,7 @@ type DirVisitor interface {
 // whether the listing ended, and Cursor where it continues; the second result
 // reports whether a reply came.
 func ReadDirBatch(path []byte, cursor uint32, target []byte) (vfs.Reply, bool) {
+	Flush()
 	return files.callBatch(vfs.Request{Path: path, Offset: uint64(cursor)}, target, vfsReplyDeadline, vfsReplyAttempts)
 }
 
