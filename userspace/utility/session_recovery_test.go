@@ -457,3 +457,43 @@ func TestVFSConcurrentAttachedNamesStayWithCaller(t *testing.T) {
 	}
 	group.Wait()
 }
+
+// A batched listing lends the path page and takes its records out before
+// releasing it.
+func TestVFSBatchCopiesRecordsOutOfPage(t *testing.T) {
+	service := newScript()
+	s := newFiles(service)
+	service.reply = func(request ipc.Message) ipc.Message {
+		copy(s.paths.memory, "records")
+		reply, ok := vfs.EncodeReply(vfs.Reply{Operation: vfs.OperationReadDirBatch, Status: vfs.StatusOK, Size: 7, Cursor: 5, BatchCount: 1, BatchEnd: true}, request.Correlation)
+		if !ok {
+			panic("invalid VFS fixture")
+		}
+		return reply
+	}
+	target := make([]byte, vfs.MaxDirBatch)
+	reply, ok := s.callBatch(vfs.Request{Path: []byte("/apps")}, target, 1, 1)
+	if !ok || reply.Size != 7 || reply.Cursor != 5 || !reply.BatchEnd || string(target[:7]) != "records" {
+		t.Fatalf("reply = %+v, %v, %q", reply, ok, target[:7])
+	}
+	if request, decoded := vfs.DecodeRequest(service.last[7]); !decoded || !request.NameReturn || request.Operation != vfs.OperationReadDirBatch {
+		t.Fatalf("request = %+v, %v", request, decoded)
+	}
+}
+
+// A size the caller cannot hold means the server broke the protocol, so the
+// endpoint and its page go as they do for an abandoned exchange.
+func TestVFSBatchQuarantinesOversizedReply(t *testing.T) {
+	service := newScript()
+	s := newFiles(service)
+	service.reply = func(request ipc.Message) ipc.Message {
+		reply, ok := vfs.EncodeReply(vfs.Reply{Operation: vfs.OperationReadDirBatch, Status: vfs.StatusOK, Size: 16}, request.Correlation)
+		if !ok {
+			panic("invalid VFS fixture")
+		}
+		return reply
+	}
+	if _, ok := s.callBatch(vfs.Request{Path: []byte("/apps")}, make([]byte, 8), 1, 1); ok || s.bound() != 0 || len(s.paths.retired) != 1 {
+		t.Fatalf("ok %v, bound %d, retired %d", ok, s.bound(), len(s.paths.retired))
+	}
+}

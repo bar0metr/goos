@@ -198,6 +198,10 @@ type AuthorityCounters struct {
 	ScopeContains       uint64
 	ScopeOpenName       uint64
 	ScopeBackendReadDir uint64
+	// BatchRequests counts batched listing calls, and BatchEntries the records
+	// they returned.
+	BatchRequests uint64
+	BatchEntries  uint64
 }
 
 func (namespace *Namespace) AuthorityCounters() AuthorityCounters { return namespace.counters }
@@ -474,6 +478,169 @@ func (namespace *Namespace) ReadDirFor(owner Owner, path []byte, cursor int) (ra
 		cursor = next
 	}
 	return ramfs.Entry{}, cursor, StatusPermissionDenied
+}
+
+// dirBatchRefill is the free space below which a batch that already holds a
+// record stops asking the backend for more. Most names would not fit, and the
+// exchange would be wasted.
+const dirBatchRefill = 128
+
+// ReadDirBatchFor writes the entries the session can read to target, from
+// cursor on. Only permitted records reach target, which a client may be able
+// to read, and hidden entries take no room in it. The call scans on until
+// target is full, the listing ends, or it has examined maxScopeWalk entries.
+// A failure after a record ends the batch early, and the next call reports it.
+func (namespace *Namespace) ReadDirBatchFor(owner Owner, path []byte, cursor int, target []byte) (ramfs.DirBatch, Status) {
+	namespace.counters.ReadDirRequests++
+	namespace.counters.BatchRequests++
+	batch := ramfs.DirBatch{Next: cursor}
+	if cursor < 0 || len(target) < ramfs.MaxDirRecord {
+		return batch, StatusInvalidArgument
+	}
+	if status := namespace.AuthorizePath(owner, path, Read, false); status != StatusOK {
+		return batch, status
+	}
+	canonical := &namespace.requested
+	size, ok := canonicalPath(canonical, path)
+	if !ok {
+		return batch, StatusInvalidArgument
+	}
+	mountIndex, node, protected, status := namespace.resolve(canonical[:size])
+	if status != StatusOK {
+		return batch, status
+	}
+	scanned := 0
+	for batch.Next < mountCursor {
+		free := len(target) - batch.Used
+		if batch.Count != 0 && free < dirBatchRefill {
+			return namespace.batchDone(batch), StatusOK
+		}
+		fetched, result := namespace.fetchDirBatch(namespace.mounts[mountIndex].backend, node, batch.Next, free)
+		if result == ramfs.StatusNotFound {
+			batch.Next = mountCursor
+			break
+		}
+		if result != ramfs.StatusOK {
+			return namespace.batchFailed(batch, mapStatus(result))
+		}
+		var record ramfs.DirRecord
+		for offset := 0; offset < fetched.Used; {
+			length, valid := record.Decode(namespace.dirBatch[offset:fetched.Used])
+			if !valid || record.Next <= batch.Next || record.Next >= mountCursor {
+				return namespace.batchFailed(batch, StatusBackendError)
+			}
+			offset += length
+			record.Stat.MountID = uint64(namespace.mountID(int(mountIndex)))
+			markProtected(&record.Stat, protected)
+			var done bool
+			if scanned, done, status = namespace.batchRecord(owner, mountIndex, &record, scanned, target, &batch); status != StatusOK {
+				return namespace.batchFailed(batch, status)
+			}
+			if done {
+				return namespace.batchDone(batch), StatusOK
+			}
+		}
+		if fetched.End {
+			batch.Next = mountCursor
+			break
+		}
+		if fetched.Count == 0 {
+			if batch.Count == 0 {
+				return batch, StatusBackendError
+			}
+			return namespace.batchDone(batch), StatusOK
+		}
+	}
+	for {
+		next, status := namespace.mountedEntry(canonical[:size], node, mountIndex, batch.Next-mountCursor)
+		if status == StatusNotFound {
+			batch.Next, batch.End = next, true
+			return namespace.batchDone(batch), StatusOK
+		}
+		if status != StatusOK {
+			return namespace.batchFailed(batch, status)
+		}
+		mount, valid := namespace.mountIndex(MountID(namespace.dirEntry.Stat.MountID))
+		if !valid {
+			return namespace.batchFailed(batch, StatusPermissionDenied)
+		}
+		record := ramfs.DirRecord{Stat: namespace.dirEntry.Stat, Next: next, Name: namespace.dirEntry.Name[:namespace.dirEntry.Size]}
+		var done bool
+		if scanned, done, status = namespace.batchRecord(owner, uint8(mount), &record, scanned, target, &batch); status != StatusOK {
+			return namespace.batchFailed(batch, status)
+		}
+		if done {
+			return namespace.batchDone(batch), StatusOK
+		}
+	}
+}
+
+// fetchDirBatch fills the start of dirBatch with up to limit bytes of records,
+// from a batching backend or from one entry of any other. The backend's
+// not-found status means what ReadDir's does: nothing more to list.
+func (namespace *Namespace) fetchDirBatch(backend Backend, node ramfs.NodeID, cursor, limit int) (ramfs.DirBatch, ramfs.Status) {
+	if limit > len(namespace.dirBatch) {
+		limit = len(namespace.dirBatch)
+	}
+	if batched, supported := backend.(BatchBackend); supported {
+		batch, status := batched.ReadDirBatch(node, cursor, namespace.dirBatch[:limit])
+		if status != ramfs.StatusUnsupported {
+			return batch, status
+		}
+	}
+	var next int
+	var status ramfs.Status
+	namespace.dirEntry, next, status = backend.ReadDir(node, cursor)
+	if status != ramfs.StatusOK {
+		return ramfs.DirBatch{}, status
+	}
+	written := ramfs.AppendDirRecord(namespace.dirBatch[:limit], &namespace.dirEntry.Stat, next, namespace.dirEntry.Name[:namespace.dirEntry.Size])
+	if written == 0 {
+		return ramfs.DirBatch{Next: cursor}, ramfs.StatusOK
+	}
+	return ramfs.DirBatch{Used: written, Count: 1, Next: next}, ramfs.StatusOK
+}
+
+// batchRecord applies the session's authority to one entry and, when it may
+// read it, writes it to target. done means the batch ends before this entry:
+// the examined limit, or no room left. A hidden entry moves the position on so
+// the next call does not examine it again.
+func (namespace *Namespace) batchRecord(owner Owner, mount uint8, record *ramfs.DirRecord, scanned int, target []byte, batch *ramfs.DirBatch) (int, bool, Status) {
+	if scanned == maxScopeWalk {
+		if batch.Count == 0 {
+			return scanned, false, StatusPermissionDenied
+		}
+		return scanned, true, StatusOK
+	}
+	mask, status := namespace.nodeScopes(namespace.mounts[mount].backend, record.Stat.ID)
+	if status != StatusOK {
+		return scanned, false, status
+	}
+	if namespace.permits(owner, mask, Read) {
+		written := ramfs.AppendDirRecord(target[batch.Used:], &record.Stat, record.Next, record.Name)
+		if written == 0 {
+			if batch.Count == 0 {
+				return scanned, false, StatusBackendError
+			}
+			return scanned, true, StatusOK
+		}
+		batch.Used += written
+		batch.Count++
+	}
+	batch.Next = record.Next
+	return scanned + 1, false, StatusOK
+}
+
+func (namespace *Namespace) batchDone(batch ramfs.DirBatch) ramfs.DirBatch {
+	namespace.counters.BatchEntries += uint64(batch.Count)
+	return batch
+}
+
+func (namespace *Namespace) batchFailed(batch ramfs.DirBatch, status Status) (ramfs.DirBatch, Status) {
+	if batch.Count != 0 {
+		return namespace.batchDone(batch), StatusOK
+	}
+	return batch, status
 }
 
 // A backend may move live objects before its final durability step fails.

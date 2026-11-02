@@ -94,6 +94,13 @@ type Backend interface {
 	UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Status
 }
 
+// BatchBackend writes many directory records in one call. A backend without
+// it, or one answering StatusUnsupported, lists one entry at a time. End and a
+// short batch keep the meaning ramfs.DirBatch gives them.
+type BatchBackend interface {
+	ReadDirBatch(parent ramfs.NodeID, cursor int, target []byte) (ramfs.DirBatch, ramfs.Status)
+}
+
 type filesystemBackend interface {
 	FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status)
 }
@@ -195,6 +202,12 @@ type Namespace struct {
 	authorities [MaxAuthorities]ownerAuthority
 	scopeNames  [2][ramfs.MaxName]byte
 	counters    AuthorityCounters
+	// dirBatch holds records a backend returned until each one's authority is
+	// checked, and dirEntry an entry that arrived alone. A scope check can
+	// reach the backend, so neither may be shared memory or a stack value the
+	// check could outlive.
+	dirBatch [MaxDirBatch]byte
+	dirEntry ramfs.Entry
 	// scopeMembers answer repeated subtree checks without walking the backend,
 	// one per scope slot. Every change to a name, mount, or scope clears them
 	// through invalidate.
@@ -779,14 +792,18 @@ func (namespace *Namespace) ReadDir(path []byte, cursor int) (ramfs.Entry, int, 
 		}
 		cursor = mountCursor
 	}
-	return namespace.mountedEntry(canonical[:size], node, mountIndex, cursor-mountCursor)
+	next, status := namespace.mountedEntry(canonical[:size], node, mountIndex, cursor-mountCursor)
+	if status != StatusOK {
+		return ramfs.Entry{}, next, status
+	}
+	return namespace.dirEntry, next, StatusOK
 }
 
-// mountedEntry reports the filesystems mounted directly on the directory named
-// by path, starting at index. A mount whose name the owning backend already
-// listed is skipped, because resolution prefers the mount and the name must
-// name one entry rather than two.
-func (namespace *Namespace) mountedEntry(path []byte, node ramfs.NodeID, owner uint8, index int) (ramfs.Entry, int, Status) {
+// mountedEntry finds the next filesystem mounted directly on the directory
+// named by path, starting at index, and leaves it in dirEntry. A mount whose
+// name the owning backend already listed is skipped, because resolution prefers
+// the mount and the name must name one entry rather than two.
+func (namespace *Namespace) mountedEntry(path []byte, node ramfs.NodeID, owner uint8, index int) (int, Status) {
 	if index < 0 {
 		index = 0
 	}
@@ -812,12 +829,12 @@ func (namespace *Namespace) mountedEntry(path []byte, node ramfs.NodeID, owner u
 			// visible even when its backend cannot describe it.
 			stat = ramfs.Stat{ID: mounted.root, Kind: ramfs.KindDirectory}
 		}
-		entry := ramfs.Entry{Stat: stat, Size: uint16(len(component))}
-		entry.Stat.MountID = uint64(namespace.mountID(index))
-		copy(entry.Name[:], component)
-		return entry, mountCursor + index + 1, StatusOK
+		stat.MountID = uint64(namespace.mountID(index))
+		namespace.dirEntry.Stat = stat
+		namespace.dirEntry.Size = uint16(copy(namespace.dirEntry.Name[:], component))
+		return mountCursor + index + 1, StatusOK
 	}
-	return ramfs.Entry{}, mountCursor + len(namespace.mounts), StatusNotFound
+	return mountCursor + len(namespace.mounts), StatusNotFound
 }
 
 // FilesystemInfo reports the mount selected by path, or the exact mount named

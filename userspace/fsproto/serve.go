@@ -26,6 +26,12 @@ type metadataVolume interface {
 	SetMetadata(id ramfs.NodeID, change ramfs.MetadataChange) ramfs.Status
 }
 
+// batchVolume lists many directory entries in one call. A volume without it
+// answers OperationReadDirBatch with StatusUnsupported.
+type batchVolume interface {
+	ReadDirBatch(parent ramfs.NodeID, cursor int, target []byte) (ramfs.DirBatch, ramfs.Status)
+}
+
 type objectVolume interface {
 	AcquireObject(ramfs.NodeID) (ramfs.NodeID, ramfs.Status)
 	ReleaseObject(ramfs.NodeID) (ramfs.NodeID, ramfs.Status)
@@ -133,6 +139,25 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 			// The name is copied out: entry is a local, and the reply must
 			// not alias memory that is gone once Serve returns.
 			reply.Name = name[:copy(name[:], entry.Name[:entry.Size])]
+		}
+	case OperationReadDirBatch:
+		batched, supported := volume.(batchVolume)
+		if !supported {
+			reply.Status = ramfs.StatusUnsupported
+			break
+		}
+		if len(cache) != CacheSize || request.Offset == 0 || request.Offset > ramfs.MaxDirBatch {
+			reply.Status = ramfs.StatusInvalidArgument
+			break
+		}
+		batch, status := batched.ReadDirBatch(request.Parent, int(request.Size), cache[NamePage*PageSize:NamePage*PageSize+request.Offset])
+		reply.Status = status
+		if status == ramfs.StatusOK {
+			if batch.Used < 0 || uint64(batch.Used) > request.Offset || batch.Count < 0 || batch.Count > ramfs.MaxDirBatch || batch.Next < 0 || uint64(batch.Next) > uint64(^uint32(0)) {
+				reply.Status = ramfs.StatusIOError
+				break
+			}
+			reply.Value, reply.Cursor, reply.Count, reply.End = uint64(batch.Used), uint32(batch.Next), uint16(batch.Count), batch.End
 		}
 	case OperationFlush:
 		if !volume.Flush() {

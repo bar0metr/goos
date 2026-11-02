@@ -171,6 +171,24 @@ expect '^linux-file$' 'dirprobe on FAT32'
 expect '^dirprobe ok: ' 'dirprobe on FAT32'
 clean 'dirprobe on FAT32'
 
+# Seventy short names fill more than one directory batch of 4096 bytes, and
+# one getdents64 call of the same size runs across the boundary.
+run 'mkdir /tmp/batched'
+tens=0
+while [ "$tens" -lt 10 ]; do
+	line=
+	for ones in 0 1 2 3 4 5 6; do
+		line="$line${line:+; }write /tmp/batched/entry-with-a-name-$tens$ones x"
+	done
+	run "$line"
+	tens=$((tens + 1))
+done
+run '/system/linux/dirprobe /tmp/batched'
+expect '^entry-with-a-name-00$' 'dirprobe across batches'
+expect '^entry-with-a-name-96$' 'dirprobe across batches'
+expect '^dirprobe ok: 70 entries$' 'dirprobe across batches'
+clean 'dirprobe across batches'
+
 # A Linux program on a writable volume. Its pages come from the file through
 # the VFS as they are touched, so a call whose argument lies in a page not
 # yet loaded has to wait for that page, not fail.

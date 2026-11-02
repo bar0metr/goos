@@ -38,21 +38,35 @@ func run(data startup.Data) {
 		return
 	}
 	var cursor uint32
+	var record ramfs.DirRecord
 	for {
-		reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationReadDir, Path: path, Offset: uint64(cursor)})
+		reply, received := utility.ReadDirBatch(path, cursor, batch[:])
 		if received && reply.Status == vfs.StatusNotFound {
 			break
 		}
 		utility.Check(reply, received, path, false)
-		utility.PrintName(reply.Name)
-		if reply.Kind == ramfs.KindDirectory {
-			utility.PrintText("/")
+		for records := batch[:reply.Size]; len(records) != 0; {
+			size, valid := record.Decode(records)
+			if !valid {
+				utility.Fail(path, "malformed directory listing")
+			}
+			records = records[size:]
+			utility.PrintName(record.Name)
+			if record.Stat.Kind == ramfs.KindDirectory {
+				utility.PrintText("/")
+			}
+			utility.EndLine()
 		}
-		utility.EndLine()
+		if reply.BatchEnd {
+			break
+		}
 		cursor = reply.Cursor
 	}
 	utility.Mark("LS_PROCESS_OK\n")
 }
+
+// batch is the listing's record buffer: ls scans one directory at a time.
+var batch [vfs.MaxDirBatch]byte
 
 func baseName(path []byte) []byte {
 	for index := len(path) - 1; index >= 0; index-- {

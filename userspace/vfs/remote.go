@@ -40,8 +40,9 @@ type Remote struct {
 	// set before any read and never changes, so workers may read it.
 	copyFault   CopyFaultHandler
 	copyContext CopyFault
-	// readDirs counts directory exchanges for the DIAG listing report.
+	// readDirs and batch count directory exchanges for the DIAG listing report.
 	readDirs uint64
+	batch    BackendBatchCounters
 }
 
 // AttachCache gives the backend the file-cache mapping it shares with its
@@ -480,6 +481,36 @@ func (remote *Remote) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int
 	entry.Stat = statOf(reply)
 	entry.Size = uint16(copy(entry.Name[:], reply.Name))
 	return entry, int(reply.Cursor), ramfs.StatusOK
+}
+
+// ReadDirBatch asks the service for records and copies them out of the shared
+// name page into target, which the VFS owns, before checking them: the service
+// can still write the page. Without the page the namespace lists one entry at
+// a time, which the protocol still serves.
+func (remote *Remote) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byte) (ramfs.DirBatch, ramfs.Status) {
+	if cursor < 0 || uint64(cursor) > uint64(^uint32(0)) || len(target) == 0 || len(target) > ramfs.MaxDirBatch {
+		return ramfs.DirBatch{}, ramfs.StatusInvalidArgument
+	}
+	if !remote.pages.Ready() {
+		return ramfs.DirBatch{}, ramfs.StatusUnsupported
+	}
+	remote.batch.Requests++
+	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationReadDirBatch, Parent: parent, Size: uint32(cursor), Offset: uint64(len(target))})
+	if status != ramfs.StatusOK {
+		return ramfs.DirBatch{}, status
+	}
+	if reply.Value > uint64(len(target)) {
+		remote.forgetAll()
+		return ramfs.DirBatch{}, ramfs.StatusIOError
+	}
+	used := copy(target[:reply.Value], remote.pages.memory[fsproto.NamePage*fsproto.PageSize:])
+	batch := ramfs.DirBatch{Used: used, Count: int(reply.Count), Next: int(reply.Cursor), End: reply.End}
+	if !ramfs.ValidDirBatch(target[:used], batch.Count, cursor, batch.Next) {
+		remote.forgetAll()
+		return ramfs.DirBatch{}, ramfs.StatusIOError
+	}
+	remote.batch.Entries += uint64(batch.Count)
+	return batch, ramfs.StatusOK
 }
 
 func statOf(reply fsproto.Reply) ramfs.Stat {

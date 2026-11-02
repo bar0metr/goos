@@ -272,7 +272,7 @@ func serve() {
 		// Answer an unusable request rather than drop it: the VFS is waiting
 		// for exactly this correlation, and silence would cost it a deadline.
 		operation := fsproto.Operation(requestMessage.Payload[0])
-		if requestMessage.Correlation == 0 || operation < fsproto.OperationMount || operation > fsproto.OperationFlush {
+		if requestMessage.Correlation == 0 || operation < fsproto.OperationMount || operation > fsproto.OperationReadDirBatch {
 			return
 		}
 		reply = fsproto.Reply{Operation: operation, Status: ramfs.StatusInvalidArgument}

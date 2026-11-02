@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+Accepted. ADR 0208 replaces the one exchange per entry and the second exchange
+for a long name with one exchange per directory batch; the record fields and
+cursor rules below still hold.
 
 ## Context
 

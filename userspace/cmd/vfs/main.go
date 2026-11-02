@@ -324,7 +324,7 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 		// Answer unusable requests: a silent drop strands the caller, which is
 		// waiting for exactly this correlation.
 		operation := vfs.Operation(message.Payload[0])
-		if message.Correlation != 0 && operation >= vfs.OperationOpen && operation <= vfs.OperationReadMount {
+		if message.Correlation != 0 && operation.Valid() {
 			if reply, encoded := vfs.EncodeReply(vfs.Reply{Operation: operation, Status: vfs.StatusInvalidArgument}, message.Correlation); encoded {
 				send(session, reply)
 			}
@@ -341,10 +341,15 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 		answer = serveBulk(owner, request, attached[0])
 	} else if request.Operation == vfs.OperationReadExecutable {
 		answer = serveExecutable(owner, request)
+	} else if request.Operation == vfs.OperationReadDirBatch {
+		answer = service.ReadDirBatch(owner, request, object)
+		if diag.Enabled && answer.Status == vfs.StatusOK && answer.BatchEnd {
+			reportListing()
+		}
 	} else {
 		answer = service.Dispatch(owner, request)
-		if diag.Enabled && request.Operation == vfs.OperationReadDir {
-			reportListing(answer.Status)
+		if diag.Enabled && request.Operation == vfs.OperationReadDir && answer.Status == vfs.StatusNotFound {
+			reportListing()
 		}
 		if len(answer.Name) > vfs.MaxInlineName {
 			answer = returnName(answer, request, object)
@@ -481,6 +486,8 @@ func mapPathObject(request *vfs.Request, object handle.ID) ([]byte, uint64, uint
 	minimum := uint64(ramfs.MaxName)
 	if request.Operation == vfs.OperationReadMount {
 		minimum = limits.PathMax
+	} else if request.Operation == vfs.OperationReadDirBatch {
+		minimum = vfs.MaxDirBatch
 	}
 	if size > maxPathObject || request.NameReturn && size < minimum || request.PathsAttached && !request.TakePaths(memory, &pathCopy, &targetCopy) {
 		sys.VMUnmap(base, size)
