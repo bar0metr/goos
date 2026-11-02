@@ -47,7 +47,11 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   across SSH rekeys, proves one execution mode per connection, attempts root
   escapes and changes to `authorized_keys`, presents a closed session's handle to
   a new one, checks reload behavior on open and new sessions, kills a client
-  mid-transfer, and downloads the uploaded file after the reboot. Logs
+  mid-transfer, and downloads the uploaded file after the reboot. `fault
+  remote-worker` and `fault vfs` during a transfer prove the session ends in
+  bounded time with no `sftpd` left, that the capacity checks after them still
+  pass, and that fresh SSH and SFTP sessions work, a stale handle stays refused and
+  a new transfer keeps its SHA-256. Logs
   and `checks.tsv` remain under `build/tmp/goos-remote-test.*`. A missing reply
   or observation fails the test. This target does not replace the host protocol
   parser and policy tests. Both SSH services build through `tools/build-ssh.sh`,

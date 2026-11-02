@@ -54,6 +54,11 @@ var (
 	remoteProcess        handle.ID
 	remoteCountsPending  bool
 	remoteCountsDeadline uint64
+	// remoteStopPending delays stopping the service after the VFS died, so that
+	// SSH workers can close their SFTP channels properly. It ends by this
+	// deadline even if a peer never answers.
+	remoteStopPending  bool
+	remoteStopDeadline uint64
 )
 
 func remoteSession(session *terminalSession) *remoteWorker {
@@ -169,7 +174,7 @@ func pollRemoteListener() {
 		return
 	}
 	worker := freeRemoteWorker()
-	if worker == nil || remoteTasks()+1 > supervisor.RemoteTaskLimit {
+	if worker == nil || remoteStopPending || remoteTasks()+1 > supervisor.RemoteTaskLimit {
 		closeMessageHandles(&message)
 		replyWorker(request.Operation, 0, remoteapi.ResultLimit, message.Correlation)
 		return
@@ -667,6 +672,37 @@ func closeRemoteWorker(worker *remoteWorker) {
 	clear(worker.command)
 	*worker = remoteWorker{}
 	notifyRemoteCounts()
+	if remoteStopPending && !remoteSFTPActive() {
+		remoteStopDeadline, _ = sys.ClockRead()
+	}
+}
+
+func remoteSFTPActive() bool {
+	for index := range remoteWorkers {
+		if remoteWorkers[index].id != 0 && remoteWorkers[index].mode == remoteapi.ModeSFTP {
+			return true
+		}
+	}
+	return false
+}
+
+// remoteVFSExited ends SFTP sessions whose filesystem session has just died. A
+// request in progress fails, an idle one would learn nothing, and neither may
+// keep running against old handles. Each worker sees its sftpd exit and closes
+// the SSH channel, and the service stops once they have finished.
+func remoteVFSExited() {
+	if !remoteSFTPActive() {
+		stopRemoteService()
+		return
+	}
+	for index := range remoteWorkers {
+		worker := &remoteWorkers[index]
+		if worker.id != 0 && worker.mode == remoteapi.ModeSFTP && worker.session.shellProcess != 0 {
+			remoteKill(worker.session.shellProcess)
+		}
+	}
+	now, _ := sys.ClockRead()
+	remoteStopPending, remoteStopDeadline = true, now+5*clock.TicksPerSecond
 }
 
 func injectRemoteSignerFault() bool {
@@ -682,6 +718,26 @@ func injectRemoteSignerFault() bool {
 			return false
 		}
 		mark("REMOTE_SIGNER_FAULT_INJECTED\n")
+		return true
+	}
+	return false
+}
+
+// injectRemoteWorkerFault kills the worker of the first running SFTP session, in
+// the validation build only. The normal exit path then has to reclaim sftpd.
+func injectRemoteWorkerFault() bool {
+	if !validation.Enabled {
+		return false
+	}
+	for index := range remoteWorkers {
+		worker := &remoteWorkers[index]
+		if worker.id == 0 || worker.process == 0 || worker.mode != remoteapi.ModeSFTP || worker.session.shellProcess == 0 {
+			continue
+		}
+		if sys.ProcessKill(worker.process) != 0 {
+			return false
+		}
+		mark("REMOTE_WORKER_FAULT_INJECTED\n")
 		return true
 	}
 	return false
@@ -824,6 +880,9 @@ func remoteFillDeadline(earliest uint64, pending bool) (uint64, bool) {
 	if remoteCountsPending && (!pending || remoteCountsDeadline < earliest) {
 		earliest, pending = remoteCountsDeadline, true
 	}
+	if remoteStopPending && (!pending || remoteStopDeadline < earliest) {
+		earliest, pending = remoteStopDeadline, true
+	}
 	for index := range remoteWorkers {
 		grace := &remoteWorkers[index].grace
 		if grace.Session != 0 {
@@ -843,6 +902,9 @@ func remoteFillDeadline(earliest uint64, pending bool) (uint64, bool) {
 	return earliest, pending
 }
 func expireRemoteFills(now uint64) {
+	if remoteStopPending && now >= remoteStopDeadline {
+		stopRemoteService()
+	}
 	if remoteCountsPending && now >= remoteCountsDeadline {
 		flushRemoteCounts()
 	}
@@ -861,7 +923,17 @@ func expireRemoteFills(now uint64) {
 	}
 }
 
+// stopRemoteAfterStorage leaves a stop already bounded by its deadline alone.
+// The VFS's death takes the filesystem service with it, and neither may cut off
+// the SSH channels the workers are closing.
+func stopRemoteAfterStorage() {
+	if !remoteStopPending {
+		stopRemoteService()
+	}
+}
+
 func stopRemoteService() {
+	remoteStopPending = false
 	closeRemoteWorkers()
 	if remoteProcess != 0 {
 		remoteKill(remoteProcess)
@@ -875,7 +947,11 @@ func remoteDependencyExited(pid uint64) {
 	for _, name := range [...]string{"vfs", "config", netServiceName, filesystemName, "block", driverName} {
 		snapshot, found := manager.Snapshot(name)
 		if found && snapshot.State == supervisor.StateRunning && snapshot.PID == pid {
-			stopRemoteService()
+			if name == "vfs" {
+				remoteVFSExited()
+			} else {
+				stopRemoteAfterStorage()
+			}
 			return
 		}
 	}

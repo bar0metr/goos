@@ -64,8 +64,10 @@ SFTP is off by default. The root must exist, be canonical and lie strictly below
 `/home`. A bad value fails `remote reload`, and a missing directory closes each new
 SFTP connection. A reload changes new sessions; an open session keeps its root.
 
-Clients cannot reach anything outside the root, and the VFS enforces that limit. The
-configured `authorized_keys` stays read only when it lies inside the root. `symlink`,
+Clients cannot name a path outside the root, and the VFS enforces that limit. It limits
+paths, so a mount below the root stays reachable, and a file already open stays usable
+if another session moves it elsewhere. If the session's worker or the VFS dies, the
+session ends and PID 1 reclaims it; after a VFS restart, reconnect. The configured `authorized_keys` stays read only when it lies inside the root. `symlink`,
 `chmod`, `chown` and `put -p` report an unsupported operation. Listed modes are
 fixed at 0644 and 0755 and grant nothing. A session holds at most 32 open handles,
 and a transfer block is at most 32 KiB. `sftpd` logs byte and request counts when a

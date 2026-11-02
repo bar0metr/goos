@@ -57,9 +57,27 @@ have broken the persistent volume for the whole system. Slots also last for the
 life of the namespace, and only eight exist, while the root changes on reload.
 
 The root identifies a path. If an administrator renames the root's directory, a
-session open at that moment follows the path, not the moved directory. Rooted paths
-stay on the same mount, and a cross-linked FAT32 directory inside the root remains a
-limit shared with every session (ADR 0117).
+session open at that moment follows the path, not the moved directory. A cross-linked
+FAT32 directory inside the root remains a limit shared with every session (ADR 0117).
+
+The root confines namespace paths, not filesystem backends or mount IDs. A mount
+reachable below the rooted path remains reachable unless another authority rule
+denies it. A subtree scope works the other way: it follows node identity on one
+backend and needs a walk of the nodes it covers.
+
+### Retained handles
+
+Root confinement applies when a session names a path. An already opened VFS file
+handle remains a capability to that opened object. If another authorized session
+renames the object outside the rooted path, the VFS does not revoke the handle because
+its namespace path changed, and READ, WRITE and FSTAT keep working on it.
+
+New path-based operations remain confined to the configured root. The session cannot
+open or stat the object at its new path, list that directory, move anything there, or
+read the mount table. Installing a scope over the object still revokes the handle or
+denies its use, as for any session. FSETSTAT changes size through the path it opened,
+so after such a move it fails. Authority granted through an open handle survives a
+rename, and obtaining a new handle still requires path authorization.
 
 ### Settings and their lifetime
 
@@ -114,11 +132,27 @@ unsupported, so `chmod` and `put -p` report failure. OPEN and MKDIR accept and i
 a permissions field, since `put` and `mkdir` send one. Reported modes, 0644 and 0755,
 are fixed and grant nothing.
 
+### Control protocol
+
+VFS control protocol version 10 carries the root in AddSession authority, after the
+scope grants. The payload is the grants alone for a session with no root. A decoder
+refuses another version, a root over 64 bytes, and a root that is not canonical.
+
 ### Failure
 
-PID 1 treats `sftpd` as the session's shell for reaping. A dead worker, a closed
-connection or a VFS exit kills it, and the kernel reclaims its handles and its VFS
-session. If `sftpd` exits, the SSH channel closes with its status.
+PID 1 treats `sftpd` as the session's shell for reaping. If `sftpd` exits, the SSH
+channel closes with its status.
+
+When a worker dies, PID 1 closes that connection's slot, kills `sftpd` and waits for
+it. The client sees its connection drop, because the process holding the SSH keys has
+gone. The VFS closes the session's open files when its channel closes.
+
+When the VFS dies, PID 1 kills every `sftpd`, and each worker sends the exit status and
+closes its channel. PID 1 admits no new connection in the meantime. It stops the remote
+service once those workers finish, or after 5 seconds if a peer does not answer. Loss
+of any other remote dependency stops the service at once. The normal restart path
+then brings the VFS and the remote service back. Old sessions, processes and handles
+do not return, and a wire handle carries a nonce that a new `sftpd` does not share.
 
 A VFS request that gets no answer within the client's deadline counts as a lost
 session. `sftpd` reports `SSH_FX_FAILURE` for that request and exits, without using

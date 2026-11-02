@@ -455,6 +455,8 @@ PID 1 starts one `sftpd` per SFTP session with exactly these grants:
 | `log` device | Write |
 
 `vfs.Authority.Root` limits every path the session names to that directory and what
-lies below it, and it denies the mount table. Scopes inside the root still apply. The
-worker receives the far ends of the two streams and no VFS session. See
+lies below it, and it denies the mount table. It confines paths, not backends: a mount
+below the root stays reachable unless another rule denies it. An open handle stays
+usable if another session moves its file out of the root; the session cannot reach that
+file again by path. Scopes inside the root still apply. The worker receives the far ends of the two streams and no VFS session. See
 [ADR 0209](../adr/0209-native-sftp-service.md).

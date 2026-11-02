@@ -387,6 +387,8 @@ Inside the root, a client can read, replace and delete ordinary files, including
 readable copies of public keys. It cannot write the configured `authorized_keys` or
 move a directory holding it. A compromised `remoted` could name another directory
 below `/home` in the policy page; PID 1 refuses any root outside `/home`.
+The root confines paths, not backends, so a mount below it is in reach, and an open
+handle keeps working if another session moves the file out (ADR 0209).
 A cross-linked FAT32 directory inside the root can alias another directory's files,
 as it can for any session (ADR 0117); scopes on that target still apply by node.
 

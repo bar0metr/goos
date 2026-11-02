@@ -305,7 +305,8 @@ def console(command, marker=None):
     start = serial_log.stat().st_size
     serial.write(command.encode() + b"\n")
     serial.flush()
-    data = wait_until(lambda: (tail if re.search(PROMPT, tail) else None)
+    # The validation VFS reports its memory at any moment, even right after a prompt.
+    data = wait_until(lambda: (tail if re.search(PROMPT, re.sub(rb"VFS_MEMORY [^\n]*\n", b"", tail)) else None)
                       if (tail := serial_log.read_bytes()[start:]) else None,
                       f"serial command completed: {command}", 60)
     if marker is not None and not re.search(marker, data):
@@ -427,6 +428,10 @@ def sftp_batch(port, name, commands, expected=0, extra=(), sessions=0, timeout=3
 
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def running_sftpd():
+    return {pid for pid, name in inventory().items() if name.rsplit("/", 1)[-1] == "sftpd"}
 
 
 def sftp_failed(result, command, message):
@@ -925,17 +930,94 @@ try:
     children.append(transfer)
     transfer.stdin.write(f'put "{local / "sftp-persist.bin"}" sftp-abrupt.bin\n'.encode())
     transfer.stdin.flush()
-    wait_until(lambda: any(name.rsplit("/", 1)[-1] == "sftpd" for name in inventory().values()), "sftpd running during transfer", 60)
+    wait_until(running_sftpd, "sftpd running during transfer", 60)
     transfer.kill()
     transfer.wait(timeout=5)
     counts()
-    wait_until(lambda: not any(name.rsplit("/", 1)[-1] == "sftpd" for name in inventory().values()), "disconnected sftpd reaped", 30)
+    wait_until(lambda: not running_sftpd(), "disconnected sftpd reaped", 30)
     require("sftp.disconnect-reaped", True, "PID 1 reaps sftpd and releases its session when the client dies")
     sftp_batch(ports[0], "sftp.after-disconnect", ["-rm sftp-abrupt.bin", "pwd"])
     # The worker owns no filesystem authority while it relays a session.
     records = console("log -n 200 --component sftpd")
     require("sftp.counters", b"sftp session closed" in records and b"uploaded=" in records and b"dir-batches=" in records,
             "the service logs bounded counters, and no content")
+
+    # A dead worker takes its sftpd along, and the capacity comes back.
+    refused = console("fault remote-worker")
+    require("sftp.worker-fault-needs-session", b"fault: refused" in refused and b"REMOTE_WORKER_FAULT_INJECTED" not in refused,
+            "the fault names a running SFTP session and touches nothing without one")
+    worker_fault_err = (work / "sftp.worker-fault.stderr.log").open("wb")
+    victim = subprocess.Popen(sftp_args(ports[0], "sftp.worker-fault"), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=worker_fault_err)
+    children.append(victim)
+    victim.stdin.write(f'put "{local / "sftp-persist.bin"}" sftp-worker-fault.bin\n'.encode())
+    victim.stdin.flush()
+    wait_until(running_sftpd, "sftpd running before the worker fault", 60)
+    counts(sessions=1)
+    console("fault remote-worker", rb"REMOTE_WORKER_FAULT_INJECTED")
+    wait_until(lambda: victim.poll() is not None, "client disconnected after the worker died", 60)
+    worker_fault_err.close()
+    require("sftp.worker-fault-client", True, f"client exited with status {victim.returncode}")
+    counts()
+    require("sftp.worker-fault-reaped", not running_sftpd(), "no sftpd outlives its worker")
+    released = console("log -n 8 --component vfs")
+    require("sftp.worker-fault-released", b"rooted session closed open-files=1" in released,
+            "the VFS closed the rooted session and the file it held open during the upload")
+    worker_back = fetched / "after-worker-fault.bin"
+    result = ssh_exec(ports[0], "sftp.worker-fault-ssh", "uname")
+    require("sftp.worker-fault-ssh-output", b"GoOS" in result.stdout, "a new SSH session is admitted")
+    sftp_batch(ports[0], "sftp.worker-fault-after", ["-rm sftp-worker-fault.bin", f'put "{local / rekey_name}" sftp-after-worker.bin',
+                                                     f'get sftp-after-worker.bin "{worker_back}"', "rm sftp-after-worker.bin"])
+    require("sftp.worker-fault-transfer", sha256(worker_back) == sha256(local / rekey_name), "a new SFTP transfer keeps its SHA-256")
+
+    # A dead VFS ends the SFTP session in bounded time. The SSH channel closes
+    # properly, and everything works again once the VFS has restarted.
+    opened = run([work / "requests", f"127.0.0.1:{ports[0]}", work / "login", known, "goos-remote-test", REMOTE_USER, "stale-open"], 30)
+    require("sftp.vfs-fault-handle", opened.returncode == 0, "a handle from before the fault")
+    counts()
+    vfs_fault_err = work / "sftp.vfs-fault.stderr.log"
+    vfs_fault_err_file = vfs_fault_err.open("wb")
+    victim = subprocess.Popen(sftp_args(ports[0], "sftp.vfs-fault"), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=vfs_fault_err_file)
+    children.append(victim)
+    victim.stdin.write(f'put "{local / "sftp-persist.bin"}" sftp-vfs-fault.bin\n'.encode())
+    victim.stdin.flush()
+    wait_until(running_sftpd, "sftpd running before the VFS fault", 60)
+    counts(sessions=1)
+    fault_time = time.monotonic()
+    # Restart messages follow the prompt, so wait for them rather than for it.
+    fault_start = serial_log.stat().st_size
+    serial.write(b"fault vfs\n")
+    serial.flush()
+    wait_until(lambda: b"VFS_FAULT_INJECTED" in serial_log.read_bytes()[fault_start:], "VFS fault delivered", 30)
+    wait_until(lambda: victim.poll() is not None, "client disconnected after the VFS died", 60)
+    vfs_fault_err_file.close()
+    require("sftp.vfs-fault-bounded", time.monotonic() - fault_time < 60, f"session ended after {time.monotonic() - fault_time:.1f} s, status {victim.returncode}")
+    closed = vfs_fault_err.read_bytes()
+    require("sftp.vfs-fault-clean-close", b"rcvd close" in closed and b"closed by remote host" not in closed,
+            "the worker closed the SSH channel rather than losing the connection")
+    wait_until(lambda: all(marker in serial_log.read_bytes()[fault_start:] for marker in
+                           (b"VFS_RESTARTED_OK", b"SYSTEM_REATTACHED_OK", b"SERVICE_FROM_DISK_OK remoted", b"LOG_SESSION_RENEWED_OK")),
+               "normal restart path completes", 90)
+    time.sleep(1)
+    serial.write(b"\n")
+    serial.flush()
+    time.sleep(1)
+    def remote_listening():
+        return re.search(rb"service=running[^\r\n]*listener=listening", console("remote status"))
+    wait_until(remote_listening, "remote service back after the VFS restart", 90)
+    counts()
+    require("sftp.vfs-fault-reaped", not running_sftpd(), "PID 1 reaped sftpd")
+    require("sftp.vfs-fault-identity", status(listener="listening").get("fingerprint") == identity, "host identity unchanged by the restart")
+    result = ssh_exec(ports[0], "sftp.vfs-fault-ssh", "uname")
+    require("sftp.vfs-fault-ssh-output", b"GoOS" in result.stdout, "a fresh SSH session works")
+    stale = run([work / "requests", f"127.0.0.1:{ports[0]}", work / "login", known, "goos-remote-test", REMOTE_USER, "stale-read-" + opened.stdout.strip().decode()], 30)
+    (work / "sftp-vfs-stale.log").write_bytes(stale.stdout + stale.stderr)
+    require("sftp.vfs-fault-stale-refused", stale.returncode == 0 and b"REJECT stale-handle" in stale.stdout,
+            "no handle from before the restart is valid after it")
+    counts()
+    vfs_back = fetched / "after-vfs-fault.bin"
+    sftp_batch(ports[0], "sftp.vfs-fault-after", ["-rm sftp-vfs-fault.bin", f'put "{local / rekey_name}" sftp-after-vfs.bin',
+                                                  f'get sftp-after-vfs.bin "{vfs_back}"', "rm sftp-after-vfs.bin"])
+    require("sftp.vfs-fault-transfer", sha256(vfs_back) == sha256(local / rekey_name), "a fresh transfer after recovery keeps its SHA-256")
 
     occupied = []
     # Authenticate each connection before the next handshake; all four shells
