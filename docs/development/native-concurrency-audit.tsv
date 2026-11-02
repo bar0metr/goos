@@ -838,3 +838,7 @@ CA-1052	goos/userspace/linux	termInfo	process	immutable	none
 CA-1053	goos/userspace/linux	ttyProbe	process	immutable	none
 CA-1055	goos/userspace/cmd/vfs	listingReadDirs	process	owned	none
 CA-1056	goos/userspace/cmd/vfs	listingStart	process	owned	none
+CA-1057	goos/userspace/bin/bench	listing	process	owned	none
+CA-1058	goos/userspace/bin/ls	batch	process	owned	none
+CA-1059	goos/userspace/bin/stat	walkBatch	process	owned	none
+CA-1060	goos/userspace/cmd/vfs	listingBackend	process	owned	none

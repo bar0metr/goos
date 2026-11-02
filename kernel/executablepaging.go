@@ -24,6 +24,7 @@ type executableFault struct {
 	object      uint64
 	offset      uint64
 	count       uint64
+	began       uint64
 	channelID   uint64
 	side        uint8
 	correlation uint64
@@ -206,7 +207,7 @@ func requestExecutablePage(owner *process.Process, entry region.Region, page uin
 		return pageFailed
 	}
 	*current = executableFault{task: task, root: owner.AddressSpace().Root, page: page, object: entry.Object,
-		offset: entry.Offset + within, count: min(vm.PageSize, entry.Data-within)}
+		offset: entry.Offset + within, count: min(vm.PageSize, entry.Data-within), began: launchMark()}
 	if !sendExecutableRequest(current) {
 		*current = executableFault{}
 		return pageFailed
@@ -432,6 +433,7 @@ func completeExecutablePageLocked(channelID uint64, side uint8) bool {
 	if !valid {
 		fault.failed = true
 	}
+	launchStageDone(launchImagePage, fault.began)
 	amd64.WakeTaskID(uint64(fault.task))
 	return true
 }

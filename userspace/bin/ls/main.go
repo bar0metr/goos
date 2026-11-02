@@ -37,6 +37,7 @@ func run(data startup.Data) {
 		utility.Mark("LS_PROCESS_OK\n")
 		return
 	}
+	utility.GatherLines()
 	var cursor uint32
 	var record ramfs.DirRecord
 	for {

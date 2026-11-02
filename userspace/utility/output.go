@@ -1,6 +1,7 @@
 package utility
 
 import (
+	"goos/kernel/kcall"
 	"goos/userspace/runtime/lock"
 	"goos/userspace/terminal"
 )
@@ -23,22 +24,76 @@ type streamWriter interface {
 // stream is the serialized resource, and a record that has started must
 // finish before the next one starts.
 //
+// A command that prints a burst of lines can gather them (gatherLines). Whole
+// lines then wait in pending and leave together in one stream write, which is
+// atomic, so a reader wakes once for many lines. A line too long for one stream
+// write goes out in several, as any long record does. Any other record sends
+// the gathered lines first, which keeps the order of the process's records.
+//
 // The handles are set once by Run, before the command's main function runs,
 // and only read afterwards.
 type output[W streamWriter] struct {
-	mu     lock.Mutex
-	stdout uint64
-	stderr uint64
-	io     W
+	mu        lock.Mutex
+	stdout    uint64
+	stderr    uint64
+	io        W
+	gathering bool
+	gathered  int
+	pending   [gatheredLines]byte
 }
 
-// writeRecord sends record to target whole.
+// gatheredLines is the most one native stream write takes.
+const gatheredLines = int(kcall.MaxStreamIO)
+
+// writeRecord sends record to target whole, after any gathered lines.
 func (o *output[W]) writeRecord(target uint64, record []byte) {
 	o.mu.Lock()
+	o.sendGathered()
+	o.send(target, record)
+	o.mu.Unlock()
+}
+
+// writeLine sends one finished line to standard output, or gathers it.
+func (o *output[W]) writeLine(line []byte) {
+	o.mu.Lock()
+	if o.gathering && len(line) <= len(o.pending) {
+		if len(line) > len(o.pending)-o.gathered {
+			o.sendGathered()
+		}
+		o.gathered += copy(o.pending[o.gathered:], line)
+	} else {
+		o.sendGathered()
+		o.send(o.stdout, line)
+	}
+	o.mu.Unlock()
+}
+
+// gatherLines starts gathering lines.
+func (o *output[W]) gatherLines() {
+	o.mu.Lock()
+	o.gathering = true
+	o.mu.Unlock()
+}
+
+// flush sends the gathered lines.
+func (o *output[W]) flush() {
+	o.mu.Lock()
+	o.sendGathered()
+	o.mu.Unlock()
+}
+
+// sendGathered sends the gathered lines. The output lock is held.
+func (o *output[W]) sendGathered() {
+	lines := o.gathered
+	o.gathered = 0
+	o.send(o.stdout, o.pending[:lines])
+}
+
+// send moves record to target. The output lock is held.
+func (o *output[W]) send(target uint64, record []byte) {
 	for len(record) != 0 {
 		record = record[o.io.write(target, record):]
 	}
-	o.mu.Unlock()
 }
 
 // tryRecord is the fatal/OOM path: never wait for a lock which this goroutine
@@ -50,6 +105,15 @@ func (o *output[W]) tryRecord(target uint64, record []byte, write func(uint64, [
 		return false
 	}
 	defer o.mu.Unlock()
+	lines := o.gathered
+	o.gathered = 0
+	// A stdout that is gone or full loses its lines and keeps no diagnostic out.
+	tryAll(o.stdout, o.pending[:lines], write)
+	return tryAll(target, record, write)
+}
+
+// tryAll moves record with a writer that must not wait.
+func tryAll(target uint64, record []byte, write func(uint64, []byte) int) bool {
 	for len(record) != 0 {
 		size := write(target, record)
 		if size <= 0 || size > len(record) {

@@ -779,7 +779,10 @@ since boot through native operation 24 (ADR 0054). Two guest tools use it:
   VFS session. Each prints `bench <mode>: N ops, total <us> us, avg <ns> ns/op`;
   `read` adds the file size and the rate. N is at most 10000. A file under
   `/persist` exercises VFS, FAT32, the block service, and the virtio-blk
-  driver. The other modes are described
+  driver. `bench list PATH N` enumerates PATH N times and prints nothing, `bench
+  lines N SIZE` prints N lines and reports on standard error so that its output
+  can be redirected, and `bench file PATH N SIZE` makes N VFS writes with no
+  stream involved. The other modes are described
   under [In-guest microbenchmarks](#in-guest-microbenchmarks).
 
 `tests/boot/latency.sh` drives one guest through a FIFO the way the stress test
@@ -791,6 +794,7 @@ case, followed by the `bench` lines:
 make test-latency
 make HZ=1000 test-latency LATENCY_REPEATS=20
 make HZ=1000 DIAG=1 test-latency
+make DIAG=1 LINUX_APPS_DIR=dir LATENCY_DIRECTORY=/apps test-latency
 ```
 
 The `help` case launches nothing and shows the measurement floor. The serial
@@ -799,7 +803,11 @@ the script ends with
 `diag` and adds the `DIAG clock` and `DIAG launch` lines to the report: per
 stage of `spawnExecutable` (image authority and extent check, address-space creation, image load,
 process and grant setup, task install), the number of launches since boot and
-their total and average time. Failed lookups are counted too. Numbers from
+their total and average time, and the `image-page` line for the pages processes
+faulted in from file-backed executables. Failed lookups are counted too.
+`LATENCY_DIRECTORY` adds the breakdown of one listing to the report (ADR 0208):
+launch, redirection, printing, enumeration, the batch object's map and unmap,
+stream writes, file writes, and `getdents64` with two buffer sizes. Numbers from
 QEMU TCG describe the emulated system on that host, not hardware.
 
 ## Performance measurement

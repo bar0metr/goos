@@ -361,9 +361,10 @@ func (service *Service) BackendBatchCounters() BackendBatchCounters {
 }
 
 // ReadDirBatch serves one batched listing, writing records to the start of
-// target, the object the client attached. Its limit is the smaller of the two
-// sizes and the protocol's; a client too small for the longest record is
-// refused rather than handed a listing that could never advance.
+// target, the object the client attached. Its limit is the smallest of the two
+// sizes, the protocol's, and what the request asks for; a client too small for
+// the longest record is refused rather than handed a listing that could never
+// advance.
 func (service *Service) ReadDirBatch(owner vfs.Owner, request vfs.Request, target []byte) vfs.Reply {
 	reply := vfs.Reply{Operation: request.Operation}
 	if tooLong(request.Path) {
@@ -376,6 +377,11 @@ func (service *Service) ReadDirBatch(owner vfs.Owner, request vfs.Request, targe
 	}
 	if len(target) > vfs.MaxDirBatch {
 		target = target[:vfs.MaxDirBatch]
+	}
+	if request.Size != 0 {
+		if limit := max(int(request.Size), ramfs.MaxDirRecord); limit < len(target) {
+			target = target[:limit]
+		}
 	}
 	batch, status := service.namespace.ReadDirBatchFor(owner, request.Path, int(request.Offset), target)
 	reply.Status = status

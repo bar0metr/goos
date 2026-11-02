@@ -172,7 +172,8 @@ expect '^dirprobe ok: ' 'dirprobe on FAT32'
 clean 'dirprobe on FAT32'
 
 # Seventy short names fill more than one directory batch of 4096 bytes, and
-# one getdents64 call of the same size runs across the boundary.
+# one getdents64 call of the same size returns them all across the boundary. A
+# small buffer takes many calls and loses and repeats nothing.
 run 'mkdir /tmp/batched'
 tens=0
 while [ "$tens" -lt 10 ]; do
@@ -186,8 +187,13 @@ done
 run '/system/linux/dirprobe /tmp/batched'
 expect '^entry-with-a-name-00$' 'dirprobe across batches'
 expect '^entry-with-a-name-96$' 'dirprobe across batches'
+expect '^dirprobe largest call: 70 entries$' 'dirprobe across batches'
 expect '^dirprobe ok: 70 entries$' 'dirprobe across batches'
 clean 'dirprobe across batches'
+run '/system/linux/dirprobe /tmp/batched 128'
+expect '^dirprobe largest call: 3 entries$' 'dirprobe with a small buffer'
+expect '^dirprobe ok: 70 entries$' 'dirprobe with a small buffer'
+clean 'dirprobe with a small buffer'
 
 # A Linux program on a writable volume. Its pages come from the file through
 # the VFS as they are touched, so a call whose argument lies in a page not

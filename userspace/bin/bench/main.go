@@ -15,10 +15,11 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "bench vfs N | bench read|meta PATH N | bench io PATH SIZE | bench stream|send|recv N SIZE",
+	Usage:   "bench MODE [PATH] [N] [SIZE]",
 	Summary: "measure native I/O",
+	Options: "vfs N; read|meta|list PATH N; io PATH SIZE; stream|send|recv|lines N SIZE; file PATH N SIZE",
 	MinArgs: 2,
-	MaxArgs: 3,
+	MaxArgs: 4,
 	Grants:  commands.GrantVFS,
 }
 
@@ -68,6 +69,12 @@ func run(data startup.Data) {
 			utility.Check(removed, ok, path, true)
 		}
 		report("meta", count, utility.ClockNanos()-start)
+	case utility.Equal(mode, "list"):
+		list(utility.Path(data, 2), argument(data, 3))
+	case utility.Equal(mode, "lines"):
+		lines(argument(data, 2), chunk(data, 3))
+	case utility.Equal(mode, "file"):
+		file(utility.Path(data, 2), argument(data, 3), chunk(data, 4))
 	case utility.Equal(mode, "io"):
 		bulkIO(utility.Path(data, 2), size(data, 3))
 	case utility.Equal(mode, "stream"):
@@ -176,6 +183,80 @@ func receive(count uint64, size int) {
 		last, pending = now, 0
 	}
 	reportRate("recv", count-1, size, last-start, waits, true, kept)
+}
+
+// listing receives the batches of bench list.
+var listing [vfs.MaxDirBatch]byte
+
+// list enumerates path count times and prints nothing. An empty directory
+// leaves the cost of one batch exchange with its object mapped and unmapped;
+// bench vfs is the same exchange without the object.
+func list(path []byte, count uint64) {
+	var batches, bytes uint64
+	start := utility.ClockNanos()
+	for index := uint64(0); index < count; index++ {
+		for cursor := uint32(0); ; {
+			reply, ok := utility.ReadDirBatch(path, cursor, listing[:])
+			utility.Check(reply, ok, path, false)
+			batches++
+			bytes += reply.Size
+			if reply.BatchEnd {
+				break
+			}
+			cursor = reply.Cursor
+		}
+	}
+	nanos := utility.ClockNanos() - start
+	var line [224]byte
+	result := utility.AppendBenchResult(line[:0], "list", count, nanos)
+	result = utility.AppendBenchCount(result, batches, "batches")
+	result = utility.AppendBenchCount(result, bytes, "bytes")
+	utility.Print(result)
+	utility.EndLine()
+}
+
+// lines prints count gathered lines of size bytes, the way a line-oriented
+// command does, and reports on standard error so that standard
+// output can be redirected. The clock stops once the last line has left the
+// process; the reader may still hold some of them.
+func lines(count uint64, size int) {
+	for index := range payload[:size-1] {
+		payload[index] = 'x'
+	}
+	utility.GatherLines()
+	start := utility.ClockNanos()
+	for index := uint64(0); index < count; index++ {
+		utility.Print(payload[:size-1])
+		utility.EndLine()
+	}
+	utility.Flush()
+	nanos := utility.ClockNanos() - start
+	var line [128]byte
+	result := append(utility.AppendBenchResult(line[:0], "lines", count, nanos), '\n')
+	utility.WriteError(result)
+}
+
+// file makes count VFS writes of size bytes to an emptied path, with no stream
+// involved.
+func file(path []byte, count uint64, size int) {
+	created, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationCreate, Path: path})
+	if created.Status == vfs.StatusAlreadyExists {
+		created.Status = vfs.StatusOK
+	}
+	utility.Check(created, ok, path, true)
+	truncated, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationTruncate, Path: path})
+	utility.Check(truncated, ok, path, true)
+	opened, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: path})
+	utility.Check(opened, ok, path, true)
+	start := utility.ClockNanos()
+	for index := uint64(0); index < count; index++ {
+		written, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: payload[:size]})
+		utility.CheckWritten(written, ok, path, size)
+	}
+	nanos := utility.ClockNanos() - start
+	closed, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+	utility.Check(closed, ok, path, false)
+	report("file", count, nanos)
 }
 
 // maxIOSize bounds the file bench io writes.

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Amends ADR 0096.
+Accepted. Amends ADR 0096. ADR 0208 raises `fsproto.CachePages` to 128.
 
 ## Context
 

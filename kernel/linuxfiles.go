@@ -938,7 +938,7 @@ func (handler *linuxCallHandler) getdents(request linuxcompat.Request) linuxcomp
 	for {
 		pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
 		written := pending.Partial
-		reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationReadDirBatch, Path: path, Offset: description.Offset, NameReturn: true}, attachName)
+		reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationReadDirBatch, Path: path, Offset: description.Offset, Size: linuxcompat.DirentBatchLimit(capacity - written), NameReturn: true}, attachName)
 		if blocked {
 			return linuxBlocked
 		}
@@ -978,7 +978,9 @@ func (handler *linuxCallHandler) getdents(request linuxcompat.Request) linuxcomp
 			description.Offset, written = next, written+uint64(size)
 		}
 		description.Offset = uint64(reply.Cursor)
-		if reply.BatchEnd || pending.Stage >= linuxcompat.MaxDirentExchanges {
+		// A buffer with no room for the shortest record ends the call; another
+		// batch could only be discarded.
+		if reply.BatchEnd || pending.Stage >= linuxcompat.MaxDirentExchanges || capacity-written < uint64(linuxcompat.DirentSize(1)) {
 			handler.vfsFinish()
 			return linuxcompat.Result{Value: written}
 		}

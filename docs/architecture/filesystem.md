@@ -153,7 +153,7 @@ shared memory instead
   page faults use bounded offset reads through the source's private VFS
   session and the shared file-cache transport page (ADR 0121).
 - File data between the VFS and the FAT32 service moves through the file
-  cache, a shared-memory object both map: 128 KiB of data slots and a page
+  cache, a shared-memory object both map: 512 KiB of data slots and a page
   for names too long for a message (ADR 0098, ADR 0110). A `GFSPRT01` read
   or write names a run of up to 16 consecutive slots; the VFS serves later
   reads of a cached page without asking the service, and writes go through to

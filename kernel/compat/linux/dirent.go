@@ -33,6 +33,18 @@ func DirentSize(nameSize int) int {
 	return (direntHeader + nameSize + 1 + direntAlignment - 1) &^ (direntAlignment - 1)
 }
 
+// DirentBatchLimit returns the bytes of directory records to ask for when free
+// bytes of a getdents64 buffer remain. A record is at most three times its
+// linux_dirent64, at the shortest names, so the limit holds every entry that
+// fits and asks for little more. The VFS and the filesystem then examine only
+// those entries, and a small buffer does not make them repeat a whole batch.
+func DirentBatchLimit(free uint64) uint32 {
+	if free >= ramfs.MaxDirBatch/3 {
+		return ramfs.MaxDirBatch
+	}
+	return uint32(free) * 3
+}
+
 // EncodeBatchDirent turns the directory record at the start of batch into one
 // linux_dirent64 record at the start of target. It returns the bytes of target
 // and of batch it took, and the listing position after the entry. No fit

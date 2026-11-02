@@ -94,7 +94,8 @@ const (
 	// attaches with NameReturn, at its start. The reply's Size is the bytes of
 	// records, BatchCount the records, Cursor where to continue, and BatchEnd
 	// whether the listing ended; an empty directory answers StatusOK with no
-	// records. Records use the format of ramfs.DirRecord.
+	// records. Records use the format of ramfs.DirRecord. A nonzero Size asks
+	// for at most that many bytes of records, or one longest record if more.
 	OperationReadDirBatch
 	lastOperation = OperationReadDirBatch
 )

@@ -43,6 +43,50 @@ func listBatched(t *testing.T, service *Service, owner vfs.Owner, path string) (
 	}
 }
 
+// A request's Size bounds its records and what the filesystem service sends, a
+// limit below the longest record rises to it, and following the cursors lists
+// everything once.
+func TestBatchLimitBoundsRecordsAndBackend(t *testing.T) {
+	service := startedService(t, testFAT32Device())
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationMkdir, Path: []byte("/home/limited")})
+	const entries = 40
+	for index := 0; index < entries; index++ {
+		dispatchOK(t, service, vfs.Request{Operation: vfs.OperationCreate, Path: []byte(fmt.Sprintf("/home/limited/program%03d", index))})
+	}
+	object := make([]byte, vfs.MaxDirBatch)
+	before := service.BackendBatchCounters()
+	first := service.ReadDirBatch(testSession, vfs.Request{Operation: vfs.OperationReadDirBatch, Path: []byte("/home/limited"), Size: 1, NameReturn: true}, object)
+	if first.Status != vfs.StatusOK || first.BatchCount == 0 || first.Size > ramfs.MaxDirRecord {
+		t.Fatalf("status %d, %d records in %d bytes", first.Status, first.BatchCount, first.Size)
+	}
+	if examined := service.BackendBatchCounters().Entries - before.Entries; examined != uint64(first.BatchCount) {
+		t.Fatalf("service sent %d entries for %d records", examined, first.BatchCount)
+	}
+	seen := map[string]bool{}
+	for cursor := uint64(0); ; {
+		reply := service.ReadDirBatch(testSession, vfs.Request{Operation: vfs.OperationReadDirBatch, Path: []byte("/home/limited"), Offset: cursor, Size: ramfs.MaxDirRecord, NameReturn: true}, object)
+		if reply.Status != vfs.StatusOK || reply.Size > ramfs.MaxDirRecord {
+			t.Fatalf("status %d, %d bytes", reply.Status, reply.Size)
+		}
+		var record ramfs.DirRecord
+		for data := object[:reply.Size]; len(data) != 0; {
+			size, ok := record.Decode(data)
+			if !ok || seen[string(record.Name)] {
+				t.Fatalf("record %q, valid %v", record.Name, ok)
+			}
+			seen[string(record.Name)] = true
+			data = data[size:]
+		}
+		if reply.BatchEnd {
+			break
+		}
+		cursor = uint64(reply.Cursor)
+	}
+	if len(seen) != entries {
+		t.Fatalf("listed %d", len(seen))
+	}
+}
+
 // A FAT32 directory larger than a batch takes a handful of exchanges across
 // both boundaries, the shape of a listing of /apps.
 func TestFAT32ListingTakesFewExchanges(t *testing.T) {
