@@ -190,9 +190,14 @@ and [testing](docs/development/testing.md) for the full set of targets.
 Current priorities and future milestones are tracked in the
 [roadmap](docs/development/roadmap.md).
 
+## Contributors
+
+See [CONTRIBUTORS](CONTRIBUTORS.md).
+
 ## License
 
-Copyright (C) 2026 Nikita Parfenovich (aka bar0metr).
+Copyright (C) 2026 Nikita Parfenovich (aka bar0metr), with contributions from
+the people listed in [CONTRIBUTORS](CONTRIBUTORS.md).
 
 GoOS is licensed under the GNU General Public License, version 3 only
 (`GPL-3.0-only`). See [LICENSE](LICENSE) and [NOTICE](NOTICE). Embedded
