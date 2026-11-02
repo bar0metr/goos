@@ -100,10 +100,12 @@ past the buffer's end are read again by the next call.
 A stream write wakes a blocked reader, so a command printing one line per write made
 the `write` stage of a redirection run after almost every line. `utility.GatherLines`
 lets finished lines wait and leave together in one stream write of at most 256 bytes.
-A stream write is atomic, so a line never splits and never interleaves with another
-process. Any other record of the process sends the gathered lines first, which keeps
-their order against standard error. `Exit`, `Flush` and `ReadDirBatch` send them too,
-so a listing appears batch by batch, and the fatal path tries without waiting.
+Gathered lines that fit within one native stream write remain atomic. Longer lines
+preserve the existing multi-write behavior. The process-local output lock preserves
+ordering between stdout and stderr records produced by the same command, because any
+other record sends the gathered lines first. `Exit`, `Flush` and `ReadDirBatch` send
+them too, so a listing appears batch by batch. The fatal path tries them without
+waiting; if stdout refuses them, they are lost and the diagnostic is still attempted.
 
 A command opts in when it prints a burst and waits for nothing but the filesystem.
 `ls` does, and any other such command can.

@@ -26,9 +26,9 @@ type streamWriter interface {
 //
 // A command that prints a burst of lines can gather them (gatherLines). Whole
 // lines then wait in pending and leave together in one stream write, which is
-// atomic, so a reader wakes once for many lines and a line never splits. Any
-// other record sends the gathered lines first, which keeps the order of the
-// process's records.
+// atomic, so a reader wakes once for many lines. A line too long for one stream
+// write goes out in several, as any long record does. Any other record sends
+// the gathered lines first, which keeps the order of the process's records.
 //
 // The handles are set once by Run, before the command's main function runs,
 // and only read afterwards.
@@ -107,9 +107,8 @@ func (o *output[W]) tryRecord(target uint64, record []byte, write func(uint64, [
 	defer o.mu.Unlock()
 	lines := o.gathered
 	o.gathered = 0
-	if !tryAll(o.stdout, o.pending[:lines], write) {
-		return false
-	}
+	// A stdout that is gone or full loses its lines and keeps no diagnostic out.
+	tryAll(o.stdout, o.pending[:lines], write)
 	return tryAll(target, record, write)
 }
 

@@ -429,3 +429,27 @@ func TestFatalOutputSendsGatheredLines(t *testing.T) {
 		t.Fatalf("%v %v", ok, got)
 	}
 }
+
+// A stdout that refuses its gathered lines does not keep the diagnostic from
+// standard error, and the lines do not come back.
+func TestFatalOutputReachesStderrPastDeadStdout(t *testing.T) {
+	var o output[chunkSink]
+	o.stdout, o.stderr = 1, 2
+	o.gathered = copy(o.pending[:], "line\n")
+	var diagnostic []byte
+	refused := 0
+	write := func(target uint64, value []byte) int {
+		if target == 1 {
+			refused++
+			return 0
+		}
+		diagnostic = append(diagnostic, value...)
+		return len(value)
+	}
+	if !o.tryRecord(2, []byte("failure\n"), write) || string(diagnostic) != "failure\n" {
+		t.Fatalf("diagnostic %q", diagnostic)
+	}
+	if refused != 1 || o.gathered != 0 {
+		t.Fatalf("%d refusals, %d bytes still gathered", refused, o.gathered)
+	}
+}
