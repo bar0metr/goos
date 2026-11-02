@@ -1,28 +1,33 @@
-<div align="center">
-
 # GoOS
 
-**An experimental 64-bit operating system for `x86_64`, written mostly in Go and compiled with TinyGo.**
+GoOS is an experimental 64-bit operating system for `x86_64`, written mostly
+in Go and compiled with TinyGo. It is not Linux rewritten in another language,
+and it is not another POSIX system with a new name. It explores what a small
+modern operating system looks like when you build it around explicit
+authority, isolated components, typed IPC, and a minimal privileged kernel.
 
-[![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue)](LICENSE)
-![Architecture: x86_64](https://img.shields.io/badge/arch-x86__64-lightgrey)
-![Go 1.25.5](https://img.shields.io/badge/Go-1.25.5-00ADD8?logo=go&logoColor=white)
-![TinyGo 0.42.0](https://img.shields.io/badge/TinyGo-0.42.0-00ADD8)
+## Project history
 
-[Architecture](#architecture) ·
-[What works](#what-works-today) ·
-[Build and run](#building-and-running) ·
-[Documentation](#documentation) ·
-[Contributors](#contributors)
+I started GoOS in 2011 as a personal research project in Free Pascal, to learn
+how a machine starts running custom code, how memory and interrupts work, and
+how a kernel should talk to applications. Later I moved it to C++ and worked on
+it whenever I wanted to test an idea, rewriting parts as my understanding
+changed.
 
-</div>
+Go gave the project a new direction. The standard Go runtime needs an
+operating system underneath it, but TinyGo made a freestanding Go system
+practical, and the current GoOS architecture grew from that.
 
-GoOS is not Linux rewritten in another language, and it is not another POSIX
-system with a new name. It explores what a small modern operating system looks
-like when you build it around explicit authority, isolated components, typed
-IPC, and a minimal privileged kernel.
+Linux taught me the value of openness, observability, and broad hardware
+support; macOS, the value of coherent design and predictable interfaces. I
+also wanted to leave behind the constraints decades of compatibility put on
+both. Native GoOS does not inherit Unix conventions by default: `fork`, UID 0,
+universal `ioctl`, a global root, and "everything is a file" are not part of
+its foundation. Linux programs use a dedicated compatibility subsystem inside the kernel.
 
-> Compromising one component must not compromise the entire system by default.
+GoOS remains a personal research project, so it can reject conventions that
+do not fit its design. Major decisions still come with a rationale, an ADR,
+tests, and documented consequences.
 
 ## Architecture
 
@@ -88,34 +93,49 @@ service chains such as VFS -> FAT32 -> block -> `virtio-blk` and
 `resolved`/`netd` -> `virtio-net`. UEFI is used during boot, not as a
 runtime layer below the kernel.
 
+The central principle:
+
+> Compromising one component must not compromise the entire system by default.
+
 ## What works today
 
 GoOS boots on x86_64 UEFI systems under QEMU and KVM/Proxmox and runs a
-capability-oriented native userspace built from isolated services.
+capability-oriented native userspace built from isolated services. The
+installed system includes persistent FAT32 storage, VFS, supervision, a native
+shell and utilities, serial and framebuffer terminals, configuration and
+logging services, and full-screen tools such as `gfm`, `gview`, and `edit`.
+A userspace IPv4 service over a virtio-net driver configures its address
+with DHCP or static settings and answers and sends ICMP echo; `ping` and
+`net status` use it from the shell. A loopback interface, a hosts table and a
+DNS stub resolver let `ping` and `resolve` take host names. Native programs
+granted a UDP or TCP session use IPv4 datagrams or bounded byte streams, as
+the `udp` and `tcp` commands do. `dnsq` queries a DNS server directly, and
+`fetch` transfers HTTP/1.1 responses through the resolver and TCP sessions.
+There is no IPv6 or Linux socket interface.
 
-| Area | State |
-|---|---|
-| **Kernel** | Preemptive SMP on up to 64 processors, per-process address spaces, typed capability-checked handles, IPC, shared memory, fine-grained kernel concurrency, CPU affinity, per-CPU runtime statistics |
-| **Native runtime** | Go compiled with TinyGo on a GoOS-owned heap that reclaims memory (ADR 0201), sibling threads (ADR 0203), and an M:N goroutine runtime for selected images (ADR 0204) |
-| **System** | Persistent FAT32 storage, VFS, supervision, configuration and logging services |
-| **User environment** | Native shell and utilities, serial and framebuffer terminals, full-screen tools such as `gfm`, `gview`, and `edit` |
-| **Networking** | Userspace IPv4 over virtio-net with DHCP or static settings, ICMP echo, a hosts table and DNS stub resolver, UDP and TCP sessions for granted programs, and `fetch` for HTTP/1.1. There is no IPv6 or Linux socket interface |
-| **Remote access** | Native SSH with public-key login, a PTY shell or one command per connection, and SFTP version 3 from a confined per-session service (ADR 0209) |
-| **Linux programs** | Unmodified static x86_64 ELF programs through a kernel-resident compatibility subsystem: musl and glibc, threads, `fork`/`execve`, pipes, signals, futexes, polling, and multithreaded workloads such as 7-Zip |
+The kernel supports preemptive SMP on up to 64 processors, per-process address
+spaces, typed capability-checked handles, IPC, shared memory, fine-grained
+kernel concurrency, CPU affinity, and per-CPU runtime statistics.
 
-### Memory and concurrency
+Native userspace programs are Go compiled with TinyGo on a GoOS-owned heap
+that reclaims memory (ADR 0201). Each process traces and sweeps its
+unreachable Go objects, reuses their storage, and returns free heap pages to
+the kernel. Interrupt handlers allocate nothing, and the kernel keeps its own
+bounded allocation discipline (ADR 0065).
 
-Each process traces and sweeps its unreachable Go objects, reuses their storage,
-and returns free heap pages to the kernel. Interrupt handlers allocate nothing,
-and the kernel keeps its own bounded allocation discipline (ADR 0065).
-
-The goroutine target adds channels, select, sync primitives, timers, preemption,
-and scheduler-aware blocking. The VFS uses it for its bounded read pool by
-default; a serial VFS build remains available as a regression fallback. The
-ordinary native target remains available for programs that do not need
+Native processes can also run sibling threads in parallel (ADR 0203). Selected
+images use a separate GoOS TinyGo target with an M:N goroutine runtime,
+channels, select, sync primitives, timers, preemption, and scheduler-aware
+blocking (ADR 0204). The VFS uses that goroutine runtime for its bounded read
+pool by default; a serial VFS build remains available as a regression fallback.
+The ordinary native target remains available for programs that do not need
 goroutines.
 
-Linux compatibility does not make the native ABI POSIX.
+GoOS also runs unmodified statically linked Linux x86_64 ELF programs through
+the kernel-resident Linux ABI compatibility subsystem. Static musl and glibc
+programs, Linux threads,
+`fork`/`execve`, pipes, signals, futexes, polling, and multithreaded workloads
+such as 7-Zip work without making the native ABI POSIX.
 
 For the detailed implementation state, see the
 [roadmap](docs/development/roadmap.md), [architecture docs](docs/architecture/),
@@ -154,46 +174,23 @@ Automated examples of expected boot, namespace, storage, Linux ABI, SMP, and
 recovery behavior live in `tests/boot/`. See [building](docs/development/building.md)
 and [testing](docs/development/testing.md) for the full set of targets.
 
-## Project history
-
-I started GoOS in 2011 as a personal research project in Free Pascal, to learn
-how a machine starts running custom code, how memory and interrupts work, and
-how a kernel should talk to applications. Later I moved it to C++ and worked on
-it whenever I wanted to test an idea, rewriting parts as my understanding
-changed.
-
-Go gave the project a new direction. The standard Go runtime needs an
-operating system underneath it, but TinyGo made a freestanding Go system
-practical, and the current GoOS architecture grew from that.
-
-Linux taught me the value of openness, observability, and broad hardware
-support; macOS, the value of coherent design and predictable interfaces. I
-also wanted to leave behind the constraints decades of compatibility put on
-both. Native GoOS does not inherit Unix conventions by default: `fork`, UID 0,
-universal `ioctl`, a global root, and "everything is a file" are not part of
-its foundation. Linux programs use a dedicated compatibility subsystem inside the kernel.
-
-GoOS remains a personal research project, so it can reject conventions that
-do not fit its design. Major decisions still come with a rationale, an ADR,
-tests, and documented consequences.
-
 ## Documentation
 
-| Topic | Where |
-|---|---|
-| Design | [Architecture](docs/architecture/), [SMP](docs/kernel/smp.md), [Networking](docs/architecture/networking.md) |
-| Remote access | [Native SSH and SFTP](docs/development/remote-access.md) |
-| Linux programs | [Linux x86_64 ABI](docs/architecture/linux-x86_64-abi.md), [Application compatibility](docs/development/linux-application-compatibility.md) |
-| Decisions and history | [ADRs](docs/adr/), [Release notes](docs/releases/) |
-| Working on GoOS | [Development and testing](docs/development/), [Roadmap](docs/development/roadmap.md) |
+- [Architecture](docs/architecture/)
+- [Roadmap](docs/development/roadmap.md)
+- [SMP design](docs/kernel/smp.md)
+- [Networking](docs/architecture/networking.md)
+- [Native SSH access](docs/development/remote-access.md)
+- [Linux x86_64 compatibility](docs/architecture/linux-x86_64-abi.md)
+- [Static Linux application compatibility](docs/development/linux-application-compatibility.md)
+- [ADRs](docs/adr/)
+- [GoOS release notes](docs/releases/)
+- [Development and testing](docs/development/)
 
 Current priorities and future milestones are tracked in the
 [roadmap](docs/development/roadmap.md).
 
 ## Contributors
-
-- **Nikita Parfenovich** ([@bar0metr](https://github.com/bar0metr)), creator and maintainer
-- **Dmitry Shabalin** ([d_shabalin@g-togl.site](mailto:d_shabalin@g-togl.site))
 
 See [CONTRIBUTORS](CONTRIBUTORS.md).
 
