@@ -150,7 +150,9 @@ gone. The VFS closes the session's open files when its channel closes.
 When the VFS dies, PID 1 kills every `sftpd`, and each worker sends the exit status and
 closes its channel. PID 1 admits no new connection in the meantime. It stops the remote
 service once those workers finish, or after 5 seconds if a peer does not answer. Loss
-of any other remote dependency stops the service at once. The normal restart path
+of another remote dependency normally stops the service at once. During the bounded
+shutdown a VFS failure started, that shutdown finishes instead, so a later loss does
+not cut off the SSH channels being closed. The normal restart path
 then brings the VFS and the remote service back. Old sessions, processes and handles
 do not return, and a wire handle carries a nonce that a new `sftpd` does not share.
 
