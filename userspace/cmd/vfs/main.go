@@ -278,7 +278,11 @@ func processControl(message ipc.Message) bool {
 // channel receive reports PeerDied after queued messages (and attachments)
 // drain, so closing here does not abandon received handles in the IPC queue.
 func closeSession(index int) {
-	service.CloseSession(sessionOwner(index))
+	rooted := service.Rooted(sessionOwner(index))
+	closed := service.CloseSession(sessionOwner(index))
+	if rooted {
+		syslog.Info("rooted session closed", syslog.Uint("open-files", uint64(closed)), syslog.Uint("sessions", uint64(liveSessions-1)))
+	}
 	readPoolProbeSessionClosed(sessionOwner(index))
 	if validation.Enabled {
 		releaseWithheld(sessionOwner(index), sessions[index], false)

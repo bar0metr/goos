@@ -96,7 +96,7 @@ func newBackend(conn net.Conn, cfg Config) (backend, error) {
 	}
 	server.AddHostKey(signer)
 	b := &pumpBackend{memory: newPumpMemory(), data: make([]byte, MaxData)}
-	p, err := ssh.NewPump(conn, ssh.PumpConfig{Server: server, Memory: &b.memory})
+	p, err := ssh.NewPump(conn, ssh.PumpConfig{Server: server, Memory: &b.memory, Subsystem: cfg.Subsystem})
 	if err != nil {
 		return nil, err
 	}

@@ -69,6 +69,8 @@ const (
 	FaultNetDriver
 	// FaultRemoteSigner closes one SSH worker's signer endpoint.
 	FaultRemoteSigner
+	// FaultRemoteWorker kills the SSH worker of one running SFTP session.
+	FaultRemoteWorker
 )
 
 // ControlStatus answers control requests. Remote shutdown returns Accepted
@@ -134,7 +136,7 @@ func validControl(operation ControlOperation, argument uint8) bool {
 	case ControlKill:
 		return argument < Slots
 	case ControlFault:
-		return argument >= FaultTerminal && argument <= FaultRemoteSigner
+		return argument >= FaultTerminal && argument <= FaultRemoteWorker
 	default:
 		return false
 	}

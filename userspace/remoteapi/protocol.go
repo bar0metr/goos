@@ -9,7 +9,7 @@ import (
 
 const (
 	ProtocolID    = uint64(0x4752454d4f544531) // GREMOTE1
-	Version       = uint16(2)
+	Version       = uint16(3)
 	MaxSessions   = 4
 	MaxHandshakes = 2
 	MaxWorkers    = MaxSessions + MaxHandshakes
@@ -24,6 +24,7 @@ type ExecutionMode uint8
 const (
 	ModeTerminal ExecutionMode = iota
 	ModeExec
+	ModeSFTP
 )
 
 type Operation uint8
@@ -90,7 +91,7 @@ type Request struct {
 }
 
 func validRequest(request *Request) bool {
-	if request.Mode > ModeExec || (request.Operation != OperationOpen && (request.Mode != ModeTerminal || request.CommandSize != 0 || request.Command != 0)) {
+	if request.Mode > ModeSFTP || (request.Operation != OperationOpen && (request.Mode != ModeTerminal || request.CommandSize != 0 || request.Command != 0)) {
 		return false
 	}
 	switch request.Operation {
@@ -99,6 +100,9 @@ func validRequest(request *Request) bool {
 	case OperationOpen:
 		if request.Mode == ModeExec {
 			return request.Session == 0 && request.Geometry == (Geometry{}) && request.Command != 0 && request.CommandSize > 0 && int(request.CommandSize) <= MaxCommand
+		}
+		if request.Mode == ModeSFTP {
+			return request.Session == 0 && request.Geometry == (Geometry{}) && request.Command == 0 && request.CommandSize == 0
 		}
 		return request.Session == 0 && request.Geometry.Valid() && request.Command == 0 && request.CommandSize == 0
 	case OperationClose:
@@ -157,9 +161,10 @@ func DecodeRequest(in *ipc.Message, out *Request) bool {
 	return true
 }
 
-// Open transfers GTTY and stdout for a terminal, or stdin writer, stdout
-// reader and stderr reader for exec. Exec carries a bounded command object;
-// neither mode permits selecting an executable or launch authority.
+// Open transfers GTTY and stdout for a terminal, stdin writer, stdout reader
+// and stderr reader for exec, or stdin writer and stdout reader for SFTP. Exec
+// carries a bounded command object; no mode permits selecting an executable or
+// launch authority.
 type Reply struct {
 	Operation Operation
 	Result    Result
@@ -172,13 +177,13 @@ func replyHandles(reply *Reply) int {
 		if reply.Mode == ModeExec {
 			return 3
 		}
-		return 2
+		return 2 // A terminal's GTTY and stdout, or SFTP's two streams.
 	}
 	return 0
 }
 
 func validReply(reply *Reply) bool {
-	if reply.Mode > ModeExec || reply.Operation != OperationOpen && reply.Mode != ModeTerminal {
+	if reply.Mode > ModeSFTP || reply.Operation != OperationOpen && reply.Mode != ModeTerminal {
 		return false
 	}
 	if reply.Operation < OperationOpen || reply.Operation > OperationAuthenticate || reply.Result > ResultPermissionDenied {

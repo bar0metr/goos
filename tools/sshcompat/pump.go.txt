@@ -22,6 +22,8 @@ type PumpMemory interface { EnterKey(newGeneration bool); LeaveKey() }
 type PumpConfig struct {
  Server *ServerConfig
  Memory PumpMemory
+ // Subsystem is the one subsystem name a session may request, or empty for none.
+ Subsystem string
 }
 type PumpEventKind uint8
 const (
@@ -35,6 +37,7 @@ const (
  PumpClose
  PumpRekey
  PumpExec
+ PumpSubsystem
 )
 type PumpEvent struct { Kind PumpEventKind; Data []byte; Command []byte; Term [64]byte; TermLen uint8; Rows, Columns uint32 }
 
@@ -45,6 +48,7 @@ type Pump struct {
  conn net.Conn
  config *ServerConfig
  memory PumpMemory
+ subsystem string
  transport *transport
  handshake *handshakeTransport
  user string
@@ -72,7 +76,7 @@ func NewPump(conn net.Conn,cfg PumpConfig)(*Pump,error){
  c.MACs=[]string{HMACSHA256}
  c.PublicKeyAuthAlgorithms=[]string{KeyAlgoED25519}
  if c.MaxAuthTries<1 || c.MaxAuthTries>10 || c.NoClientAuth || c.PublicKeyCallback==nil || c.PasswordCallback!=nil || c.KeyboardInteractiveCallback!=nil || c.GSSAPIWithMICConfig!=nil {return nil,ErrPumpState}
- p:=&Pump{conn:conn,config:&c,memory:cfg.Memory,frame:make([]byte,PumpMaxPacket+20),control:make([]byte,PumpMaxPacket)}
+ p:=&Pump{conn:conn,config:&c,memory:cfg.Memory,subsystem:cfg.Subsystem,frame:make([]byte,PumpMaxPacket+20),control:make([]byte,PumpMaxPacket)}
  return p,nil
 }
 // The initial upstream auth loop runs synchronously, without a mux or read loop.
@@ -237,6 +241,9 @@ func (p *Pump) application(packet []byte)(PumpEvent,error){
   case "shell":if p.pty && !p.started && len(m.RequestSpecificData)==0 {p.started=true;accepted=true;event.Kind=PumpShell}
   case "exec":
    if !p.pty && !p.started {command,tail,ok:=parseString(m.RequestSpecificData);if ok && len(tail)==0 && len(command)>0 && len(command)<=4096 && bytes.IndexByte(command,0)<0 {p.started=true;p.exec=true;accepted=true;event=PumpEvent{Kind:PumpExec,Command:command}}}
+  case "subsystem":
+   // A subsystem carries a binary stream like exec, and shares its credit rule.
+   if !p.pty && !p.started && p.subsystem!="" {name,tail,ok:=parseString(m.RequestSpecificData);if ok && len(tail)==0 && string(name)==p.subsystem {p.started=true;p.exec=true;accepted=true;event=PumpEvent{Kind:PumpSubsystem,Command:name}}}
   case "window-change":if p.pty && len(m.RequestSpecificData)==16 {cols:=binary.BigEndian.Uint32(m.RequestSpecificData);rows:=binary.BigEndian.Uint32(m.RequestSpecificData[4:]);if pumpGeometry(rows,cols){accepted=true;event=PumpEvent{Kind:PumpResize,Rows:rows,Columns:cols}}}
   }
   if m.WantReply{kind:=byte(msgChannelFailure);if accepted{kind=msgChannelSuccess};b:=[5]byte{kind};binary.BigEndian.PutUint32(b[1:],p.peer);if err:=p.send(b[:]);err!=nil{return progress,err}}

@@ -342,6 +342,9 @@ func (service *Service) CloseSession(owner vfs.Owner) int {
 	return closed
 }
 
+// Rooted reports whether the session is limited to a root.
+func (service *Service) Rooted(owner vfs.Owner) bool { return service.namespace.Rooted(owner) }
+
 // BackendBatchCounters counts the batched listing exchanges with a filesystem
 // service and the records they brought back.
 type BackendBatchCounters struct {
@@ -541,6 +544,11 @@ func (service *Service) authorize(owner vfs.Owner, request vfs.Request) vfs.Stat
 		rights = vfs.Write
 	case vfs.OperationUnlink, vfs.OperationRename, vfs.OperationReplace:
 		rights, moving = vfs.Write, true
+	case vfs.OperationFilesystemInfo, vfs.OperationReadMount:
+		if service.namespace.Rooted(owner) {
+			return vfs.StatusPermissionDenied
+		}
+		return vfs.StatusOK
 	default:
 		return vfs.StatusOK
 	}

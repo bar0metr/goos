@@ -160,3 +160,17 @@ the native readiness mechanisms; completion hints bridge the goroutine workers
 back into that owner loop. VFS closes a server endpoint on `PeerDied`, and the
 kernel then releases the channel object. Replies therefore cannot be consumed
 by another process sharing one queue.
+
+## Rooted sessions
+
+PID 1 can limit a session to a directory with `Authority.Root`, carried by VFS control
+protocol version 10. Every path the session names must be that canonical path or lie
+below it, and a rename, replacement or removal must lie strictly below it. The session
+cannot use the mount table.
+
+A root is path-based confinement. It does not fix a backend or mount, so a mount below
+the root stays reachable unless another rule denies it. A subtree scope instead follows
+node identity on one backend and walks a bounded number of nodes. Scopes apply inside a
+root as usual. An open handle remains a capability to its object if another session
+renames the object out of the root; the session cannot reach it by path again. See
+[ADR 0209](../adr/0209-native-sftp-service.md).

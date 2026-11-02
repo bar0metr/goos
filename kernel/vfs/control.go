@@ -10,8 +10,9 @@ import (
 const (
 	ControlProtocolID = uint64(0x4756465343544c31)
 	// Version 9 adds the attach generation and fence to SetFilesystem and
-	// the notice that a filesystem service must be replaced.
-	ControlVersion      = uint16(9)
+	// the notice that a filesystem service must be replaced. Version 10 adds an
+	// optional rooted path to AddSession authority.
+	ControlVersion      = uint16(10)
 	operationAddSession = byte(1)
 	operationSync       = byte(2)
 	// operationSetFilesystem hands the service the client end of a channel to

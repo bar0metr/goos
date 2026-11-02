@@ -275,7 +275,7 @@ func storageExited(name string) {
 		filesystemPending = true
 	}
 	// A read in flight from the storage that went cannot be answered.
-	stopRemoteService()
+	stopRemoteAfterStorage()
 	cancelServiceSources()
 	if !systemReady {
 		return

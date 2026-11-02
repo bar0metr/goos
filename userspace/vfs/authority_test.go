@@ -412,3 +412,33 @@ func TestCrossLinkedDirectoryListingHidesScopedChildren(t *testing.T) {
 		t.Fatalf("exact alias listed %v", names)
 	}
 }
+
+func TestRootedSessionThroughDispatch(t *testing.T) {
+	service, _ := protectedRemote(t)
+	const rooted vfs.Owner = 77
+	for _, path := range []string{"/home", "/home/rooted", "/home/elsewhere"} {
+		service.Dispatch(1, vfs.Request{Operation: vfs.OperationMkdir, Path: []byte(path)})
+	}
+	authority, ok := vfs.RootedAuthority([]byte("/home/rooted"))
+	if !ok || service.SetAuthority(rooted, authority) != vfs.StatusOK {
+		t.Fatal("authority")
+	}
+	if reply := service.Dispatch(rooted, vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/home/rooted/file")}); reply.Status != vfs.StatusOK {
+		t.Fatal(reply.Status)
+	}
+	opened := service.Dispatch(rooted, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/home/rooted/file")})
+	if opened.Status != vfs.StatusOK {
+		t.Fatal(opened.Status)
+	}
+	deny(t, service, rooted,
+		vfs.Request{Operation: vfs.OperationStat, Path: []byte("/home/elsewhere")},
+		vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/home/rooted/../elsewhere/x")},
+		vfs.Request{Operation: vfs.OperationRename, Path: []byte("/home/rooted/file"), Target: []byte("/home/elsewhere/file")},
+		vfs.Request{Operation: vfs.OperationRename, Path: []byte("/home/rooted"), Target: []byte("/home/moved")},
+		vfs.Request{Operation: vfs.OperationUnlink, Path: []byte("/home/rooted")},
+		vfs.Request{Operation: vfs.OperationReadMount},
+		vfs.Request{Operation: vfs.OperationFilesystemInfo, Path: []byte("/home/rooted")})
+	if !service.Rooted(rooted) || service.CloseSession(rooted) != 1 || service.Rooted(rooted) {
+		t.Fatal("close did not release the rooted session and its file")
+	}
+}

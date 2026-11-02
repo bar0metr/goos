@@ -34,11 +34,35 @@ type Policy struct {
 	Ciphers            []string
 	HostKeyAlgorithms  []string
 	UserKeyAlgorithms  []string
+	SFTPEnabled        bool
+	SFTPRoot           string
 }
 
+// declaration holds one setting's default in a small form. A config.Value spans
+// its whole text buffer, and this table is in every image that links the package.
 type declaration struct {
-	name  string
-	value config.Value
+	name   string
+	kind   config.Kind
+	number uint64
+	text   string
+}
+
+func (item *declaration) value() config.Value {
+	switch item.kind {
+	case config.KindBool:
+		return config.Bool(item.number == 1)
+	case config.KindUint:
+		return config.Uint(item.number)
+	}
+	return text(item.text)
+}
+
+func flag(name string) declaration { return declaration{name: name, kind: config.KindBool} }
+func number(name string, value uint64) declaration {
+	return declaration{name: name, kind: config.KindUint, number: value}
+}
+func textSetting(name, value string) declaration {
+	return declaration{name: name, kind: config.KindText, text: value}
 }
 
 func text(value string) config.Value {
@@ -46,29 +70,31 @@ func text(value string) config.Value {
 	return result
 }
 
-func defaults() [14]declaration {
-	return [14]declaration{
-		{"enabled", config.Bool(false)},
-		{"listen-address", text("0.0.0.0")},
-		{"port", config.Uint(22)},
-		{"user", text("user")},
-		{"authorized-keys", text("/home/user/.ssh/authorized_keys")},
-		{"host-key", text("/state/security/ssh/ssh_host_ed25519_key")},
-		{"max-sessions", config.Uint(4)},
-		{"max-auth-attempts", config.Uint(3)},
-		{"handshake-timeout-ms", config.Uint(15000)},
-		{"idle-timeout-sec", config.Uint(0)},
-		{"kex", text(KEXAlgorithm)},
-		{"ciphers", text(CipherAlgorithm)},
-		{"host-key-algorithms", text(KeyAlgorithm)},
-		{"user-key-algorithms", text(KeyAlgorithm)},
+func defaults() [16]declaration {
+	return [16]declaration{
+		flag("enabled"),
+		textSetting("listen-address", "0.0.0.0"),
+		number("port", 22),
+		textSetting("user", "user"),
+		textSetting("authorized-keys", "/home/user/.ssh/authorized_keys"),
+		textSetting("host-key", "/state/security/ssh/ssh_host_ed25519_key"),
+		number("max-sessions", 4),
+		number("max-auth-attempts", 3),
+		number("handshake-timeout-ms", 15000),
+		number("idle-timeout-sec", 0),
+		textSetting("kex", KEXAlgorithm),
+		textSetting("ciphers", CipherAlgorithm),
+		textSetting("host-key-algorithms", KeyAlgorithm),
+		textSetting("user-key-algorithms", KeyAlgorithm),
+		flag("sftp-enabled"),
+		textSetting("sftp-root", "/home/user"),
 	}
 }
 
 // DeclareDefaults adds the remote namespace with writable typed defaults.
 func DeclareDefaults(store *config.Store) config.Status {
 	for _, item := range defaults() {
-		if status := store.Declare(Prefix+item.name, item.value, false); status != config.StatusOK {
+		if status := store.Declare(Prefix+item.name, item.value(), false); status != config.StatusOK {
 			return status
 		}
 	}
@@ -81,10 +107,10 @@ func Load(get Getter) (Policy, error) {
 	if get == nil {
 		return Policy{}, errors.New("remote configuration unavailable")
 	}
-	var values [14]config.Value
+	var values [16]config.Value
 	for index, item := range defaults() {
 		value, status := get(Prefix + item.name)
-		if status != config.StatusOK || value.Kind != item.value.Kind || !validValue(value) {
+		if status != config.StatusOK || value.Kind != item.kind || !validValue(value) {
 			return Policy{}, errors.New("invalid remote setting: " + item.name)
 		}
 		values[index] = value
@@ -104,6 +130,7 @@ func Load(get Getter) (Policy, error) {
 		User: string(values[3].Bytes()), AuthorizedKeys: string(values[4].Bytes()), HostKey: string(values[5].Bytes()),
 		MaxSessions: uint8(values[6].Uint), MaxAuthAttempts: uint8(values[7].Uint),
 		HandshakeTimeoutMS: uint32(values[8].Uint), IdleTimeoutSec: uint32(values[9].Uint),
+		SFTPEnabled: values[14].Uint == 1, SFTPRoot: string(values[15].Bytes()),
 	}
 	if !ValidUser(policy.User) {
 		return Policy{}, errors.New("invalid remote user")
@@ -111,6 +138,9 @@ func Load(get Getter) (Policy, error) {
 	if !ValidPath(policy.AuthorizedKeys) || !ValidPath(policy.HostKey) || !strings.HasPrefix(policy.HostKey, "/state/") || policy.AuthorizedKeys == policy.HostKey ||
 		policy.AuthorizedKeys == policy.HostKey+".pub" || policy.AuthorizedKeys == policy.HostKey+".new" || policy.AuthorizedKeys == policy.HostKey+".pub.new" {
 		return Policy{}, errors.New("invalid remote key paths")
+	}
+	if !ValidSFTPRoot(policy.SFTPRoot) {
+		return Policy{}, errors.New("invalid remote SFTP root")
 	}
 	for _, item := range []struct {
 		index     int
@@ -178,6 +208,12 @@ func ValidPath(path string) bool {
 		}
 	}
 	return true
+}
+
+// ValidSFTPRoot accepts a canonical absolute path strictly below /home. It says
+// nothing of whether that directory exists.
+func ValidSFTPRoot(path string) bool {
+	return ValidPath(path) && strings.HasPrefix(path, "/home/")
 }
 
 // ParseAlgorithms accepts only canonical comma-separated compiled names. The

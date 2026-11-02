@@ -221,6 +221,12 @@ func handleControl(message ipc.Message) {
 			status = execproto.ControlOK
 		}
 		sendControlStatus(status, message.Correlation)
+	case operation == execproto.ControlFault && argument == execproto.FaultRemoteWorker:
+		status := execproto.ControlNotFound
+		if injectRemoteWorkerFault() {
+			status = execproto.ControlOK
+		}
+		sendControlStatus(status, message.Correlation)
 	case operation == execproto.ControlFault && argument == execproto.FaultStorage:
 		status := execproto.ControlNotFound
 		if injectStorageLoss() {

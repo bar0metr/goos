@@ -25,9 +25,11 @@ accepts only username `user` and up to 64 configured public keys. Native code
 uses `cryptosys.Reader`; entropy failure aborts the exchange, including the
 upstream KEX cookie read.
 
-The server accepts one session channel, one PTY, shell, window-change, data,
-EOF, and close. It requires PTY before shell. It rejects exec, subsystem, global
-forwarding, agent and X11 requests. TERM must contain 1..64 printable
+The server accepts one session channel, one PTY, shell, exec, window-change, data,
+EOF, and close, and the one subsystem name its caller configures. It requires PTY
+before shell. A session enters one of those modes once; any later request for a
+mode, and any other subsystem name, gets a channel failure and leaves the
+connection up. It rejects global forwarding, agent and X11 requests. TERM must contain 1..64 printable
 ASCII bytes (0x20..0x7e); rows and columns must lie in 1..1000, including the initial PTY.
 Zero geometry does not request a default.
 
