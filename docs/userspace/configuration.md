@@ -178,8 +178,8 @@ Its UDP limits (ADR 0195), all `uint`:
 | `system.net.udp.ephemeral-port-min` | 49152 | 1024..65535 | lowest port a bind to port 0 or a connect may pick |
 | `system.net.udp.ephemeral-port-max` | 65535 | 1024..65535 | highest such port; at least `ephemeral-port-min` |
 | `system.net.udp.recv-queue-depth` | 8 | 1..16 | datagrams queued on one endpoint before newcomers are dropped |
-| `system.net.udp.max-endpoints` | 32 | 1..32 | endpoints open across all sessions |
-| `system.net.udp.max-endpoints-per-session` | 8 | 1..8 | endpoints open in one session; at most `max-endpoints` |
+| `system.net.udp.max-endpoints` | 96 | 1..96 | endpoints open across all sessions |
+| `system.net.udp.max-endpoints-per-session` | 8 | 1..8 | endpoints open in one ordinary session; at most `max-endpoints`. A session PID 1 grants a larger quota keeps it |
 | `system.net.udp.max-payload` | 4096 | 1232..4096 | largest payload sent or queued, loopback included |
 
 The upper ends are compile-time capacities that no setting raises: 8 UDP
@@ -205,8 +205,8 @@ Its TCP settings (ADR 0196), all `uint`:
 | --- | ---: | ---: | --- |
 | `system.net.tcp.ephemeral-port-min` | 49152 | 1024..65535 | lowest automatic local port |
 | `system.net.tcp.ephemeral-port-max` | 65535 | 1024..65535 | highest automatic local port; at least the minimum |
-| `system.net.tcp.max-endpoints` | 32 | 1..32 | endpoints across all TCP sessions |
-| `system.net.tcp.max-endpoints-per-session` | 8 | 1..8 | endpoints in one session; at most the global limit |
+| `system.net.tcp.max-endpoints` | 96 | 1..96 | endpoints across all TCP sessions |
+| `system.net.tcp.max-endpoints-per-session` | 8 | 1..8 | endpoints in one ordinary session; at most the global limit. A session PID 1 grants a larger quota keeps it |
 | `system.net.tcp.listen-backlog` | 8 | 1..8 | children retained by one listener |
 | `system.net.tcp.send-buffer-bytes` | 16384 | 1..16384 | send bytes accepted per connection |
 | `system.net.tcp.recv-buffer-bytes` | 16384 | 1..16384 | contiguous receive bytes retained per connection |

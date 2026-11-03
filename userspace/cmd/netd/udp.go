@@ -88,7 +88,11 @@ func addUDPSession() netapi.ControlResult {
 	current := &udpSessions[index]
 	current.channel, current.txHandle, current.rxHandle = channel, tx, rx
 	current.txBase, current.txSize, current.rxBase, current.rxSize = txBase, txSize, rxBase, rxSize
-	current.state.Start(&stack, index, sys.Window(txBase, txPool), sys.Window(rxBase, rxPool))
+	// The control codec admits quotas 1 to netapi.MaxSessionQuota only.
+	if !current.state.StartQuota(&stack, index, int(control.Quota), sys.Window(txBase, txPool), sys.Window(rxBase, rxPool)) {
+		closeUDPSession(index, "quota invalid")
+		return netapi.ControlInvalidArgument
+	}
 	return netapi.ControlOK
 }
 

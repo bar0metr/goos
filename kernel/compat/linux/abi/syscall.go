@@ -31,6 +31,7 @@ const (
 	SysReadv         Syscall = 19
 	SysWritev        Syscall = 20
 	SysPipe          Syscall = 22
+	SysSelect        Syscall = 23
 	SysSchedYield    Syscall = 24
 	SysMadvise       Syscall = 28
 	SysDup           Syscall = 32
@@ -98,6 +99,7 @@ const (
 	SysFchmodat         Syscall = 268
 	SysFaccessat        Syscall = 269
 	SysUtimensat        Syscall = 280
+	SysPselect6         Syscall = 270
 	SysPpoll            Syscall = 271
 	SysSetRobustList    Syscall = 273
 	SysDup3             Syscall = 292
@@ -321,7 +323,7 @@ func (number Syscall) Known() bool {
 		SysArchPrctl, SysGettid, SysTime, SysFutex, SysGetdents64, SysSetTidAddress,
 		SysClockGettime,
 		SysExitGroup, SysOpenat, SysNewfstatat, SysUnlinkat, SysReadlinkat,
-		SysPpoll, SysSetRobustList, SysPipe2, SysPrlimit64, SysGetrandom,
+		SysSelect, SysPselect6, SysPpoll, SysSetRobustList, SysPipe2, SysPrlimit64, SysGetrandom,
 		SysStatx, SysChmod, SysFchmod, SysFchmodat, SysUtimensat, SysSchedGetaffinity, SysSchedSetaffinity, SysGetcpu:
 		return true
 	default:

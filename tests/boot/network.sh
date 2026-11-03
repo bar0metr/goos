@@ -617,8 +617,8 @@ require peer.dns-tcp-reset '^dns-tcp-reset tcp-fallback-reset\.test ' "$queries"
 require_after left.dns-tcp-counters 'resolve status ' '^tcp: fallbacks 2 answers 1$' "$left"
 require_after left.dns-tcp-errors 'resolve status ' '^tcp-errors: failures 1 timeouts 0$' "$left"
 # The fallback connections are gone once the lookups end.
-before=$(window "$left" 'net status   ' | grep '^  endpoints: [0-9]*/32 listeners')
-after=$(window "$left" 'net status    ' | grep '^  endpoints: [0-9]*/32 listeners')
+before=$(window "$left" 'net status   ' | grep '^  endpoints: [0-9]*/96 listeners')
+after=$(window "$left" 'net status    ' | grep '^  endpoints: [0-9]*/96 listeners')
 [ -n "$before" ] && [ "$before" = "$after" ] || fail left.dns-tcp-endpoints "TCP endpoints after the fallbacks as before, '$before' then '$after'" "$left"
 checks=$((checks + 1))
 require_after right.dnsq-udp 'dnsq @192.0.2.53 dnsq.test' '^;; transport: UDP$' "$right"

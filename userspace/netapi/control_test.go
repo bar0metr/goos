@@ -18,7 +18,10 @@ func controlSamples() []controlSample {
 		{ControlRequest{Opcode: ControlSetDevice, Generation: 1}, []handle.ID{20, 21, 22}},
 		{ControlRequest{Opcode: ControlSetDevice, Generation: ^uint64(0)}, []handle.ID{20, 21, 22}},
 		{ControlRequest{Opcode: ControlAddSession, Rights: RightsResolveStatus}, []handle.ID{14}},
-		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsUDP}, []handle.ID{30, 31, 32}},
+		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsUDP, Quota: OrdinarySessionQuota}, []handle.ID{30, 31, 32}},
+		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsUDP, Quota: MaxSessionQuota}, []handle.ID{30, 31, 32}},
+		{ControlRequest{Opcode: ControlAddTCPSession, Rights: RightsTCP, Quota: 1}, []handle.ID{33, 34, 35}},
+		{ControlRequest{Opcode: ControlAddTCPSession, Rights: RightsTCP, Quota: MaxSessionQuota}, []handle.ID{33, 34, 35}},
 		{ControlRequest{Opcode: ControlSetNetwork, Generation: 2}, []handle.ID{40, 41, 42, 43}},
 		{ControlRequest{Opcode: ControlSetTCP, Generation: 2}, []handle.ID{44, 45, 46}},
 	}
@@ -57,7 +60,13 @@ func TestControlRequestInvalid(t *testing.T) {
 		{ControlRequest{Opcode: ControlAddSession, Rights: RightsUDP}, []handle.ID{1}},
 		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsPingStatus}, []handle.ID{1, 2, 3}},
 		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsUDP, Generation: 1}, []handle.ID{1, 2, 3}},
-		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsUDP}, []handle.ID{1, 2}},
+		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsUDP, Quota: 8}, []handle.ID{1, 2}},
+		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsUDP}, []handle.ID{1, 2, 3}},
+		{ControlRequest{Opcode: ControlAddTCPSession, Rights: RightsTCP}, []handle.ID{1, 2, 3}},
+		{ControlRequest{Opcode: ControlAddTCPSession, Rights: RightsTCP, Quota: MaxSessionQuota + 1}, []handle.ID{1, 2, 3}},
+		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsUDP, Quota: MaxSessionQuota + 1}, []handle.ID{1, 2, 3}},
+		{ControlRequest{Opcode: ControlAddSession, Rights: RightsPingStatus, Quota: 1}, []handle.ID{1}},
+		{ControlRequest{Opcode: ControlSetTCP, Generation: 1, Quota: 8}, []handle.ID{1, 2, 3}},
 		{ControlRequest{Opcode: ControlSetNetwork}, []handle.ID{1, 2, 3, 4}},
 		{ControlRequest{Opcode: ControlSetNetwork, Generation: 1}, []handle.ID{1, 2, 3}},
 		{ControlRequest{Opcode: ControlSetNetwork, Generation: 1, Rights: RightsUDP}, []handle.ID{1, 2, 3, 4}},
@@ -107,9 +116,16 @@ func TestControlRequestRejects(t *testing.T) {
 		{"handle count overflow", func(m *ipc.Message) { m.HandleCount = 200 }},
 		{"zero handle", func(m *ipc.Message) { m.Handles[0] = 0 }},
 		{"opcode", func(m *ipc.Message) { m.Payload[0] = byte(ControlSetTCP + 1) }},
-		{"rights", func(m *ipc.Message) { m.Payload[1] = byte(RightsUDP + 1) }},
+		{"rights", func(m *ipc.Message) { m.Payload[1] = byte(RightsTCP + 1) }},
+		{"quota", func(m *ipc.Message) {
+			if m.Payload[0] == byte(ControlAddUDPSession) || m.Payload[0] == byte(ControlAddTCPSession) {
+				m.Payload[controlQuota] = 0
+			} else {
+				m.Payload[controlQuota] = 1
+			}
+		}},
 		{"generation", func(m *ipc.Message) {
-			if m.Payload[0] == byte(ControlAddSession) || m.Payload[0] == byte(ControlAddUDPSession) {
+			if m.Payload[0] == byte(ControlAddSession) || m.Payload[0] == byte(ControlAddUDPSession) || m.Payload[0] == byte(ControlAddTCPSession) {
 				m.Payload[8] = 1
 			} else {
 				copy(m.Payload[controlGeneration:ControlSize], make([]byte, 8))

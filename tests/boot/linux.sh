@@ -295,6 +295,10 @@ run '/system/linux/abi-probe ppoll'
 expect '^ppoll ok$' 'ppoll timespec timeout and temporary signal mask'
 clean 'ppoll timespec timeout and temporary signal mask'
 
+run '/system/linux/abi-probe select'
+expect '^select ok$' 'select and pselect6 sets, timeouts, errors, and temporary signal mask'
+clean 'select and pselect6 sets, timeouts, errors, and temporary signal mask'
+
 run '/system/linux/abi-probe run /system/linux/musl-hello alpha beta'
 expect '^argc=3$' 'a Linux program replaces itself with another'
 expect '^hello from musl$' 'a Linux program replaces itself with another'

@@ -127,7 +127,7 @@ func listen(parsed *options) {
 		utility.Usage()
 	}
 	listener := open()
-	request = tcpapi.Request{Opcode: tcpapi.OpBind, Endpoint: listener, Address: parsed.bind, Port: port(parsed.operands[0])}
+	request = tcpapi.Request{Opcode: tcpapi.OpBind, Endpoint: listener, Address: parsed.bind, Port: port(parsed.operands[0]), Flags: tcpapi.FlagReuseAddr}
 	call("bind", parsed.wait)
 	request = tcpapi.Request{Opcode: tcpapi.OpListen, Endpoint: listener, Backlog: uint8(parsed.count)}
 	call("listen", parsed.wait)
@@ -157,7 +157,7 @@ func self(parsed *options) {
 	}
 	local, targetPort := address(parsed.operands[0]), port(parsed.operands[1])
 	listener := open()
-	request = tcpapi.Request{Opcode: tcpapi.OpBind, Endpoint: listener, Address: local, Port: targetPort}
+	request = tcpapi.Request{Opcode: tcpapi.OpBind, Endpoint: listener, Address: local, Port: targetPort, Flags: tcpapi.FlagReuseAddr}
 	call("bind", parsed.wait)
 	request = tcpapi.Request{Opcode: tcpapi.OpListen, Endpoint: listener, Backlog: 1}
 	call("listen", parsed.wait)

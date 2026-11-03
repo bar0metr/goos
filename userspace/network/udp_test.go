@@ -121,8 +121,8 @@ func TestUDPDHCPPortReserved(t *testing.T) {
 func TestUDPEndpointExhaustionAndRelease(t *testing.T) {
 	h := newHarness(t)
 	var ids []EndpointID
-	for owner := 0; owner < MaxUDPEndpoints/MaxUDPSessionEndpoints; owner++ {
-		for count := 0; count < MaxUDPSessionEndpoints; count++ {
+	for owner, quota := range fullTable(h.stack) {
+		for count := 0; count < quota; count++ {
 			ids = append(ids, h.open(owner))
 		}
 	}
@@ -306,7 +306,7 @@ func TestUDPPayloadLimits(t *testing.T) {
 	if sent := only(t, h.drain()); len(sent.udp.payload) != limit {
 		t.Fatalf("sent %d bytes", len(sent.udp.payload))
 	}
-	if result := h.stack.UDPSendTo(0, id, peerIP, 9, make([]byte, limit+1), h.now); result != ResultInvalidArgument {
+	if result := h.stack.UDPSendTo(0, id, peerIP, 9, make([]byte, limit+1), h.now); result != ResultMessageSize {
 		t.Fatalf("one byte over: %d", result)
 	}
 	if frames := h.drain(); len(frames) != 0 {
@@ -315,7 +315,7 @@ func TestUDPPayloadLimits(t *testing.T) {
 	if result := h.stack.UDPSendTo(0, id, LoopbackAddress, 9, make([]byte, UDPPayloadCapacity), h.now); result != ResultOK {
 		t.Fatalf("loopback at the payload capacity: %d", result)
 	}
-	if result := h.stack.UDPSendTo(0, id, LoopbackAddress, 9, make([]byte, UDPPayloadCapacity+1), h.now); result != ResultInvalidArgument {
+	if result := h.stack.UDPSendTo(0, id, LoopbackAddress, 9, make([]byte, UDPPayloadCapacity+1), h.now); result != ResultMessageSize {
 		t.Fatalf("loopback past the capacity: %d", result)
 	}
 }
@@ -467,8 +467,8 @@ func TestUDPQueueOrderAndOverflow(t *testing.T) {
 func TestUDPSharedBuffersBoundAllQueues(t *testing.T) {
 	h := readyWithPeer(t)
 	var ports []uint16
-	for owner := 0; owner < MaxUDPEndpoints/MaxUDPSessionEndpoints; owner++ {
-		for count := 0; count < MaxUDPSessionEndpoints; count++ {
+	for owner, quota := range fullTable(h.stack) {
+		for count := 0; count < quota; count++ {
 			ports = append(ports, h.bind(owner, h.open(owner), IPv4{}, 0))
 		}
 	}
@@ -725,7 +725,7 @@ func TestUDPTuningReload(t *testing.T) {
 	if port := h.bind(0, id, IPv4{}, 0); port != 40000 {
 		t.Fatalf("port %d outside the new range", port)
 	}
-	if result := h.stack.UDPSendTo(0, id, peerIP, 9, make([]byte, UDPMinPayload+1), h.now); result != ResultInvalidArgument {
+	if result := h.stack.UDPSendTo(0, id, peerIP, 9, make([]byte, UDPMinPayload+1), h.now); result != ResultMessageSize {
 		t.Fatalf("payload over the new limit: %d", result)
 	}
 	h.receive(udpFrame(peerIP, peerMAC, 7, 40000, make([]byte, UDPMinPayload+1)))
@@ -854,4 +854,15 @@ func TestUDPConnectFixesSourceOfUnboundEndpoint(t *testing.T) {
 	if result := h.stack.UDPSend(0, id, nil, h.now); result != ResultReconfigured {
 		t.Fatalf("send from the removed address: %d", result)
 	}
+}
+
+// fullTable grants owner 0 the largest quota and gives ordinary quotas to as
+// many owners as fill the rest of the table. It returns each owner's quota.
+func fullTable(stack *Stack) []int {
+	stack.SetUDPQuota(0, MaxUDPSessionQuota)
+	quotas := []int{MaxUDPSessionQuota}
+	for left := MaxUDPEndpoints - MaxUDPSessionQuota; left > 0; left -= MaxUDPSessionEndpoints {
+		quotas = append(quotas, min(left, MaxUDPSessionEndpoints))
+	}
+	return quotas
 }
