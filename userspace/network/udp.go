@@ -249,7 +249,7 @@ func (stack *Stack) UDPBindReuse(owner int, id EndpointID, address IPv4, port ui
 	}
 	if !stack.localAddress(address) {
 		increment(&stack.udpStats.BindFail)
-		return IPv4{}, 0, ResultInvalidArgument
+		return IPv4{}, 0, ResultNoAddress
 	}
 	if port == 0 {
 		port = stack.ephemeralPort()

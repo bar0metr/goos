@@ -429,6 +429,16 @@ func (s *Service) doneConnect(o *op, sock *socket, c *NativeCompletion) {
 			sock.local, sock.localPort = c.Local, c.LocalPort
 		}
 		s.counters.Connects++
+		// A stream connect answers InProgress even when netd finished it
+		// inside the request, as a loopback connect does: Linux reports
+		// EINPROGRESS for every nonblocking TCP connect, and the next
+		// connect or SO_ERROR gives the outcome.
+		if c.Result == NativeOK && sock.stream {
+			sock.state, sock.connectDone = stateConnected, true
+			s.publish(int(o.socket))
+			s.finish(o, linuxsockapi.ResultInProgress)
+			return
+		}
 		if c.Result == NativeInProgress {
 			sock.state = stateConnecting
 			s.publish(int(o.socket))
@@ -440,6 +450,17 @@ func (s *Service) doneConnect(o *op, sock *socket, c *NativeCompletion) {
 		o.reply.Address, o.reply.Port = r.Address, r.Port
 		o.reply.Local, o.reply.LocalPort = sock.local, sock.localPort
 		s.finish(o, linuxsockapi.ResultOK)
+	case NativeRefused, NativeReset, NativeTimeout:
+		if !sock.stream {
+			s.finish(o, nativeResult(c.Result))
+			return
+		}
+		// A refusal netd learned at once, from loopback, reaches the
+		// caller the way a remote one does: InProgress now, the error in
+		// SO_ERROR and the next connect.
+		sock.state, sock.pending = stateFailed, nativeResult(c.Result)
+		s.publish(int(o.socket))
+		s.finish(o, linuxsockapi.ResultInProgress)
 	default:
 		if sock.stream {
 			sock.reopen = true
@@ -723,6 +744,9 @@ func (s *Service) stepShutdown(o *op, sock *socket) {
 // stepPendingError returns and clears SO_ERROR: the socket's own error
 // first, then whatever netd holds.
 func (s *Service) stepPendingError(o *op, sock *socket) {
+	// The kernel reads a finished connect's outcome here, so the
+	// connect after it is EISCONN.
+	sock.connectDone = false
 	if sock.pending != linuxsockapi.ResultOK || !sock.stream || sock.dead || sock.endpoint == 0 ||
 		sock.mask&MaskPendingError == 0 && !sock.fetching {
 		o.reply.Value = uint64(sock.pending)

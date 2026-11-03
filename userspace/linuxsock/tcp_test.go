@@ -224,8 +224,27 @@ func TestFailedConnectReportsAndClearsError(t *testing.T) {
 	}
 	h.complete(h.take(NativeOpen), NativeCompletion{Endpoint: 777})
 	h.complete(h.take(NativeConnect), NativeCompletion{Local: localAddress, LocalPort: 40001})
-	if reply := h.reply(f, correlation); reply.Result != linuxsockapi.ResultOK || h.endpoint(id) != 777 {
+	if reply := h.reply(f, correlation); reply.Result != linuxsockapi.ResultInProgress || h.endpoint(id) != 777 {
 		t.Fatalf("reconnect %+v", reply)
+	}
+}
+
+// A refusal netd reports inside the connect, as loopback does, arrives the
+// way a remote one does: InProgress, then the error in SO_ERROR.
+func TestImmediateRefusalIsInProgress(t *testing.T) {
+	h := newHarness(t)
+	f := h.family(1, 7)
+	id := h.open(f, linuxsockapi.KindStream)
+	correlation := h.send(f, linuxsockapi.Request{Opcode: opConnect, Socket: id, Address: peerAddress, Port: 81})
+	h.complete(h.take(NativeConnect), NativeCompletion{Result: NativeRefused})
+	if reply := h.reply(f, correlation); reply.Result != linuxsockapi.ResultInProgress {
+		t.Fatalf("connect %+v", reply)
+	}
+	if state := h.readiness(f, id); state.Ready&(linuxsockapi.ReadyOut|linuxsockapi.ReadyError) != linuxsockapi.ReadyOut|linuxsockapi.ReadyError {
+		t.Fatalf("readiness %+v", state)
+	}
+	if reply := h.call(f, linuxsockapi.Request{Opcode: linuxsockapi.OpGetPendingError, Socket: id}); reply.Value != uint64(linuxsockapi.ResultRefused) {
+		t.Fatalf("SO_ERROR %+v", reply)
 	}
 }
 

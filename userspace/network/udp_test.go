@@ -96,7 +96,7 @@ func TestUDPBindRefusesForeignAddresses(t *testing.T) {
 	h := readyWithPeer(t)
 	id := h.open(0)
 	for _, address := range []IPv4{peerIP, broadcastIPv4, {224, 0, 0, 1}, {10, 0, 2, 255}, {127, 0, 0, 0}, {127, 255, 255, 255}} {
-		if _, _, result := h.stack.UDPBind(0, id, address, 9000); result != ResultInvalidArgument {
+		if _, _, result := h.stack.UDPBind(0, id, address, 9000); result != ResultNoAddress {
 			t.Errorf("bind %v: %d", address, result)
 		}
 	}

@@ -237,8 +237,13 @@ func (h *harness) connected(family int) uint64 {
 	id := h.open(family, linuxsockapi.KindStream)
 	correlation := h.send(family, linuxsockapi.Request{Opcode: linuxsockapi.OpConnect, Socket: id, Address: peerAddress, Port: 80})
 	h.complete(h.take(NativeConnect), NativeCompletion{Local: localAddress, LocalPort: 40000})
-	if reply := h.reply(family, correlation); reply.Result != linuxsockapi.ResultOK {
+	// A stream connect netd finished at once still answers InProgress;
+	// the kernel reads the outcome through GetPendingError.
+	if reply := h.reply(family, correlation); reply.Result != linuxsockapi.ResultInProgress {
 		h.t.Fatalf("connect: %d", reply.Result)
+	}
+	if reply := h.call(family, linuxsockapi.Request{Opcode: linuxsockapi.OpGetPendingError, Socket: id}); reply.Result != linuxsockapi.ResultOK || reply.Value != 0 {
+		h.t.Fatalf("connect outcome: %+v", reply)
 	}
 	return id
 }

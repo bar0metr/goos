@@ -255,8 +255,11 @@ func (stack *Stack) TCPBind(owner int, id TCPEndpointID, address IPv4, port uint
 // the existing one is not listening. Port 0 picks a port nothing holds.
 func (stack *Stack) TCPBindReuse(owner int, id TCPEndpointID, address IPv4, port uint16, reuse bool) (IPv4, uint16, Result) {
 	entry, slot := stack.tcpEndpoint(owner, id)
-	if entry == nil || entry.state != TCPOpen || !stack.localAddress(address) {
+	if entry == nil || entry.state != TCPOpen {
 		return IPv4{}, 0, ResultInvalidArgument
+	}
+	if !stack.localAddress(address) {
+		return IPv4{}, 0, ResultNoAddress
 	}
 	if port == 0 {
 		port = stack.tcpEphemeralPort(address, IPv4{}, 0, slot)
