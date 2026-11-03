@@ -129,6 +129,7 @@ func setNetwork(generation uint64) netapi.ControlResult {
 	link = networkLink{generation: generation, channel: channel, txHandle: tx, rxHandle: rx, status: status,
 		txBase: txBase, txSize: txSize, rxBase: rxBase, rxSize: rxSize}
 	client.Bind(sys.Window(txBase, txPool), sys.Window(rxBase, rxPool))
+	stubBindUDP(txBase, rxBase)
 	resolver.Reset(clockNanos())
 	applyServers()
 	askServers()
@@ -170,6 +171,7 @@ func setTCP(generation uint64) netapi.ControlResult {
 	closeTCP()
 	stream = tcpLink{channel: channel, txHandle: tx, rxHandle: rx, txBase: txBase, txSize: txSize, rxBase: rxBase, rxSize: rxSize}
 	fallback.Bind(sys.Window(txBase, txPool), sys.Window(rxBase, rxPool))
+	stubBindTCP(txBase, rxBase)
 	syslog.Info("TCP session bound", syslog.Uint("generation", generation))
 	return netapi.ControlOK
 }
@@ -187,6 +189,7 @@ func closeTCP() {
 	sys.VMUnmap(stream.rxBase, stream.rxSize)
 	stream = tcpLink{}
 	fallback.Unbind(&resolver, clockNanos())
+	stub.UnbindTCP(&resolver)
 }
 
 // closeNetwork drops every session. The DHCP servers belonged to the lease
@@ -204,6 +207,7 @@ func closeNetwork() {
 	generation := link.generation
 	link = networkLink{generation: generation}
 	client.Unbind()
+	stub.UnbindUDP(&resolver)
 	resolver.Reset(clockNanos())
 	applyServers()
 }
@@ -257,7 +261,7 @@ func serviceUDP() {
 			return
 		}
 		answered, valid := udpapi.DecodeReply(&message, &udpReply)
-		if !valid || !client.Answer(&resolver, &udpReply, answered, clockNanos(), udpSender{}) {
+		if !valid || !answerUDP(answered, clockNanos()) {
 			syslog.Error("UDP session failed")
 			closeNetwork()
 			return
@@ -283,7 +287,7 @@ func serviceTCP() {
 			return
 		}
 		answered, valid := tcpapi.DecodeReply(&message, &tcpReply)
-		if !valid || !fallback.Answer(&resolver, &tcpReply, answered, clockNanos(), tcpSender{}) {
+		if !valid || !answerTCP(answered, clockNanos()) {
 			syslog.Error("TCP session failed")
 			closeTCP()
 			return
