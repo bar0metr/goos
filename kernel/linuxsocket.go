@@ -361,6 +361,20 @@ func (handler *linuxCallHandler) socketConnect(request linuxcompat.Request) linu
 		return linuxErrno(errno)
 	}
 	timeout := call.socket.SendTimeout
+	if !resumed && call.socket.Connecting {
+		// A connect already under way: once it finished, this one reports
+		// its outcome, 0 or the error, and a later one EISCONN; before
+		// that a nonblocking one is EALREADY and a blocking one waits.
+		if state, live := socketReadiness(call); live && state.Ready&(linuxsockapi.ReadyOut|linuxsockapi.ReadyError|linuxsockapi.ReadyHangup) == 0 && socketNonBlocking(call, 0) {
+			handler.socketEnd()
+			return linuxErrno(linuxabi.EALREADY)
+		}
+		if errno := handler.socketStart(request, socketTimeoutEnd(timeout)); errno != 0 {
+			return linuxErrno(errno)
+		}
+		handler.socketProgress(connectWaiting)
+		pending, resumed = handler.socketPending(), true
+	}
 	for round := 0; round < 4; round++ {
 		var reply linuxsockapi.Reply
 		var blocked bool

@@ -26,7 +26,8 @@ const (
 )
 
 // ClassifyOption finds who answers an option, or the error Linux gives for
-// one that does not exist. Options with behavior GoOS lacks, SO_REUSEPORT,
+// one that does not exist: EOPNOTSUPP for an unknown level, ENOPROTOOPT for
+// an unknown name. Options with behavior GoOS lacks, SO_REUSEPORT,
 // SO_BINDTODEVICE, multicast and the rest, are ENOPROTOOPT rather than
 // accepted and ignored. SO_KEEPALIVE, SO_LINGER, SO_BROADCAST, SO_OOBINLINE,
 // SO_DEBUG and SO_DONTROUTE read as off and accept only off.
@@ -58,6 +59,11 @@ func ClassifyOption(level uint64, name uint64, datagram bool, set bool) (OptionP
 		if name == abi.OptionIPTTL {
 			return OptionService, 0
 		}
+	case abi.LevelUDP:
+	default:
+		// Linux 6.12 answers a level no protocol of the socket knows with
+		// EOPNOTSUPP, a name its level does not know with ENOPROTOOPT.
+		return 0, abi.EOPNOTSUPP
 	}
 	return 0, abi.ENOPROTOOPT
 }

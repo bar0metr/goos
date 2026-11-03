@@ -323,7 +323,9 @@ func (handler *linuxCallHandler) socketReceive(request linuxcompat.Request, call
 				}
 				pending = handler.socketPending()
 			}
-			if call.socket.ShutRead && !call.socket.Datagram || partial >= transfer.limit {
+			// After SHUT_RD the service still returns what it had buffered,
+			// then end of file, as Linux does.
+			if partial >= transfer.limit {
 				handler.socketEnd()
 				return linuxcompat.Result{Value: partial}
 			}
