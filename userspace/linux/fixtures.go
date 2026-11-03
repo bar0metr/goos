@@ -29,6 +29,8 @@ var (
 	abiProbe []byte
 	//go:embed prebuilt/tty-probe
 	ttyProbe []byte
+	//go:embed prebuilt/netprobe
+	netprobe []byte
 )
 
 // All lists the fixtures in the order the image stores them.
@@ -41,5 +43,6 @@ func All() []Fixture {
 		{"dirprobe", dirprobe, "4a068a52296fca685abc2a6236f66006b6040f80335b7a3e67deadb849e9f0e6"},
 		{"abi-probe", abiProbe, "3649d8d9c01af4b54fa88ea9e5121e6453b24819339b0a88c98b61336dd0e0b2"},
 		{"tty-probe", ttyProbe, "5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957"},
+		{"netprobe", netprobe, "09662d411894720e72d1f054ead9d3cdc8c5ef7933beea429a7d8035bbc4bf6e"},
 	}
 }
