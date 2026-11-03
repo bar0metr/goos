@@ -24,6 +24,7 @@ const (
 	SysRtSigaction   Syscall = 13
 	SysRtSigprocmask Syscall = 14
 	SysRtSigreturn   Syscall = 15
+	SysRtSigpending  Syscall = 127
 	SysIoctl         Syscall = 16
 	SysPread64       Syscall = 17
 	SysPwrite64      Syscall = 18
@@ -312,7 +313,7 @@ const (
 func (number Syscall) Known() bool {
 	switch number {
 	case SysRead, SysWrite, SysOpen, SysClose, SysStat, SysFstat, SysLstat, SysPoll, SysLseek, SysMmap,
-		SysMprotect, SysMunmap, SysBrk, SysRtSigaction, SysRtSigprocmask, SysRtSigreturn, SysRtSigsuspend, SysPause,
+		SysMprotect, SysMunmap, SysBrk, SysRtSigaction, SysRtSigprocmask, SysRtSigpending, SysRtSigreturn, SysRtSigsuspend, SysPause,
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
 		SysDup, SysDup2, SysFcntl, SysFsync, SysFdatasync, SysDup3, SysPread64, SysPwrite64, SysAccess, SysSetuid, SysSetgid,
 		SysGetgroups, SysFaccessat,

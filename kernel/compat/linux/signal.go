@@ -407,6 +407,11 @@ func (state *SignalState) Action(signal uint64, replacement *[SignalActionSize]b
 		// with, and reports the mask without them.
 		stored := binary.LittleEndian.Uint64(current[signalActionMask:]) &^ uncatchable
 		binary.LittleEndian.PutUint64(current[signalActionMask:], stored)
+		// Setting a disposition that ignores the signal discards it if
+		// it is pending, blocked or not, as POSIX and Linux require.
+		if state.ignored(signal) {
+			atomic.StoreUint64(&state.pending, state.pending&^(uint64(1)<<(signal-1)))
+		}
 	}
 	return 0
 }

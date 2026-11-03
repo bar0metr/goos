@@ -89,6 +89,13 @@ func wantExecutablePage(page uint64) {
 	}
 }
 
+// executablePageWanted reports whether a copy of task's call recorded a
+// page it needs from an executable object, without taking the record.
+func executablePageWanted(task sched.TaskID) bool {
+	slot, _, valid := task.Parts()
+	return valid && int(slot) < len(executableWanted) && executableWanted[slot].Load() != 0
+}
+
 // takeExecutableWant returns and clears the page the calling task's call
 // wanted, if any.
 func takeExecutableWant(task sched.TaskID) (uint64, bool) {

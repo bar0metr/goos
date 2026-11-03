@@ -113,6 +113,8 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		return handler.signalAction(state, arguments)
 	case linuxabi.SysRtSigprocmask:
 		return handler.signalMask(state, arguments)
+	case linuxabi.SysRtSigpending:
+		return handler.signalPending(state, arguments)
 	case linuxabi.SysGetrandom:
 		return handler.getrandom(request)
 	case linuxabi.SysUmask:
@@ -283,6 +285,23 @@ func (handler *linuxCallHandler) signalMask(state *linuxcompat.ProcessState, arg
 		if !vm.CopyOut(handler.root, previous, local.linuxSignalSet[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
+	}
+	return linuxcompat.Result{}
+}
+
+// signalPending serves rt_sigpending: the signals raised while the caller
+// blocks them. As on Linux, a set size above 8 bytes is EINVAL, and a
+// shorter one gets that many bytes of the set.
+func (handler *linuxCallHandler) signalPending(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
+	local := thisCPU()
+	size := arguments[1]
+	if size > linuxcompat.SignalSetSize {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	blocked, _ := state.Signals.Mask(linuxabi.SignalBlock, 0, false)
+	linuxcompat.EncodeSignalSet(&local.linuxSignalSet, state.Signals.Pending()&blocked)
+	if size != 0 && !vm.CopyOut(handler.root, arguments[0], local.linuxSignalSet[:size]) {
+		return linuxErrno(linuxabi.EFAULT)
 	}
 	return linuxcompat.Result{}
 }

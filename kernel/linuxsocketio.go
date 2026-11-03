@@ -50,7 +50,7 @@ func (handler *linuxCallHandler) vectorLimit(wire []byte, bound uint64, write bo
 		usable := handler.accessible(base, length, write)
 		total += usable
 		if usable < length {
-			if total == 0 {
+			if total == 0 || executablePageWanted(handler.task) {
 				return 0, linuxabi.EFAULT
 			}
 			break
@@ -68,10 +68,15 @@ func (handler *linuxCallHandler) rangeLimit(address uint64, length uint64, write
 	if length == 0 {
 		return 0, 0
 	}
-	if length = handler.accessible(address, length, write); length == 0 {
+	usable := handler.accessible(address, length, write)
+	// A page of the program's image the copy cannot take now is not the end
+	// of the buffer: the call fails before any effect, and the dispatcher
+	// brings the page in and runs it again. Shortening the buffer instead
+	// would cut a datagram.
+	if usable == 0 || usable < length && executablePageWanted(handler.task) {
 		return 0, linuxabi.EFAULT
 	}
-	return length, 0
+	return usable, 0
 }
 
 // socketRead serves read and readv on a socket.
