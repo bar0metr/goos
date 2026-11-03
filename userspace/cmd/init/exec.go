@@ -215,6 +215,16 @@ func handleControl(message ipc.Message) {
 			status = execproto.ControlOK
 		}
 		sendControlStatus(status, message.Correlation)
+	case operation == execproto.ControlFault && (argument == execproto.FaultNetService || argument == execproto.FaultLinuxSockets):
+		process, marker := &netServiceProcess, "NETD_FAULT_INJECTED\n"
+		if argument == execproto.FaultLinuxSockets {
+			process, marker = &linuxSockProcess, "LINUXSOCKD_FAULT_INJECTED\n"
+		}
+		status := execproto.ControlNotFound
+		if injectServiceFault(process, marker) {
+			status = execproto.ControlOK
+		}
+		sendControlStatus(status, message.Correlation)
 	case operation == execproto.ControlFault && argument == execproto.FaultRemoteSigner:
 		status := execproto.ControlNotFound
 		if injectRemoteSignerFault() {
@@ -382,6 +392,7 @@ func waitApplicationExit(processHandle handle.ID) uint64 {
 			}
 			fatal("INIT_EXEC_WAIT_FAILED\n")
 		}
+		linuxLaunchExited(processHandle)
 		if sys.HandleClose(processHandle) != 0 {
 			fatal("INIT_EXEC_CLOSE_FAILED\n")
 		}

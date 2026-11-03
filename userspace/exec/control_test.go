@@ -19,7 +19,7 @@ func TestControlRequestRoundTrip(t *testing.T) {
 	for _, bad := range []struct {
 		operation ControlOperation
 		argument  uint8
-	}{{ControlOperation(9), 0}, {ControlReboot, 1}, {ControlKill, Slots}, {ControlDiagnostics, 1}, {ControlFault, 0}, {ControlFault, FaultRemoteWorker + 1}} {
+	}{{ControlOperation(9), 0}, {ControlReboot, 1}, {ControlKill, Slots}, {ControlDiagnostics, 1}, {ControlFault, 0}, {ControlFault, FaultLinuxSockets + 1}} {
 		if _, ok := EncodeControl(bad.operation, bad.argument, 7); ok {
 			t.Fatalf("encoded %#v", bad)
 		}

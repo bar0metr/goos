@@ -284,7 +284,7 @@ func storageExited(name string) {
 	for _, service := range sessionServiceNames() {
 		manager.Hold(service)
 	}
-	for _, service := range networkServiceNames() {
+	for _, service := range append(networkServiceNames(), linuxSocketServiceNames()...) {
 		manager.Hold(service)
 	}
 }
@@ -295,7 +295,7 @@ func storageExited(name string) {
 // and only a service that keeps failing with storage up uses its budget up.
 func systemResumed() {
 	systemReady = true
-	for _, name := range append(sessionServiceNames(), networkServiceNames()...) {
+	for _, name := range append(append(sessionServiceNames(), networkServiceNames()...), linuxSocketServiceNames()...) {
 		if executable, found := manager.Executable(name); found {
 			manager.Rebase(name, bytesString(executable), supervisionTicks)
 		}
@@ -403,6 +403,7 @@ func enterRecovery(stage supervisor.Stage, path, reason string) {
 		configControlHandle = 0
 	}
 	// Recovery runs no network either: both services run from the volume.
+	stopLinuxSockets()
 	stopNetwork()
 	for index := range sessions {
 		session := &sessions[index]

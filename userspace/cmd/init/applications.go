@@ -281,6 +281,14 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		sendLinuxGeometry(ttyPair[1], &launchingLinuxTerminal.session.geometry)
 		linuxEntries = [][]byte{linuxTerminalEntry(&launchingLinuxTerminal.session.geometry, &linuxStorage)}
 	}
+	// A Linux launch gets a family session for its sockets while linuxsockd
+	// runs, after vfs and the optional linux-tty; without one its sockets
+	// fail with ENETDOWN.
+	var linuxNet linuxNetSession
+	useLinuxNet := false
+	if linuxProcess {
+		linuxNet, useLinuxNet = openLinuxFamily(true)
+	}
 	addHome := linuxTerminal && !environmentHas(environment, "HOME=")
 	addTermInfo := linuxTerminal && !environmentHas(environment, "TERMINFO=")
 	slot, staging := stagingSlot()
@@ -320,6 +328,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	if linuxTerminal {
 		handles++
+	}
+	if useLinuxNet {
+		handles += 2
 	}
 	// A Linux program searches the Linux fixture directory, never the
 	// native one: its execve refuses native images.
@@ -431,6 +442,10 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if linuxTerminal {
 		writer.Handle([]byte("linux-tty"), 0)
 	}
+	if useLinuxNet {
+		writer.Handle([]byte("linux-net"), 0)
+		writer.Handle([]byte("linux-net-pool"), 0)
+	}
 	// The request was validated when it arrived, so what does not fit is its
 	// size: its strings need more room in the startup object's tables.
 	startupData, ok := writer.Finish()
@@ -445,6 +460,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closePair(launchPair)
 		closePair(resizePair)
 		closePair(ttyPair)
+		closeLinuxFamily(linuxNet)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
 		if useBlockCheck {
@@ -501,6 +517,11 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		// terminal; PID 1 keeps the writer.
 		grants = append(grants, supervisor.Capability{Name: "linux-tty", Handle: handle.ID(ttyPair[0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait, Consume: true})
 	}
+	if useLinuxNet {
+		grants = append(grants,
+			supervisor.Capability{Name: "linux-net", Handle: linuxNet.channel, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			supervisor.Capability{Name: "linux-net-pool", Handle: linuxNet.pool, Type: handle.TypeMemory, Rights: capability.Read | capability.Write, Consume: true})
+	}
 	profile := supervisor.ProfileNormal
 	if linuxProcess {
 		profile = supervisor.ProfileLarge
@@ -522,6 +543,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closeOpen(hostnameConfig)
 		closePair(resizePair)
 		closePair(ttyPair)
+		closeLinuxFamily(linuxNet)
 		closeOpen(remoteAdmin)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
@@ -543,6 +565,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	if linuxTerminal {
 		launchingLinuxTerminal.linuxTerminal = ttyPair[1]
+	}
+	if useLinuxNet {
+		linuxFamilyLaunched(linuxNet, event.ProcessHandle)
 	}
 	if useLaunch {
 		launch.server, launch.input = handle.ID(launchPair[0]), streams.Input.ID
