@@ -80,7 +80,8 @@ type Handler interface {
 	SigSuspend(Request) Result
 	// Kill serves kill, tkill, and tgkill.
 	Kill(Request) Result
-	// Poll serves poll and ppoll.
+	// Poll serves poll, ppoll, select, and pselect6, which share one
+	// readiness engine.
 	Poll(Request) Result
 	Exit(Request, bool) Result
 }
@@ -212,7 +213,7 @@ func route(request Request, handler Handler) Result {
 			return handler.SigSuspend(request)
 		case abi.SysKill, abi.SysTkill, abi.SysTgkill:
 			return handler.Kill(request)
-		case abi.SysPoll, abi.SysPpoll:
+		case abi.SysPoll, abi.SysPpoll, abi.SysSelect, abi.SysPselect6:
 			return handler.Poll(request)
 		case abi.SysExit:
 			return handler.Exit(request, false)
