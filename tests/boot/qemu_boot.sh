@@ -475,6 +475,8 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'ls /system/bin\n'
 	sleep 1
+	printf 'ls /etc\n'
+	sleep 1
 	printf 'mount\n'
 	sleep 1
 	printf 'df\n'
@@ -1002,12 +1004,16 @@ require_marker filesystem.persisted-content 'Welcome to GoOS' "$log" 'cat /persi
 require_marker filesystem.system-image-mounted SYSTEM_IMAGE_MOUNT_OK "$log"
 # The namespace must name every mount, so the layout is discoverable by walking
 # it rather than only by knowing a path in advance.
-for entry in system tmp persist home state; do
+for entry in system etc tmp persist home state; do
 	require_regex "filesystem.root-lists-$entry" "^$entry/\$" "$entry/ in the root listing" "$log" 'ls /'
 done
 # /system is the boot image itself: the executables the launch path resolves are
 # the ones a listing shows, and nothing can write to them.
 require_regex filesystem.system-lists-bin '^bin/$' 'bin/ under /system' "$log" 'ls system'
+# /etc is the boot archive's etc directory, for the static C library.
+for entry in hosts nsswitch.conf resolv.conf; do
+	require_regex "filesystem.etc-lists-$entry" "^$entry\$" "$entry in /etc" "$log" 'ls /etc'
+done
 for entry in ls cat write gview edit gfm; do
 	require_regex "filesystem.system-bin-lists-$entry" "^$entry\$" "$entry in /system/bin" "$log" 'ls /system/bin'
 done
@@ -1505,6 +1511,7 @@ forbid_regex corrupt.no-mount-marker '^FAT32_MOUNT_OK$' 'no mount claimed for a 
 # the archive (ADR 0175).
 require_regex corrupt.recovery '^\[MODE\] recovery: stage=storage' 'recovery mode for a refused volume' "$corrupt_log" 'Starting services'
 require_window corrupt.root-listed '^bootstrap/$' 'the boot archive still mounted' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
+require_window corrupt.etc-listed '^etc/$' '/etc comes with the boot archive' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
 forbid_window corrupt.persist-absent '^persist/$' 'no persistent mounts listed' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
 forbid_window corrupt.system-absent '^system/$' 'no installed system listed' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
 require_regex corrupt.usable '^volatile-root-still-works$' 'the system usable without storage' "$corrupt_log" 'goos> echo volatile-root-still-works'
