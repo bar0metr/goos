@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	eventfdSemaphore = 0x1
-	eventfdCloseExec = linuxabi.OpenCloseExec
-	eventfdNonBlock  = linuxabi.OpenNonBlock
+	eventfdSemaphore = uint64(0x1)
+	eventfdCloseExec = uint64(linuxabi.OpenCloseExec)
+	eventfdNonBlock  = uint64(linuxabi.OpenNonBlock)
 	// linuxEventCorrelation marks the one wait a task in an eventfd read or
 	// write has.
 	linuxEventCorrelation = 1
@@ -34,7 +34,7 @@ func (handler *linuxCallHandler) eventfdCreate(state *linuxcompat.ProcessState, 
 	if request.Number == linuxabi.SysEventfd2 {
 		flags = request.Arguments[1]
 	}
-	if flags&^uint64(eventfdSemaphore|eventfdCloseExec|eventfdNonBlock) != 0 {
+	if flags&^(eventfdSemaphore|eventfdCloseExec|eventfdNonBlock) != 0 {
 		return linuxErrno(linuxabi.EINVAL)
 	}
 	object, errno := linuxcompat.CreateEventCounter(state.FamilyID, uint32(request.Arguments[0]), flags&eventfdSemaphore != 0)
