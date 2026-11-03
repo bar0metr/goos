@@ -17,6 +17,12 @@ const (
 	OptionNoDelay   = 1 // IPPROTO_TCP TCP_NODELAY
 	OptionMaxSeg    = 2 // IPPROTO_TCP TCP_MAXSEG
 	OptionIPTTL     = 2 // IPPROTO_IP IP_TTL
+
+	// A datagram socket's buffers are netd's fixed bounds, which GUDP
+	// does not report: a receive queue of 16 datagrams of at most 4096
+	// bytes, and one datagram on its way out.
+	DatagramReceiveBuffer = 16 * linuxsockapi.SlotSize
+	DatagramSendBuffer    = linuxsockapi.SlotSize
 )
 
 // optionOf names the native option behind a Linux one, or zero for an
@@ -45,6 +51,7 @@ func optionOf(stream bool, level, name uint32) (NativeOptionID, bool) {
 //   - SO_REUSEADDR is kept by the socket and applied by its next bind;
 //   - SO_RCVBUF and SO_SNDBUF report netd's effective buffer; a set is
 //     accepted and answers that effective value, which it cannot change;
+//     a datagram socket's are fixed bounds of netd;
 //   - TCP_NODELAY reports 1, as netd sends without Nagle's delay; setting 1
 //     is accepted and setting 0 is NotSupported;
 //   - TCP_MAXSEG reports the effective send MSS and cannot be set;
@@ -79,6 +86,14 @@ func (s *Service) stepOption(o *op, sock *socket) {
 		return
 	case set && native == OptionMSS:
 		s.finish(o, linuxsockapi.ResultNotSupported)
+		return
+	case !sock.stream && native == OptionReceiveBuffer:
+		o.reply.Value = DatagramReceiveBuffer
+		s.finish(o, linuxsockapi.ResultOK)
+		return
+	case !sock.stream && native == OptionSendBuffer:
+		o.reply.Value = DatagramSendBuffer
+		s.finish(o, linuxsockapi.ResultOK)
 		return
 	}
 	if !s.usable(o, sock) {

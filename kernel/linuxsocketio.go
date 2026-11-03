@@ -311,6 +311,11 @@ func (handler *linuxCallHandler) socketReceive(request linuxcompat.Request, call
 	if resumed {
 		partial = pending.Partial
 	}
+	if call.socket.Listening {
+		// A listener carries no stream; Linux reads it as unconnected.
+		handler.socketEnd()
+		return linuxErrno(linuxabi.ENOTCONN)
+	}
 	if transfer.limit == 0 {
 		handler.socketEnd()
 		return linuxcompat.Result{}

@@ -122,13 +122,14 @@ func TestDatagramOptionsAndNoTCPLevel(t *testing.T) {
 	if reply := h.call(f, linuxsockapi.Request{Opcode: linuxsockapi.OpGetOption, Socket: id, Level: LevelTCP, Name: OptionNoDelay}); reply.Result != linuxsockapi.ResultNoOption {
 		t.Fatalf("TCP_NODELAY on UDP %d", reply.Result)
 	}
-	correlation := h.send(f, linuxsockapi.Request{Opcode: linuxsockapi.OpGetOption, Socket: id, Level: LevelSocket, Name: OptionRecvBuf})
-	option := h.take(NativeOption)
-	if option.request.Option != OptionReceiveBuffer || option.proto != UDP {
-		t.Fatalf("option %+v", option)
-	}
-	h.complete(option, NativeCompletion{Value: 32768})
-	if reply := h.reply(f, correlation); reply.Value != 32768 {
+	// GUDP reports no buffer size; the service answers netd's bounds.
+	if reply := h.call(f, linuxsockapi.Request{Opcode: linuxsockapi.OpSetOption, Socket: id, Level: LevelSocket, Name: OptionRecvBuf, Value: 4096}); reply.Value != DatagramReceiveBuffer {
 		t.Fatalf("SO_RCVBUF %+v", reply)
+	}
+	if reply := h.call(f, linuxsockapi.Request{Opcode: linuxsockapi.OpGetOption, Socket: id, Level: LevelSocket, Name: OptionSendBuf}); reply.Value != DatagramSendBuffer {
+		t.Fatalf("SO_SNDBUF %+v", reply)
+	}
+	if h.has(NativeOption) {
+		t.Fatal("datagram buffer asked of netd")
 	}
 }
