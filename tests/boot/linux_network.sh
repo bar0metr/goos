@@ -148,7 +148,7 @@ background() {
 	sleep 1
 	send "echo gate-mark-$marks"
 	finish
-	expect '^\[[0-9]*\] started$' "background job: $1"
+	expect '\[[0-9]*\] started$' "background job: $1"
 }
 
 # await_guest waits for a line in the guest's log since the current command.

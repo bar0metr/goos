@@ -2357,7 +2357,7 @@ static int serve_mode(int argc, char **argv)
 
 /* --- service faults ---------------------------------------------------- */
 
-static void alarm_note(int number)
+static void watchdog_note(int number)
 {
 	(void)number;
 }
@@ -2405,7 +2405,7 @@ static int hold_mode(int argc, char **argv)
 
 	/* A blocking read must end on its own. The watchdog child's signal
 	 * only turns a hang into a reported failure. */
-	handle(SIGUSR1, alarm_note, 0);
+	handle(SIGUSR1, watchdog_note, 0);
 	{
 		pid_t parent = getpid();
 
