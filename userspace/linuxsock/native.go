@@ -86,6 +86,8 @@ const (
 	MaskWriteClosed                          // the local write side is closed
 	MaskPendingError                         // NativeError has an error to report
 	MaskHungUp                               // the transport is gone both ways
+	MaskConnecting                           // an active open is under way
+	MaskListening                            // the endpoint listens
 )
 
 // NativeOptionID names an option NativeOption reads.

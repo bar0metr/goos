@@ -215,6 +215,16 @@ func handleControl(message ipc.Message) {
 			status = execproto.ControlOK
 		}
 		sendControlStatus(status, message.Correlation)
+	case operation == execproto.ControlFault && (argument == execproto.FaultNetService || argument == execproto.FaultLinuxSockets):
+		process, marker := &netServiceProcess, "NETD_FAULT_INJECTED\n"
+		if argument == execproto.FaultLinuxSockets {
+			process, marker = &linuxSockProcess, "LINUXSOCKD_FAULT_INJECTED\n"
+		}
+		status := execproto.ControlNotFound
+		if injectServiceFault(process, marker) {
+			status = execproto.ControlOK
+		}
+		sendControlStatus(status, message.Correlation)
 	case operation == execproto.ControlFault && argument == execproto.FaultRemoteSigner:
 		status := execproto.ControlNotFound
 		if injectRemoteSignerFault() {

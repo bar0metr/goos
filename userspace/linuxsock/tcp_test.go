@@ -174,6 +174,11 @@ func TestNonblockingConnect(t *testing.T) {
 	if state := h.readiness(f, id); state.Ready != linuxsockapi.ReadyOut {
 		t.Fatalf("connected readiness %+v", state)
 	}
+	// Linux: the first connect after the nonblocking one finished returns
+	// 0, the next EISCONN.
+	if reply := h.call(f, linuxsockapi.Request{Opcode: opConnect, Socket: id, Address: peerAddress, Port: 80}); reply.Result != linuxsockapi.ResultOK || reply.LocalPort != 40000 {
+		t.Fatalf("connect after it finished %+v", reply)
+	}
 	if reply := h.call(f, linuxsockapi.Request{Opcode: opConnect, Socket: id, Address: peerAddress, Port: 80}); reply.Result != linuxsockapi.ResultIsConnected {
 		t.Fatalf("connect after connected %d", reply.Result)
 	}
@@ -222,6 +227,26 @@ func TestFailedConnectReportsAndClearsError(t *testing.T) {
 	if reply := h.reply(f, correlation); reply.Result != linuxsockapi.ResultOK || h.endpoint(id) != 777 {
 		t.Fatalf("reconnect %+v", reply)
 	}
+}
+
+func TestConnectAfterFailureReportsErrorOnce(t *testing.T) {
+	h := newHarness(t)
+	f := h.family(1, 7)
+	id := h.open(f, linuxsockapi.KindStream)
+	h.send(f, linuxsockapi.Request{Opcode: opConnect, Socket: id, Address: peerAddress, Port: 81})
+	h.complete(h.take(NativeConnect), NativeCompletion{Result: NativeInProgress})
+	h.wake(h.endpoint(id), MaskConnectFailed|MaskPendingError, 0)
+	fetch := h.take(NativeError)
+	// A connect while the error is being fetched waits for it.
+	correlation := h.send(f, linuxsockapi.Request{Opcode: opConnect, Socket: id, Address: peerAddress, Port: 81})
+	h.noReply(f, correlation)
+	h.complete(fetch, NativeCompletion{Value: uint32(NativeRefused)})
+	if reply := h.reply(f, correlation); reply.Result != linuxsockapi.ResultRefused {
+		t.Fatalf("connect after failure %d", reply.Result)
+	}
+	h.send(f, linuxsockapi.Request{Opcode: opConnect, Socket: id, Address: peerAddress, Port: 81})
+	h.take(NativeClose)
+	h.take(NativeOpen)
 }
 
 func TestImmediateConnectFailure(t *testing.T) {
@@ -411,26 +436,35 @@ func TestShutdown(t *testing.T) {
 	if reply := h.call(f, linuxsockapi.Request{Opcode: opShutdown, Socket: h.open(f, linuxsockapi.KindStream), Length: shutWrite}); reply.Result != linuxsockapi.ResultNotConnected {
 		t.Fatalf("shutdown unconnected %d", reply.Result)
 	}
-	// Bytes retained before SHUT_RD are dropped; reads then end.
+	// Linux: after SHUT_RD the bytes already buffered stay readable, then
+	// reads end.
 	correlation := h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 10})
 	h.complete(h.take(NativeRead), NativeCompletion{Data: []byte("abc")})
 	first := h.reply(f, correlation)
 	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: first.Slot, Length: 3})
+	h.wake(h.endpoint(id), MaskReadable|MaskWritable, 20)
 	if reply := h.call(f, linuxsockapi.Request{Opcode: opShutdown, Socket: id, Length: shutRead}); reply.Result != linuxsockapi.ResultOK {
 		t.Fatalf("SHUT_RD %d", reply.Result)
 	}
-	if h.svc.families[f].rxUsed != 0 {
-		t.Fatal("retained bytes kept after SHUT_RD")
-	}
-	if reply := h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 10}); reply.Result != linuxsockapi.ResultOK || reply.Flags != linuxsockapi.FlagEOF {
-		t.Fatalf("read after SHUT_RD %+v", reply)
-	}
-	// What still arrives is drained in netd.
-	h.wake(h.endpoint(id), MaskReadable|MaskWritable, 20)
-	drain := h.take(NativeRead)
-	h.complete(drain, NativeCompletion{Data: make([]byte, 20)})
-	if state := h.readiness(f, id); state.Ready&linuxsockapi.ReadyIn == 0 || state.Ready&linuxsockapi.ReadyReadHangup == 0 || state.Readable != 0 {
+	if state := h.readiness(f, id); state.Ready&linuxsockapi.ReadyIn == 0 || state.Ready&linuxsockapi.ReadyReadHangup == 0 || state.Readable != 23 {
 		t.Fatalf("SHUT_RD readiness %+v", state)
+	}
+	retained := h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 10})
+	if string(readBytes(h, f, retained)) != "abc" {
+		t.Fatalf("retained after SHUT_RD %q", readBytes(h, f, retained))
+	}
+	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: retained.Slot})
+	correlation = h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 100})
+	h.complete(h.take(NativeRead), NativeCompletion{Data: make([]byte, 20)})
+	buffered := h.reply(f, correlation)
+	if buffered.Length != 20 {
+		t.Fatalf("buffered after SHUT_RD %+v", buffered)
+	}
+	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: buffered.Slot})
+	correlation = h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 10})
+	h.complete(h.take(NativeRead), NativeCompletion{Result: NativeWouldBlock})
+	if reply := h.reply(f, correlation); reply.Result != linuxsockapi.ResultOK || reply.Flags != linuxsockapi.FlagEOF {
+		t.Fatalf("read after SHUT_RD drained %+v", reply)
 	}
 	correlation = h.send(f, linuxsockapi.Request{Opcode: opShutdown, Socket: id, Length: shutWrite})
 	h.complete(h.take(NativeShutdownWrite), NativeCompletion{})

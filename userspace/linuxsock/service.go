@@ -36,9 +36,9 @@ const (
 	// family's operations always make progress, so the Releases behind them
 	// are always read.
 	FamilyParked = linuxsockapi.RXSlots
-	// MaxOps holds every family's requests and two internal operations per
-	// socket: a drain after SHUT_RD and a pending-error fetch.
-	MaxOps = MaxFamilies*FamilyOps + 2*MaxSockets
+	// MaxOps holds every family's requests and one internal operation per
+	// socket, a pending-error fetch.
+	MaxOps = MaxFamilies*FamilyOps + MaxSockets
 	// MaxBacklog is the native listen backlog limit; Linux backlogs are
 	// clamped to it.
 	MaxBacklog = 8
@@ -70,12 +70,14 @@ type socket struct {
 	waiting   bool // a NativeWaitReady is held
 	needWait  bool // the wait could not be sent and is retried
 	noWait    bool // the backend cannot wait; readiness comes from replies only
-	draining  bool
 	fetching  bool
 	// reopen: a connect failed at once and the native endpoint is spent; the
 	// next connect replaces it.
 	reopen bool
-	reuse  bool
+	// connectDone: a nonblocking connect finished and no connect has
+	// reported it yet.
+	connectDone bool
+	reuse       bool
 	// lentPeek and lentRetained describe the lent slot: data a native peek
 	// left in netd, or bytes the socket had retained.
 	lentPeek     bool
@@ -144,7 +146,6 @@ type opKind uint8
 
 const (
 	kindRequest opKind = iota
-	kindDrain
 	kindError
 )
 
@@ -269,7 +270,7 @@ func (s *Service) FamilyByToken(token uint64) (int, bool) {
 	return -1, false
 }
 
-// Families reports whether family index is in use.
+// Family reports whether family index is in use.
 func (s *Service) Family(index int) bool {
 	return index >= 0 && index < MaxFamilies && s.families[index].used
 }
@@ -573,7 +574,7 @@ func (s *Service) release(index int) {
 	case unread != 0:
 		start = offset
 	}
-	if sock.readShut || end == start {
+	if end == start {
 		s.freeRX(f, r.Slot)
 		s.publish(global)
 		return
@@ -650,13 +651,9 @@ func (s *Service) freeOp(o *op) {
 			}
 		}
 	}
-	if o.kind == kindDrain || o.kind == kindError {
+	if o.kind == kindError {
 		if sock := s.socketOf(o); sock != nil {
-			if o.kind == kindDrain {
-				sock.draining = false
-			} else {
-				sock.fetching = false
-			}
+			sock.fetching = false
 		}
 	}
 	o.state = opFree
@@ -804,7 +801,7 @@ func (s *Service) BackendUp(proto Proto, generation uint64) linuxsockapi.Control
 	return linuxsockapi.ControlOK
 }
 
-// BackendUp reports the live generation of proto, zero for none.
+// BackendGeneration reports the live generation of proto, zero for none.
 func (s *Service) BackendGeneration(proto Proto) uint64 {
 	if proto != TCP && proto != UDP || !s.backends[proto].up {
 		return 0

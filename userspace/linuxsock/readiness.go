@@ -25,11 +25,12 @@ func (s *Service) readiness(sock *socket) linuxsockapi.Readiness {
 		ready = in | out | hangup | readHangup
 	case !sock.stream:
 		ready = out
-		if sock.readShut {
-			ready |= in | readHangup
-		} else if m&MaskReadable != 0 {
+		if m&MaskReadable != 0 {
 			ready |= in
 			readable = sock.readable
+		}
+		if sock.readShut {
+			ready |= in | readHangup
 		}
 		if sock.readShut && sock.writeShut {
 			ready |= hangup
@@ -46,11 +47,9 @@ func (s *Service) readiness(sock *socket) linuxsockapi.Readiness {
 	default:
 		readClosed := sock.readShut || m&MaskReceiveEOF != 0
 		writeClosed := sock.writeShut || m&MaskWriteClosed != 0
-		if !sock.readShut {
-			readable = sock.readable + uint32(sock.retainedLength)
-			if m&MaskReadable == 0 {
-				readable = uint32(sock.retainedLength)
-			}
+		readable = uint32(sock.retainedLength)
+		if m&MaskReadable != 0 {
+			readable += sock.readable
 		}
 		if readable != 0 || readClosed || m&MaskHungUp != 0 {
 			ready |= in
@@ -153,15 +152,14 @@ func (s *Service) waited(global int, serial uint32, c *NativeCompletion) {
 }
 
 // observe applies a mask from netd: a connect that ended moves the
-// stream's state, an error netd holds is fetched, and a stream shut for
-// reading drains.
+// stream's state and an error netd holds is fetched.
 func (s *Service) observe(global int, mask NativeMask, readable uint32) {
 	sock := &s.sockets[global]
 	sock.mask, sock.readable = mask, readable
 	if sock.stream && sock.state == stateConnecting {
 		switch {
 		case mask&MaskConnected != 0:
-			sock.state = stateConnected
+			sock.state, sock.connectDone = stateConnected, true
 		case mask&MaskConnectFailed != 0:
 			sock.state = stateFailed
 			s.fetchError(global)
@@ -169,9 +167,6 @@ func (s *Service) observe(global int, mask NativeMask, readable uint32) {
 	}
 	if sock.stream && mask&MaskPendingError != 0 {
 		s.fetchError(global)
-	}
-	if sock.readShut {
-		s.drain(global)
 	}
 	s.publish(global)
 }

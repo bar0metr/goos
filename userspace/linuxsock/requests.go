@@ -14,9 +14,6 @@ const (
 // for the pump.
 func (s *Service) step(o *op) {
 	switch o.kind {
-	case kindDrain:
-		s.stepDrain(o)
-		return
 	case kindError:
 		s.stepError(o)
 		return
@@ -94,9 +91,6 @@ func (s *Service) done(o *op, c *NativeCompletion) {
 		return
 	}
 	switch o.kind {
-	case kindDrain:
-		s.freeOp(o)
-		return
 	case kindError:
 		s.doneError(o, c)
 		return
@@ -367,9 +361,10 @@ func (s *Service) doneAccept(o *op, c *NativeCompletion) {
 
 // stepConnect follows Linux's state rules for a stream: a connect while
 // one is in progress is EALREADY, one on a connected stream or a listener
-// EISCONN. A stream whose connect failed connects again on a new native
-// endpoint, as Linux's socket returns to its closed state; its earlier bind
-// does not carry over.
+// EISCONN, except that the first one after a nonblocking connect finished
+// reports its outcome. A stream whose connect failed connects again on a
+// new native endpoint, as Linux's socket returns to its closed state; its
+// earlier bind does not carry over.
 func (s *Service) stepConnect(o *op, sock *socket) {
 	if !s.usable(o, sock) {
 		return
@@ -384,9 +379,31 @@ func (s *Service) stepConnect(o *op, sock *socket) {
 	case stateConnecting:
 		s.finish(o, linuxsockapi.ResultAlready)
 		return
-	case stateConnected, stateListening:
+	case stateConnected:
+		if !sock.connectDone {
+			s.finish(o, linuxsockapi.ResultIsConnected)
+			return
+		}
+		// The first connect after a nonblocking one finished reports it.
+		sock.connectDone = false
+		o.reply.Address, o.reply.Port = sock.peer, sock.peerPort
+		o.reply.Local, o.reply.LocalPort = sock.local, sock.localPort
+		s.finish(o, linuxsockapi.ResultOK)
+		return
+	case stateListening:
 		s.finish(o, linuxsockapi.ResultIsConnected)
 		return
+	case stateFailed:
+		// The first connect after a nonblocking one failed reports its
+		// error; the next one starts again.
+		if sock.fetching {
+			s.wait(o)
+			return
+		}
+		if sock.pending != linuxsockapi.ResultOK && o.stage == 0 {
+			s.finishPending(o, sock)
+			return
+		}
 	}
 	if o.stage == 0 && (sock.state == stateFailed || sock.reopen) {
 		s.queueClose(TCP, sock.generation, sock.endpoint)
@@ -463,7 +480,7 @@ func (s *Service) stepRead(o *op, sock *socket) {
 		s.finish(o, linuxsockapi.ResultWouldBlock)
 		return
 	}
-	if sock.readShut {
+	if sock.readShut && !sock.stream && sock.state == stateUnbound {
 		o.reply.Flags = linuxsockapi.FlagEOF
 		s.finish(o, linuxsockapi.ResultOK)
 		return
@@ -540,6 +557,12 @@ func (s *Service) doneRead(o *op, sock *socket, c *NativeCompletion) {
 	case NativeWouldBlock:
 		if sock.pending != linuxsockapi.ResultOK {
 			s.finishPending(o, sock)
+			return
+		}
+		if sock.readShut {
+			// Shut for reading and nothing buffered: end of file.
+			o.reply.Flags = linuxsockapi.FlagEOF
+			s.finish(o, linuxsockapi.ResultOK)
 			return
 		}
 		s.finish(o, linuxsockapi.ResultWouldBlock)
@@ -669,9 +692,9 @@ func (s *Service) doneWrite(o *op, sock *socket, c *NativeCompletion) {
 	s.finish(o, linuxsockapi.ResultOK)
 }
 
-// stepShutdown: SHUT_RD drops unread bytes and makes later reads end of
-// file, draining what netd still receives; SHUT_WR half-closes in netd. A
-// listener takes SHUT_RD as the end of its accepting.
+// stepShutdown: after SHUT_RD reads return the bytes already buffered and
+// then end of file, as Linux's do; SHUT_WR half-closes in netd. A listener
+// takes SHUT_RD as the end of its accepting.
 func (s *Service) stepShutdown(o *op, sock *socket) {
 	how := o.request.Length
 	read, write := how == shutRead || how == shutBoth, how == shutWrite || how == shutBoth
@@ -681,11 +704,6 @@ func (s *Service) stepShutdown(o *op, sock *socket) {
 	}
 	if read && !sock.readShut {
 		sock.readShut = true
-		if sock.retained >= 0 {
-			s.freeRX(&s.families[o.family], uint8(sock.retained))
-			sock.retained, sock.retainedLength = -1, 0
-		}
-		s.drain(int(o.socket))
 		s.publish(int(o.socket))
 	}
 	if !write || sock.writeShut || sock.state == stateListening {
@@ -724,31 +742,6 @@ func (s *Service) answerReady(o *op, sock *socket) {
 }
 
 // --- internal operations -------------------------------------------------------
-
-// drain discards what netd receives for a stream shut for reading.
-func (s *Service) drain(global int) {
-	sock := &s.sockets[global]
-	if sock.draining || sock.dead || sock.endpoint == 0 || !sock.readShut || sock.mask&MaskReadable == 0 {
-		return
-	}
-	o := s.newOp(int(sock.family), kindDrain)
-	if o == nil {
-		return
-	}
-	o.socket, o.socketSerial = int16(global), sock.serial
-	sock.draining = true
-	s.step(o)
-}
-
-func (s *Service) stepDrain(o *op) {
-	sock := s.socketOf(o)
-	if sock == nil || sock.dead || sock.endpoint == 0 {
-		s.freeOp(o)
-		return
-	}
-	s.native = NativeRequest{Op: NativeRead, Flags: NativeNoWait, Endpoint: sock.endpoint, Length: linuxsockapi.SlotSize}
-	s.submit(o, sock.proto)
-}
 
 // fetchError reads netd's pending error into the socket.
 func (s *Service) fetchError(global int) {

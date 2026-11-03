@@ -36,7 +36,7 @@ linuxsockd  -- Linux socket objects, readiness, options
 netd  -- TCBs, UDP endpoints, bind conflicts, routing, ARP
 ```
 
-`linuxsockd` (`/system/bin/linuxsockd`, logic in `userspace/linuxsock`) is a
+`linuxsockd` (`/system/services/linuxsockd`, logic in `userspace/linuxsock`) is a
 supervised native service that PID 1 starts after `netd`. It holds one
 GLNXCTL1 control channel from PID 1, one GTCP session and one GUDP session
 with an explicit endpoint quota, and the service side of every family
@@ -180,7 +180,11 @@ gives each running Linux launch a new session through the native call
 `LinuxNetAttach(process, channel, pool)`, which requires PID 1's handle to
 the launch's process. A `netd` restart keeps the family sessions:
 `linuxsockd` fails every socket that the dead native sessions backed, and
-takes fresh native sessions from PID 1.
+takes fresh native sessions from PID 1. A failed socket reports every
+readiness condition and holds `ServiceLost` as its pending error; each later
+request on it but Close, the name queries, `QueryReady` and
+`GetPendingError` answers `ServiceLost`, and new sockets use the new
+sessions.
 
 ### DNS
 

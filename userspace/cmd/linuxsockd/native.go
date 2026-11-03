@@ -2,16 +2,12 @@
 
 package main
 
-// The native backend: the GTCP and GUDP sessions PID 1 hands over with
-// ControlSetTCP and ControlSetUDP, speaking linuxsock.Backend.
-//
-// This file is the only one that knows the native wire. It speaks GTCP1 and
-// GUDP1 (tcpapi and udpapi version 1), which lack what ADR 0210 adds in
-// version 2: NoWait, Peek, ReuseAddr, Ready, WaitReady, Error, Option and
-// the full datagram length. Under version 1 those operations answer
-// SubmitUnsupported, Read, Accept and Connect wait in netd, and the core
-// learns readiness only from replies. Moving to version 2 replaces
-// encodeTCP, encodeUDP, completeTCP and completeUDP and nothing else.
+// The native backend: the GTCP 2 and GUDP 2 sessions PID 1 hands over with
+// ControlSetTCP and ControlSetUDP, behind linuxsock.Backend. This file is
+// the only one that knows the native wire. Every request it sends answers
+// at once in netd, except WaitReady, which netd holds until the endpoint's
+// mask changes. GUDP has no pending error and no buffer options: those
+// requests answer SubmitUnsupported.
 
 import (
 	"goos/internal/capability"
@@ -106,14 +102,20 @@ func (backend) Submit(proto linuxsock.Proto, tag uint64, request *linuxsock.Nati
 
 func encodeTCP(r *linuxsock.NativeRequest, slot uint8) linuxsock.SubmitStatus {
 	tcpRequest = tcpapi.Request{Endpoint: r.Endpoint}
+	if r.Flags&linuxsock.NativeNoWait != 0 {
+		tcpRequest.Flags |= tcpapi.FlagNoWait
+	}
 	if r.Flags&linuxsock.NativePeek != 0 {
-		return linuxsock.SubmitUnsupported
+		tcpRequest.Flags |= tcpapi.FlagPeek
 	}
 	switch r.Op {
 	case linuxsock.NativeOpen:
 		tcpRequest.Opcode = tcpapi.OpOpen
 	case linuxsock.NativeBind:
 		tcpRequest.Opcode, tcpRequest.Address, tcpRequest.Port = tcpapi.OpBind, r.Address, r.Port
+		if r.Flags&linuxsock.NativeReuseAddr != 0 {
+			tcpRequest.Flags = tcpapi.FlagReuseAddr
+		}
 	case linuxsock.NativeListen:
 		tcpRequest.Opcode, tcpRequest.Backlog = tcpapi.OpListen, uint8(min(r.Length, 255))
 	case linuxsock.NativeAccept:
@@ -128,6 +130,26 @@ func encodeTCP(r *linuxsock.NativeRequest, slot uint8) linuxsock.SubmitStatus {
 		tcpRequest.Opcode = tcpapi.OpShutdownWrite
 	case linuxsock.NativeClose:
 		tcpRequest.Opcode = tcpapi.OpClose
+	case linuxsock.NativeReady:
+		tcpRequest.Opcode = tcpapi.OpReady
+	case linuxsock.NativeWaitReady:
+		tcpRequest.Opcode, tcpRequest.Mask = tcpapi.OpWaitReady, tcpMask(r.Mask)
+	case linuxsock.NativeError:
+		tcpRequest.Opcode = tcpapi.OpError
+	case linuxsock.NativeOption:
+		tcpRequest.Opcode = tcpapi.OpOption
+		switch r.Option {
+		case linuxsock.OptionMSS:
+			tcpRequest.Option = tcpapi.OptionSendMSS
+		case linuxsock.OptionSendBuffer:
+			tcpRequest.Option = tcpapi.OptionSendBuffer
+		case linuxsock.OptionReceiveBuffer:
+			tcpRequest.Option = tcpapi.OptionReceiveBuffer
+		case linuxsock.OptionTTL:
+			tcpRequest.Option = tcpapi.OptionTTL
+		default:
+			return linuxsock.SubmitUnsupported
+		}
 	default:
 		return linuxsock.SubmitUnsupported
 	}
@@ -136,18 +158,24 @@ func encodeTCP(r *linuxsock.NativeRequest, slot uint8) linuxsock.SubmitStatus {
 
 func encodeUDP(r *linuxsock.NativeRequest, slot uint8) linuxsock.SubmitStatus {
 	udpRequest = udpapi.Request{Endpoint: r.Endpoint}
-	if r.Flags&linuxsock.NativePeek != 0 {
-		return linuxsock.SubmitUnsupported
-	}
 	switch r.Op {
 	case linuxsock.NativeOpen:
 		udpRequest.Opcode = udpapi.OpOpen
 	case linuxsock.NativeBind:
 		udpRequest.Opcode, udpRequest.Address, udpRequest.Port = udpapi.OpBind, r.Address, r.Port
+		if r.Flags&linuxsock.NativeReuseAddr != 0 {
+			udpRequest.Flags = udpapi.FlagReuseAddr
+		}
 	case linuxsock.NativeConnect:
 		udpRequest.Opcode, udpRequest.Address, udpRequest.Port = udpapi.OpConnect, r.Address, r.Port
 	case linuxsock.NativeRead:
 		udpRequest.Opcode = udpapi.OpRecvFrom
+		if r.Flags&linuxsock.NativeNoWait != 0 {
+			udpRequest.Flags |= udpapi.FlagNoWait
+		}
+		if r.Flags&linuxsock.NativePeek != 0 {
+			udpRequest.Flags |= udpapi.FlagPeek
+		}
 	case linuxsock.NativeWrite:
 		udpRequest.Opcode, udpRequest.Slot, udpRequest.Length = udpapi.OpSend, slot, uint16(len(r.Data))
 	case linuxsock.NativeSendTo:
@@ -155,10 +183,79 @@ func encodeUDP(r *linuxsock.NativeRequest, slot uint8) linuxsock.SubmitStatus {
 		udpRequest.Address, udpRequest.Port = r.Address, r.Port
 	case linuxsock.NativeClose:
 		udpRequest.Opcode = udpapi.OpClose
+	case linuxsock.NativeReady:
+		udpRequest.Opcode = udpapi.OpReady
+	case linuxsock.NativeWaitReady:
+		udpRequest.Opcode, udpRequest.Mask = udpapi.OpWaitReady, udpMask(r.Mask)
+	case linuxsock.NativeOption:
+		if r.Option != linuxsock.OptionTTL {
+			return linuxsock.SubmitUnsupported
+		}
+		udpRequest.Opcode, udpRequest.Option = udpapi.OpOption, udpapi.OptionTTL
 	default:
 		return linuxsock.SubmitUnsupported
 	}
 	return linuxsock.SubmitAccepted
+}
+
+// The native masks and the core's name the same conditions.
+var tcpBits = [...]struct {
+	native uint16
+	core   linuxsock.NativeMask
+}{
+	{tcpapi.ReadyAcceptable, linuxsock.MaskAcceptable},
+	{tcpapi.ReadyConnected, linuxsock.MaskConnected},
+	{tcpapi.ReadyConnectFailed, linuxsock.MaskConnectFailed},
+	{tcpapi.ReadyReadable, linuxsock.MaskReadable},
+	{tcpapi.ReadyReadEOF, linuxsock.MaskReceiveEOF},
+	{tcpapi.ReadyWritable, linuxsock.MaskWritable},
+	{tcpapi.ReadyWriteClosed, linuxsock.MaskWriteClosed},
+	{tcpapi.ReadyError, linuxsock.MaskPendingError},
+	{tcpapi.ReadyHangUp, linuxsock.MaskHungUp},
+	{tcpapi.ReadyConnecting, linuxsock.MaskConnecting},
+	{tcpapi.ReadyListening, linuxsock.MaskListening},
+}
+
+func tcpMask(mask linuxsock.NativeMask) uint16 {
+	var native uint16
+	for _, bit := range tcpBits {
+		if mask&bit.core != 0 {
+			native |= bit.native
+		}
+	}
+	return native
+}
+
+func coreTCPMask(native uint16) linuxsock.NativeMask {
+	var mask linuxsock.NativeMask
+	for _, bit := range tcpBits {
+		if native&bit.native != 0 {
+			mask |= bit.core
+		}
+	}
+	return mask
+}
+
+func udpMask(mask linuxsock.NativeMask) uint16 {
+	var native uint16
+	if mask&linuxsock.MaskReadable != 0 {
+		native |= udpapi.ReadyReadable
+	}
+	if mask&linuxsock.MaskWritable != 0 {
+		native |= udpapi.ReadyWritable
+	}
+	return native
+}
+
+func coreUDPMask(native uint16) linuxsock.NativeMask {
+	var mask linuxsock.NativeMask
+	if native&udpapi.ReadyReadable != 0 {
+		mask |= linuxsock.MaskReadable
+	}
+	if native&udpapi.ReadyWritable != 0 {
+		mask |= linuxsock.MaskWritable
+	}
+	return mask
 }
 
 // serviceLink reads every reply waiting on a session and hands each to the
@@ -230,6 +327,10 @@ func tcpResult(result tcpapi.Result) linuxsock.NativeResult {
 		return linuxsock.NativeDriverFault
 	case tcpapi.ResultEOF:
 		return linuxsock.NativeEOF
+	case tcpapi.ResultWouldBlock:
+		return linuxsock.NativeWouldBlock
+	case tcpapi.ResultInProgress:
+		return linuxsock.NativeInProgress
 	}
 	return linuxsock.NativeClosed
 }
@@ -256,11 +357,15 @@ func udpResult(result udpapi.Result) linuxsock.NativeResult {
 		return linuxsock.NativeAddressInUse
 	case udpapi.ResultDriverFault:
 		return linuxsock.NativeDriverFault
+	case udpapi.ResultWouldBlock:
+		return linuxsock.NativeWouldBlock
+	case udpapi.ResultMessageSize:
+		return linuxsock.NativeMessageSize
 	}
 	return linuxsock.NativeClosed
 }
 
-// completeTCP turns a GTCP1 reply into completion.
+// completeTCP turns a GTCP 2 reply into completion.
 func completeTCP(link *nativeLink) (uint64, bool) {
 	tcpReply = tcpapi.Reply{}
 	correlation, ok := tcpapi.DecodeReply(&nativeIn, &tcpReply)
@@ -298,11 +403,21 @@ func completeTCP(link *nativeLink) (uint64, bool) {
 		completion.Op = linuxsock.NativeShutdownWrite
 	case tcpapi.OpClose:
 		completion.Op = linuxsock.NativeClose
+	case tcpapi.OpReady, tcpapi.OpWaitReady:
+		completion.Op = linuxsock.NativeReady
+		if r.Opcode == tcpapi.OpWaitReady {
+			completion.Op = linuxsock.NativeWaitReady
+		}
+		completion.Mask, completion.Readable = coreTCPMask(r.Mask), r.Value
+	case tcpapi.OpError:
+		completion.Op, completion.Value = linuxsock.NativeError, uint32(tcpResult(r.Error))
+	case tcpapi.OpOption:
+		completion.Op, completion.Value = linuxsock.NativeOption, r.Value
 	}
 	return correlation, true
 }
 
-// completeUDP turns a GUDP1 reply into completion.
+// completeUDP turns a GUDP 2 reply into completion.
 func completeUDP(link *nativeLink) (uint64, bool) {
 	udpReply = udpapi.Reply{}
 	correlation, ok := udpapi.DecodeReply(&nativeIn, &udpReply)
@@ -339,6 +454,14 @@ func completeUDP(link *nativeLink) (uint64, bool) {
 		}
 	case udpapi.OpClose:
 		completion.Op = linuxsock.NativeClose
+	case udpapi.OpReady, udpapi.OpWaitReady:
+		completion.Op = linuxsock.NativeReady
+		if r.Opcode == udpapi.OpWaitReady {
+			completion.Op = linuxsock.NativeWaitReady
+		}
+		completion.Mask, completion.Readable = coreUDPMask(r.Mask), r.Value
+	case udpapi.OpOption:
+		completion.Op, completion.Value = linuxsock.NativeOption, r.Value
 	}
 	return correlation, true
 }

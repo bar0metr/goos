@@ -26,10 +26,6 @@ import (
 
 const (
 	linuxSockName = "linuxsockd"
-	// linuxSockQuota is the endpoint quota PID 1 asks netd for on each of
-	// the service's native sessions: one endpoint per socket of the
-	// service's table.
-	linuxSockQuota = 64
 	// linuxFamilyLimit matches the service's family table.
 	linuxFamilyLimit = 16
 	// linuxSockReplies bounds the stale replies PID 1 skips while it waits
@@ -133,13 +129,18 @@ func linuxSockRunning() bool {
 }
 
 // bindLinuxSockBackends hands the service a TCP and a UDP session, each
-// under a new generation.
+// under a new generation. openLinuxSocketSessions asks netd for both with
+// the endpoint quota the service's socket table needs (GNETCTL 5).
 func bindLinuxSockBackends() {
+	tcp, udp, ok := openLinuxSocketSessions()
+	if !ok {
+		syslog.Error("linuxsockd native sessions unavailable")
+		return
+	}
 	for _, opcode := range [...]linuxsockapi.ControlOpcode{linuxsockapi.ControlSetTCP, linuxsockapi.ControlSetUDP} {
-		session, ok := openLinuxSockSession(opcode == linuxsockapi.ControlSetTCP, linuxSockQuota)
-		if !ok {
-			syslog.Error("linuxsockd native session unavailable", syslog.Uint("operation", uint64(opcode)))
-			continue
+		session := tcp
+		if opcode == linuxsockapi.ControlSetUDP {
+			session = udp
 		}
 		linuxSockGeneration++
 		request := linuxsockapi.ControlRequest{Opcode: opcode, Generation: linuxSockGeneration}
@@ -148,18 +149,6 @@ func bindLinuxSockBackends() {
 		}
 	}
 	mark("LINUXSOCKD_NATIVE_BOUND_OK\n")
-}
-
-// openLinuxSockSession opens one native session for the service with an
-// endpoint quota of quota. The quota rides on GNETCTL version 5's
-// ControlAddTCPSession and ControlAddUDPSession; GNETCTL version 4 has no
-// quota field, so until then the session gets netd's ordinary one.
-func openLinuxSockSession(tcp bool, quota uint16) ([3]handle.ID, bool) {
-	_ = quota
-	if tcp {
-		return openTCPSession()
-	}
-	return openUDPSession()
 }
 
 // linuxSockCall sends one control request and waits, bounded, for its
