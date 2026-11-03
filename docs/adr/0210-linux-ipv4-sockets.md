@@ -213,3 +213,25 @@ static libc resolves names with ordinary socket traffic.
   family beyond them runs without sockets. With a context for every process
   the kernel image grew past 8 MiB, where OVMF reserves memory, and the
   firmware moved it.
+- `eventfd` and `eventfd2` are part of the ABI: curl 8.22's resolver thread
+  wakes its transfer loop through one, and failed with "Out of memory"
+  without it.
+- `netd` answers a held readiness wait only when the mask changes. After a
+  read that uses up the readable count it last reported, or a write that
+  finds the send buffer full, `linuxsockd` asks for the readiness again
+  instead of trusting the old mask; without that a reader and a writer on
+  one connection could both sleep.
+- A nonblocking stream connect is always `EINPROGRESS`, also when `netd`
+  finished a loopback connect inside the request, as Linux reports it.
+- A dead network driver makes `netd` drop the interface address and abort
+  the connections bound to it. Linux sockets follow that state: such a
+  connection fails with a network error and new ones work once the driver
+  is back.
+
+## Validation
+
+`make test-linux-network` passes 80 checks under QEMU: all 16 `netprobe`
+loopback groups, which match a Linux 6.12 kernel, libc DNS through the
+local server with the TCP fallback, TCP client and server against the host,
+UDP, descriptor inheritance, BusyBox 1.38.0 `nc`, `wget` and `httpd`, curl
+8.22.0, and the `net-driver`, `netd` and `linuxsockd` faults.
