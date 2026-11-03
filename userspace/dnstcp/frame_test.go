@@ -140,6 +140,39 @@ func TestSenderPartialWrites(t *testing.T) {
 	}
 }
 
+// A server reads exactly one message at a time into a small buffer: Exact
+// never asks past the message, so pipelined queries stay apart, and a prefix
+// naming more than the buffer holds is invalid.
+func TestReceiverExactIntoSmallBuffer(t *testing.T) {
+	first, second := body(20), body(33)
+	stream := append(framed(first), framed(second)...)
+	buffer := make([]byte, 40)
+	var receiver Receiver
+	for _, want := range [][]byte{first, second} {
+		receiver.Reset()
+		for !receiver.Complete() {
+			size := receiver.Exact(slot)
+			if size <= 0 || size > len(stream) {
+				t.Fatalf("exact %d with %d left", size, len(stream))
+			}
+			if _, valid := receiver.TakeInto(buffer, stream[:size]); !valid {
+				t.Fatal("invalid")
+			}
+			stream = stream[size:]
+		}
+		if receiver.Length() != len(want) || !bytes.Equal(buffer[:receiver.Length()], want) {
+			t.Fatalf("message % x", buffer[:receiver.Length()])
+		}
+	}
+	if len(stream) != 0 {
+		t.Fatalf("%d bytes left", len(stream))
+	}
+	receiver.Reset()
+	if _, valid := receiver.TakeInto(buffer, framed(body(41))[:2]); valid {
+		t.Fatal("oversized prefix accepted")
+	}
+}
+
 func TestSenderOverAccept(t *testing.T) {
 	var sender Sender
 	sender.Set(body(30))
