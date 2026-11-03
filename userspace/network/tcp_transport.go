@@ -91,6 +91,7 @@ func (stack *Stack) passiveSYN(listener *tcpEndpoint, packet ipv4Packet, segment
 	child.local, child.port = packet.destination, segment.destinationPort
 	child.remote, child.remotePort = packet.source, segment.sourcePort
 	child.listener = tcpID(listener, listenerSlot)
+	child.reuse = listener.reuse
 	child.irs, child.rcvNxt = segment.sequence, segment.sequence+1
 	child.iss = uint32(stack.next())
 	child.sndUna, child.sndNxt = child.iss, child.iss+1

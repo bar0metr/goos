@@ -86,9 +86,12 @@ type Stack struct {
 	udpPending    [UDPPendingSends]udpPending
 	udpGeneration uint32
 	udpStats      UDPStats
+	udpQuota      [MaxUDPSessions]uint8
+	udpBinds      uint32
 
 	tcp           [MaxTCPEndpoints]tcpEndpoint
 	tcpTombstones [tcpTombstoneSlots]tcpTombstone
+	tcpQuota      [MaxTCPSessions]uint8
 	tcpGeneration uint32
 	tcpStats      TCPStats
 

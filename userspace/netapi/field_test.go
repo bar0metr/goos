@@ -5,6 +5,15 @@ import (
 	"testing"
 )
 
+// A session quota the codec admits must fit the stack's per-session tables.
+func TestSessionQuotasMatchNetwork(t *testing.T) {
+	got := [...]int{MaxSessionQuota, MaxSessionQuota, OrdinarySessionQuota, OrdinarySessionQuota}
+	want := [...]int{network.MaxTCPSessionQuota, network.MaxUDPSessionQuota, network.MaxTCPEndpointsPerSession, network.MaxUDPSessionEndpoints}
+	if got != want {
+		t.Fatalf("session quotas %v, stack %v", got, want)
+	}
+}
+
 // The service sends a network.Field as a netapi.Field, so both enumerations
 // must number every setting the same way.
 func TestFieldsMatchNetwork(t *testing.T) {

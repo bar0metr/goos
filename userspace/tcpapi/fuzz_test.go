@@ -18,6 +18,13 @@ func FuzzDecode(f *testing.F) {
 		{Opcode: OpShutdownWrite, Endpoint: 1},
 		{Opcode: OpClose, Endpoint: 1},
 		{Opcode: OpRelease, Slot: 0},
+		{Opcode: OpBind, Endpoint: 1, Port: 80, Flags: FlagReuseAddr},
+		{Opcode: OpRead, Endpoint: 1, Length: 1, Flags: FlagNoWait | FlagPeek},
+		{Opcode: OpConnect, Endpoint: 1, Address: [4]byte{192, 0, 2, 1}, Port: 7, Flags: FlagNoWait},
+		{Opcode: OpReady, Endpoint: 1},
+		{Opcode: OpWaitReady, Endpoint: 1, Mask: ReadyReadable | ReadyConnected},
+		{Opcode: OpError, Endpoint: 1},
+		{Opcode: OpOption, Endpoint: 1, Option: OptionSendMSS},
 	}
 	for _, request := range requests {
 		correlation := uint64(1)
@@ -27,6 +34,17 @@ func FuzzDecode(f *testing.F) {
 		var message ipc.Message
 		EncodeRequest(&request, correlation, &message)
 		f.Add(message.Payload[:RequestSize], uint8(message.Kind), correlation)
+	}
+	for _, reply := range []Reply{
+		{Opcode: OpReady, Endpoint: 1, Mask: ReadyWritable, Value: 3, Room: 9},
+		{Opcode: OpError, Endpoint: 1, Error: ResultReset},
+		{Opcode: OpOption, Endpoint: 1, Value: 64},
+		{Opcode: OpConnect, Result: ResultInProgress, Endpoint: 1, Address: [4]byte{1, 2, 3, 4}, Port: 1, Local: [4]byte{5, 6, 7, 8}, LocalPort: 2},
+		{Opcode: OpRead, Result: ResultWouldBlock, Endpoint: 1},
+	} {
+		var message ipc.Message
+		EncodeReply(&reply, 1, &message)
+		f.Add(message.Payload[:ReplySize], uint8(ipc.KindReply), uint64(1))
 	}
 	f.Fuzz(func(t *testing.T, payload []byte, kind uint8, correlation uint64) {
 		if len(payload) > ipc.MaxPayload {

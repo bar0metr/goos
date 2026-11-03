@@ -204,7 +204,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -743,6 +743,18 @@ test-network:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
 	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) tests/boot/network.sh $(ISO) $(OVMF_CODE)
 
+# The Linux sockets gate (ADR 0210): netprobe, BusyBox nc, wget and httpd,
+# and curl on a validation guest against tools/netpeer, with the network
+# driver, netd and linuxsockd killed under open sockets. The caller supplies
+# the pinned static BusyBox and curl; the gate checks their SHA-256.
+#   make test-linux-network BUSYBOX=/path/to/busybox CURL=/path/to/curl
+test-linux-network:
+	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }
+	@test -n "$(CURL)" && test -f "$(CURL)" || { echo "CURL=/path/to/static/curl is required" >&2; exit 2; }
+	@tools/linuxfixture/check-static.sh "$(BUSYBOX)" "$(CURL)"
+	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX)):$(abspath $(CURL))
+	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) tests/boot/linux_network.sh $(ISO) $(OVMF_CODE) $(abspath $(BUSYBOX)) $(abspath $(CURL))
+
 # Crypto feasibility reports stay in ignored build scratch output. A failed dependency
 # does not prevent native execution of the independently built probes.
 CRYPTO_WORK ?=
@@ -1215,6 +1227,7 @@ help:
 	  '  test-linux-kernel-reference KERNEL=path BUSYBOX=path  run the probe on a Linux kernel in QEMU' \
 	  '  test-linux-all  Linux ABI host tests and the Linux end-to-end boot' \
 	  '  test-linux-busybox BUSYBOX=path  run BusyBox applets from a static busybox' \
+	  '  test-linux-network BUSYBOX=path CURL=path  Linux sockets: netprobe, nc, wget, httpd, curl, service faults' \
 	  '  test-linux-7zip LINUX_EXTRA=path  archive, extract, and hash with a static 7zzs on SMP=4' \
 	  '  profile-locks [LINUX_EXTRA=path]  lock acquisitions and contention per workload on SMP=4' \
 	  '  test-race       concurrency tests of handles, channels, Linux tables, waits, and the scheduler under the race detector' \

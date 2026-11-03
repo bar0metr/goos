@@ -1,7 +1,7 @@
 # Networking
 
 `/system/bin/fetch` is a native HTTP/1.1 client for HTTP and HTTPS. It asks
-`resolved` for IPv4 addresses through GRESOLV1, then uses GTCP1 to connect to
+`resolved` for IPv4 addresses through GRESOLV1, then uses GTCP to connect to
 `netd`. Its response parser lives in `userspace/httpwire`; URL and redirect policy live in
 `userspace/fetch`. An optional VFS session receives file output. The network
 services do not interpret HTTP, TLS or X.509.
@@ -27,7 +27,7 @@ Linux socket calls. `dnsq` shows AAAA records; nothing sends IPv6.
 
 ## HTTPS
 
-`userspace/tlsclient` wraps a connected GTCP1 byte stream in the pinned Go
+`userspace/tlsclient` wraps a connected GTCP byte stream in the pinned Go
 1.25.5 software `crypto/tls` and `crypto/x509` implementations, compiled with
 TinyGo 0.42.0 (ADR 0198). It performs no DNS lookup or transport dial itself.
 `fetch` uses the same request, HTTP framing and VFS output code for both schemes;
@@ -76,12 +76,12 @@ and [the evidence report](../development/crypto-feasibility.md).
 
 ```text
 resolve             ping                         net    udp, tcp, dnsq
-  | GRESOLV1          | GRESOLV1, GNETAPI version 4 | GNETAPI v4 | GUDP1 / GTCP1
+  | GRESOLV1          | GRESOLV1, GNETAPI version 4 | GNETAPI v4 | GUDP 2 / GTCP 2
   v                   +-------------+---------------+--------------------+
 resolved  <-- GNETCTL --  PID 1     |  one private session per command
   |  hosts: GHST1 on its configuration session
-  |  GUDP1 session, GTCP1 session   v
-  |  and GNETAPI status     netd  <---- GNETCTL version 4 ----  PID 1
+  |  GUDP 2 session, GTCP 2 session v
+  |  and GNETAPI status     netd  <---- GNETCTL version 5 ----  PID 1
   +-------------------------------->|  lo, Ethernet, ARP, IPv4, ICMP echo,
                                     |  DHCP client, UDP endpoints, TCP TCBs
                                     |
@@ -203,23 +203,39 @@ limit, and the count of echoes answered on it (ADR 0193).
 
 ## UDP
 
-A program reaches UDP through a `GUDP1` session (`userspace/udpapi`): one
-channel, a TX pool of four 4096-byte slots the program writes and `netd`
+A program reaches UDP through a GUDP version 2 session (`userspace/udpapi`):
+one channel, a TX pool of four 4096-byte slots the program writes and `netd`
 only reads, and an RX pool of eight slots `netd` writes and the program only
 reads. PID 1 creates the three objects for a command whose manifest asks for
 `GrantUDP` and hands `netd` its ends with `ControlAddUDPSession`. The
-requests are `Open`, `Bind`, `Connect`, `Send`, `SendTo`, `RecvFrom` and
-`Close`, each answered once; `Release` returns an RX slot and gets no reply.
-`netd` closes a session that sends a malformed request or hands back a slot
-it does not hold, and every endpoint of that session closes with it.
+requests are `Open`, `Bind`, `Connect`, `Send`, `SendTo`, `RecvFrom`,
+`Close`, `Ready`, `WaitReady` and `Option`, and `netd` answers each once;
+`Release` returns an RX slot and gets no reply. `netd` closes a session that
+sends a malformed request or hands back a slot it does not hold, and every
+endpoint of that session closes with it. `netd` treats a message of another
+version as malformed.
+
+Requests are 24 bytes and replies 32. A flags byte carries `NoWait` and
+`Peek` for `RecvFrom` and `ReuseAddr` for `Bind`. A `NoWait` receive with
+nothing queued answers `WouldBlock`; a `Peek` receive copies the datagram
+and leaves it queued. A receive reply's length is the whole datagram, up to
+4096 bytes, the slot size. `Ready` reports the readiness mask (readable,
+writable), the next datagram's length and the number queued. `WaitReady`
+names the mask the client saw; `netd` answers it once the endpoint's mask
+differs, at once if it already does. An endpoint holds one, and `Close`
+answers it with `Closed` first. `Option` reads the TTL or the largest
+payload the path to a destination carries: max-payload on the local path,
+the MTU less 28 bytes on the wire. A larger send answers `MessageSize`, and
+`netd` sends nothing.
 
 The endpoints live in the stack. Each has an owner, the index of the UDP
 session it was opened on, and every call checks it. An endpoint ID carries a
 generation above its table slot, so an ID kept after `Close` matches
 nothing. Bind takes port 0 for a random port from the ephemeral range,
 49152 to 65535 by default; a port is taken when another endpoint holds it
-on the same address or either address is the wildcard, and port 68 belongs
-to the DHCP client while the interface runs DHCP. `Connect` fixes the peer,
+on the same address or either address is the wildcard, unless both
+endpoints bound with `ReuseAddr`, and port 68 belongs to the DHCP client
+while the interface runs DHCP. `Connect` fixes the peer,
 binds an ephemeral port if needed and sends nothing; a connected endpoint
 sends only to that peer and keeps only datagrams from its address and port.
 
@@ -231,25 +247,69 @@ bytes, 1472 on a 1500-byte link; there is no fragmentation. Broadcast,
 multicast, a subnet's network or broadcast address and port 0 are refused as
 destinations. A received datagram goes to the endpoint bound to its
 destination address and port, or else to the one bound to the wildcard on
-that port. Queued payloads share 32 receive buffers of 4096 bytes, at most 16
-per session; a full queue or share drops the newcomer and keeps what is
-queued. No ICMP Port Unreachable is sent for an unbound port.
+that port. Among endpoints that share a binding by `ReuseAddr`, the one bound
+last receives unicast, as on Linux. Queued payloads share 128 receive
+buffers of 4096 bytes, 512 KiB in all, and one session holds at most 64 of
+them, one for each endpoint of a session at the largest quota; a full queue
+or share drops the newcomer and keeps what is queued. No ICMP Port
+Unreachable is sent for an unbound port.
 
 ## TCP
 
 TCP uses the same route, ARP and local-delivery paths as UDP, but keeps its
-TCBs in `userspace/network`. Native programs reach it through `GTCP1`: a
-channel, four TX slots and eight RX slots. PID 1 creates these objects only
-for `GrantTCP` and registers the service side with `netd` through
+TCBs in `userspace/network`. Native programs reach it through GTCP version
+2: a channel, four TX slots and eight RX slots. PID 1 creates these objects
+only for `GrantTCP` and registers the service side with `netd` through
 `ControlAddTCPSession`. Endpoint IDs carry generations and every operation
 checks the owning session.
+
+Requests are 24 bytes and replies 32. Without flags, `Accept`, `Connect`,
+`Read` and `Write` park in `netd` until they finish, as in version 1. The
+`NoWait` flag answers them at once: `Read` and `Accept` with `WouldBlock`,
+`Write` with the prefix that fit or `WouldBlock` when nothing fit, and
+`Connect` with `InProgress` and the chosen four-tuple once the handshake has
+started. `Peek` reads bytes without consuming them; `ReuseAddr` binds with
+SO_REUSEADDR. `Ready` reports a readiness mask, the readable byte count and
+the send buffer room without consuming anything. The mask says whether a
+listener has a child, the connect finished or failed, bytes are buffered,
+the peer's FIN follows them, a write would take a byte, the write side is
+closed, an error is pending, the connection hung up, a connect is in
+progress, or the endpoint listens. `WaitReady` names the mask the client
+saw; `netd` answers it once the endpoint's mask differs, at once if it already
+does, so a client that calls `Ready` and then `WaitReady` with the mask it
+got cannot miss a change between the two. An endpoint holds one wait;
+`Close` answers it with `Closed` first. `Error` returns and
+clears the pending transport error; a `Connect`, `Read` or `Write` reply
+that reports the error clears it too. `Option` reads the send MSS, the send
+and receive buffer sizes and the TTL.
+
+A bind follows the Linux SO_REUSEADDR rule: it conflicts with any endpoint
+or TIME_WAIT four-tuple on the same port whose address overlaps, equal or
+either one the wildcard, unless both carry `ReuseAddr` and the holder is not
+listening. A TIME_WAIT entry keeps the flag of its connection, and an
+accepted child takes its listener's. A connect may share an ephemeral local
+port with other connections, which the four-tuple check keeps apart. `remoted`
+and `tcp listen` bind with `ReuseAddr`, so a restarted server rebinds while
+its old connections wait out TIME_WAIT.
 
 The stack supports bind, ephemeral ports, listen, deferred accept and connect,
 bounded byte-stream reads and writes, retransmission, receive and congestion
 windows, bounded out-of-order reassembly, zero-window probes, FIN half-close,
 RST and TIME_WAIT. Each connection has fixed 16 KiB send and receive arrays;
-the global table has 32 endpoints, with at most eight per session. Runtime
-settings can lower these limits but cannot allocate more storage.
+the global table has 96 endpoints and at most 16 listeners. Runtime settings
+can lower these limits but cannot allocate more storage.
+
+### Session quotas
+
+Each TCP and UDP session has an endpoint quota that PID 1 names in
+GNETCTL version 5 (`ControlAddTCPSession` and `ControlAddUDPSession` carry
+it in byte 2, 1 to 64). Commands and `resolved` get the ordinary quota of
+8; `max-endpoints-per-session` can lower it. PID 1 asks for 64 for
+`linuxsockd`, and the tuning does not lower a grant above the ordinary
+quota. `netd` holds 8 TCP and 8 UDP sessions. Its per-session tables and the
+TIME_WAIT tombstone table fit the largest quota, so a session at 64 cannot
+take another session's share: an owner keeps up to its quota of tombstones,
+and at least 8. A passive child counts against its listener's session.
 
 Traffic to `127.0.0.0/8` or the current interface address is fed back through
 the TCP parser and state machine. It does not use ARP or the virtio driver.
@@ -278,7 +338,7 @@ both sessions and hands them over with `ControlSetNetwork` whenever either
 service starts (ADR 0194, ADR 0195).
 
 An answer with TC=1 that matches the query makes `resolved` ask the same
-server the same question over TCP. PID 1 gives it a `GTCP1` session with
+server the same question over TCP. PID 1 gives it a `GTCP` session with
 `ControlSetTCP` right after the UDP pair, under the same generation
 (ADR 0196). Each fallback opens one connection to port 53, writes the
 two-byte length and the query, reads exactly one length-prefixed reply into
@@ -311,7 +371,7 @@ sessions it sends one query to the server on its command line and prints the
 answer. It shares `dnswire` and `dnstcp` with the resolver, holds one
 65535-byte buffer for a response from either transport, and runs UDP and a
 TCP fallback against one deadline. Each TCP query uses one connection that
-`dnsq` closes like any `GTCP1` client, TIME_WAIT included.
+`dnsq` closes like any `GTCP` client, TIME_WAIT included.
 
 The interface is in one of four states:
 

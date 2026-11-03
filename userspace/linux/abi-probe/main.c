@@ -46,6 +46,8 @@
  *   eintr             signals interrupt read, wait4, nanosleep, and poll; SA_RESTART
  *   poll              poll readiness, HUP, ERR, NVAL, timeouts, and wake-ups
  *   ppoll             ppoll and rt_sigsuspend with a temporary signal mask
+ *   select            select and pselect6 over pipes: sets, timeouts, the time
+ *                     left, EBADF, EINVAL, EFAULT, and a temporary signal mask
  *   family            leave a child asleep and wait on standard input
  *   path              print the PATH the program started with
  *   run PATH ARGS...  replace this image with PATH and ARGS
@@ -2428,6 +2430,318 @@ static int ppoll_test(void)
 	return 0;
 }
 
+/* select and pselect6 go to the kernel directly: musl's pselect copies the
+ * timeout, so the kernel's write-back of the time left would not show. Sets
+ * are one 64-bit word; every descriptor the probe uses is below 64. */
+static long probe_select(int count, uint64_t *read, uint64_t *write, uint64_t *except, struct timeval *timeout)
+{
+	return syscall(SYS_select, count, read, write, except, timeout);
+}
+
+static long probe_pselect(int count, uint64_t *read, uint64_t *write, uint64_t *except, struct timespec *timeout,
+			  const sigset_t *mask, unsigned long size)
+{
+	struct {
+		const sigset_t *set;
+		unsigned long size;
+	} argument = {mask, size};
+
+	return syscall(SYS_pselect6, count, read, write, except, timeout, &argument);
+}
+
+static volatile int select_seen;
+
+static void note_select(int number)
+{
+	(void)number;
+	select_seen++;
+}
+
+static int select_fail(const char *step)
+{
+	printf("select failed: %s errno=%d seen=%d\n", step, errno, select_seen);
+	return 1;
+}
+
+static uint64_t bit(int fd)
+{
+	return (uint64_t)1 << fd;
+}
+
+/* Time left in microseconds, or -1 when the timeval is not a valid one. */
+static long long timeval_left(const struct timeval *value)
+{
+	if (value->tv_sec < 0 || value->tv_usec < 0 || value->tv_usec >= 1000000)
+		return -1;
+	return (long long)value->tv_sec * 1000000 + value->tv_usec;
+}
+
+/* Sleeps in pselect6 with SIGUSR1 let through, after saying ready. */
+static int pselect_sleeper(int ready)
+{
+	uint64_t read = bit(eintr_pipe[0]);
+	sigset_t unblocked;
+
+	sigemptyset(&unblocked);
+	if (write(ready, "r", 1) != 1)
+		return 2;
+	if (probe_pselect(eintr_pipe[0] + 1, &read, NULL, NULL, NULL, &unblocked, 8) != -1 || errno != EINTR ||
+	    select_seen != 1)
+		return 1;
+	return user1_blocked() ? 0 : 3;
+}
+
+/* Sleeps in select with SIGUSR1 unblocked: the call ends with EINTR, the
+ * set as it was, and the time left in the timeval. */
+static int select_sleeper(int ready)
+{
+	struct timeval timeout = {5, 0};
+	uint64_t read = bit(eintr_pipe[0]);
+	sigset_t block;
+	long long left;
+
+	sigemptyset(&block);
+	sigaddset(&block, SIGUSR1);
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	if (write(ready, "r", 1) != 1)
+		return 2;
+	if (probe_select(eintr_pipe[0] + 1, &read, NULL, NULL, &timeout) != -1 || errno != EINTR || select_seen != 1)
+		return 1;
+	left = timeval_left(&timeout);
+	if (read != bit(eintr_pipe[0]) || left <= 3000000 || left >= 5000000)
+		return 3;
+	return 0;
+}
+
+static int select_test(void)
+{
+	struct timespec nap = {0, 50 * 1000 * 1000}, start, spec;
+	struct timeval timeout;
+	uint64_t read, write_set, except, wide[16];
+	void *bad = (void *)0x8000000000000000ULL;
+	sigset_t block, unblocked;
+	char byte;
+	int fds[2], top, file, status;
+	pid_t child;
+	long long left;
+
+	signal(SIGPIPE, SIG_IGN);
+	fflush(stdout);
+	if (pipe(fds) != 0 || pipe(eintr_pipe) != 0)
+		return select_fail("pipe");
+	top = (fds[0] > fds[1] ? fds[0] : fds[1]) + 1;
+	timeout = (struct timeval){0, 0};
+	if (probe_select(0, NULL, NULL, NULL, &timeout) != 0)
+		return select_fail("empty");
+
+	/* An idle pipe: the write end is writable, the read end is not ready. */
+	read = bit(fds[0]) | bit(fds[1]);
+	write_set = bit(fds[0]) | bit(fds[1]);
+	except = bit(fds[0]) | bit(fds[1]);
+	if (probe_select(top, &read, &write_set, &except, &timeout) != 1 || read != 0 || write_set != bit(fds[1]) ||
+	    except != 0 || timeout.tv_sec != 0 || timeout.tv_usec != 0)
+		return select_fail("idle pipe");
+
+	/* Each set counts on its own, and a pipe has no exceptional state. */
+	if (write(fds[1], "x", 1) != 1)
+		return select_fail("write");
+	read = bit(fds[0]);
+	write_set = bit(fds[1]);
+	except = bit(fds[0]);
+	if (probe_select(top, &read, &write_set, &except, &timeout) != 2 || read != bit(fds[0]) ||
+	    write_set != bit(fds[1]) || except != 0)
+		return select_fail("readable");
+
+	/* A descriptor at or above the count is not looked at, open or not. */
+	read = bit(fds[0]) | bit(60);
+	if (probe_select(fds[0] + 1, &read, NULL, NULL, &timeout) != 1 || read != bit(fds[0]))
+		return select_fail("count");
+	/* A count above the table is cut to it. */
+	memset(wide, 0, sizeof wide);
+	wide[0] = bit(fds[0]);
+	if (probe_select(1024, wide, NULL, NULL, &timeout) != 1 || wide[0] != bit(fds[0]))
+		return select_fail("wide count");
+
+	/* A ready return writes back the time left. */
+	timeout = (struct timeval){5, 0};
+	read = bit(fds[0]);
+	left = probe_select(top, &read, NULL, NULL, &timeout) == 1 ? timeval_left(&timeout) : -1;
+	if (left < 4500000 || left >= 5000000)
+		return select_fail("time left");
+	/* Linux carries whole seconds out of tv_usec. */
+	timeout = (struct timeval){0, 1500000};
+	read = bit(fds[0]);
+	left = probe_select(top, &read, NULL, NULL, &timeout) == 1 ? timeval_left(&timeout) : -1;
+	if (left < 1000000 || left >= 1500000)
+		return select_fail("carried microseconds");
+	/* One second less a million microseconds is a zero timeout, which
+	 * leaves the timeval alone. */
+	timeout = (struct timeval){1, -1000000};
+	read = bit(fds[0]);
+	if (probe_select(top, &read, NULL, NULL, &timeout) != 1 || timeout.tv_sec != 1 || timeout.tv_usec != -1000000)
+		return select_fail("borrowed second");
+	read = bit(fds[0]);
+	spec = (struct timespec){5, 0};
+	if (probe_pselect(top, &read, NULL, NULL, &spec, NULL, 0) != 1 || spec.tv_sec != 4 || spec.tv_nsec < 500000000)
+		return select_fail("pselect6 time left");
+	if (syscall(SYS_read, fds[0], &byte, 1) != 1)
+		return select_fail("drain");
+
+	/* A timeout clears the sets and leaves no time. */
+	timeout = (struct timeval){0, 60 * 1000};
+	read = bit(fds[0]);
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	if (probe_select(top, &read, NULL, NULL, &timeout) != 0 || elapsed_ms(&start) < 55 || read != 0 ||
+	    timeout.tv_sec != 0 || timeout.tv_usec != 0)
+		return select_fail("timeout");
+	spec = (struct timespec){0, 60 * 1000 * 1000};
+	read = bit(fds[0]);
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	if (probe_pselect(top, &read, NULL, NULL, &spec, NULL, 0) != 0 || elapsed_ms(&start) < 55 || read != 0 ||
+	    spec.tv_sec != 0 || spec.tv_nsec != 0)
+		return select_fail("pselect6 timeout");
+	/* With no descriptors select is a sleep. */
+	timeout = (struct timeval){0, 60 * 1000};
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	if (probe_select(0, NULL, NULL, NULL, &timeout) != 0 || elapsed_ms(&start) < 55)
+		return select_fail("sleep");
+
+	/* Arguments: the count, the timeout, the mask size. */
+	timeout = (struct timeval){0, 0};
+	read = bit(fds[0]);
+	if (!fails(probe_select(-1, &read, NULL, NULL, &timeout), EINVAL) || read != bit(fds[0]))
+		return select_fail("negative count");
+	timeout = (struct timeval){-1, 0};
+	if (!fails(probe_select(top, &read, NULL, NULL, &timeout), EINVAL))
+		return select_fail("negative seconds");
+	timeout = (struct timeval){0, -1};
+	if (!fails(probe_select(top, &read, NULL, NULL, &timeout), EINVAL))
+		return select_fail("negative microseconds");
+	spec = (struct timespec){0, 1000000000};
+	if (!fails(probe_pselect(top, &read, NULL, NULL, &spec, NULL, 0), EINVAL))
+		return select_fail("whole-second nanoseconds");
+	spec = (struct timespec){-1, 0};
+	if (!fails(probe_pselect(top, &read, NULL, NULL, &spec, NULL, 0), EINVAL))
+		return select_fail("pselect6 negative seconds");
+	sigemptyset(&unblocked);
+	spec = (struct timespec){0, 0};
+	if (!fails(probe_pselect(top, &read, NULL, NULL, &spec, &unblocked, 4), EINVAL) ||
+	    probe_pselect(top, &read, NULL, NULL, &spec, NULL, 4) != 0)
+		return select_fail("mask size");
+
+	/* A descriptor that is not open fails the call in any set. The sets
+	 * stay as they were, and the time left is written back. */
+	read = bit(60);
+	timeout = (struct timeval){0, 0};
+	if (!fails(probe_select(61, &read, NULL, NULL, &timeout), EBADF) || read != bit(60))
+		return select_fail("closed in read set");
+	except = bit(60);
+	if (!fails(probe_select(61, NULL, NULL, &except, &timeout), EBADF))
+		return select_fail("closed in exceptional set");
+	write_set = bit(fds[1]) | bit(60);
+	timeout = (struct timeval){5, 0};
+	if (!fails(probe_select(61, NULL, &write_set, NULL, &timeout), EBADF) || write_set != (bit(fds[1]) | bit(60)))
+		return select_fail("closed in write set");
+	left = timeval_left(&timeout);
+	if (left < 4500000 || left >= 5000000)
+		return select_fail("time left after EBADF");
+
+	/* Bad pointers. With a count of zero no set is copied. */
+	timeout = (struct timeval){0, 0};
+	read = bit(fds[0]);
+	if (!fails(probe_select(top, bad, NULL, NULL, &timeout), EFAULT) ||
+	    !fails(probe_select(top, NULL, bad, NULL, &timeout), EFAULT) ||
+	    !fails(probe_select(top, NULL, NULL, bad, &timeout), EFAULT) ||
+	    !fails(probe_select(top, &read, NULL, NULL, bad), EFAULT) ||
+	    !fails(probe_pselect(top, &read, NULL, NULL, bad, NULL, 0), EFAULT) ||
+	    !fails(probe_pselect(top, &read, NULL, NULL, &spec, bad, 8), EFAULT) ||
+	    !fails(syscall(SYS_pselect6, top, &read, NULL, NULL, &spec, bad), EFAULT))
+		return select_fail("bad pointer");
+	if (probe_select(0, bad, bad, bad, &timeout) != 0)
+		return select_fail("bad pointer at count zero");
+
+	/* A wake-up from another process. */
+	read = bit(fds[0]);
+	child = fork();
+	if (child == 0) {
+		nanosleep(&nap, NULL);
+		_exit(write(fds[1], "y", 1) == 1 ? 0 : 1);
+	}
+	if (child < 0 || probe_select(top, &read, NULL, NULL, NULL) != 1 || read != bit(fds[0]) ||
+	    wait4(child, &status, 0, NULL) != child || status != 0)
+		return select_fail("wake");
+	syscall(SYS_read, fds[0], &byte, 1);
+
+	/* The read end of a pipe with no writer is readable. The write end of
+	 * one with no reader has an error, which select reports in both sets. */
+	close(fds[1]);
+	read = bit(fds[0]);
+	if (probe_select(fds[0] + 1, &read, NULL, NULL, NULL) != 1 || read != bit(fds[0]))
+		return select_fail("hangup");
+	close(fds[0]);
+	if (pipe(fds) != 0 || close(fds[0]) != 0)
+		return select_fail("broken pipe");
+	read = write_set = bit(fds[1]);
+	timeout = (struct timeval){0, 0};
+	if (probe_select(fds[1] + 1, &read, &write_set, NULL, &timeout) != 2 || read != bit(fds[1]) ||
+	    write_set != bit(fds[1]))
+		return select_fail("broken pipe");
+	close(fds[1]);
+	file = open(IMAGE, O_RDONLY);
+	read = write_set = except = bit(file);
+	if (file < 0 || probe_select(file + 1, &read, &write_set, &except, NULL) != 2 || read != bit(file) ||
+	    write_set != bit(file) || except != 0)
+		return select_fail("regular file");
+	close(file);
+
+	/* pselect6 lets a pending signal through and gives the mask back. */
+	if (pipe(fds) != 0)
+		return select_fail("pipe");
+	top = (fds[0] > fds[1] ? fds[0] : fds[1]) + 1;
+	signal(SIGUSR1, note_select);
+	sigemptyset(&block);
+	sigaddset(&block, SIGUSR1);
+	sigprocmask(SIG_BLOCK, &block, NULL);
+	raise(SIGUSR1);
+	read = bit(fds[0]);
+	if (select_seen != 0 || probe_pselect(top, &read, NULL, NULL, NULL, &unblocked, 8) != -1 || errno != EINTR ||
+	    select_seen != 1 || !user1_blocked() || read != bit(fds[0]))
+		return select_fail("pending signal");
+	/* So it does with a zero timeout and nothing ready. */
+	raise(SIGUSR1);
+	spec = (struct timespec){0, 0};
+	if (probe_pselect(top, &read, NULL, NULL, &spec, &unblocked, 8) != -1 || errno != EINTR || select_seen != 2 ||
+	    !user1_blocked())
+		return select_fail("pending signal at zero timeout");
+	/* A ready descriptor wins, and the old mask is back before delivery. */
+	raise(SIGUSR1);
+	if (write(fds[1], "x", 1) != 1 || probe_pselect(top, &read, NULL, NULL, NULL, &unblocked, 8) != 1 ||
+	    read != bit(fds[0]) || select_seen != 2)
+		return select_fail("ready with a pending signal");
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	if (select_seen != 3)
+		return select_fail("unblock");
+	sigprocmask(SIG_BLOCK, &block, NULL);
+	close(fds[0]);
+	close(fds[1]);
+
+	/* A signal sent while the call sleeps interrupts it. */
+	select_seen = 0;
+	if ((status = interrupt_child(pselect_sleeper, 0)) != 0) {
+		printf("select failed: pselect6 sleeper %d\n", status);
+		return 1;
+	}
+	select_seen = 0;
+	if ((status = interrupt_child(select_sleeper, 0)) != 0) {
+		printf("select failed: select sleeper %d\n", status);
+		return 1;
+	}
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	signal(SIGUSR1, SIG_DFL);
+	printf("select ok\n");
+	return 0;
+}
+
 /* The child sleeps on a pipe nobody writes; the parent says so and reads
  * standard input. Ctrl-C on the parent must end both. */
 static int family_test(void)
@@ -4181,6 +4495,8 @@ int main(int argc, char **argv)
 			return poll_test();
 		if (!strcmp(argv[1], "ppoll"))
 			return ppoll_test();
+		if (!strcmp(argv[1], "select"))
+			return select_test();
 		if (!strcmp(argv[1], "family"))
 			return family_test();
 		if (!strcmp(argv[1], "run") && argc >= 3) {

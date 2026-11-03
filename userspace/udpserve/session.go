@@ -1,6 +1,9 @@
-// Package udpserve is the network service's side of one GUDP1 session
+// Package udpserve is the network service's side of one GUDP session
 // (ADR 0195): it turns decoded requests into stack calls, holds each
-// endpoint's waiting RecvFrom, and tracks the RX slots the client holds. It
+// endpoint's waiting RecvFrom and WaitReady, and tracks the RX slots the
+// client holds. A WaitReady parks while the endpoint's mask equals the mask
+// it names, so a datagram that arrives between a client's Ready and its
+// WaitReady answers the wait at once. It
 // knows nothing of channels or memory objects; the service maps the pools,
 // decodes requests and sends the replies this package produces, so the
 // whole request path runs in host tests against a real stack.
@@ -29,8 +32,11 @@ const (
 // waiter is one of the session's endpoints and the correlation of the
 // RecvFrom waiting on it, zero when none waits.
 type waiter struct {
-	id   network.EndpointID
-	recv uint64
+	id        network.EndpointID
+	recv      uint64
+	recvPeek  bool
+	ready     uint64
+	readyMask uint16
 }
 
 // Session is one client's GUDP1 state. Owner is the stack owner its
@@ -39,26 +45,38 @@ type Session struct {
 	owner     int
 	tx, rx    []byte
 	rxSlots   udpapi.Slots
-	endpoints [network.MaxUDPSessionEndpoints]waiter
+	endpoints [network.MaxUDPSessionQuota]waiter
 	reply     udpapi.Reply
 }
 
-// Start begins a session on owner's endpoints, with the client's TX pool
-// mapped read-only and the RX pool writable. Anything the owner held before
-// is closed first.
+// Start begins a session on owner's endpoints with the ordinary quota.
 func (s *Session) Start(stack *network.Stack, owner int, tx, rx []byte) {
+	s.StartQuota(stack, owner, 0, tx, rx)
+}
+
+// StartQuota begins a session on owner's endpoints, with the client's TX
+// pool mapped read-only and the RX pool writable. The owner may hold quota
+// endpoints, 1 to network.MaxUDPSessionQuota; zero is the ordinary quota.
+// Anything the owner held before is closed first.
+func (s *Session) StartQuota(stack *network.Stack, owner, quota int, tx, rx []byte) bool {
 	stack.UDPCloseOwner(owner)
+	if !stack.SetUDPQuota(owner, quota) {
+		stack.SetUDPQuota(owner, 0)
+		return false
+	}
 	s.owner, s.tx, s.rx = owner, tx, rx
 	s.rxSlots.Reset(udpapi.RXSlots)
 	for index := range s.endpoints {
 		s.endpoints[index] = waiter{}
 	}
+	return true
 }
 
 // End closes every endpoint of the session. Waiting receives end with it
 // unanswered: the client is gone.
 func (s *Session) End(stack *network.Stack) {
 	stack.UDPCloseOwner(s.owner)
+	stack.SetUDPQuota(s.owner, 0)
 	s.tx, s.rx = nil, nil
 	s.rxSlots.Reset(udpapi.RXSlots)
 	for index := range s.endpoints {
@@ -71,6 +89,9 @@ func (s *Session) Waiting() int {
 	count := 0
 	for index := range s.endpoints {
 		if s.endpoints[index].recv != 0 {
+			count++
+		}
+		if s.endpoints[index].ready != 0 {
 			count++
 		}
 	}
@@ -100,7 +121,8 @@ func (s *Session) Handle(stack *network.Stack, request *udpapi.Request, correlat
 			reply.Endpoint = uint32(opened)
 		}
 	case udpapi.OpBind:
-		address, port, result := stack.UDPBind(s.owner, id, network.IPv4(request.Address), request.Port)
+		reuse := request.Flags&udpapi.FlagReuseAddr != 0
+		address, port, result := stack.UDPBindReuse(s.owner, id, network.IPv4(request.Address), request.Port, reuse)
 		reply.Result = Result(result)
 		if result == network.ResultOK {
 			reply.Address, reply.Port = address, port
@@ -129,9 +151,53 @@ func (s *Session) Handle(stack *network.Stack, request *udpapi.Request, correlat
 			reply.Result = udpapi.ResultInvalidArgument
 		case held.recv != 0:
 			reply.Result = udpapi.ResultBusy
-		default:
-			held.recv = correlation
+		case request.Flags&udpapi.FlagNoWait == 0:
+			held.recv, held.recvPeek = correlation, request.Flags&udpapi.FlagPeek != 0
 			return s.deliver(stack, held, out)
+		default:
+			if _, free := s.rxSlots.Free(); !free {
+				// The client holds every RX slot; nothing could be lent.
+				reply.Result = udpapi.ResultBusy
+				break
+			}
+			held.recv, held.recvPeek = correlation, request.Flags&udpapi.FlagPeek != 0
+			if fault := s.deliver(stack, held, out); fault != FaultNone || held.recv == 0 {
+				return fault
+			}
+			held.recv, held.recvPeek = 0, false
+			reply.Result = udpapi.ResultWouldBlock
+		}
+	case udpapi.OpReady:
+		ready, result := stack.UDPReadiness(s.owner, id)
+		reply.Result = Result(result)
+		if result == network.ResultOK {
+			reply.Mask, reply.Value, reply.Count = uint16(ready.Mask), ready.Next, ready.Queued
+		}
+	case udpapi.OpWaitReady:
+		held := s.find(id)
+		if _, result := stack.UDPReadiness(s.owner, id); held == nil || id == 0 || result != network.ResultOK {
+			reply.Result = udpapi.ResultInvalidArgument
+			break
+		}
+		if held.ready != 0 {
+			reply.Result = udpapi.ResultBusy
+			break
+		}
+		held.ready, held.readyMask = correlation, request.Mask
+		return s.deliverReady(stack, held, out)
+	case udpapi.OpOption:
+		var value int
+		_, result := stack.UDPReadiness(s.owner, id)
+		if result != network.ResultOK {
+			result = network.ResultInvalidArgument
+		} else if request.Option == udpapi.OptionTTL {
+			value = int(stack.Tuning().TTL)
+		} else {
+			value, result = stack.UDPMaxPayload(s.owner, id, network.IPv4(request.Address))
+		}
+		reply.Result = Result(result)
+		if result == network.ResultOK {
+			reply.Value = uint32(value)
 		}
 	case udpapi.OpRelease:
 		if !s.rxSlots.Return(request.Slot) {
@@ -145,6 +211,12 @@ func (s *Session) Handle(stack *network.Stack, request *udpapi.Request, correlat
 		}
 		result := stack.UDPClose(s.owner, id)
 		if held != nil {
+			if held.ready != 0 {
+				closed := udpapi.Reply{Opcode: udpapi.OpWaitReady, Result: udpapi.ResultClosed, Endpoint: request.Endpoint}
+				if !out.Reply(&closed, held.ready) {
+					return FaultUnreachable
+				}
+			}
 			if held.recv != 0 {
 				closed := udpapi.Reply{Opcode: udpapi.OpRecvFrom, Result: udpapi.ResultClosed, Endpoint: request.Endpoint}
 				if !out.Reply(&closed, held.recv) {
@@ -162,12 +234,36 @@ func (s *Session) Handle(stack *network.Stack, request *udpapi.Request, correlat
 }
 
 // Deliver answers every waiting RecvFrom whose endpoint has a datagram,
-// while the client has an RX slot free for it.
+// while the client has an RX slot free for it, then every WaitReady whose
+// endpoint's mask changed.
 func (s *Session) Deliver(stack *network.Stack, out Replier) Fault {
 	for index := range s.endpoints {
 		if fault := s.deliver(stack, &s.endpoints[index], out); fault != FaultNone {
 			return fault
 		}
+		if fault := s.deliverReady(stack, &s.endpoints[index], out); fault != FaultNone {
+			return fault
+		}
+	}
+	return FaultNone
+}
+
+func (s *Session) deliverReady(stack *network.Stack, held *waiter, out Replier) Fault {
+	if held.ready == 0 {
+		return FaultNone
+	}
+	ready, result := stack.UDPReadiness(s.owner, held.id)
+	if result == network.ResultOK && uint16(ready.Mask) == held.readyMask {
+		return FaultNone
+	}
+	reply := udpapi.Reply{Opcode: udpapi.OpWaitReady, Result: Result(result), Endpoint: uint32(held.id)}
+	if result == network.ResultOK {
+		reply.Mask, reply.Value, reply.Count = uint16(ready.Mask), ready.Next, ready.Queued
+	}
+	correlation := held.ready
+	held.ready, held.readyMask = 0, 0
+	if !out.Reply(&reply, correlation) {
+		return FaultUnreachable
 	}
 	return FaultNone
 }
@@ -181,7 +277,14 @@ func (s *Session) deliver(stack *network.Stack, held *waiter, out Replier) Fault
 		return FaultNone
 	}
 	offset := udpapi.Offset(slot)
-	received, found := stack.UDPReceive(s.owner, held.id, s.rx[offset:offset+udpapi.SlotSize])
+	dst := s.rx[offset : offset+udpapi.SlotSize]
+	var received network.UDPReceived
+	var found bool
+	if held.recvPeek {
+		received, found = stack.UDPPeek(s.owner, held.id, dst)
+	} else {
+		received, found = stack.UDPReceive(s.owner, held.id, dst)
+	}
 	if !found {
 		return FaultNone
 	}
@@ -189,7 +292,7 @@ func (s *Session) deliver(stack *network.Stack, held *waiter, out Replier) Fault
 	reply := udpapi.Reply{Opcode: udpapi.OpRecvFrom, Endpoint: uint32(held.id), Slot: slot,
 		Address: received.Source, Port: received.SourcePort, Length: uint16(received.Length), Local: received.Destination}
 	correlation := held.recv
-	held.recv = 0
+	held.recv, held.recvPeek = 0, false
 	if !out.Reply(&reply, correlation) {
 		return FaultUnreachable
 	}
@@ -227,6 +330,8 @@ func Result(result network.Result) udpapi.Result {
 		return udpapi.ResultAddressInUse
 	case network.ResultDriverFault:
 		return udpapi.ResultDriverFault
+	case network.ResultMessageSize:
+		return udpapi.ResultMessageSize
 	}
 	return udpapi.ResultInvalidArgument
 }

@@ -12,6 +12,7 @@ them to the native image format.
 | `fsprobe` | [fsprobe/main.c](fsprobe/main.c) | create, write, read, and stat a file |
 | `dirprobe` | [dirprobe/main.c](dirprobe/main.c) | list a directory with `getdents64` |
 | `abi-probe` | [abi-probe/main.c](abi-probe/main.c) | the conformance suite: every group of calls, checked result by result |
+| `netprobe` | [netprobe/main.c](netprobe/main.c) | IPv4 sockets: loopback groups checked against Linux, and the clients and servers of the network gate |
 
 `abi-probe` with two ordinary arguments runs the conformance checks and
 prints one line per group. A first argument selects another mode: `hostile`
@@ -43,7 +44,10 @@ signal and restarts a `read` under `SA_RESTART`; `poll` checks readiness,
 `POLLHUP`, `POLLERR`, `POLLNVAL`, a timeout, and a wake-up from a child;
 `ppoll` checks a timespec timeout and the remaining time it writes back, and
 a temporary mask that lets a pending or a sent signal interrupt the call and
-comes back after the handler or a ready return; `family` leaves a child asleep
+comes back after the handler or a ready return; `select` makes raw `select` and
+`pselect6` calls over pipes and a file and checks the ready sets, zero and
+short timeouts, the time left both calls write back, `nfds` above the table,
+`EBADF`, `EINVAL`, `EFAULT`, and a `pselect6` mask; `family` leaves a child asleep
 for the Ctrl-C check of the boot test; `path` prints the `PATH` it got;
 `fork-fault` and `exec-vfs-loss` serve the validation kernel and VFS, which
 fail a fork mid-copy and die during an `execve`; `fpstate` checks that XMM
@@ -133,8 +137,9 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `4a068a52296fca685abc2a6236f66006b6040f80335b7a3e67deadb849e9f0e6` |
-| `prebuilt/abi-probe` | `3649d8d9c01af4b54fa88ea9e5121e6453b24819339b0a88c98b61336dd0e0b2` |
+| `prebuilt/abi-probe` | `af5779253e2a822497a47c003516a62cc4723386265458ac4fa815f946c0c6fe` |
 | `prebuilt/tty-probe` | `5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957` |
+| `prebuilt/netprobe` | `857796a86b034e6024bd93946170170846d4e552a0cb668db2dee0024170eec9` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF
@@ -249,6 +254,53 @@ Fields of `struct stat` differ between the two systems where the fixture does
 not compare them: GoOS reports owner 1000, link count 1 for a directory, and
 `st_blocks` from the size alone. `ioctl(TIOCGWINSZ)` fails with `ENOTTY` on
 both.
+
+## Socket probe
+
+`netprobe` with no argument runs sixteen groups over 127.0.0.1 and prints
+`<group> ok` for each, then `netprobe ok`; a group name runs one group.
+The groups cover `socket` errors and flags, `sockaddr` lengths, `bind`,
+`listen` and `accept4`, `connect`, stream reads and writes, `shutdown`,
+`SIGPIPE`, `poll`, `select` and `pselect6`, UDP, `dup` and `fork`,
+close-on-exec across `execve`, `EINTR` and `SA_RESTART`, options, and the
+file calls on a socket. The source header lists what each group checks.
+The other modes (`resolve`, `fetch`, `connect`, `reset`, `silent`,
+`udp-echo`, `inherit`, `serve`, `hold`) serve `make test-linux-network`.
+
+The bundled musl has no `network`, `select` or `stat` sources, so the probe
+makes those calls through `syscall()`. For the same reason it has no
+`getaddrinfo`: `netprobe resolve` reads `/etc/hosts`, sends an A query over
+UDP to the first `nameserver` in `/etc/resolv.conf`, and repeats it over TCP
+when the answer comes back truncated, as musl's resolver does. The gate
+covers musl's own `getaddrinfo` through curl and BusyBox `wget`.
+
+`run-on-linux-kernel.sh KERNEL BUSYBOX netprobe` boots Linux with loopback
+up, runs every group, then `serve` and `fetch` against each other, `inherit`
+and `hold` against BusyBox `nc -e cat`, and BusyBox `httpd`, `wget` and
+`nc` over loopback; `CURL=path` adds curl. Every group passes on Linux
+6.12.114, the Alpine 3.22 `virt` kernel, with BusyBox 1.38.0
+(`9209cc9efa5840f06e0e61f78c1ca4b9a374eb6508ac0bd831cf53181a86f2db`, with
+the `nc`, `wget`, `httpd` and `sha256sum` applets) and curl 8.22.0 for
+`x86_64-pc-linux-musl`
+(`5f8fa1c76781b051939f808bee042bdfb3998fff9dbee060a27d8c4613c8c692`).
+
+The probe checks the shape both systems give where GoOS documents another
+bound or another choice:
+
+| Check | Linux | GoOS | The probe requires |
+| --- | --- | --- | --- |
+| largest UDP datagram | 65507 bytes | 4096 bytes | 4096 bytes arrive whole, 65508 fail with `EMSGSIZE` and nothing arrives, 65000 arrive whole or fail the same way |
+| `SO_RCVBUF`, `SO_SNDBUF` | twice the request, up to a sysctl | the bounded capacity | positive, at least 4096 after a request for 4096, positive after a request for 1 GiB |
+| ephemeral ports | 32768 to 60999 | 49152 to 65535 | a nonzero port |
+| backlog | clamped to `somaxconn` | clamped to the native maximum | `listen` with 1000 succeeds |
+| `TCP_MAXSEG`, `IP_TTL` | 65483 on loopback, 64 | the native MSS and TTL | 1 to 65535, 1 to 255 |
+| `TCP_NODELAY` 0, `IP_TTL` set, `SO_REUSEPORT` | accepted | refused | not checked |
+| `pselect6` timespec after a timeout | the time left, zero | unchanged | zero or unchanged |
+| `select` with `nfds` past the table | clamped | `EINVAL` past 64 | not checked |
+| `SHUT_RD` with unread bytes | returns them, then end of file | drops them | `SHUT_RD` on an empty socket: end of file, write side open |
+| `AF_INET6`, `AF_UNIX`, `AF_NETLINK`, `AF_PACKET`, `SOCK_RAW`, `SOCK_SEQPACKET` | supported | refused | refused, on GoOS only |
+| a second `connect` after a nonblocking connect finished | 0, then `EISCONN` | | 0 or `EISCONN`, then `EISCONN` |
+| close with unread bytes | sends a reset | | not checked; the gate checks a reset from the peer |
 
 ## License
 

@@ -3,57 +3,87 @@ package main
 import (
 	"bytes"
 	"strconv"
+	"strings"
 )
 
 type httpStream struct {
-	request  []byte
-	answered bool
+	request   []byte
+	window    uint16 // the client's receive window
+	tx        *txStream
+	clientFIN bool
 }
 
+// handleHTTP takes one segment on an established HTTP connection. It runs
+// with h.mu held. The peer answers one request within the client's window,
+// closes with FIN after the answer, and forgets the connection once both
+// FINs are acknowledged.
 func (h *host) handleHTTP(key tcpKey, conn *tcpConn, segment tcpSegment) [][]byte {
-	if len(segment.payload) > 0 {
-		if segment.seq != conn.clientSeq {
-			return [][]byte{h.tcpFrame(conn, tcpACK, nil)}
+	s := conn.http
+	if segment.flags&tcpACK != 0 {
+		s.window = segment.window
+		if s.tx != nil {
+			s.tx.acknowledge(segment.ack)
 		}
+	}
+	received := len(segment.payload) != 0 || segment.flags&tcpFIN != 0
+	if received && segment.seq != conn.clientSeq {
+		return [][]byte{h.tcpFrameAt(conn, conn.serverSeq, tcpACK, nil)}
+	}
+	if len(segment.payload) != 0 {
 		conn.clientSeq += uint32(len(segment.payload))
-		if len(conn.http.request)+len(segment.payload) > 8192 {
-			delete(h.tcp, key)
-			return [][]byte{h.tcpFrame(conn, tcpRST|tcpACK, nil)}
-		}
-		conn.http.request = append(conn.http.request, segment.payload...)
-		ack := h.tcpFrame(conn, tcpACK, nil)
-		if conn.http.answered {
-			return [][]byte{ack}
-		}
-		response, route, complete := httpReply(conn.http.request)
-		if !complete {
-			return [][]byte{ack}
-		}
-		conn.http.answered = true
-		frames := [][]byte{ack}
-		for len(response) > 0 {
-			n := len(response)
-			if n > tcpPeerMSS {
-				n = tcpPeerMSS
+		if s.tx == nil {
+			if len(s.request)+len(segment.payload) > 8192 {
+				delete(h.tcp, key)
+				return [][]byte{h.tcpFrame(conn, tcpRST|tcpACK, nil)}
 			}
-			frames = append(frames, h.tcpFrame(conn, tcpACK|tcpPSH, response[:n]))
-			response = response[n:]
+			s.request = append(s.request, segment.payload...)
+			if response, route, complete := h.reply(s.request); complete {
+				s.tx = &txStream{out: response, base: conn.serverSeq}
+				h.log.printf("http %s:%d %s", conn.client, conn.clientPort, route)
+			}
 		}
-		frames = append(frames, h.tcpFrame(conn, tcpFIN|tcpACK, nil))
-		conn.closing = true
-		h.log.printf("http %s:%d %s", conn.client, conn.clientPort, route)
+	}
+	if segment.flags&tcpFIN != 0 {
+		conn.clientSeq++
+		s.clientFIN = true
+	}
+	var frames [][]byte
+	if s.tx != nil {
+		frames = h.streamSend(conn, s.tx, s.window)
+	}
+	if received && len(frames) == 0 {
+		frames = append(frames, h.tcpFrameAt(conn, conn.serverSeq, tcpACK, nil))
+	}
+	if s.clientFIN && (s.tx == nil || s.tx.finAcked) {
+		delete(h.tcp, key)
 		return frames
 	}
-	if segment.flags&tcpFIN != 0 && segment.seq == conn.clientSeq {
-		conn.clientSeq++
-		ack := h.tcpFrame(conn, tcpACK, nil)
-		delete(h.tcp, key)
-		return [][]byte{ack}
+	if s.tx != nil {
+		h.streamArm(key, conn, s.tx, func() uint16 { return s.window })
 	}
-	if conn.closing && segment.flags&tcpACK != 0 && segment.ack == conn.serverSeq {
-		delete(h.tcp, key)
+	return frames
+}
+
+// reply answers a GET or HEAD for a file named with -http-file, and any
+// other request through httpReply.
+func (h *host) reply(request []byte) ([]byte, string, bool) {
+	end := bytes.Index(request, []byte("\r\n\r\n"))
+	lineEnd := bytes.Index(request, []byte("\r\n"))
+	if end >= 0 && lineEnd >= 0 {
+		fields := bytes.Fields(request[:lineEnd])
+		if len(fields) == 3 && (string(fields[0]) == "GET" || string(fields[0]) == "HEAD") {
+			if body, ok := h.files[strings.TrimPrefix(string(fields[1]), "/")]; ok {
+				header := "HTTP/1.1 200 OK\r\nContent-Length: " + strconv.Itoa(len(body)) +
+					"\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
+				response := []byte(header)
+				if string(fields[0]) == "GET" {
+					response = append(response, body...)
+				}
+				return response, string(fields[1]), true
+			}
+		}
 	}
-	return nil
+	return httpReply(request)
 }
 
 func httpReply(request []byte) ([]byte, string, bool) {

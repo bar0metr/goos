@@ -9,8 +9,8 @@ import (
 // them, in Field order from FieldTTL.
 var storedDefaults = [TuningFields]uint64{64, 3, 1000, 1000, 2000, 2, 2000, 10000, 10, 60000,
 	60000, 1000, 3, 20, 4000, 64000, 10000,
-	49152, 65535, 8, 32, 8, 4096,
-	49152, 65535, 32, 8, 8, 16384, 16384, 30000, 1000, 60000, 60000}
+	49152, 65535, 8, 96, 8, 4096,
+	49152, 65535, 96, 8, 8, 16384, 16384, 30000, 1000, 60000, 60000}
 
 func TestParseTuningDefaults(t *testing.T) {
 	values := storedDefaults

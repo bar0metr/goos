@@ -277,9 +277,10 @@ func (handler *linuxCallHandler) interrupted(restartable bool) linuxcompat.Resul
 
 // interruptLinuxSleeper wakes the task of state from an interruptible wait
 // once a signal with a handler is pending for it: a stream read or write,
-// wait4, nanosleep, poll, ppoll, rt_sigsuspend, or pause. A VFS exchange, a queued VFS request,
-// and a vfork parent keep waiting, as Linux file I/O and vfork do. A signal
-// that would end the process has already ended it.
+// wait4, nanosleep, poll, ppoll, select, pselect6, rt_sigsuspend, or pause.
+// A VFS exchange, a queued VFS request, and a vfork parent keep waiting, as
+// Linux file I/O and vfork do. A signal that would end the process has
+// already ended it.
 func interruptLinuxSleeper(state *linuxcompat.ProcessState) {
 	if !state.Signals.Interrupting() {
 		return
@@ -316,7 +317,8 @@ func interruptLinuxTask(state *linuxcompat.ProcessState, task sched.TaskID) bool
 		}
 	case linuxabi.SysWait4:
 		linuxcompat.ReleaseChildWaiter(state.PID)
-	case linuxabi.SysNanosleep, linuxabi.SysPoll, linuxabi.SysPpoll, linuxabi.SysRtSigsuspend, linuxabi.SysPause:
+	case linuxabi.SysNanosleep, linuxabi.SysPoll, linuxabi.SysPpoll, linuxabi.SysSelect, linuxabi.SysPselect6,
+		linuxabi.SysRtSigsuspend, linuxabi.SysPause:
 		waitAnyTable.Cancel(task)
 	case linuxabi.SysFutex:
 		return interruptFutexWaiter(task)
