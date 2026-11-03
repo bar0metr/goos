@@ -882,3 +882,4 @@ CA-1097	goos/userspace/cmd/resolved	stub	process	owned	none
 CA-1098	goos/userspace/dnsstub	Address	process	immutable	none
 CA-1099	goos/userspace/linux	netprobe	process	immutable	none
 CA-1100	goos/userspace/linuxsockapi	noAddress	process	immutable	none
+CA-1101	goos/userspace/cmd/init	linuxSockLaunching	process	owned	none

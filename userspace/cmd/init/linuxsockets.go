@@ -43,7 +43,10 @@ type linuxFamily struct {
 var (
 	linuxSockControl handle.ID
 	linuxSockStarted bool
-	linuxSockProcess handle.ID
+	// linuxSockLaunching is set while linuxSockLaunched gives families
+	// their sessions again.
+	linuxSockLaunching bool
+	linuxSockProcess   handle.ID
 	// linuxSockGeneration numbers the native sessions; linuxSockSession and
 	// linuxSockToken number family sessions. All three only grow.
 	linuxSockGeneration uint64
@@ -104,11 +107,15 @@ func linuxSockLaunched(process handle.ID) {
 	}
 	linuxSockStarted = true
 	bindLinuxSockBackends()
+	// The supervisor marks the service running only after this hook, and
+	// the new instance takes families already.
+	linuxSockLaunching = true
 	for index := range linuxFamilies {
 		if linuxFamilies[index].process != 0 {
 			reattachLinuxFamily(&linuxFamilies[index])
 		}
 	}
+	linuxSockLaunching = false
 }
 
 // linuxSockNetworkLaunched runs after netd started. The native sessions the
@@ -123,6 +130,9 @@ func linuxSockNetworkLaunched() {
 func linuxSockRunning() bool {
 	if linuxSockControl == 0 || !linuxSockStarted {
 		return false
+	}
+	if linuxSockLaunching {
+		return true
 	}
 	snapshot, found := manager.Snapshot(linuxSockName)
 	return found && snapshot.State == supervisor.StateRunning
@@ -277,6 +287,7 @@ func linuxLaunchExited(process handle.ID) {
 func reattachLinuxFamily(record *linuxFamily) {
 	session, ok := openLinuxFamily(false)
 	if !ok {
+		syslog.Warn("Linux family session not reopened")
 		*record = linuxFamily{}
 		return
 	}
