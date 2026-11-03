@@ -572,7 +572,7 @@ require_after left.udp-own 'udp self 192.0.2.10 9102 own' '^3 bytes from 192\.0\
 require_after left.udp-zero-local 'udp self -s 0 127.0.0.1 9103' '^0 bytes from 127\.0\.0\.1:[0-9]* to 127\.0\.0\.1$' "$left"
 require_after left.udp-zero 'udp listen -c 1 -W 8000 9004' '^0 bytes from 192\.0\.2\.53:4004 to 192\.0\.2\.10$' "$left"
 require_after left.udp-largest 'udp send -s 1472 -r 192.0.2.53 7' '^1472 bytes from 192\.0\.2\.53:7 to 192\.0\.2\.10$' "$left"
-require_after left.udp-too-large 'udp send -s 1473 192.0.2.53 7' '^udp: send: invalid argument$' "$left"
+require_after left.udp-too-large 'udp send -s 1473 192.0.2.53 7' '^udp: send: message too long$' "$left"
 require_after left.udp-checksum 'udp listen -c 1 -W 8000 9005' '^4 bytes from 192\.0\.2\.53:4005 to 192\.0\.2\.10: good$' "$left"
 forbid_after left.udp-corrupt 'udp listen -c 1 -W 8000 9005' ': bad$' "$left"
 require_after left.udp-counters 'net status ' '^  dropped: no-endpoint [1-9][0-9]* queue-full 0 checksum 1 too-long 0$' "$left"
