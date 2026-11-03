@@ -23,6 +23,8 @@ type config struct {
 	zone       *zone
 	noEDNS     bool
 	foreignMAC mac
+	// files are served over HTTP as /NAME.
+	files map[string][]byte
 }
 
 // logger writes one line per event with a single Write, so a test that
@@ -60,6 +62,7 @@ type host struct {
 	tcpZeroWindow  time.Duration
 	tcpDropSYN     bool
 	tcpDropData    bool
+	nextClient     uint16
 	// later sends frames after a delay; the server sets it. Without it
 	// a slow answer goes at once.
 	later func(delay time.Duration, frames [][]byte)
@@ -219,6 +222,9 @@ func (h *host) command(line string) ([][]byte, bool, error) {
 		return nil, true, nil
 	case "udp-send", "udp-bad", "udp-fill", "udp-burst":
 		frames, err := h.udpCommand(fields)
+		return frames, false, err
+	case "http-get", "http-abort", "tcp-chat":
+		frames, err := h.clientCommand(fields)
 		return frames, false, err
 	case "tcp-drop-next":
 		if len(fields) != 2 || fields[1] != "syn" && fields[1] != "data" {
