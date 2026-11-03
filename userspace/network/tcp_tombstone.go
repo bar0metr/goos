@@ -1,12 +1,19 @@
 package network
 
 const (
-	// tcpTombstonesPerOwner bounds the TIME_WAIT four-tuples one owner may
-	// have moved out of its endpoint slots. With one share per session the
-	// table can never fill, so no owner can use up another's share.
-	tcpTombstonesPerOwner = MaxTCPEndpointsPerSession
-	tcpTombstoneSlots     = MaxTCPSessions * tcpTombstonesPerOwner
+	// tcpTombstoneSlots holds the TIME_WAIT four-tuples owners have moved
+	// out of their endpoint slots. One owner holds at most its quota of
+	// them, and each owner's share fits at the largest quota, so the table
+	// can never fill and no owner can use up another's share.
+	tcpTombstoneSlots = MaxTCPSessions * MaxTCPSessionQuota
 )
+
+// tcpTombstoneShare is how many tombstones owner may hold: its quota, and
+// never less than the ordinary quota, so a lowered tuning does not shrink
+// the share an ordinary session always had.
+func (stack *Stack) tcpTombstoneShare(owner int) int {
+	return max(stack.tcpOwnerQuota(owner), MaxTCPEndpointsPerSession)
+}
 
 // tcpTombstone keeps what a TIME_WAIT connection protects after its endpoint
 // slot went to a new endpoint: the four-tuple, which no new connection may
@@ -19,6 +26,7 @@ type tcpTombstone struct {
 	port       uint16
 	remote     IPv4
 	remotePort uint16
+	reuse      bool
 	sndNxt     uint32
 	rcvNxt     uint32
 	deadline   uint64
@@ -53,12 +61,12 @@ func (stack *Stack) recycleTimeWait(owner int) int {
 			held++
 		}
 	}
-	if free < 0 || free >= len(stack.tcpTombstones) || held >= tcpTombstonesPerOwner {
+	if free < 0 || free >= len(stack.tcpTombstones) || held >= stack.tcpTombstoneShare(owner) {
 		return -1
 	}
 	entry := &stack.tcp[oldest]
 	stack.tcpTombstones[free] = tcpTombstone{used: true, owner: entry.owner, local: entry.local, port: entry.port,
-		remote: entry.remote, remotePort: entry.remotePort, sndNxt: entry.sndNxt, rcvNxt: entry.rcvNxt,
+		remote: entry.remote, remotePort: entry.remotePort, reuse: entry.reuse, sndNxt: entry.sndNxt, rcvNxt: entry.rcvNxt,
 		deadline: entry.deadline}
 	stack.releaseTCP(entry)
 	return oldest

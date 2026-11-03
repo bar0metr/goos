@@ -3,10 +3,15 @@ package network
 // TCP uses fixed endpoint, stream and reassembly storage. Runtime tuning can
 // lower these limits but cannot resize them.
 const (
-	MaxTCPSessions            = 8
-	MaxTCPEndpoints           = 32
+	MaxTCPSessions  = 8
+	MaxTCPEndpoints = 96
+	// MaxTCPEndpointsPerSession is the ordinary session quota, the
+	// capacity behind max-endpoints-per-session. MaxTCPSessionQuota is the
+	// largest quota a session can be granted explicitly; per-session tables
+	// size to it.
 	MaxTCPEndpointsPerSession = 8
-	MaxTCPListeners           = 8
+	MaxTCPSessionQuota        = 64
+	MaxTCPListeners           = 16
 	MaxTCPBacklog             = 8
 	MaxTCPOutOfOrderSegments  = 8
 	TCPSendCapacity           = 16 * 1024
@@ -75,6 +80,9 @@ type tcpEndpoint struct {
 	listener   TCPEndpointID
 	accepted   bool
 	backlog    uint8
+	// reuse is SO_REUSEADDR as given at bind; a passive child takes its
+	// listener's.
+	reuse bool
 	// synchronized records a completed three-way handshake. It survives
 	// later transitions so a deferred Connect still reports success.
 	synchronized bool
@@ -128,6 +136,9 @@ type tcpEndpoint struct {
 
 	deadline   uint64
 	lastResult Result
+	// pendingError is the transport error that ended the connection, kept
+	// until TCPTakeError reads it.
+	pendingError Result
 }
 
 // TCPStats are monotonic transport counters plus current state counts.
@@ -146,8 +157,37 @@ func (stack *Stack) resetTCP() {
 	for index := range stack.tcpTombstones[:] {
 		stack.tcpTombstones[index] = tcpTombstone{}
 	}
+	for index := range stack.tcpQuota[:] {
+		stack.tcpQuota[index] = 0
+	}
 	stack.tcpGeneration = 0
 	stack.tcpStats = TCPStats{}
+}
+
+// SetTCPQuota sets how many endpoints owner may hold, 1 to
+// MaxTCPSessionQuota. Zero restores the ordinary quota, the tuned
+// max-endpoints-per-session. A quota above the ordinary capacity is an
+// explicit grant and the tuning does not lower it; a smaller quota is capped
+// by the tuning as well. Endpoints already open stay open.
+func (stack *Stack) SetTCPQuota(owner, quota int) bool {
+	if owner < 0 || owner >= MaxTCPSessions || quota < 0 || quota > MaxTCPSessionQuota {
+		return false
+	}
+	stack.tcpQuota[owner] = uint8(quota)
+	return true
+}
+
+// tcpOwnerQuota is the number of endpoints owner may hold now.
+func (stack *Stack) tcpOwnerQuota(owner int) int {
+	tuned := int(stack.tuning.TCP.SessionEndpoints)
+	quota := int(stack.tcpQuota[owner])
+	switch {
+	case quota == 0:
+		return tuned
+	case quota > MaxTCPEndpointsPerSession:
+		return quota
+	}
+	return min(quota, tuned)
 }
 
 func (stack *Stack) tcpEndpoint(owner int, id TCPEndpointID) (*tcpEndpoint, int) {
@@ -184,7 +224,7 @@ func (stack *Stack) TCPOpen(owner int) (TCPEndpointID, Result) {
 			mine++
 		}
 	}
-	if free < 0 || total >= int(stack.tuning.TCP.MaxEndpoints) || mine >= int(stack.tuning.TCP.SessionEndpoints) {
+	if free < 0 || total >= int(stack.tuning.TCP.MaxEndpoints) || mine >= stack.tcpOwnerQuota(owner) {
 		// A connection the owner closed first waits out TIME_WAIT on the
 		// owner's count. Rather than refuse the owner for up to time-wait-ms,
 		// reuse the slot of the oldest such entry; its four-tuple stays
@@ -206,6 +246,14 @@ func (stack *Stack) TCPOpen(owner int) (TCPEndpointID, Result) {
 }
 
 func (stack *Stack) TCPBind(owner int, id TCPEndpointID, address IPv4, port uint16) (IPv4, uint16, Result) {
+	return stack.TCPBindReuse(owner, id, address, port, false)
+}
+
+// TCPBindReuse binds with SO_REUSEADDR when reuse is set. A bind conflicts
+// with any endpoint or TIME_WAIT tombstone on the same port whose address
+// overlaps, equal or either one the wildcard, unless both carry reuse and
+// the existing one is not listening. Port 0 picks a port nothing holds.
+func (stack *Stack) TCPBindReuse(owner int, id TCPEndpointID, address IPv4, port uint16, reuse bool) (IPv4, uint16, Result) {
 	entry, slot := stack.tcpEndpoint(owner, id)
 	if entry == nil || entry.state != TCPOpen || !stack.localAddress(address) {
 		return IPv4{}, 0, ResultInvalidArgument
@@ -215,10 +263,10 @@ func (stack *Stack) TCPBind(owner int, id TCPEndpointID, address IPv4, port uint
 		if port == 0 {
 			return IPv4{}, 0, ResultBusy
 		}
-	} else if stack.tcpBindConflict(slot, address, port) {
+	} else if stack.tcpReuseConflict(slot, address, port, reuse) {
 		return IPv4{}, 0, ResultAddressInUse
 	}
-	entry.local, entry.port, entry.state = address, port, TCPBound
+	entry.local, entry.port, entry.state, entry.reuse = address, port, TCPBound, reuse
 	return address, port, ResultOK
 }
 
@@ -464,6 +512,9 @@ func (stack *Stack) closeTCP(entry *tcpEndpoint, result Result) {
 	}
 	entry.lastResult, entry.state = result, TCPClosed
 	entry.deadline, entry.rtoDeadline = 0, 0
+	if result != ResultOK {
+		entry.pendingError = result
+	}
 }
 
 // tcpSMSS is the sender maximum segment size: the smaller of the path MSS and
@@ -504,13 +555,46 @@ func (stack *Stack) TCPStats() TCPStats {
 	return stats
 }
 
-func (stack *Stack) tcpBindConflict(skip int, address IPv4, port uint16) bool {
+// tcpPortTaken is the check behind automatic port choice. A bind to port 0
+// takes a port nothing holds. A connect, as on Linux, may share a local port
+// with other connections and TIME_WAIT four-tuples, which the tuple check
+// keeps apart, but never with an endpoint bound or listening there.
+func (stack *Stack) tcpPortTaken(skip int, address IPv4, port uint16, connect bool) bool {
+	if !connect {
+		return stack.tcpReuseConflict(skip, address, port, false)
+	}
 	for index := range stack.tcp[:] {
 		entry := &stack.tcp[index]
 		if index == skip || entry.state < TCPBound || entry.state > TCPListen || entry.port != port {
 			continue
 		}
 		if address == zeroIPv4 || entry.local == zeroIPv4 || entry.local == address {
+			return true
+		}
+	}
+	return false
+}
+
+// tcpReuseConflict is the Linux bind rule: an endpoint other than skip, in
+// any state from bound on, or a tombstone, on port with an overlapping
+// address conflicts unless reuse and the holder's reuse are both set and the
+// holder is not listening.
+func (stack *Stack) tcpReuseConflict(skip int, address IPv4, port uint16, reuse bool) bool {
+	overlaps := func(local IPv4) bool {
+		return address == zeroIPv4 || local == zeroIPv4 || local == address
+	}
+	for index := range stack.tcp[:] {
+		entry := &stack.tcp[index]
+		if index == skip || entry.state < TCPBound || entry.port != port || !overlaps(entry.local) {
+			continue
+		}
+		if !reuse || !entry.reuse || entry.state == TCPListen {
+			return true
+		}
+	}
+	for index := range stack.tcpTombstones[:] {
+		tombstone := &stack.tcpTombstones[index]
+		if tombstone.used && tombstone.port == port && overlaps(tombstone.local) && (!reuse || !tombstone.reuse) {
 			return true
 		}
 	}
@@ -541,7 +625,7 @@ func (stack *Stack) tcpEphemeralPort(local, remote IPv4, remotePort uint16, skip
 	span := last - first + 1
 	port := first + uint32(stack.next()%uint64(span))
 	for attempt := uint32(0); attempt < span+4; attempt++ {
-		if !stack.tcpBindConflict(skip, local, uint16(port)) && !stack.tcpTupleConflict(skip, local, uint16(port), remote, remotePort) {
+		if !stack.tcpPortTaken(skip, local, uint16(port), remotePort != 0) && !stack.tcpTupleConflict(skip, local, uint16(port), remote, remotePort) {
 			return uint16(port)
 		}
 		if attempt < 4 {

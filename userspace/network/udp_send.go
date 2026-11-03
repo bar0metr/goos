@@ -83,6 +83,26 @@ func (stack *Stack) udpRoute(local, destination IPv4) (udpRouteResult, Result) {
 	return route, ResultOK
 }
 
+// UDPMaxPayload is the largest datagram an endpoint can send to destination
+// now: the tuned max-payload on the local path, and no more than the link
+// MTU less the IPv4 and UDP headers on the wire. A larger send is
+// MessageSize; nothing is ever truncated.
+func (stack *Stack) UDPMaxPayload(owner int, id EndpointID, destination IPv4) (int, Result) {
+	entry, _ := stack.endpoint(owner, id)
+	if entry == nil {
+		return 0, ResultInvalidArgument
+	}
+	route, result := stack.udpRoute(entry.local, destination)
+	if result != ResultOK {
+		return 0, result
+	}
+	limit := int(stack.tuning.UDP.MaxPayload)
+	if route.path == udpWire {
+		limit = min(limit, int(stack.mtu)-ipv4HeaderSize-udpHeaderSize)
+	}
+	return max(limit, 0), ResultOK
+}
+
 // UDPSend sends payload to a connected endpoint's peer.
 func (stack *Stack) UDPSend(owner int, id EndpointID, payload []byte, now uint64) Result {
 	entry, _ := stack.endpoint(owner, id)
@@ -107,7 +127,7 @@ func (stack *Stack) UDPSendTo(owner int, id EndpointID, destination IPv4, port u
 // ephemeral port, so a refused send leaves the endpoint as it was.
 func (stack *Stack) sendUDP(entry *udpEndpoint, destination IPv4, port uint16, payload []byte, now uint64) Result {
 	if len(payload) > int(stack.tuning.UDP.MaxPayload) {
-		return ResultInvalidArgument
+		return ResultMessageSize
 	}
 	route, result := stack.udpRoute(entry.local, destination)
 	if result != ResultOK {
@@ -117,7 +137,7 @@ func (stack *Stack) sendUDP(entry *udpEndpoint, destination IPv4, port uint16, p
 	pending := -1
 	if route.path == udpWire {
 		if ipv4HeaderSize+udpHeaderSize+len(payload) > int(stack.mtu) {
-			return ResultInvalidArgument
+			return ResultMessageSize
 		}
 		var known bool
 		if mac, known = stack.lookupNeighbor(route.nextHop, now); known {
@@ -137,6 +157,7 @@ func (stack *Stack) sendUDP(entry *udpEndpoint, destination IPv4, port uint16, p
 			return ResultBusy
 		}
 		entry.port, entry.state = local, UDPBound
+		stack.markBound(entry)
 	}
 	increment(&stack.udpStats.TX)
 	switch {

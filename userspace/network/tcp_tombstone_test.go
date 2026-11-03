@@ -115,7 +115,20 @@ func TestTCPRecycledTimeWaitKeepsFourTuple(t *testing.T) {
 	if _, result := h.stack.TCPConnect(1, id, peerIP, 53, h.now); result != ResultBusy {
 		t.Fatalf("connect over the protected tuple: %d", result)
 	}
-	if _, _, result := h.stack.TCPBind(1, id, old.Local, old.LocalPort); result != ResultOK {
+	// TIME_WAIT keeps the port bound: without reuse on both sides a bind
+	// fails, as on Linux.
+	if _, _, result := h.stack.TCPBindReuse(1, id, old.Local, old.LocalPort, true); result != ResultAddressInUse {
+		t.Fatalf("bind over a TIME_WAIT without reuse %d", result)
+	}
+	tombstone := h.stack.tcpTombstone(old.Local, old.LocalPort, old.Remote, old.RemotePort)
+	if tombstone == nil {
+		t.Fatal("no tombstone")
+	}
+	tombstone.reuse = true
+	if _, _, result := h.stack.TCPBind(1, id, old.Local, old.LocalPort); result != ResultAddressInUse {
+		t.Fatalf("bind without reuse %d", result)
+	}
+	if _, _, result := h.stack.TCPBindReuse(1, id, old.Local, old.LocalPort, true); result != ResultOK {
 		t.Fatalf("bind %d", result)
 	}
 	if _, result := h.stack.TCPConnect(1, id, peerIP, 53, h.now); result != ResultAddressInUse {
@@ -244,12 +257,12 @@ func TestTCPTombstoneSharesPerOwner(t *testing.T) {
 	h.stack.TCPClose(2, held, h.now)
 
 	// Owner 1 recycles until its share is full.
-	for round := 0; round < tcpTombstonesPerOwner; round++ {
+	for round := 0; round < MaxTCPEndpointsPerSession; round++ {
 		id := h.recycle(1)
 		h.stack.TCPClose(1, id, h.now)
 		h.peerTimeWait(1, uint16(60+round))
 	}
-	if h.tombstones(1) != tcpTombstonesPerOwner || h.timeWaits(1) != 1 {
+	if h.tombstones(1) != MaxTCPEndpointsPerSession || h.timeWaits(1) != 1 {
 		t.Fatalf("tombstones %d TIME_WAIT %d", h.tombstones(1), h.timeWaits(1))
 	}
 	if _, result := h.stack.TCPOpen(1); result != ResultBusy {
@@ -294,7 +307,7 @@ func TestTCPCloseOwnerKeepsTimeWait(t *testing.T) {
 func TestTCPShortConnectionsPastTheLimit(t *testing.T) {
 	h := readyWithPeer(t)
 	seen := map[TCPTuple]bool{}
-	limit := MaxTCPEndpointsPerSession + tcpTombstonesPerOwner
+	limit := MaxTCPEndpointsPerSession + MaxTCPEndpointsPerSession
 	for round := 0; round < limit; round++ {
 		_, tuple := h.peerTimeWait(1, 53)
 		if seen[tuple] {
