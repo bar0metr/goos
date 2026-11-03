@@ -52,6 +52,8 @@ VIRTIO_NET_IMAGE = $(OUT_DIR)/userspace/virtio-net
 VIRTIO_NET_ELF = $(OUT_DIR)/userspace/virtio-net.elf
 RESOLVED_IMAGE = $(OUT_DIR)/userspace/resolved
 RESOLVED_ELF = $(OUT_DIR)/userspace/resolved.elf
+LINUXSOCKD_IMAGE = $(OUT_DIR)/userspace/linuxsockd
+LINUXSOCKD_ELF = $(OUT_DIR)/userspace/linuxsockd.elf
 REMOTED_IMAGE = $(OUT_DIR)/userspace/remoted
 REMOTED_ELF = $(OUT_DIR)/userspace/remoted.elf
 REMOTED_WORKER_IMAGE = $(OUT_DIR)/userspace/remoted-worker
@@ -224,7 +226,7 @@ $(KERNEL): $(shell find kernel internal -type f) $(filter-out $(CURDIR)/kernel/%
 	@$(STACKFRAMES) $@ || { rm -f $@; exit 1; }
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(dir $@)
@@ -377,6 +379,14 @@ $(RESOLVED_IMAGE): $(RESOLVED_ELF) tools/elf2native/main.go kernel/loader/native
 	@$(STACKFRAMES) $(RESOLVED_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(RESOLVED_ELF) $@
 
+$(LINUXSOCKD_ELF): $(call go_deps,./userspace/cmd/linuxsockd) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/linuxsockd
+
+$(LINUXSOCKD_IMAGE): $(LINUXSOCKD_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(LINUXSOCKD_ELF)
+	$(BUILD_ENV) go run ./tools/elf2native $(LINUXSOCKD_ELF) $@
+
 $(VIRTIO_NET_ELF): $(call go_deps,./userspace/cmd/virtio-net) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/virtio-net
@@ -434,7 +444,7 @@ initramfs: userspace
 # LINUX_APPS_DIR copies a host directory into /apps.
 system-tree: userspace
 	@$(if $(strip $(VALIDATION_CA_BUNDLE)),true,$(BUILD_ENV) go run ./tools/truststore -check security/ca-source.pem security/ca-certificates.pem)
-	@$(BUILD_ENV) SYSTEM_CA_BUNDLE='$(SYSTEM_CA_SOURCE)' SYSTEM_TRUST_UPDATE_KEY='$(SYSTEM_TRUST_KEY_SOURCE)' SYSTEM_TRUST_UPDATE_URL='$(SYSTEM_TRUST_URL)' LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
+	@$(BUILD_ENV) SYSTEM_CA_BUNDLE='$(SYSTEM_CA_SOURCE)' SYSTEM_TRUST_UPDATE_KEY='$(SYSTEM_TRUST_KEY_SOURCE)' SYSTEM_TRUST_UPDATE_URL='$(SYSTEM_TRUST_URL)' LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
 
 system-image: iso system-tree
 	@rm -f $(SYSTEM_IMAGE)

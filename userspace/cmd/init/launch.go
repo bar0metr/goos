@@ -72,6 +72,9 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	if resolverStarted && bytesString(spec.Name[:spec.NameSize]) == resolverName && !renewResolverGrants(&spec) {
 		return 0, false
 	}
+	if linuxSockStarted && bytesString(spec.Name[:spec.NameSize]) == linuxSockName && !renewLinuxSockGrants(&spec) {
+		return 0, false
+	}
 	// Every driver launch, the first included, gets a binding of its own.
 	netDriver := bytesString(spec.Name[:spec.NameSize]) == netDriverName
 	if netDriver && !bindNetDevice(&spec) {
@@ -152,7 +155,7 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	// through lifecycle events, not handles.
 	session, tty, interactive := sessionOfService(name)
 	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || interactive || name == "vfs" || name == "block") ||
-		name == filesystemName || diskService(name) || networkService(name) || remoteListener
+		name == filesystemName || diskService(name) || networkService(name) || name == linuxSockName || remoteListener
 	if keep && launched == supervisor.LaunchOK {
 		switch {
 		case interactive && tty:
@@ -179,6 +182,12 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	}
 	if networkService(name) && launched == supervisor.LaunchOK {
 		networkLaunched(name, event.ProcessHandle)
+		if name == netServiceName {
+			linuxSockNetworkLaunched()
+		}
+	}
+	if name == linuxSockName && launched == supervisor.LaunchOK {
+		linuxSockLaunched(event.ProcessHandle)
 	}
 	if remoteListener && launched != supervisor.LaunchOK {
 		abortRemoteGrants(&spec)

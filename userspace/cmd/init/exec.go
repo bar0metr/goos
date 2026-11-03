@@ -382,6 +382,7 @@ func waitApplicationExit(processHandle handle.ID) uint64 {
 			}
 			fatal("INIT_EXEC_WAIT_FAILED\n")
 		}
+		linuxLaunchExited(processHandle)
 		if sys.HandleClose(processHandle) != 0 {
 			fatal("INIT_EXEC_CLOSE_FAILED\n")
 		}
