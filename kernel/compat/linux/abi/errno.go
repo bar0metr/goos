@@ -30,11 +30,36 @@ const (
 	ESPIPE       Errno = 29
 	EROFS        Errno = 30
 	EPIPE        Errno = 32
+	EDOM         Errno = 33
 	ERANGE       Errno = 34
 	ENAMETOOLONG Errno = 36
 	ENOSYS       Errno = 38
 	ENOTEMPTY    Errno = 39
-	EOPNOTSUPP   Errno = 95
-	ETIMEDOUT    Errno = 110
-	EUCLEAN      Errno = 117
+	ENOTSOCK     Errno = 88
+	EDESTADDRREQ Errno = 89
+	EMSGSIZE     Errno = 90
+	EPROTOTYPE   Errno = 91
+	ENOPROTOOPT  Errno = 92
+	// EPROTONOSUPPORT and ESOCKTNOSUPPORT refuse a socket protocol and a
+	// socket type.
+	EPROTONOSUPPORT Errno = 93
+	ESOCKTNOSUPPORT Errno = 94
+	EOPNOTSUPP      Errno = 95
+	EAFNOSUPPORT    Errno = 97
+	EADDRINUSE      Errno = 98
+	EADDRNOTAVAIL   Errno = 99
+	ENETDOWN        Errno = 100
+	ENETUNREACH     Errno = 101
+	ENETRESET       Errno = 102
+	ECONNABORTED    Errno = 103
+	ECONNRESET      Errno = 104
+	ENOBUFS         Errno = 105
+	EISCONN         Errno = 106
+	ENOTCONN        Errno = 107
+	ETIMEDOUT       Errno = 110
+	ECONNREFUSED    Errno = 111
+	EHOSTUNREACH    Errno = 113
+	EALREADY        Errno = 114
+	EINPROGRESS     Errno = 115
+	EUCLEAN         Errno = 117
 )

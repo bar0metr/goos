@@ -75,6 +75,8 @@ type cpuScratch struct {
 	linuxHandler         linuxCallHandler
 	linuxIOBuffer        [stream.AtomicWrite]byte
 	linuxTerminal        linuxTerminalScratch
+	linuxSocket          linuxSocketScratch
+	linuxSocketTransfer  socketTransfer
 	linuxIOVecWire       [linuxcompat.MaxIOVec * linuxabi.IOVecSize]byte
 	linuxProbe           [1]byte
 	linuxTimespec        [linuxcompat.TimespecSize]byte

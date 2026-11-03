@@ -30,6 +30,11 @@ func (handler *linuxCallHandler) Descriptor(request linuxcompat.Request) linuxco
 		if description.Kind == linuxcompat.FDTerminal {
 			return handler.terminalIoctl(state, description, arguments[1], arguments[2])
 		}
+		if description.Kind == linuxcompat.FDSocket {
+			if socket, open := state.FDs.Description(fd); open {
+				return handler.socketIoctl(socket, arguments[1], arguments[2])
+			}
+		}
 		return linuxErrno(linuxabi.ENOTTY)
 	case linuxabi.SysDup:
 		return duplicated(state.FDs.Duplicate(fd, 0, false))
@@ -116,7 +121,7 @@ func (handler *linuxCallHandler) duplicateOnto(request linuxcompat.Request, stat
 // the caller must run.
 func (handler *linuxCallHandler) releaseDescription(released linuxcompat.FileDescription) bool {
 	switch released.Kind {
-	case linuxcompat.FDStreamReader, linuxcompat.FDStreamWriter, linuxcompat.FDTerminal:
+	case linuxcompat.FDStreamReader, linuxcompat.FDStreamWriter, linuxcompat.FDTerminal, linuxcompat.FDSocket:
 		releaseLinuxDescriptionReference(released)
 	case linuxcompat.FDVFSDirectory:
 		if state, found := linuxcompat.FindProcess(handler.root); found {
@@ -133,6 +138,10 @@ func (handler *linuxCallHandler) releaseDescription(released linuxcompat.FileDes
 func releaseLinuxDescriptionReference(released linuxcompat.FileDescription) {
 	if released.Kind == linuxcompat.FDTerminal {
 		releaseTerminal(linuxcompat.TerminalID(released.Object))
+		return
+	}
+	if released.Kind == linuxcompat.FDSocket {
+		releaseSocketDescription(released.Object)
 		return
 	}
 	if released.Kind != linuxcompat.FDStreamReader && released.Kind != linuxcompat.FDStreamWriter {

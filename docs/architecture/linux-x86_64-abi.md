@@ -25,13 +25,19 @@ an errno; nothing is accepted and ignored.
 
 | Syscall | Status | Notes |
 | --- | --- | --- |
-| `read(0)` | implemented | streams block without polling; a handled signal interrupts the wait with `EINTR` or restarts it under `SA_RESTART`; files read at their position, at most 64 KiB per call; a directory is `EISDIR` |
-| `write(1)` | implemented | streams: at most 4096 bytes land whole, larger writes move in bounded chunks with partial writes; files at their position or at the end for `O_APPEND`, at most 64 KiB per call |
+| `read(0)` | implemented | streams block without polling; a handled signal interrupts the wait with `EINTR` or restarts it under `SA_RESTART`; files read at their position, at most 64 KiB per call; a directory is `EISDIR`; a socket reads as `recv` with no flags |
+| `write(1)` | implemented | streams: at most 4096 bytes land whole, larger writes move in bounded chunks with partial writes; files at their position or at the end for `O_APPEND`, at most 64 KiB per call; a socket writes as `send` with no flags and raises `SIGPIPE` on `EPIPE` |
 | `open(2)` | implemented | `openat` from the working directory; musl's `open()` uses it |
 | `close(3)` | implemented | frees the descriptor, then releases the stream handle, the VFS file, or the directory record |
 | `stat(4)`, `fstat(5)`, `lstat(6)`, `newfstatat(262)` | implemented | synthetic mode, owner, and link count; `lstat` is `stat`; `newfstatat` takes `AT_EMPTY_PATH` |
-| `poll(7)`, `ppoll(271)` | implemented | at most 64 entries; streams sleep on native readiness; files and devices always ready; `POLLHUP`, `POLLERR`, `POLLNVAL`; a handled signal ends it with `EINTR` |
+| `poll(7)`, `ppoll(271)` | implemented | at most 64 entries; streams sleep on native readiness; sockets read the session's readiness page and sleep on its channel, with `POLLRDHUP`; files and devices always ready; `POLLHUP`, `POLLERR`, `POLLNVAL`; a handled signal ends it with `EINTR` |
 | `select(23)`, `pselect6(270)` | implemented | the readiness of `poll` over three sets of descriptors below 64; a descriptor in a set that is not open is `EBADF`; the exceptional set stays empty; the time left is written back; a handled signal ends it with `EINTR` |
+| `socket(41)` | implemented | `AF_INET` with `SOCK_STREAM` (TCP) or `SOCK_DGRAM` (UDP), protocol 0 or the matching one, `SOCK_NONBLOCK` and `SOCK_CLOEXEC`; other families `EAFNOSUPPORT`, raw and sequenced-packet sockets `ESOCKTNOSUPPORT`, a wrong protocol `EPROTONOSUPPORT`; a family without a network session `ENETDOWN`; served by `linuxsockd` over the family's GLNXSOCK1 session (ADR 0210) |
+| `bind(49)`, `listen(50)`, `getsockname(51)`, `getpeername(52)`, `shutdown(48)` | implemented | `sockaddr_in` of at least 16 bytes, longer than 128 `EINVAL`; `SO_REUSEADDR` goes with the bind; a nonzero port below 1024 is `EACCES`, since a Linux program runs as uid 1000 without `CAP_NET_BIND_SERVICE`; the backlog is cut at 4096; a returned address is cut to the caller's length and its full length reported; after `SHUT_RD` buffered bytes are still read, then end of file |
+| `connect(42)` | implemented | a blocking connect waits until the socket is writable and reports the outcome; a nonblocking one is `EINPROGRESS`, the next one `EALREADY` until it finished, then its outcome once, then `EISCONN`; `SO_SNDTIMEO` bounds the wait; `AF_UNSPEC` is `EOPNOTSUPP` |
+| `accept(43)`, `accept4(288)` | implemented | `SOCK_NONBLOCK` and `SOCK_CLOEXEC`, other flags `EINVAL`; a full descriptor table is `EMFILE` before a connection is taken; `SO_RCVTIMEO` bounds the wait |
+| `sendto(44)`, `sendmsg(46)`, `recvfrom(45)`, `recvmsg(47)` | implemented | at most 16 vector elements, more `EMSGSIZE`; 4096 bytes per exchange and 64 KiB per call; a datagram of more than 4096 bytes `EMSGSIZE`; `MSG_PEEK`, `MSG_WAITALL`, `MSG_TRUNC`, `MSG_DONTWAIT`, `MSG_NOSIGNAL`; `MSG_OOB` and `MSG_DONTROUTE` `EOPNOTSUPP`; a control message to send `EOPNOTSUPP`, none received; `EPIPE` raises `SIGPIPE` without `MSG_NOSIGNAL` |
+| `setsockopt(54)`, `getsockopt(55)` | implemented | the kernel answers `SO_TYPE`, `SO_DOMAIN`, `SO_PROTOCOL`, `SO_ACCEPTCONN`, `SO_REUSEADDR`, `SO_RCVTIMEO`, `SO_SNDTIMEO`, and reads `SO_KEEPALIVE`, `SO_LINGER`, `SO_BROADCAST` as off and accepts only off; `SO_ERROR` reads and clears the pending error; `SO_SNDBUF`, `SO_RCVBUF`, `TCP_NODELAY`, `TCP_MAXSEG`, `IP_TTL` go to `linuxsockd`; an unknown level `EOPNOTSUPP`, an unknown name `ENOPROTOOPT` |
 | `lseek(8)` | implemented | files by `SEEK_SET`, `SEEK_CUR`, `SEEK_END`; streams are `ESPIPE`; a device stays at 0; no `SEEK_DATA` or `SEEK_HOLE` |
 | `mmap(9)` | partial | anonymous private mappings at a kernel-chosen address, with `MAP_STACK` and `MAP_NORESERVE` as hints; the descriptor is ignored; no fixed, file-backed, or executable mappings |
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; on the program's own image segments only rights taken away (glibc's `PT_GNU_RELRO`), never given back; executable protection refused |
@@ -39,7 +45,7 @@ an errno; nothing is accepted and ignored.
 | `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
 | `rt_sigaction(13)`, `rt_sigprocmask(14)` | partial | dispositions per process and the blocked mask per thread; handlers run at system call returns; unblocking delivers what is pending; flags GoOS cannot honor `EINVAL` |
 | `rt_sigreturn(15)` | implemented | restores registers and mask from the handler's frame; a frame returning outside the user half ends the process with `SIGSEGV` |
-| `ioctl(16)` | partial | a terminal takes `TCGETS`, `TCSETS`, `TCSETSW`, `TCSETSF`, `TIOCGWINSZ`, `TIOCSWINSZ`, `TIOCGPGRP`, `TIOCSPGRP`, `TIOCGSID`, `FIONREAD`, `TCFLSH`, and `TCSBRK` (ADR 0206); any other request, and every request on a pipe, file, or device, is `ENOTTY` |
+| `ioctl(16)` | partial | a terminal takes `TCGETS`, `TCSETS`, `TCSETSW`, `TCSETSF`, `TIOCGWINSZ`, `TIOCSWINSZ`, `TIOCGPGRP`, `TIOCSPGRP`, `TIOCGSID`, `FIONREAD`, `TCFLSH`, and `TCSBRK` (ADR 0206); a socket takes `FIONREAD`, `FIONBIO`, and `SIOCATMARK`, a device request (`0x89xx`) on it is `EOPNOTSUPP`; any other request, and every request on a pipe, file, or device, is `ENOTTY` |
 | `pread64(17)`, `pwrite64(18)` | implemented | files at an offset, position unchanged; three VFS exchanges; streams are `ESPIPE` |
 | `readv(19)`, `writev(20)` | implemented | streams and files; at most 16 elements and 64 KiB per call; a stream vector of at most 4096 bytes lands whole |
 | `pipe(22)`, `pipe2(293)` | partial | a native stream with an 8176-byte ring; `pipe2` takes `O_CLOEXEC`, other flags `EINVAL`; `EPIPE` and `SIGPIPE` with no reader |
@@ -100,7 +106,6 @@ BusyBox does about it:
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)` | a program that uses them in place of `utimensat` cannot set a time |
 | `ftruncate(77)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
-| `socket(41)` and the network calls | no networking for Linux programs; the native network service (ADR 0191) offers no socket interface |
 
 Wrong-ABI Linux entry returns `-EPERM`. A noncanonical or non-user return RIP
 or RSP retires the task rather than attempting an unsafe IRETQ.
@@ -766,6 +771,8 @@ a terminal with termios, sessions, process groups, and job control
 | Linux processes, all families | 48, so 16 of 64 process slots stay native |
 | `poll` and `ppoll` entries | 64 |
 | `select` and `pselect6` descriptors | 64 |
+| sockets per family, TCP and UDP together | 32 |
+| socket requests in flight per family | 8 |
 | pending signals | one per standard signal, 31 |
 | VFS requests queued per family | 15 |
 | `execve` arguments and environment entries | 256 each |

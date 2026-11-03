@@ -297,8 +297,15 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 				abandonSpawn(root, spawned, false)
 				return 0, 0, supervisor.LaunchInvalidImage
 			}
+			netChannel, _ := bound.Handle(linuxcompat.NetRole)
+			netPool, _ := bound.Handle(linuxcompat.NetPoolRole)
+			if !attachLaunchNet(spawned, root, netChannel, netPool) {
+				abandonSpawn(root, spawned, false)
+				return 0, 0, supervisor.LaunchInvalidImage
+			}
 			// The shared descriptions now own these endpoint references. The
-			// process table keeps only the VFS channel used by its requests.
+			// process table keeps the VFS channel used by its requests and
+			// the network session's channel and pool.
 			for _, id := range streamHandles {
 				if id != 0 {
 					spawned.Handles().Close(id)
@@ -512,32 +519,46 @@ func classifyExecutable(source loader.Source) supervisor.ExecutableFormat {
 // the startup template bind each grant to its role; no device or management
 // authority can be smuggled into a Linux process as an extra grant.
 func validLinuxLaunch(grants []supervisor.Capability, profile supervisor.ResourceProfile, template []byte) bool {
-	// An interactive launch has one more role, its terminal's control
-	// stream, and nothing else; the fifth grant is accepted only under that
-	// name and with exactly those rights.
-	if profile != supervisor.ProfileLarge || len(grants) != 4 && len(grants) != 5 || len(template) == 0 {
+	// After the standard streams and the VFS channel come an interactive
+	// launch's terminal control stream and a networked launch's session
+	// channel and pool, each under its own name with exactly its rights.
+	// The session comes as both roles or neither.
+	if profile != supervisor.ProfileLarge || len(grants) < 4 || len(grants) > 7 || len(template) == 0 {
 		return false
 	}
 	data, ok := startup.DecodeTemplate(template)
 	if !ok || data.HandleCount() != len(grants) {
 		return false
 	}
-	names := [...]string{"in", "stdout", "stderr", "vfs", linuxcompat.TerminalRole}
-	types := [...]handle.Type{handle.TypeStream, handle.TypeStream, handle.TypeStream, handle.TypeChannel, handle.TypeStream}
-	rights := [...]capability.Rights{
+	terminal, network := len(grants) == 5 || len(grants) == 7, len(grants) >= 6
+	names := [7]string{"in", "stdout", "stderr", "vfs"}
+	types := [7]handle.Type{handle.TypeStream, handle.TypeStream, handle.TypeStream, handle.TypeChannel}
+	rights := [7]capability.Rights{
 		capability.Read | capability.Wait,
 		capability.Write | capability.Wait,
 		capability.Write | capability.Wait,
 		capability.Read | capability.Write | capability.Wait,
-		capability.Read | capability.Wait,
 	}
-	for index := range grants {
+	consumed := [7]bool{false, false, false, true}
+	count := 4
+	if terminal {
+		names[count], types[count], rights[count] = linuxcompat.TerminalRole, handle.TypeStream, capability.Read|capability.Wait
+		count++
+	}
+	if network {
+		names[count], types[count], rights[count], consumed[count] = linuxcompat.NetRole, handle.TypeChannel, capability.Read|capability.Write|capability.Wait, true
+		count++
+		names[count], types[count], rights[count], consumed[count] = linuxcompat.NetPoolRole, handle.TypeMemory, capability.Read|capability.Write, true
+		count++
+	}
+	for index := 0; index < count && index < len(grants); index++ {
 		name, id := data.HandleAt(index)
-		if id != 0 || !equalLaunchName(name, names[index]) || grants[index].Type != types[index] || grants[index].Rights != rights[index] {
+		if id != 0 || !equalLaunchName(name, names[index]) || grants[index].Type != types[index] || grants[index].Rights != rights[index] ||
+			consumed[index] && !grants[index].Consume {
 			return false
 		}
 	}
-	return grants[3].Consume
+	return count == len(grants)
 }
 
 func equalLaunchName(name []byte, expected string) bool {

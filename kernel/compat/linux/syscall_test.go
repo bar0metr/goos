@@ -39,6 +39,7 @@ func (handler *testHandler) SigReturn(request Request) Result     { return handl
 func (handler *testHandler) SigSuspend(request Request) Result    { return handler.memory(request) }
 func (handler *testHandler) Kill(request Request) Result          { return handler.memory(request) }
 func (handler *testHandler) Poll(request Request) Result          { return handler.memory(request) }
+func (handler *testHandler) Socket(request Request) Result        { return handler.memory(request) }
 func (handler *testHandler) memory(request Request) Result {
 	handler.called = request.Number
 	return Result{}

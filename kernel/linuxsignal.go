@@ -309,7 +309,9 @@ func interruptLinuxTask(state *linuxcompat.ProcessState, task sched.TaskID) bool
 	switch pending.Number {
 	case linuxabi.SysRead, linuxabi.SysReadv, linuxabi.SysWrite, linuxabi.SysWritev:
 		// A pipe read or write waits on its stream; a terminal read on its
-		// streams and the terminal at once.
+		// streams and the terminal at once; a socket read or write on its
+		// session channel while it sleeps on readiness. A reply wait is in
+		// neither table and keeps waiting.
 		if !streamWaitSet.Cancel(task) && !waitAnyTable.Cancel(task) {
 			return false
 		}
@@ -320,6 +322,13 @@ func interruptLinuxTask(state *linuxcompat.ProcessState, task sched.TaskID) bool
 		waitAnyTable.Cancel(task)
 	case linuxabi.SysFutex:
 		return interruptFutexWaiter(task)
+	case linuxabi.SysConnect, linuxabi.SysAccept, linuxabi.SysAccept4, linuxabi.SysSendto, linuxabi.SysRecvfrom,
+		linuxabi.SysSendmsg, linuxabi.SysRecvmsg:
+		// Only a readiness sleep ends for a signal. A reply wait does not:
+		// the service answers every request at once.
+		if pending.Correlation != linuxcompat.SocketSleepCorrelation || !waitAnyTable.Cancel(task) {
+			return false
+		}
 	default:
 		return false
 	}

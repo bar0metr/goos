@@ -108,6 +108,7 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 		linuxcompat.SyscallContinuations.Cancel(handler.task)
 		return handler.pollReturn(state, request, end, linuxErrno(linuxabi.ENOMEM))
 	}
+	rearmSocketInterests(local.linuxPollEntries[:interests])
 	return linuxBlocked
 }
 
@@ -232,6 +233,8 @@ func pollDescriptor(state *linuxcompat.ProcessState, fd int32, events uint16) (u
 		default:
 			readiness.Error = true
 		}
+	case linuxcompat.FDSocket:
+		return pollSocket(description, events)
 	default:
 		// Regular files, directories, and devices never block.
 		readiness.Readable, readiness.Writable = true, true

@@ -79,6 +79,13 @@ type StandardStreams struct {
 	Control uint64
 }
 
+// NetRole and NetPoolRole are the startup names of a family's network
+// session: its GLNXSOCK1 channel and its pool (ADR 0210).
+const (
+	NetRole     = "linux-net"
+	NetPoolRole = "linux-net-pool"
+)
+
 // TerminalRole is the startup name of the terminal control stream PID 1
 // grants an interactive Linux launch.
 const TerminalRole = "linux-tty"
@@ -272,7 +279,7 @@ var processRecords [process.MaxProcesses]ProcessRecord
 func installProcessHeld(root uint64, goosProcessID process.ID, data startup.Data, streams StandardStreams, brkBase uint64, brkLimit uint64) bool {
 	guard.Check()
 	if root == 0 || goosProcessID == 0 || brkBase == 0 || brkBase >= brkLimit || brkBase%LinuxPageSize != 0 || brkLimit%LinuxPageSize != 0 ||
-		data.HandleCount() != 4 && (data.HandleCount() != 5 || streams.Control == 0) || len(data.CWD()) == 0 || data.CWD()[0] != '/' || len(data.CWD()) > limits.PathMax ||
+		data.HandleCount() != launchHandleCount(data, streams) || len(data.CWD()) == 0 || data.CWD()[0] != '/' || len(data.CWD()) > limits.PathMax ||
 		streams.Input == 0 || streams.Output == 0 || streams.Error == 0 {
 		return false
 	}
@@ -313,6 +320,12 @@ func installProcessHeld(root uint64, goosProcessID process.ID, data startup.Data
 		*state = ProcessState{}
 		return false
 	}
+	if !installNetContextHeld(record.FamilyID) {
+		releaseVFSContextHeld(record.FamilyID)
+		processRecords[recordIndex(record.PID)] = ProcessRecord{}
+		*state = ProcessState{}
+		return false
+	}
 	state.Root, state.VFSHandle, state.cwdLen = root, vfsHandle, uint16(size)
 	state.PID, state.FamilyID = record.PID, record.FamilyID
 	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
@@ -322,6 +335,7 @@ func installProcessHeld(root uint64, goosProcessID process.ID, data startup.Data
 	if streams.Control != 0 {
 		if _, named := data.Handle(TerminalRole); !named {
 			releaseVFSContextHeld(record.FamilyID)
+			releaseNetContextHeld(record.FamilyID)
 			processRecords[recordIndex(record.PID)] = ProcessRecord{}
 			*state = ProcessState{}
 			return false
@@ -330,6 +344,7 @@ func installProcessHeld(root uint64, goosProcessID process.ID, data startup.Data
 		created, ok := createTerminalHeld(record.FamilyID, endpoints, DefaultTerminalRows, DefaultTerminalColumns, record.PID)
 		if !ok {
 			releaseVFSContextHeld(record.FamilyID)
+			releaseNetContextHeld(record.FamilyID)
 			processRecords[recordIndex(record.PID)] = ProcessRecord{}
 			*state = ProcessState{}
 			return false
@@ -347,11 +362,27 @@ func installProcessHeld(root uint64, goosProcessID process.ID, data startup.Data
 			releaseTerminalHeld(terminal)
 		}
 		releaseVFSContextHeld(record.FamilyID)
+		releaseNetContextHeld(record.FamilyID)
 		processRecords[recordIndex(record.PID)] = ProcessRecord{}
 		*state = ProcessState{}
 		return false
 	}
 	return true
+}
+
+// launchHandleCount is the number of roles a Linux launch carries: the
+// standard streams and the VFS channel, the terminal control stream of an
+// interactive launch, and the network session's channel and pool when PID
+// 1 gave the family one.
+func launchHandleCount(data startup.Data, streams StandardStreams) int {
+	count := 4
+	if streams.Control != 0 {
+		count++
+	}
+	if _, net := data.Handle(NetRole); net {
+		count += 2
+	}
+	return count
 }
 
 func forkProcessHeld(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsHandle handle.ID) bool {
@@ -703,6 +734,7 @@ func removeProcessHeld(root uint64, released *Released) bool {
 				closeProcessFDs(&processStates[index], released)
 				if final, _ := releaseVFSContextHeld(familyID); final {
 					releaseDirectories(familyID)
+					releaseNetContextHeld(familyID)
 				}
 				processStates[index] = ProcessState{}
 				forgetThreads(root)
@@ -733,6 +765,7 @@ func exitProcessHeld(root uint64, termination Termination, released *Released) b
 		closeProcessFDs(&processStates[index], released)
 		if final, _ := releaseVFSContextHeld(familyID); final {
 			releaseDirectories(familyID)
+			releaseNetContextHeld(familyID)
 		}
 		processStates[index] = ProcessState{}
 		forgetThreads(root)

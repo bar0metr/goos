@@ -135,6 +135,7 @@ func (handler *linuxCallHandler) Select(request linuxcompat.Request) linuxcompat
 		linuxcompat.SyscallContinuations.Cancel(handler.task)
 		return handler.selectReturn(state, request, end, linuxErrno(linuxabi.ENOMEM))
 	}
+	rearmSocketInterests(local.linuxPollEntries[:interests])
 	return linuxBlocked
 }
 

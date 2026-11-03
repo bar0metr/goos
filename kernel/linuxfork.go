@@ -244,6 +244,7 @@ func exitLinuxProcess(exited *process.Process, code uint64) {
 	if _, shared := linuxcompat.VFSContext(familyID); shared {
 		exited.Handles().Close(vfsHandle)
 	}
+	endLinuxNetHolder(exited, familyID)
 }
 
 // linuxForkFaultDirectory is the working directory under which a validation

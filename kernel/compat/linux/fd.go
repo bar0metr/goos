@@ -27,6 +27,9 @@ const (
 	// FDTerminal is a Linux terminal. Object is its TerminalID, never a
 	// native handle or stream endpoint.
 	FDTerminal
+	// FDSocket is an IPv4 socket. Object names its entry in the family's
+	// socket table, never the service's identity or a native handle.
+	FDSocket
 )
 
 type FileDescription struct {
@@ -325,7 +328,7 @@ func (table *FDTable) description(index uint16) (*descriptionSlot, bool) {
 }
 
 func (description FileDescription) valid() bool {
-	return description.Kind > FDInvalid && description.Kind <= FDTerminal && description.Object != 0
+	return description.Kind > FDInvalid && description.Kind <= FDSocket && description.Object != 0
 }
 
 // OpenDescriptionCount reports how many open-file descriptions exist in all
