@@ -346,7 +346,7 @@ check_fetch() { # line name
 }
 
 if wants server; then
-	interactive "$probe serve 8081 $probe 6"
+	interactive "$probe serve 8081 /system/linux/abi-probe 6"
 	await_guest '^serve listening 8081$'
 	check_fetch "$(peer_fetch s1 8081 /abi-probe)" 'first sequential fetch'
 	check_fetch "$(peer_fetch s2 8081 /abi-probe)" 'second sequential fetch'
@@ -367,7 +367,7 @@ if wants server; then
 	refuse 'killed\|exit status' 'the server survived the abort'
 	# The server closed first, so its connections wait in TIME_WAIT; the
 	# restarted server binds the port again with SO_REUSEADDR.
-	interactive "$probe serve 8081 $probe 1"
+	interactive "$probe serve 8081 /system/linux/abi-probe 1"
 	await_guest '^serve listening 8081$'
 	check_fetch "$(peer_fetch r1 8081 /abi-probe)" 'fetch after the restart'
 	await_guest '^serve done '
