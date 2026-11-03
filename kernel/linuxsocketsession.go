@@ -124,6 +124,7 @@ func (handler *linuxCallHandler) socketResume(request linuxcompat.Request) (pend
 		// A readiness sleep ends with a published event, which wakes the
 		// task without resuming its continuation.
 		linuxcompat.SyscallContinuations.Resume(handler.task, pending.Correlation, linuxcompat.WakeMessage)
+		linuxcompat.NoteNet(linuxcompat.NetPollWakeups, 1)
 	}
 	waitAnyTable.Cancel(handler.task)
 	ipcWaitSet.Cancel(handler.task)
