@@ -523,6 +523,10 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 		switch {
 		case !valid:
 			reply.Status = vfs.StatusInvalidArgument
+		case len(request.Path) != 0 && service.onImage(request.Path):
+			// The archive keeps no times or attributes to change; this is
+			// the refusal a write open gets, which reads as read-only.
+			reply.Status = vfs.StatusPermissionDenied
 		case len(request.Path) == 0 && request.Handle != 0:
 			reply.Status = service.namespace.SetMetadataOpen(owner, request.Handle, change)
 		default:

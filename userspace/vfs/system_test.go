@@ -269,6 +269,7 @@ func TestEtcIsTheArchiveEtcReadOnly(t *testing.T) {
 				{Operation: vfs.OperationMkdir, Path: []byte(root + "/sub")},
 				{Operation: vfs.OperationUnlink, Path: []byte(root + "/resolv.conf")},
 				{Operation: vfs.OperationRename, Path: []byte(root + "/resolv.conf"), Target: []byte(root + "/old")},
+				vfs.MetadataRequest([]byte(root+"/resolv.conf"), 0, ramfs.MetadataChange{SetModified: true}),
 			} {
 				if reply := service.Dispatch(testSession, request); reply.Status != vfs.StatusPermissionDenied {
 					t.Fatalf("operation %d on %s = %d, want permission denied", request.Operation, request.Path, reply.Status)
