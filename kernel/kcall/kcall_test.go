@@ -643,7 +643,7 @@ func TestDispatchExecutableCalls(t *testing.T) {
 			t.Fatalf("random read of %d bytes reached the handler", length)
 		}
 	}
-	if result := Dispatch(Request{Operation: OperationThreadHoldCancel + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if result := Dispatch(Request{Operation: OperationLinuxNetAttach + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}
@@ -880,6 +880,22 @@ func (handler *testHandler) ThreadHoldStep(thread uint64) Status {
 func (handler *testHandler) ThreadHoldCancel(thread uint64) Status {
 	handler.channel, handler.called = thread, true
 	return StatusOK
+}
+
+func (handler *testHandler) LinuxNetAttach(process uint64, channel uint64, pool uint64) Status {
+	handler.channel, handler.address, handler.length, handler.called = process, channel, pool, true
+	return StatusOK
+}
+
+func TestLinuxNetAttachIsAppended(t *testing.T) {
+	if OperationLinuxNetAttach != 76 {
+		t.Fatalf("LinuxNetAttach is %d, want 76", OperationLinuxNetAttach)
+	}
+	handler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationLinuxNetAttach, Arg0: 3, Arg1: 4, Arg2: 5}, handler); result.Status != StatusOK ||
+		!handler.called || handler.channel != 3 || handler.address != 4 || handler.length != 5 {
+		t.Fatalf("attach dispatch %+v %+v", result, handler)
+	}
 }
 
 func TestThreadHoldCallsAreAppended(t *testing.T) {

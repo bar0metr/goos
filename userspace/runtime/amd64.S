@@ -791,6 +791,15 @@ goos_thread_hold_cancel:
     ret
 .size goos_thread_hold_cancel, .-goos_thread_hold_cancel
 
+// LinuxNetAttach is PID 1's: it gives a Linux family a network session.
+.global goos_linux_net_attach
+.type goos_linux_net_attach,@function
+goos_linux_net_attach:
+    movl $76, %eax
+    int $0x80
+    ret
+.size goos_linux_net_attach, .-goos_linux_net_attach
+
 // goos_thread_entry is where the kernel starts a thread ThreadCreate made:
 // at its stack top, 16-byte aligned, with the runtime's argument in rdi and
 // the thread's slot in rsi. It calls goos_thread_main, which runs the

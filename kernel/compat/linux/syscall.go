@@ -82,6 +82,8 @@ type Handler interface {
 	Kill(Request) Result
 	// Poll serves poll and ppoll.
 	Poll(Request) Result
+	// Socket serves the socket calls, 41 to 55 and accept4.
+	Socket(Request) Result
 	Exit(Request, bool) Result
 }
 
@@ -214,6 +216,10 @@ func route(request Request, handler Handler) Result {
 			return handler.Kill(request)
 		case abi.SysPoll, abi.SysPpoll:
 			return handler.Poll(request)
+		case abi.SysSocket, abi.SysConnect, abi.SysAccept, abi.SysSendto, abi.SysRecvfrom, abi.SysSendmsg, abi.SysRecvmsg,
+			abi.SysShutdown, abi.SysBind, abi.SysListen, abi.SysGetsockname, abi.SysGetpeername, abi.SysSetsockopt,
+			abi.SysGetsockopt, abi.SysAccept4:
+			return handler.Socket(request)
 		case abi.SysExit:
 			return handler.Exit(request, false)
 		case abi.SysExitGroup:

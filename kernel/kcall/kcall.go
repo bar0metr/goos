@@ -133,6 +133,11 @@ const (
 	OperationThreadHoldWait
 	OperationThreadHoldStep
 	OperationThreadHoldCancel
+	// OperationLinuxNetAttach gives a Linux family a new GLNXSOCK1 session
+	// (ADR 0210): Arg0 is a process handle to the family's launch root,
+	// Arg1 and Arg2 the session's channel and pool, which move into that
+	// process's handle table.
+	OperationLinuxNetAttach
 )
 
 // Instruction holds (ADR 0204). A ThreadHoldWait record is HoldRecordSize
@@ -342,6 +347,7 @@ type Handler interface {
 	ThreadHoldWait(thread uint64, address uint64) Status
 	ThreadHoldStep(thread uint64) Status
 	ThreadHoldCancel(thread uint64) Status
+	LinuxNetAttach(process uint64, channel uint64, pool uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -569,6 +575,8 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.ThreadHoldStep(request.Arg0)}
 	case OperationThreadHoldCancel:
 		return Result{Status: handler.ThreadHoldCancel(request.Arg0)}
+	case OperationLinuxNetAttach:
+		return Result{Status: handler.LinuxNetAttach(request.Arg0, request.Arg1, request.Arg2)}
 	default:
 		return Result{Status: StatusUnsupported}
 	}

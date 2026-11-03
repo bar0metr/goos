@@ -53,6 +53,8 @@ func cancelTaskWaits(taskID sched.TaskID) {
 	forgetFutexWaiter(taskID)
 	wakeVFSContextWaiter(linuxcompat.CancelVFSTask(taskID))
 	linuxcompat.SyscallContinuations.Cancel(taskID)
+	linuxcompat.AbandonTask(taskID)
+	linuxcompat.RemoveSocketWaiter(taskID)
 	ipcWaitSet.Cancel(taskID)
 	streamWaitSet.Cancel(taskID)
 	processWaitSet.Cancel(taskID)

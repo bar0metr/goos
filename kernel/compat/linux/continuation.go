@@ -197,6 +197,16 @@ func (table *ContinuationTable) advanceHeld(task sched.TaskID, stage uint8, next
 	return true
 }
 
+func (table *ContinuationTable) rearmHeld(task sched.TaskID, partial uint64) bool {
+	entry, ok := table.entry(task)
+	if !ok || entry.Phase != ContinuationReady {
+		return false
+	}
+	entry.Partial = partial
+	entry.Correlation, entry.Wake, entry.Issued = 0, 0, false
+	return true
+}
+
 func (table *ContinuationTable) finishHeld(task sched.TaskID) bool {
 	entry, ok := table.entry(task)
 	if !ok || entry.Phase != ContinuationReady {
@@ -315,6 +325,16 @@ func (table *ContinuationTable) Resume(task sched.TaskID, correlation uint64, re
 func (table *ContinuationTable) Advance(task sched.TaskID, stage uint8, next uint8, partial uint64) bool {
 	table.take()
 	result := table.advanceHeld(task, stage, next, partial)
+	table.lock.Unlock()
+	return result
+}
+
+// Rearm ends one wait of a call that waits more than once at the same
+// stage, a socket call, and records its progress. The call keeps its
+// arguments and note; the next wait is issued afresh.
+func (table *ContinuationTable) Rearm(task sched.TaskID, partial uint64) bool {
+	table.take()
+	result := table.rearmHeld(task, partial)
 	table.lock.Unlock()
 	return result
 }

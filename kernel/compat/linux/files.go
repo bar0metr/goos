@@ -198,6 +198,9 @@ func StatusFlagsOf(description FileDescription) uint32 {
 		return abi.OpenWriteOnly
 	case FDVFSDirectory:
 		return description.Flags | abi.OpenLargeFile | abi.OpenDirectory
+	case FDSocket:
+		// A socket is read-write, and Linux forces no O_LARGEFILE on it.
+		return abi.OpenReadWrite | description.Flags&abi.OpenNonBlock
 	}
 	return description.Flags | abi.OpenLargeFile
 }

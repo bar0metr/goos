@@ -252,7 +252,7 @@ func nativeCallLocks(operation kcall.Operation) lockSet {
 		return callIPCSend
 	case kcall.OperationIPCReceive, kcall.OperationIPCWaitReceive:
 		return callIPCReceive
-	case kcall.OperationChannelCreate, kcall.OperationHandleClose:
+	case kcall.OperationChannelCreate, kcall.OperationHandleClose, kcall.OperationLinuxNetAttach:
 		return callIPC
 	case kcall.OperationStreamCreate, kcall.OperationStreamRead, kcall.OperationStreamWrite, kcall.OperationStreamWait:
 		return callStream

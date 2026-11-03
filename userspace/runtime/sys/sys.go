@@ -301,6 +301,12 @@ func ProcessWait(process handle.ID, timeout uint64) (uint64, kcall.Status) {
 // ProcessKill stops a process through a process handle with Write.
 func ProcessKill(process handle.ID) kcall.Status { return status(processKill(uint64(process))) }
 
+// LinuxNetAttach gives the Linux family whose launch root process names a
+// new network session: channel and pool move into that process (ADR 0210).
+func LinuxNetAttach(process, channel, pool handle.ID) kcall.Status {
+	return status(linuxNetAttach(uint64(process), uint64(channel), uint64(pool)))
+}
+
 // ProcessInfo fills target with the record of the index-th process.
 func ProcessInfo(index uint64, target *[kcall.ProcessInfoSize]byte) kcall.Status {
 	touch(target[:])

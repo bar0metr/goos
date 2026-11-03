@@ -324,6 +324,9 @@ func (number Syscall) Known() bool {
 		SysPpoll, SysSetRobustList, SysPipe2, SysPrlimit64, SysGetrandom,
 		SysStatx, SysChmod, SysFchmod, SysFchmodat, SysUtimensat, SysSchedGetaffinity, SysSchedSetaffinity, SysGetcpu:
 		return true
+	case SysSocket, SysConnect, SysAccept, SysSendto, SysRecvfrom, SysSendmsg, SysRecvmsg, SysShutdown, SysBind,
+		SysListen, SysGetsockname, SysGetpeername, SysSetsockopt, SysGetsockopt, SysAccept4:
+		return true
 	default:
 		return false
 	}
