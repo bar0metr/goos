@@ -99,7 +99,7 @@ per session) and 8 pending sends. `system.net.udp.*` sets how much of each one i
 | `ephemeral-port-min` | 49152 | 1024..65535 |
 | `ephemeral-port-max` | 65535 | 1024..65535, at least `ephemeral-port-min` |
 | `recv-queue-depth` | 8 | 1..16 |
-| `max-endpoints` | 32 | 1..32 |
+| `max-endpoints` | 96 | 1..96 |
 | `max-endpoints-per-session` | 8 | 1..8, at most `max-endpoints` |
 | `max-payload` | 4096 | 1232..4096 |
 

@@ -85,8 +85,8 @@ func (stack *Stack) udpRoute(local, destination IPv4) (udpRouteResult, Result) {
 
 // UDPMaxPayload is the largest datagram an endpoint can send to destination
 // now: the tuned max-payload on the local path, and no more than the link
-// MTU less the IPv4 and UDP headers on the wire. A larger send is
-// MessageSize; nothing is ever truncated.
+// MTU less the IPv4 and UDP headers on the wire. A larger send fails with
+// MessageSize and sends nothing.
 func (stack *Stack) UDPMaxPayload(owner int, id EndpointID, destination IPv4) (int, Result) {
 	entry, _ := stack.endpoint(owner, id)
 	if entry == nil {

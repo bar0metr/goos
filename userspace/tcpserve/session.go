@@ -5,8 +5,8 @@
 // Each endpoint holds at most one parked Accept, Connect, Read, Write and
 // WaitReady. A request with FlagNoWait never parks. A WaitReady parks while
 // the endpoint's mask equals the mask the request names; Deliver answers it
-// once the mask differs, so a change that happens between a client's Ready
-// and its WaitReady is answered at once rather than lost.
+// once the mask differs. If the endpoint changes between a client's Ready
+// and its WaitReady, netd answers the WaitReady at once.
 package tcpserve
 
 import (
