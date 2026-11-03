@@ -121,7 +121,11 @@ type NetContext struct {
 	nextSocketGn uint32
 }
 
-var netContexts [process.MaxProcesses]NetContext
+// MaxNetFamilies bounds the families that hold a socket session at once:
+// linuxsockd serves 16 families, and PID 1 grants no more.
+const MaxNetFamilies = 16
+
+var netContexts [MaxNetFamilies]NetContext
 
 // SocketObject is the Object of an FDSocket description: the context, the
 // socket's slot, and the slot's generation, so a reused slot never matches
@@ -213,8 +217,14 @@ type NetGrant struct {
 func AttachNet(familyID uint64, grant NetGrant, replaceLive bool) (old NetGrant, replaced bool, ok bool) {
 	tablesLock.Lock()
 	defer tablesLock.Unlock()
+	if grant.Channel == 0 || grant.PoolObject == 0 || grant.Holder == 0 {
+		return NetGrant{}, false, false
+	}
 	context, _, found := netContextHeld(familyID)
-	if !found || grant.Channel == 0 || grant.PoolObject == 0 || grant.Holder == 0 {
+	if !found && installNetContextHeld(familyID) {
+		context, _, found = netContextHeld(familyID)
+	}
+	if !found {
 		return NetGrant{}, false, false
 	}
 	if context.attached && !context.failed && !replaceLive {

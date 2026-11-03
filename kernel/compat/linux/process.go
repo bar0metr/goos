@@ -320,12 +320,9 @@ func installProcessHeld(root uint64, goosProcessID process.ID, data startup.Data
 		*state = ProcessState{}
 		return false
 	}
-	if !installNetContextHeld(record.FamilyID) {
-		releaseVFSContextHeld(record.FamilyID)
-		processRecords[recordIndex(record.PID)] = ProcessRecord{}
-		*state = ProcessState{}
-		return false
-	}
+	// A family past MaxNetFamilies runs without sockets: socket() is
+	// ENETDOWN, and a later attach finds a context if one is free then.
+	installNetContextHeld(record.FamilyID)
 	state.Root, state.VFSHandle, state.cwdLen = root, vfsHandle, uint16(size)
 	state.PID, state.FamilyID = record.PID, record.FamilyID
 	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
