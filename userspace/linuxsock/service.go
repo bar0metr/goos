@@ -36,9 +36,9 @@ const (
 	// family's operations always make progress, so the Releases behind them
 	// are always read.
 	FamilyParked = linuxsockapi.RXSlots
-	// MaxOps holds every family's requests and one internal operation per
-	// socket, a pending-error fetch.
-	MaxOps = MaxFamilies*FamilyOps + MaxSockets
+	// MaxOps holds every family's requests and two internal operations per
+	// socket, a pending-error fetch and a readable-count refresh.
+	MaxOps = MaxFamilies*FamilyOps + 2*MaxSockets
 	// MaxBacklog is the native listen backlog limit; Linux backlogs are
 	// clamped to it.
 	MaxBacklog = 8
@@ -71,6 +71,8 @@ type socket struct {
 	needWait  bool // the wait could not be sent and is retried
 	noWait    bool // the backend cannot wait; readiness comes from replies only
 	fetching  bool
+	// refreshing: a kindRefresh operation is out.
+	refreshing bool
 	// reopen: a connect failed at once and the native endpoint is spent; the
 	// next connect replaces it.
 	reopen bool
@@ -147,6 +149,10 @@ type opKind uint8
 const (
 	kindRequest opKind = iota
 	kindError
+	// kindRefresh reads a stream's readable count again once reads used
+	// up the count netd last reported while its Readable bit stays set:
+	// netd answers a held wait only when the mask changes.
+	kindRefresh
 )
 
 type op struct {
@@ -654,6 +660,11 @@ func (s *Service) freeOp(o *op) {
 	if o.kind == kindError {
 		if sock := s.socketOf(o); sock != nil {
 			sock.fetching = false
+		}
+	}
+	if o.kind == kindRefresh {
+		if sock := s.socketOf(o); sock != nil {
+			sock.refreshing = false
 		}
 	}
 	o.state = opFree

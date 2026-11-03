@@ -537,3 +537,25 @@ func TestCloseReleasesEndpointAndIdentity(t *testing.T) {
 		t.Fatalf("old generation %d", reply.Result)
 	}
 }
+
+// netd answers a held wait only when the mask changes, so a stream whose
+// reads used up the reported count while Readable stays set asks again
+// rather than publishing an empty socket nobody wakes.
+func TestDrainedCountRefreshesReadable(t *testing.T) {
+	h := newHarness(t)
+	f := h.family(1, 7)
+	id := h.connected(f)
+	h.wake(h.endpoint(id), MaskWritable|MaskReadable, 4)
+	correlation := h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 100})
+	h.complete(h.take(NativeRead), NativeCompletion{Data: []byte("0123")})
+	reply := h.reply(f, correlation)
+	// Nothing is published as readable until netd says so.
+	if state := h.readiness(f, id); state.Ready&linuxsockapi.ReadyIn != 0 {
+		t.Fatalf("readiness while the count is refreshed %+v", state)
+	}
+	h.complete(h.take(NativeReady), NativeCompletion{Mask: MaskWritable | MaskReadable, Readable: 3000})
+	if state := h.readiness(f, id); state.Ready&linuxsockapi.ReadyIn == 0 || state.Readable != 3000 {
+		t.Fatalf("refreshed readiness %+v", state)
+	}
+	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: reply.Slot})
+}

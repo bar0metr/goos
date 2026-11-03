@@ -17,6 +17,9 @@ func (s *Service) step(o *op) {
 	case kindError:
 		s.stepError(o)
 		return
+	case kindRefresh:
+		s.stepRefresh(o)
+		return
 	}
 	r := &o.request
 	if r.Opcode == linuxsockapi.OpOpen {
@@ -93,6 +96,9 @@ func (s *Service) done(o *op, c *NativeCompletion) {
 	switch o.kind {
 	case kindError:
 		s.doneError(o, c)
+		return
+	case kindRefresh:
+		s.doneRefresh(o, c)
 		return
 	}
 	r := &o.request
@@ -612,6 +618,9 @@ func (s *Service) doneRead(o *op, sock *socket, c *NativeCompletion) {
 		if !peek {
 			s.counters.BytesIn += uint64(length)
 			sock.readable -= min(sock.readable, length)
+			if sock.readable == 0 && sock.mask&MaskReadable != 0 {
+				s.refreshReadable(int(o.socket))
+			}
 		}
 		s.publish(int(o.socket))
 		s.finish(o, linuxsockapi.ResultOK)
@@ -693,6 +702,16 @@ func (s *Service) stepWrite(o *op, sock *socket, addressed bool) {
 
 func (s *Service) doneWrite(o *op, sock *socket, c *NativeCompletion) {
 	r := &o.request
+	if sock.stream && (c.Result == NativeWouldBlock || c.Result == NativeOK && c.Length == 0 && r.Length != 0) {
+		// The send buffer is full now, whatever the last mask said; a
+		// fresh mask decides when it has room again, since the held wait
+		// may still name the mask it has now.
+		sock.mask &^= MaskWritable
+		s.refreshReadable(int(o.socket))
+		s.publish(int(o.socket))
+		s.finish(o, linuxsockapi.ResultWouldBlock)
+		return
+	}
 	if c.Result != NativeOK {
 		s.finish(o, nativeResult(c.Result))
 		return
@@ -766,6 +785,42 @@ func (s *Service) answerReady(o *op, sock *socket) {
 }
 
 // --- internal operations -------------------------------------------------------
+
+// refreshReadable asks netd for a stream's mask and readable count, after
+// reads used up the count or a write found the send buffer full.
+func (s *Service) refreshReadable(global int) {
+	sock := &s.sockets[global]
+	if sock.refreshing || sock.dead || sock.endpoint == 0 || !sock.stream {
+		return
+	}
+	o := s.newOp(int(sock.family), kindRefresh)
+	if o == nil {
+		return
+	}
+	o.socket, o.socketSerial = int16(global), sock.serial
+	sock.refreshing = true
+	s.step(o)
+}
+
+func (s *Service) stepRefresh(o *op) {
+	sock := s.socketOf(o)
+	if sock == nil || sock.dead || sock.endpoint == 0 {
+		s.freeOp(o)
+		return
+	}
+	s.native = NativeRequest{Op: NativeReady, Endpoint: sock.endpoint}
+	s.submit(o, TCP)
+}
+
+func (s *Service) doneRefresh(o *op, c *NativeCompletion) {
+	sock := s.socketOf(o)
+	global := int(o.socket)
+	s.freeOp(o)
+	if sock == nil || c.Result != NativeOK {
+		return
+	}
+	s.observe(global, c.Mask, c.Readable)
+}
 
 // fetchError reads netd's pending error into the socket.
 func (s *Service) fetchError(global int) {
