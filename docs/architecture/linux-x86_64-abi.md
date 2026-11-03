@@ -31,6 +31,7 @@ an errno; nothing is accepted and ignored.
 | `close(3)` | implemented | frees the descriptor, then releases the stream handle, the VFS file, or the directory record |
 | `stat(4)`, `fstat(5)`, `lstat(6)`, `newfstatat(262)` | implemented | synthetic mode, owner, and link count; `lstat` is `stat`; `newfstatat` takes `AT_EMPTY_PATH` |
 | `poll(7)`, `ppoll(271)` | implemented | at most 64 entries; streams sleep on native readiness; files and devices always ready; `POLLHUP`, `POLLERR`, `POLLNVAL`; a handled signal ends it with `EINTR` |
+| `select(23)`, `pselect6(270)` | implemented | the readiness of `poll` over three sets of descriptors below 64; a descriptor in a set that is not open is `EBADF`; the exceptional set stays empty; the time left is written back; a handled signal ends it with `EINTR` |
 | `lseek(8)` | implemented | files by `SEEK_SET`, `SEEK_CUR`, `SEEK_END`; streams are `ESPIPE`; a device stays at 0; no `SEEK_DATA` or `SEEK_HOLE` |
 | `mmap(9)` | partial | anonymous private mappings at a kernel-chosen address, with `MAP_STACK` and `MAP_NORESERVE` as hints; the descriptor is ignored; no fixed, file-backed, or executable mappings |
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; on the program's own image segments only rights taken away (glibc's `PT_GNU_RELRO`), never given back; executable protection refused |
@@ -470,9 +471,10 @@ call. Others wait for its next system call return (ADR 0166).
 returns `ECHILD` (ADR 0165).
 
 A handled signal interrupts a stream `read` or `write` that moved nothing,
-`wait4`, `nanosleep`, and `poll`. A stream call or `wait4` restarts after the
-handler under `SA_RESTART`, and fails with `EINTR` without it. `nanosleep`
-and `poll` always fail with `EINTR`; `nanosleep` reports the time left.
+`wait4`, `nanosleep`, `poll`, and `select`. A stream call or `wait4` restarts
+after the handler under `SA_RESTART`, and fails with `EINTR` without it.
+`nanosleep`, `poll`, and `select` always fail with `EINTR`; `nanosleep` and
+`select` report the time left.
 `wait4` returns a child that has already ended rather than `EINTR`. A file
 operation waiting for the VFS is not interrupted, as Linux does not interrupt
 regular-file I/O (ADR 0167).
@@ -507,6 +509,34 @@ writes the time left back. A non-null mask of size 8 replaces the signal mask
 for the call. A handled signal the mask lets through ends the call with
 `EINTR` unless a descriptor is ready, and its handler's return restores the
 old mask. Any other return restores the old mask first (ADR 0169).
+
+`select` and `pselect6` evaluate each descriptor of their read, write, and
+exceptional sets as `poll` does and sleep the same way. A descriptor goes in
+the read set for `POLLIN`, `POLLHUP`, or `POLLERR`, in the write set for
+`POLLOUT` or `POLLERR`, and in the exceptional set for `POLLPRI`. No GoOS
+descriptor has priority data, so the exceptional set always comes back empty;
+the write end of a pipe with no reader is in both other sets. The return
+value counts set bits, so one descriptor can count twice.
+
+| Case | Result |
+| --- | --- |
+| `nfds` negative | `EINVAL` |
+| `nfds` above 64 | cut to 64, the descriptor table, as Linux cuts it to its table |
+| a set | only the 64-bit words `nfds` needs are copied in and back; a null set is skipped |
+| a descriptor below `nfds` in a set that is not open | `EBADF` for the call, the sets untouched |
+| timeval | `tv_usec` carries whole seconds into `tv_sec` first, as on Linux; then negative seconds or microseconds are `EINVAL` |
+| timespec | negative fields or `tv_nsec` of a second or more are `EINVAL` |
+| a null timeout | no limit; a zero one returns at once |
+| ready or timed out | the sets hold the ready descriptors, all clear after a timeout |
+| any return after the timeout was read | the time left goes back to a nonzero timeout, a `timeval` for `select` and a `timespec` for `pselect6`, as the Linux system calls do; a C library `pselect` copies its argument, so its caller sees no change; a timeout that cannot be written does not fail the call |
+| nothing ready and a handled signal the mask lets through | `EINTR`, also with a zero timeout |
+| an unreadable set, timeout, or sixth `pselect6` argument | `EFAULT` |
+
+The sixth `pselect6` argument points at a signal set address and its size.
+A null set leaves the mask alone whatever the size; a non-null one needs size
+8 (`EINVAL` otherwise) and is installed for the call as `ppoll` installs its
+mask. The checks run in the Linux order: the sixth argument, the timeout,
+the mask, then `nfds`, the sets, and the descriptors.
 
 ## Random bytes
 
@@ -710,7 +740,7 @@ GoOS 0.2.1 runs x86_64, statically linked ELF programs, position-independent
 or not, musl or glibc (ADR 0176), with threads (ADR 0177) that have their own
 signal masks and share the process's pending signals. It has no `PT_INTERP` or dynamic
 linker; no copy-on-write and no shared-memory
-`vfork`; no `select`, `epoll`, or alternate signal stack; no nonblocking pipes;
+`vfork`; no `epoll` or alternate signal stack; no nonblocking pipes;
 no networking; no `/proc` or `/sys`, and of `/dev` three names; no
 file-backed `mmap`; no address-space randomization; no ownership or
 permission enforcement; no root. A Linux program alone in the foreground has
@@ -735,6 +765,7 @@ a terminal with termios, sessions, process groups, and job control
 | Linux processes per family | 16, zombies included |
 | Linux processes, all families | 48, so 16 of 64 process slots stay native |
 | `poll` and `ppoll` entries | 64 |
+| `select` and `pselect6` descriptors | 64 |
 | pending signals | one per standard signal, 31 |
 | VFS requests queued per family | 15 |
 | `execve` arguments and environment entries | 256 each |
@@ -820,6 +851,7 @@ boot:
 | `abi-probe fork`, `vfork`, `orphan` | private memory, shared file position, a suspended `vfork` parent, `clone(SIGCHLD)`, reparenting to PID 1 |
 | `abi-probe wait`, `pipe`, `signal`, `kill` | `wait4` by PID and any with `WNOHANG` and `ECHILD`; pipe direction, EOF, `EPIPE`, lifetime, `PIPE_BUF`; `SIGPIPE` and `SIGCHLD` handlers, masks, `rt_sigreturn`, forged frames; `kill` on the tree, `SA_NOCLDWAIT` |
 | `abi-probe eintr`, `poll`, `ppoll` | `EINTR` and `SA_RESTART` on blocked calls; `poll` readiness, `POLLHUP`, `POLLERR`, `POLLNVAL`, timeouts; `ppoll` and `rt_sigsuspend` with a temporary mask |
+| `abi-probe select` | `select` and `pselect6` over pipes and a file: ready sets, zero and short timeouts, the time left written back, `nfds` cut to the table, `EBADF`, `EINVAL`, `EFAULT`, a temporary mask, and a wake-up and a signal while asleep |
 | `abi-probe hardening` | failed `execve` keeps the image; fork copies touched, untouched, read-only, and brk pages; shared descriptions; a killed writer; pipe exhaustion; bad handler and restorer addresses; `SIGKILL` in a handler; the native gate refused in a child |
 | `abi-probe fpstate` | XMM0, XMM1, XMM7, XMM15, MXCSR, and the x87 control word survive `getpid`, a sleeping `nanosleep`, `fork` into the child, a handler that clobbers them and a nested signal; an edited image comes back; a null `fpstate` gives the initial state; an unreadable, kernel-half, or truncated `fpstate` ends the process with `SIGSEGV`; reserved MXCSR bits are cleared |
 | `abi-probe limits` | a fork bomb stops at 15 children with `EAGAIN`; zombies count; reaping frees the budget |
