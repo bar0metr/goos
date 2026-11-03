@@ -1,8 +1,8 @@
 /*
  * netprobe checks the Linux IPv4 socket ABI one group at a time and prints
  * a line per group. The same binary runs on a Linux kernel, where every
- * line must read "<group> ok": that run is the reference GoOS is held to.
- * Only results both systems must give are checked. Where GoOS documents a
+ * line must read "<group> ok": that run is the reference GoOS must match.
+ * The probe checks only results both systems must give. Where GoOS documents a
  * different bound (buffer sizes, the largest datagram, the backlog), the
  * probe checks the shape a Linux program may rely on, not the number.
  *
