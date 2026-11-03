@@ -2629,7 +2629,7 @@ static int select_test(void)
 	    probe_pselect(top, &read, NULL, NULL, &spec, NULL, 4) != 0)
 		return select_fail("mask size");
 
-	/* A descriptor that is not unblocked fails the call in any set. The sets
+	/* A descriptor that is not open fails the call in any set. The sets
 	 * stay as they were, and the time left is written back. */
 	read = bit(60);
 	timeout = (struct timeval){0, 0};

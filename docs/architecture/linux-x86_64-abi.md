@@ -514,7 +514,7 @@ old mask. Any other return restores the old mask first (ADR 0169).
 exceptional sets as `poll` does and sleep the same way. A descriptor goes in
 the read set for `POLLIN`, `POLLHUP`, or `POLLERR`, in the write set for
 `POLLOUT` or `POLLERR`, and in the exceptional set for `POLLPRI`. No GoOS
-descriptor has priority data, so the exceptional set always comes back empty;
+descriptor has priority data, so the exceptional set comes back empty;
 the write end of a pipe with no reader is in both other sets. The return
 value counts set bits, so one descriptor can count twice.
 

@@ -86,8 +86,8 @@ func EncodeFDSet(wire []byte, set *FDSet) {
 }
 
 // SelectEvents is the poll event mask select asks a descriptor for, given
-// the sets that name it. The exceptional events are always asked for, as on
-// Linux.
+// the sets that name it. It includes the exceptional events whatever the
+// sets, as Linux does.
 func SelectEvents(read, write bool) uint16 {
 	events := SelectExceptEvents
 	if read {
@@ -101,7 +101,7 @@ func SelectEvents(read, write bool) uint16 {
 
 // SelectTimevalNanos reads the struct timeval timeout of select. Linux
 // carries whole seconds out of tv_usec before it checks the value, so a
-// tv_usec of a million or more is a longer timeout, not an error. What is
+// tv_usec of a million or more adds whole seconds to the timeout. What is
 // left must be a valid time: no negative seconds, and microseconds that are
 // neither negative nor a whole second. The result saturates at the largest
 // duration.
