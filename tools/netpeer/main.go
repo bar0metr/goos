@@ -6,8 +6,9 @@
 // It floods every frame between the guests like a hub, and it is a station
 // on the segment that answers ARP and ICMP echo, serves static DHCP leases
 // and an authoritative DNS zone under "test" over UDP and TCP port 53,
-// echoes UDP and TCP on port 7, logs what it sees, and injects ARP address
-// conflicts and UDP datagrams on command.
+// echoes UDP and TCP on port 7, serves HTTP on ports 80 and 8080, drops
+// SYNs to port 81, logs what it sees, and on command injects ARP address
+// conflicts and UDP datagrams and opens TCP connections to a guest.
 package main
 
 import (
@@ -20,6 +21,19 @@ import (
 	"strings"
 	"syscall"
 )
+
+type fileFlag map[string]string
+
+func (f fileFlag) String() string { return "" }
+
+func (f fileFlag) Set(text string) error {
+	name, path, ok := strings.Cut(text, "=")
+	if !ok || name == "" || strings.Contains(name, "/") {
+		return fmt.Errorf("want NAME=PATH, got %q", text)
+	}
+	f[name] = path
+	return nil
+}
 
 type leaseFlag map[mac]ipv4
 
@@ -59,6 +73,8 @@ func run(args []string) error {
 	leaseTime := flags.Uint("lease-time", 3600, "DHCP lease time in seconds")
 	leases := leaseFlag{}
 	flags.Var(leases, "lease", "static lease MAC=IP (repeatable)")
+	files := fileFlag{}
+	flags.Var(files, "http-file", "serve file PATH over HTTP as /NAME, given as NAME=PATH (repeatable)")
 	zonePath := flags.String("zone", "", "DNS zone file")
 	noEDNS := flags.Bool("no-edns", false, "answer queries carrying OPT with FORMERR")
 	logPath := flags.String("log", "", "event log file (default: standard output)")
@@ -113,6 +129,17 @@ func run(args []string) error {
 	cfg.leaseTime = uint32(*leaseTime)
 	cfg.leases = leases
 	cfg.noEDNS = *noEDNS
+	cfg.files = map[string][]byte{}
+	for name, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if len(data) > maxServedFile {
+			return fmt.Errorf("-http-file %s is larger than %d bytes", path, maxServedFile)
+		}
+		cfg.files[name] = data
+	}
 	if *zonePath != "" {
 		file, err := os.Open(*zonePath)
 		if err != nil {

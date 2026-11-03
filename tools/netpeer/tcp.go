@@ -11,12 +11,14 @@ const (
 	tcpDNSPort     = 53
 	tcpHTTPPort    = 80
 	tcpHTTPAltPort = 8080
-	tcpFIN         = 0x01
-	tcpSYN         = 0x02
-	tcpRST         = 0x04
-	tcpPSH         = 0x08
-	tcpACK         = 0x10
-	tcpPeerMSS     = 1200
+	// tcpSilentPort drops every SYN, so a connect there times out.
+	tcpSilentPort = 81
+	tcpFIN        = 0x01
+	tcpSYN        = 0x02
+	tcpRST        = 0x04
+	tcpPSH        = 0x08
+	tcpACK        = 0x10
+	tcpPeerMSS    = 1200
 )
 
 type tcpSegment struct {
@@ -119,6 +121,8 @@ type tcpConn struct {
 	openAt               time.Time
 	dns                  *dnsStream
 	http                 *httpStream
+	// active is set on a connection the peer opened to a guest.
+	active *clientStream
 }
 
 func (h *host) tcpFrame(conn *tcpConn, flags byte, payload []byte) []byte {
@@ -148,8 +152,21 @@ func (h *host) handleTCP(src mac, packet ipPacket) [][]byte {
 	}
 	conn := h.tcp[key]
 	if segment.flags&tcpRST != 0 {
+		if conn != nil && conn.active != nil {
+			h.clientReset(conn)
+		}
 		delete(h.tcp, key)
 		h.mu.Unlock()
+		return nil
+	}
+	if conn != nil && conn.active != nil {
+		frames := h.handleClient(key, conn, segment)
+		h.mu.Unlock()
+		return frames
+	}
+	if conn == nil && segment.flags&tcpSYN != 0 && segment.dstPort == tcpSilentPort {
+		h.mu.Unlock()
+		h.log.printf("tcp-silent %s:%d", packet.src, segment.srcPort)
 		return nil
 	}
 	if conn == nil {
@@ -182,7 +199,7 @@ func (h *host) handleTCP(src mac, packet ipPacket) [][]byte {
 		if conn.localPort == tcpDNSPort {
 			conn.dns = &dnsStream{window: segment.window}
 		} else if conn.localPort == tcpHTTPPort || conn.localPort == tcpHTTPAltPort {
-			conn.http = &httpStream{}
+			conn.http = &httpStream{window: segment.window}
 		}
 		h.tcp[key] = conn
 		if h.tcpDropSYN {
