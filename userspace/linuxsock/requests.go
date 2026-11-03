@@ -636,6 +636,11 @@ func (s *Service) doneRead(o *op, sock *socket, c *NativeCompletion) {
 	o.reply.Value, o.reply.Address, o.reply.Port = uint64(full), c.Address, c.Port
 	if !peek {
 		s.counters.DatagramsIn++
+		// The queue may be empty now; until netd says, the socket is not
+		// readable, and the held wait may still name the mask it has.
+		sock.mask &^= MaskReadable
+		s.refreshReadable(int(o.socket))
+		s.publish(int(o.socket))
 	}
 	s.finish(o, linuxsockapi.ResultOK)
 }
@@ -790,7 +795,7 @@ func (s *Service) answerReady(o *op, sock *socket) {
 // reads used up the count or a write found the send buffer full.
 func (s *Service) refreshReadable(global int) {
 	sock := &s.sockets[global]
-	if sock.refreshing || sock.dead || sock.endpoint == 0 || !sock.stream {
+	if sock.refreshing || sock.dead || sock.endpoint == 0 {
 		return
 	}
 	o := s.newOp(int(sock.family), kindRefresh)
@@ -809,7 +814,7 @@ func (s *Service) stepRefresh(o *op) {
 		return
 	}
 	s.native = NativeRequest{Op: NativeReady, Endpoint: sock.endpoint}
-	s.submit(o, TCP)
+	s.submit(o, sock.proto)
 }
 
 func (s *Service) doneRefresh(o *op, c *NativeCompletion) {
