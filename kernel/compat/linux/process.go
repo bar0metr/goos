@@ -732,6 +732,7 @@ func removeProcessHeld(root uint64, released *Released) bool {
 				if final, _ := releaseVFSContextHeld(familyID); final {
 					releaseDirectories(familyID)
 					releaseNetContextHeld(familyID)
+					releaseEventCountersHeld(familyID)
 				}
 				processStates[index] = ProcessState{}
 				forgetThreads(root)
@@ -763,6 +764,7 @@ func exitProcessHeld(root uint64, termination Termination, released *Released) b
 		if final, _ := releaseVFSContextHeld(familyID); final {
 			releaseDirectories(familyID)
 			releaseNetContextHeld(familyID)
+			releaseEventCountersHeld(familyID)
 		}
 		processStates[index] = ProcessState{}
 		forgetThreads(root)

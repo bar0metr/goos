@@ -181,7 +181,7 @@ func route(request Request, handler Handler) Result {
 		case abi.SysGetpid, abi.SysGettid, abi.SysGetppid, abi.SysSetpgid, abi.SysGetpgrp, abi.SysSetsid, abi.SysGetpgid, abi.SysGetsid, abi.SysGetuid, abi.SysGeteuid, abi.SysGetgid, abi.SysGetegid,
 			abi.SysSetuid, abi.SysSetgid, abi.SysGetgroups,
 			abi.SysUname, abi.SysClockGettime, abi.SysGettimeofday, abi.SysTime, abi.SysSysinfo, abi.SysNanosleep, abi.SysPrlimit64,
-			abi.SysRtSigaction, abi.SysRtSigprocmask, abi.SysRtSigpending, abi.SysGetrandom,
+			abi.SysRtSigaction, abi.SysRtSigprocmask, abi.SysRtSigpending, abi.SysEventfd, abi.SysEventfd2, abi.SysGetrandom,
 			abi.SysUmask, abi.SysSetRobustList, abi.SysFutex, abi.SysSchedYield, abi.SysSchedGetaffinity, abi.SysSchedSetaffinity, abi.SysGetcpu:
 			return handler.System(request)
 		case abi.SysAccess, abi.SysFaccessat, abi.SysGetdents64, abi.SysStat, abi.SysFstat, abi.SysLstat, abi.SysNewfstatat, abi.SysLseek, abi.SysGetcwd, abi.SysChdir, abi.SysRename, abi.SysMkdir, abi.SysRmdir, abi.SysUnlink,

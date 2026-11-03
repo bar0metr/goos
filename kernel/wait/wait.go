@@ -35,9 +35,12 @@ const (
 	// KindLinuxTerminal is a Linux terminal's processed input or geometry.
 	// Its object is the terminal's identity. Only Linux calls wait on it.
 	KindLinuxTerminal
+	// KindLinuxEvent is a Linux eventfd counter. Its object is the
+	// counter's description Object. Only Linux calls wait on it.
+	KindLinuxEvent
 
 	// lastKind is the highest valid kind; validKey bounds keys by it.
-	lastKind = KindLinuxTerminal
+	lastKind = KindLinuxEvent
 )
 
 type Event uint8

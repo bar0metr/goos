@@ -379,6 +379,8 @@ fi
 
 if wants apps; then
 	interactive "$bb httpd -f -p 8080 -h /system/linux"
+	# httpd prints nothing once it listens; give it time to get there.
+	sleep 3
 	check_fetch "$(peer_fetch h1 8080 /abi-probe)" 'BusyBox httpd first fetch'
 	check_fetch "$(peer_fetch h2 8080 /abi-probe)" 'BusyBox httpd second fetch'
 	peer_command 'http-get h3 192.0.2.10 8080 /abi-probe'

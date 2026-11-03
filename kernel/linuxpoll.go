@@ -235,6 +235,8 @@ func pollDescriptor(state *linuxcompat.ProcessState, fd int32, events uint16) (u
 		}
 	case linuxcompat.FDSocket:
 		return pollSocket(description, events)
+	case linuxcompat.FDEvent:
+		return pollEvent(state, description, events)
 	default:
 		// Regular files, directories, and devices never block.
 		readiness.Readable, readiness.Writable = true, true

@@ -115,6 +115,8 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		return handler.signalMask(state, arguments)
 	case linuxabi.SysRtSigpending:
 		return handler.signalPending(state, arguments)
+	case linuxabi.SysEventfd, linuxabi.SysEventfd2:
+		return handler.eventfdCreate(state, request)
 	case linuxabi.SysGetrandom:
 		return handler.getrandom(request)
 	case linuxabi.SysUmask:

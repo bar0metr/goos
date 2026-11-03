@@ -56,6 +56,8 @@ func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) 
 			return handler.terminalRead(request, description, vector)
 		case linuxcompat.FDSocket:
 			return handler.socketRead(request, description, vector)
+		case linuxcompat.FDEvent:
+			return handler.eventTransfer(request, description, false, vector)
 		}
 	}
 	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {
@@ -253,6 +255,8 @@ func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.
 			return handler.terminalWrite(request, description, false)
 		case linuxcompat.FDSocket:
 			return handler.socketWrite(request, description, false)
+		case linuxcompat.FDEvent:
+			return handler.eventTransfer(request, description, true, false)
 		}
 	}
 	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {
@@ -344,6 +348,8 @@ func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat
 			return handler.terminalWrite(request, description, true)
 		case linuxcompat.FDSocket:
 			return handler.socketWrite(request, description, true)
+		case linuxcompat.FDEvent:
+			return handler.eventTransfer(request, description, true, true)
 		}
 	}
 	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {

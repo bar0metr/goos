@@ -121,7 +121,7 @@ func (handler *linuxCallHandler) duplicateOnto(request linuxcompat.Request, stat
 // the caller must run.
 func (handler *linuxCallHandler) releaseDescription(released linuxcompat.FileDescription) bool {
 	switch released.Kind {
-	case linuxcompat.FDStreamReader, linuxcompat.FDStreamWriter, linuxcompat.FDTerminal, linuxcompat.FDSocket:
+	case linuxcompat.FDStreamReader, linuxcompat.FDStreamWriter, linuxcompat.FDTerminal, linuxcompat.FDSocket, linuxcompat.FDEvent:
 		releaseLinuxDescriptionReference(released)
 	case linuxcompat.FDVFSDirectory:
 		if state, found := linuxcompat.FindProcess(handler.root); found {
@@ -142,6 +142,10 @@ func releaseLinuxDescriptionReference(released linuxcompat.FileDescription) {
 	}
 	if released.Kind == linuxcompat.FDSocket {
 		releaseSocketDescription(released.Object)
+		return
+	}
+	if released.Kind == linuxcompat.FDEvent {
+		linuxcompat.ReleaseEventCounterObject(released.Object)
 		return
 	}
 	if released.Kind != linuxcompat.FDStreamReader && released.Kind != linuxcompat.FDStreamWriter {

@@ -30,6 +30,9 @@ const (
 	// FDSocket is an IPv4 socket. Object names its entry in the family's
 	// socket table, never the service's identity or a native handle.
 	FDSocket
+	// FDEvent is an eventfd counter. Object names its entry in the
+	// kernel's counter table.
+	FDEvent
 )
 
 type FileDescription struct {
@@ -328,7 +331,7 @@ func (table *FDTable) description(index uint16) (*descriptionSlot, bool) {
 }
 
 func (description FileDescription) valid() bool {
-	return description.Kind > FDInvalid && description.Kind <= FDSocket && description.Object != 0
+	return description.Kind > FDInvalid && description.Kind <= FDEvent && description.Object != 0
 }
 
 // OpenDescriptionCount reports how many open-file descriptions exist in all

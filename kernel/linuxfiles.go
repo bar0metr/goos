@@ -879,6 +879,8 @@ func (handler *linuxCallHandler) beginDescriptorStatus(request linuxcompat.Reque
 		return handler.deliverStatus(request, buffer, linuxcompat.TerminalStatus(linuxcompat.TerminalID(description.Object))), true
 	case linuxcompat.FDSocket:
 		return handler.deliverStatus(request, buffer, linuxcompat.SocketStatus(description.Object)), true
+	case linuxcompat.FDEvent:
+		return handler.deliverStatus(request, buffer, linuxcompat.EventStatus(description.Object)), true
 	default:
 		identity, _, _ := stream.DecodeEndpointObject(description.Object)
 		return handler.deliverStatus(request, buffer, linuxcompat.StreamStatus(identity)), true
