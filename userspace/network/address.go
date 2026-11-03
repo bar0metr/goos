@@ -99,6 +99,9 @@ const (
 	ResultReset
 	ResultClosed
 	ResultEOF
+	// ResultMessageSize is a datagram larger than its path carries. GNETAPI
+	// never carries it.
+	ResultMessageSize
 )
 
 const (

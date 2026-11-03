@@ -111,28 +111,52 @@ service keeps one such wait per socket.
 
 ### Native protocol changes
 
-GTCP version 2:
+GTCP version 2 (`userspace/tcpapi`) grows requests to 24 bytes and replies
+to 32:
 
-- a flags byte: NoWait for Accept, Connect, Read and Write; Peek for Read;
-  ReuseAddr for Bind;
-- NoWait Read and Accept answer WouldBlock; NoWait Write takes what fits and
-  answers WouldBlock only when nothing fits; NoWait Connect answers
-  InProgress;
-- `OpReady` returns the endpoint's mask and readable byte count, and
-  `OpWaitReady` waits until the mask changes; `OpClose` answers a held wait;
-- `OpError` returns and clears the pending connection error;
-- `OpOption` reads the effective send MSS, buffer sizes and TTL.
+- byte 17 of a request is a flags byte: NoWait for Accept, Connect, Read and
+  Write, Peek for Read, ReuseAddr for Bind. A flag on any other opcode makes
+  the request malformed;
+- without NoWait, Accept, Connect, Read and Write park in `netd` as in
+  version 1. With it, Read and Accept answer WouldBlock, Write takes what
+  fits and answers WouldBlock only when nothing fits, and Connect answers
+  InProgress with the chosen four-tuple. A loopback connect can finish
+  inside the request; its reply is then the final result;
+- `OpReady` returns the endpoint's mask, the readable byte count and the
+  send buffer room. `OpWaitReady` names a mask in bytes 18 and 19, and
+  `netd` holds it until the endpoint's mask differs, answering at once when
+  it already does. An endpoint holds one wait; `OpClose` answers it with
+  Closed before its own reply. Neither consumes a byte;
+- `OpError` returns the pending transport error in reply byte 3 and clears
+  it. A Connect, Read or Write reply that carries the error clears it too;
+- `OpOption` reads the effective send MSS, send buffer, receive buffer or
+  TTL, selected by request byte 20.
 
-GUDP version 2 adds the same flags, `OpReady`, `OpWaitReady` and `OpOption`,
-Peek on RecvFrom, and a MessageSize result for a datagram the path cannot
-carry. GNETCTL version 5 adds an endpoint quota to `ControlAddTCPSession`
-and `ControlAddUDPSession`. Ordinary commands keep 8; PID 1 asks for 64 for
-`linuxsockd`. `netd` holds 96 TCP and 96 UDP endpoints.
+GUDP version 2 (`userspace/udpapi`) grows requests to 24 bytes and replies
+to 32. Request byte 2 holds the flags (NoWait and Peek on RecvFrom,
+ReuseAddr on Bind) and byte 3 the option selector. It adds `OpReady`,
+`OpWaitReady` with the same rules as GTCP, and `OpOption` for the TTL and
+for the largest payload the path to a named destination carries. A Send or
+SendTo larger than its path, max-payload locally or the MTU less 28 bytes
+on the wire, answers MessageSize and sends nothing. A RecvFrom reply's
+length is the whole datagram.
 
-SO_REUSEADDR follows Linux: a bind conflicts with an endpoint on the same
-port and an overlapping address unless both carry the flag and the existing
-one is not a listener. TIME_WAIT keeps the flag of the connection it came
-from.
+GNETCTL version 5 carries an endpoint quota in byte 2 of
+`ControlAddTCPSession` and `ControlAddUDPSession`, 1 to 64, and zero in
+every other request. Commands and `resolved` get 8, which
+`max-endpoints-per-session` can lower; PID 1 asks for 64 for `linuxsockd`
+(`openLinuxSocketSessions` in `userspace/cmd/init`), and the tuning does
+not lower a grant above 8. `netd` holds 96 TCP and 96 UDP endpoints, 16 TCP
+listeners and 128 UDP receive buffers, of which one session holds at most
+64.
+
+SO_REUSEADDR follows Linux. A TCP bind conflicts with an endpoint or
+TIME_WAIT four-tuple on the same port and an overlapping address, equal or
+either one the wildcard, unless both carry the flag and the existing one is
+not a listener. TIME_WAIT keeps the flag of the connection it came from,
+and an accepted child takes its listener's. A UDP bind that overlaps
+succeeds only when both endpoints carry the flag; the endpoint bound last
+then receives unicast.
 
 ### Kernel
 
@@ -171,5 +195,6 @@ static libc resolves names with ordinary socket traffic.
   sockets, netlink, `epoll` and ancillary data fail explicitly.
 - A payload byte is copied twice more than a native client copies it:
   user memory to the family pool, then to the GTCP pool.
-- Native protocol versions move to GTCP 2, GUDP 2 and GNETCTL 5; every
-  client is rebuilt with the new version and mismatches fail closed.
+- Native protocol versions move to GTCP 2, GUDP 2 and GNETCTL 5. Every
+  client builds against the new codecs, and each decoder rejects any other
+  version.
