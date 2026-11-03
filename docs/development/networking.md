@@ -24,8 +24,8 @@ ADR 0196 adds generic IPv4 TCP, GTCP1 sessions, the `tcp` command and TCP
 status. Its parser, TCBs, stream buffers, reassembly, retransmission,
 congestion control, close states and TIME_WAIT remain in `userspace/network`.
 The resolver now repeats a truncated UDP answer over a GTCP1 session
-(ADR 0194, ADR 0196). IPv6, Linux socket calls and persistent DNS-over-TCP
-connections remain out of scope.
+(ADR 0194, ADR 0196). Linux programs reach TCP and UDP through `linuxsockd`
+(ADR 0210). IPv6 and persistent DNS-over-TCP connections remain out of scope.
 
 ADR 0198 selects native TLS 1.3 above GTCP1, with explicit system roots,
 kernel entropy and REALTIME. TLS and X.509 remain application parsers; network

@@ -188,7 +188,7 @@ Added SMP across all supported processors, per-CPU queues/timers, migration, TLB
 
 Added the native network path from userspace virtio-net through IPv4, UDP, TCP and DNS to the HTTP/1.1 `fetch` client. DHCP/static addressing, loopback, hosts, DNS cache/TCP fallback and generic UDP/TCP sessions are included.
 
-IPv6 and Linux socket syscalls remain outside the native networking design.
+IPv6 remains outside the native networking design. Linux IPv4 sockets arrived later as an adapter over these services (ADR 0210).
 
 ### 0.2.6 — Native HTTPS and trust updates
 
@@ -355,9 +355,9 @@ Possible later milestones:
 - multicast/mDNS;
 - stronger TCP compatibility/performance;
 - additional application protocols;
-- Linux socket syscalls backed by the native network services.
+- `epoll` for Linux programs, on the socket readiness ADR 0210 already publishes.
 
-Linux networking must remain an adapter over native services rather than a privileged parallel network stack.
+Linux IPv4 sockets run through `linuxsockd` over GTCP and GUDP (ADR 0210); Linux networking stays an adapter over native services, with no parallel network stack.
 
 Encrypted DNS, HTTP/2, HTTP/3 and QUIC are not immediate priorities.
 

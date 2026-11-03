@@ -278,6 +278,31 @@ is `EBUSY`, and a directory moves only onto a free name.
 
 `ftruncate` and `fsync` are not implemented.
 
+### Sockets
+
+`socket`, `bind`, `listen`, `accept`, `accept4`, `connect`, the send and
+receive calls, `shutdown`, the name calls and the option calls serve
+`AF_INET` stream and datagram sockets (ADR 0210). A socket is an open-file
+description of kind `FDSocket`; `dup`, `fork` and `execve` treat it like any
+other description, and the last reference closes it.
+
+The kernel holds no TCP or UDP state. Each family has one session to
+`linuxsockd`: a channel and a 17-page pool that PID 1 grants at launch as
+`linux-net` and `linux-net-pool`. A request never waits in the service.
+When a socket is not ready, the calling task sleeps through its
+continuation on the family channel, with a timer for `SO_RCVTIMEO` or
+`SO_SNDTIMEO`, and reads the socket's state again from the pool's readiness
+page when it wakes. `poll`, `ppoll`, `select` and `pselect6` read the same
+page. A signal with a handler interrupts that sleep; a reply wait is bounded
+at eight seconds and no signal interrupts it.
+
+When `linuxsockd` dies, the family's sockets fail with `ENETRESET`, and PID 1
+gives each running launch a new session through `LinuxNetAttach`. A launch
+made while the service is down has no session, and `socket` is `ENETDOWN`.
+
+Name lookup needs no GoOS interface: `/etc/resolv.conf` names
+`127.0.0.1`, where `resolved` answers DNS over UDP and TCP.
+
 ### Devices
 
 The kernel compares a resolved path with `/dev/null`, `/dev/zero`, and
@@ -475,7 +500,7 @@ GoOS runs static x86_64 programs, musl or glibc, position-independent
 or not, with threads (ADR 0176, ADR 0177). A thread has its own TID, TLS, and
 signal mask and shares the process's pending signals; all threads share one
 CPU, and a process holds at most 8 tasks. Dynamic linking,
-nonblocking pipes, networking, `/proc`, file-backed `mmap`, and
+nonblocking pipes, IPv6 and other socket families, `/proc`, file-backed `mmap`, and
 address-space randomization are outside it. BusyBox `sh` runs programs,
 pipelines, redirections, scripts, and background jobs without a terminal
 (ADR 0172), and interactively with job control on one, where GNU nano runs
