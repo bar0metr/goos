@@ -17,7 +17,7 @@ import (
 // EBADF, as on Linux.
 //
 // The exceptional set reports POLLPRI. No GoOS descriptor kind has urgent or
-// priority data, so it always comes back empty.
+// priority data, so the call returns it empty.
 //
 // Both calls write the time left back to their timeout, select as a timeval
 // and pselect6 as a timespec, as the Linux system calls do; a C library

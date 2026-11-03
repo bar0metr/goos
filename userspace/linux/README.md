@@ -43,8 +43,8 @@ signal and restarts a `read` under `SA_RESTART`; `poll` checks readiness,
 `POLLHUP`, `POLLERR`, `POLLNVAL`, a timeout, and a wake-up from a child;
 `ppoll` checks a timespec timeout and the remaining time it writes back, and
 a temporary mask that lets a pending or a sent signal interrupt the call and
-comes back after the handler or a ready return; `select` calls `select` and
-`pselect6` directly over pipes and a file and checks the ready sets, zero and
+comes back after the handler or a ready return; `select` makes raw `select` and
+`pselect6` calls over pipes and a file and checks the ready sets, zero and
 short timeouts, the time left both calls write back, `nfds` above the table,
 `EBADF`, `EINVAL`, `EFAULT`, and a `pselect6` mask; `family` leaves a child asleep
 for the Ctrl-C check of the boot test; `path` prints the `PATH` it got;
