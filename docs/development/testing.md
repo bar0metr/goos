@@ -351,6 +351,44 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   repository carries no BusyBox. See the
   [static application catalog](linux-application-compatibility.md) for the
   tested operations and limits.
+- `make test-linux-network BUSYBOX=/path/to/busybox CURL=/path/to/curl` runs
+  `tests/boot/linux_network.sh`, the Linux sockets gate (ADR 0210). It checks
+  that both binaries are static x86_64 ELF files with the pinned SHA-256
+  (`BUSYBOX_SHA256` and `CURL_SHA256` override the pins), builds the
+  validation ISO and a system tree with both under `/system/linux`, and boots
+  one guest on a private stream backend with `tools/netpeer` at
+  `192.0.2.53`. The peer leases the guest `192.0.2.10`, answers DNS for
+  `plain.test`, for `example.test` with TC=1 over UDP, and NXDOMAIN for
+  `gone.test`, serves a random 300000-byte `/big` over HTTP, echoes TCP and
+  UDP on port 7, drops SYNs to port 81, and fetches from guest servers on
+  command. `LINUX_NETWORK_SCENARIOS` picks scenarios:
+  - `loopback`: every `netprobe` group over 127.0.0.1;
+  - `dns`: `/etc/resolv.conf`, `/etc/hosts` and `/etc/nsswitch.conf` read
+    and refuse writes, `netprobe resolve` answers through the stub on
+    `127.0.0.1:53`, the peer sees `resolved` repeat the truncated
+    `example.test` query over TCP, and `gone.test` fails as NXDOMAIN;
+  - `client`: `/big` by address, by name and after a nonblocking connect,
+    each with its SHA-256, a refusal with `POLLERR` and `SO_ERROR`, a
+    connect to the silent port that times out, a reset, and an
+    `SO_RCVTIMEO` read from a peer that says nothing;
+  - `udp`: `netprobe udp-echo`; `inherit`: one connection written by a
+    forked child and by an `execve`'d image, with a `SOCK_CLOEXEC` socket
+    closed in the new image;
+  - `server`: the peer fetches `abi-probe` from `netprobe serve` twice in
+    turn and three times at once, resets a fourth fetch after the first
+    bytes, and fetches once more from a restarted server on the same port;
+  - `apps`: BusyBox `httpd` serves two fetches in turn and two at once and
+    ends on Ctrl-C, BusyBox `nc` works as TCP client, UDP client and
+    listener, BusyBox `wget` and curl download `/big` by name with the right
+    SHA-256 and exit status, and both fail for `gone.test`;
+  - `faults`: `netprobe hold` keeps a connection across `fault net-driver`,
+    and across `fault netd` and `fault linuxsockd` its blocked read wakes
+    with a network error, its old sockets stay failed, and new sockets in
+    the same process work; a new launch downloads `/big` afterwards.
+
+  Logs go to `build/logs/linux-network.log` and
+  `build/logs/linux-network-netpeer.log`. The repository carries neither
+  binary, so the target is no part of `test-all`.
 - `make test-linux-tty` boots a validation guest and drives
   `/system/linux/tty-probe` on its terminal through the serial console
   (ADR 0206): `tty-probe identity` checks descriptor identity, `/dev/tty`,
