@@ -4,6 +4,42 @@ import (
 	"testing"
 )
 
+// FuzzParseQuery parses a client query and writes the reply the resolver's
+// stub would send. A reply to a query whose question was read must parse as
+// the response to that question, with the client's ID, and fit MaxReply.
+func FuzzParseQuery(f *testing.F) {
+	f.Add(query(1, FlagRD, "a.test", TypeA, ClassIN))
+	f.Add(query(2, FlagRD, "Mixed.Case.test", TypeAAAA, ClassIN, opt(1232, 0)))
+	f.Add(query(3, 0, "a.test", TypeMX, 3, opt(512, 1<<16), rr{name: "k", kind: 250, class: 255}))
+	f.Add([]byte{0, 1, 0x28, 0, 0, 1, 0, 0, 0, 0, 0, 0})
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		var out Query
+		result := ParseQuery(payload, &out)
+		if result == QueryIgnore {
+			return
+		}
+		if result != QueryOK && result != QueryFormErr && result != QueryNotImp {
+			t.Fatalf("result %d", result)
+		}
+		var reply [MaxReply]byte
+		addresses := [][4]byte{{1, 2, 3, 4}, {5, 6, 7, 8}}
+		for _, rcode := range []uint16{RcodeNoError, RcodeServFail, RcodeBadVers} {
+			length := EncodeReply(reply[:], &out, rcode, 60, addresses)
+			if length < HeaderSize || length > MaxReply {
+				t.Fatalf("reply length %d", length)
+			}
+			if result != QueryOK || out.Class != ClassIN {
+				continue
+			}
+			var response Response
+			var scratch Name
+			if got := ParseResponse(reply[:length], length, out.ID, &out.Name, out.Type, &scratch, &response); got != ParseOK {
+				t.Fatalf("reply to % x does not parse: %d", payload, got)
+			}
+		}
+	})
+}
+
 func FuzzDecodeName(f *testing.F) {
 	f.Add(wire("www.example.com"), uint16(0))
 	f.Add(append(wire("example.com"), 3, 'w', 'w', 'w', 0xc0, 0), uint16(13))

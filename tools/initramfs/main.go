@@ -50,6 +50,7 @@ func main() {
 		// recovery has something to cat.
 		file("system/motd", 0o444, []byte("Welcome to GoOS\n")),
 	}
+	members = append(members, etc()...)
 	for index, name := range services {
 		if name == "fault-probe" && !*validation {
 			continue

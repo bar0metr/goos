@@ -346,19 +346,21 @@ one of two 65535-byte buffers, and closes. The reply goes through the same
 checks, CNAME handling and cache as a UDP answer. `resolved` holds a UDP
 session, a TCP session and a status session, and no device.
 
-The DNS code splits into four packages:
+The DNS code splits into five packages:
 
 ```text
                        +--> userspace/dns --> resolved
-userspace/dnswire -----+
+userspace/dnswire -----+--> userspace/dnsstub --> resolved
                        +--> userspace/dnsq --> dnsq
 
 userspace/dnstcp ------+--> userspace/tcpupstream --> resolved
+                       +--> userspace/dnsstub --> resolved
                        +--> userspace/dnsq --> dnsq
 ```
 
 `dnswire` holds the message format: names, query encoding for any QTYPE,
-response validation, record iteration and presentation text. It is the
+response validation, query validation and reply encoding for the local
+server, record iteration and presentation text. It is the
 only DNS parser in the system, with the bounds above: 63-byte labels,
 255-byte names, backward compression pointers, at most 64 of them in a
 name, and record lengths checked against the message. `dnstcp` holds the
@@ -372,6 +374,58 @@ answer. It shares `dnswire` and `dnstcp` with the resolver, holds one
 65535-byte buffer for a response from either transport, and runs UDP and a
 TCP fallback against one deadline. Each TCP query uses one connection that
 `dnsq` closes like any `GTCP` client, TIME_WAIT included.
+
+### Local DNS server
+
+Programs that speak DNS themselves, such as a static C library, find
+`resolved` on `127.0.0.1:53`. The boot archive's `/etc/resolv.conf` says
+`nameserver 127.0.0.1`, `/etc/hosts` holds `127.0.0.1 localhost`, and
+`/etc/nsswitch.conf` says `hosts: files dns` (see
+[filesystem.md](filesystem.md)). `userspace/dnsstub` serves the address
+over UDP and TCP. It binds `127.0.0.1` alone, so only loopback traffic
+reaches it, and it answers through the same `dns` resolver as a GRESOLV1
+lookup: localhost, the hosts table, the cache, then the upstream servers
+with the TCP fallback and the resolver's deadlines. A client gets its ID
+and question back with the answer, and nothing else it wrote leaves the
+host: `resolved` asks upstream with its own ID and the folded name.
+
+| Query | Reply |
+| --- | --- |
+| A, class IN | the addresses, or the resolver's failure |
+| AAAA, class IN | the rcode of the A lookup for the name, no records: GoOS has no IPv6, and the C library gets its IPv4 answer without waiting out a timeout |
+| other types, other opcodes | NOTIMP |
+| other classes, names outside host-name syntax, `.local` | REFUSED |
+| EDNS version above 0 | BADVERS |
+| fewer than 12 bytes, or QR set | no reply |
+| any other malformed query | FORMERR |
+
+A lookup that found the name is NOERROR, NXDOMAIN stays NXDOMAIN, and a
+timeout, SERVFAIL upstream, a busy resolver or a network change is
+SERVFAIL. A reply carries at most 8 addresses and an OPT record when the
+query had one, 410 bytes at most, so the stub never sets TC.
+
+The stub runs on `resolved`'s own UDP and TCP sessions. Its correlations
+have the top bit set, and `resolved` hands each reply to the stub or to the
+upstream clients by that bit. It shares their TX slot trackers: on UDP it
+takes a slot only while one stays free for each upstream query still
+opening, and on TCP it holds at most two, leaving the other two for the two
+fallbacks.
+
+| Bound | Value |
+| --- | --- |
+| UDP queries in progress | 6; the stub keeps one RecvFrom out only while a slot is free, so a flood waits in `netd`'s queue and drops there |
+| TCP connections | 2 accepted, listener backlog 2, one query at a time per connection |
+| TCP query size | 1232 bytes; a longer length prefix closes the connection |
+| idle connection | 5 s to deliver a query or take a reply |
+| resolver client slots | 16 for GRESOLV1 sessions, 8 for the stub |
+
+A connection reads exactly one framed query at a time, so a client that
+pipelines keeps its next query in the stream. Against `netd`'s 8 endpoints
+per session, `resolved` uses at most 5 UDP endpoints (4 upstream queries and
+the stub's) and 7 TCP endpoints (2 fallbacks, the listener, 2 in the backlog
+and 2 accepted). New sessions from PID 1 end the stub's queries in progress
+on the old ones; the stub opens its endpoint and listener again on the new
+ones.
 
 The interface is in one of four states:
 

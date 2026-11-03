@@ -37,7 +37,7 @@ const (
 	configDeadline = 2 * clock.TicksPerSecond
 	configBudget   = 5 * clock.TicksPerSecond
 	hostsDeadline  = clock.TicksPerSecond / 2
-	maxSessions    = dns.MaxClients
+	maxSessions    = 16
 	exitFailed     = 1
 )
 
@@ -93,6 +93,7 @@ func userspaceMain() {
 		fatal("RESOLVED_RANDOM_FAILED\n")
 	}
 	resolver.Init(seed, dns.DefaultPolicy())
+	stubInit()
 	if field := reload(); field != 0 {
 		syslog.Warn("resolver settings invalid; using defaults", syslog.Str("key", resolvapi.Key(field)))
 	}
@@ -107,9 +108,14 @@ func serve() {
 		sendQueries(now)
 		releaseFinished()
 		deliverAnswers()
+		stubFlush(now)
 		count := buildInterests()
 		timeout := uint64(idleWait)
-		if deadline, pending := resolver.Deadline(); pending {
+		deadline, pending := resolver.Deadline()
+		if stubDeadline, stubPending := stub.Deadline(); stubPending && (!pending || stubDeadline < deadline) {
+			deadline, pending = stubDeadline, true
+		}
+		if pending {
 			timeout = 1
 			if deadline > now {
 				timeout = max(min((deadline-now+nanosPerTick-1)/nanosPerTick, uint64(idleWait)), 1)
@@ -374,25 +380,34 @@ func handleRequest(index int, correlation uint64) {
 // fromHosts answers from the hosts table. Without a configuration service
 // the table is out of reach, and the lookup goes on to DNS.
 func fromHosts(name *hostname.Name) bool {
-	if configHandle == 0 {
+	address, found := hostsAddress(name)
+	if !found {
 		return false
+	}
+	answer.Count, answer.Source = 1, resolvapi.SourceHosts
+	answer.Addresses[0] = address
+	return true
+}
+
+// hostsAddress asks the hosts table for name.
+func hostsAddress(name *hostname.Name) ([4]byte, bool) {
+	if configHandle == 0 {
+		return [4]byte{}, false
 	}
 	hosts := config.HostsRequest{Operation: config.HostsGet, Name: name.Bytes()}
 	encoded, ok := config.EncodeHostsRequest(hosts, 1)
 	if !ok {
-		return false
+		return [4]byte{}, false
 	}
 	var link configLink
 	if configClient.Exchange(link, &encoded, link.Now()+hostsDeadline, &configMessage) != config.OutcomeOK {
-		return false
+		return [4]byte{}, false
 	}
 	found, valid := config.DecodeHostsReply(&configMessage)
 	if !valid || found.Operation != config.HostsGet || found.Status != config.StatusOK {
-		return false
+		return [4]byte{}, false
 	}
-	answer.Count, answer.Source = 1, resolvapi.SourceHosts
-	answer.Addresses[0] = found.Address
-	return true
+	return found.Address, true
 }
 
 func fill(result *dns.Answer) {
@@ -412,7 +427,7 @@ func deliverAnswers() {
 		if !found {
 			return
 		}
-		if client < 0 || client >= len(sessions) {
+		if stub.Complete(client, &result, clockNanos()) || client < 0 || client >= len(sessions) {
 			continue
 		}
 		current := &sessions[client]

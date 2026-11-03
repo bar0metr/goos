@@ -86,6 +86,13 @@ func (r *Receiver) Started() bool { return r.received != 0 }
 // invalid length prefix: shorter than a DNS header. Bytes after the message
 // are ignored; a connection carries one.
 func (r *Receiver) Take(buffer *Buffer, data []byte) (complete, valid bool) {
+	return r.TakeInto(buffer[:], data)
+}
+
+// TakeInto is Take into a buffer of the caller's size. A length prefix that
+// names more than len(buffer) bytes is invalid too, so a server can assemble
+// queries in a buffer far smaller than MaxMessage.
+func (r *Receiver) TakeInto(buffer []byte, data []byte) (complete, valid bool) {
 	for len(data) > 0 {
 		if r.received < PrefixSize {
 			r.prefix[r.received] = data[0]
@@ -93,7 +100,7 @@ func (r *Receiver) Take(buffer *Buffer, data []byte) (complete, valid bool) {
 			data = data[1:]
 			if r.received == PrefixSize {
 				r.expected = int(binary.BigEndian.Uint16(r.prefix[:]))
-				if r.expected < dnswire.HeaderSize {
+				if r.expected < dnswire.HeaderSize || r.expected > len(buffer) {
 					return false, false
 				}
 			}
@@ -105,6 +112,20 @@ func (r *Receiver) Take(buffer *Buffer, data []byte) (complete, valid bool) {
 	}
 	return r.Complete(), true
 }
+
+// Exact is how much to ask the stream for without reading past the message,
+// at most limit: the rest of the prefix, then the rest of the message. A
+// server that reads this way leaves a pipelining client's next query in the
+// stream.
+func (r *Receiver) Exact(limit int) int {
+	if r.received < PrefixSize {
+		return min(PrefixSize-r.received, limit)
+	}
+	return r.Want(limit)
+}
+
+// Length is the message length once the prefix is in.
+func (r *Receiver) Length() int { return r.expected }
 
 // Complete reports that the whole message is in.
 func (r *Receiver) Complete() bool {

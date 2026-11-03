@@ -5,7 +5,7 @@ in the kernel, and none holds more authority than its layer needs.
 
 ```text
 utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /tmp, /run)
-                               ├─ image backend            (/bootstrap, read-only boot archive)
+                               ├─ image backend            (/bootstrap and /etc, read-only boot archive)
                                └─ remote backend ──GFSPRT01──▶ FAT32 service ──GBLK001──▶ block service ──IPC──▶ virtio-blk driver ──▶ disk
                                   (/persist, /system, /apps, /home, /state)       (one slice)   (partition table)
 ```
@@ -32,6 +32,7 @@ longest whole-component prefix.
 | `/` | RAMFS | volatile |
 | `/tmp`, `/run` | RAMFS | volatile |
 | `/bootstrap` | boot archive, read-only | immutable; replaced only by a new image |
+| `/etc` | the boot archive's `etc` directory, read-only | immutable; replaced only by a new image |
 | `/persist` | FAT32 over the virtio-blk disk | survives reboot; the whole volume |
 | `/system` | the volume's `system` directory, protected | the installed system; changed only outside GoOS |
 | `/apps` | the volume's `apps` directory | survives reboot; applications |
@@ -50,11 +51,23 @@ path there, and asks the kernel to launch the extent it found under an image
 capability with Execute. The VFS maps the archive through a Read-only copy of
 that capability, which cannot launch anything (ADR 0070, ADR 0093).
 
+`/etc` is the static configuration a C library reads: `resolv.conf`
+(`nameserver 127.0.0.1`, the resolver's local DNS server), `hosts`
+(`127.0.0.1 localhost`) and `nsswitch.conf` (`hosts: files dns`).
+`tools/initramfs` writes them as archive members `system/etc/*`, so they
+also appear as `/bootstrap/etc`, and the VFS mounts that directory at `/etc`
+right after `/bootstrap`. They are ordinary files to every client and need
+no volume. The archive backend refuses every change, and the VFS refuses a
+write open on either archive mount at once, so a Linux program gets `EROFS`
+from `open` rather than from its first `write`. Native configuration does
+not live here: the hosts table that GRESOLV1 lookups use belongs to the
+configuration service.
+
 `/system` is the system installed on the volume, published by PID 1 once it
 has checked it (ADR 0175). The VFS protects the volume's `system` directory
 on its node: every mutation at or below it is refused with permission denied
 under every name that reaches it, `/persist/system` and case variants
-included, and stat reports its files read-only. `/bootstrap`, `/system`, and
+included, and stat reports its files read-only. `/bootstrap`, `/etc`, `/system`, and
 `/apps` are reserved, so nothing can be made there while they are not
 mounted. For a program on a filesystem, the installed system's included, PID 1 opens a private VFS session and has
 VFS pin the stable open object against mutation. The kernel retains one header

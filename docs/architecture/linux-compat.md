@@ -364,8 +364,14 @@ the VFS with the request, as native clients do.
 
 ### Namespace view
 
-A Linux process sees the GoOS VFS namespace: `/system`, `/tmp`, `/persist`,
-`/home`, `/state`, and whatever else is mounted. GoOS has no general `/proc`
+A Linux process sees the GoOS VFS namespace: `/system`, `/etc`, `/tmp`,
+`/persist`, `/home`, `/state`, and whatever else is mounted. `/etc` is the
+boot archive's read-only `etc` directory with `resolv.conf`
+(`nameserver 127.0.0.1`), `hosts` and `nsswitch.conf`, so a static C
+library resolves names through the resolver's local DNS server with ordinary
+socket traffic ([networking.md](networking.md), "Local DNS server"). The
+kernel treats these as plain VFS files: `open`, `read` and `stat` work, and
+a writable open or a create there fails with `EROFS`. GoOS has no general `/proc`
 or `/sys` filesystem. The kernel serves a few synthetic names that supported
 programs need: `/dev/null`, `/dev/zero`, and `/dev/tty`, and the processor
 lists `/sys/devices/system/cpu/online` and `/sys/devices/system/cpu/possible`,

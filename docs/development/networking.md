@@ -455,6 +455,18 @@ response of any rcode, exit 1 a transport, protocol, timeout or truncation
 failure, exit 2 a usage error. The shell guide documents the options and
 output.
 
+`resolved` also answers DNS itself on `127.0.0.1:53`, UDP and TCP, for
+programs that read `/etc/resolv.conf` (docs/architecture/networking.md,
+"Local DNS server"). The logic lives in `userspace/dnsstub`; its host tests
+run a client session, the stub, the resolver's UDP and TCP clients and an
+upstream server over one real `network.Stack` through `udpserve` and
+`tcpserve`. They cover ID and question preservation, the cache and hosts
+table, truncation and the TCP fallback, rcode mapping for NXDOMAIN,
+SERVFAIL and timeouts, malformed and unsupported queries, the request and
+connection bounds, TCP framing with pipelined queries, the idle timeout,
+session replacement and a datagram path that allocates nothing.
+`dnswire.FuzzParseQuery` fuzzes the query parser and the reply encoder.
+
 ## 8. Restart and failure behavior
 
 PID 1 keeps the NIC device capabilities so a replacement driver can receive
