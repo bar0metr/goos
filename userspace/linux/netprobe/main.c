@@ -2373,7 +2373,8 @@ static int hold_mode(int argc, char **argv)
 	char buffer[64];
 	const char *via;
 	uint32_t address;
-	int port, seconds, fail, tcp, udp, listening, attempt, fresh, events;
+	int port, seconds, fail, tcp, udp, listening, attempt, fresh, events, saved;
+	pid_t watchdog;
 	long n, start;
 
 	group = "hold";
@@ -2402,13 +2403,27 @@ static int hold_mode(int argc, char **argv)
 		return 0;
 	}
 
-	/* A blocking read must end on its own. The alarm only turns a hang
-	 * into a reported failure. */
-	handle(SIGALRM, alarm_note, 0);
-	alarm((unsigned)seconds);
+	/* A blocking read must end on its own. The watchdog child's signal
+	 * only turns a hang into a reported failure. */
+	handle(SIGUSR1, alarm_note, 0);
+	{
+		pid_t parent = getpid();
+
+		watchdog = spawn();
+		if (watchdog == 0) {
+			nap(seconds * 1000);
+			kill(parent, SIGUSR1);
+			_exit(0);
+		}
+	}
 	start = now_ms();
 	n = read(tcp, buffer, sizeof(buffer));
-	alarm(0);
+	saved = errno;
+	if (watchdog > 0) {
+		kill(watchdog, SIGKILL);
+		child_status(watchdog);
+	}
+	errno = saved;
 	if (n < 0 && errno == EINTR) {
 		printf("hold failed: read still blocked after %d s\n", seconds);
 		return 1;

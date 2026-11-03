@@ -79,6 +79,14 @@ $bb sleep 1
 echo from-client | $bb nc -w 2 127.0.0.1 8083
 wait
 echo "nc listener got: $($bb cat /tmp/nc.out)"
+$bb nc -l -p 7007 -e /bin/busybox cat &
+$bb sleep 1
+$probe inherit 127.0.0.1 7007
+wait
+$bb nc -l -p 7008 -e /bin/busybox cat &
+$bb sleep 1
+$probe hold 127.0.0.1 7008 survive 2
+wait
 if [ -x /system/linux/curl ]; then
 	/system/linux/curl --version | $bb head -n 1
 	/system/linux/curl -sS -o /tmp/curl.out http://localhost:8082/netprobe; echo "curl-exit=$?"
