@@ -417,7 +417,7 @@ device, or a smaller resource profile refuses the launch.
 | sockets reach only `linuxsockd` | `linux-net` is a family session to `linuxsockd`; the process holds no GTCP, GUDP, `netd` control, or pool of another family, and socket identities from another session answer `Stale` |
 | fork and exec create no authority | a forked child gets the parent's VFS channel capability and nothing else; `execve` loads only a static Linux image, never a native image or manifest (ADR 0157, ADR 0158) |
 | a forked child cannot reach the native gate | `abi-probe hardening` runs the isolation check in a child |
-| `kill` cannot cross families | the target must be the caller or a descendant in the family registry; another family or a native process is `ESRCH` (ADR 0166) |
+| `kill` cannot cross families | the target must be in the caller's family registry; another family or a native process is `ESRCH` (ADR 0166) |
 | a fork bomb stays bounded | 16 processes per family, 48 for all families, 16 native slots reserved; `abi-probe limits` stops at 15 children (ADR 0155) |
 | a forged signal frame cannot escalate | `rt_sigreturn` refuses a return address or stack outside the user half, and every return filters RFLAGS (ADR 0164) |
 

@@ -202,3 +202,14 @@ static libc resolves names with ordinary socket traffic.
 - Native protocol versions move to GTCP 2, GUDP 2 and GNETCTL 5. Every
   client builds against the new codecs, and each decoder rejects any other
   version.
+
+## Amendments
+
+- `kill`, `tkill` and `tgkill` reach any process of the caller's family,
+  where ADR 0166 allowed only the caller and its descendants. A Linux server
+  or test helper commonly signals its parent; the family stays the boundary,
+  and a target outside it is still `ESRCH`.
+- The kernel holds 16 socket contexts, the families `linuxsockd` serves. A
+  family beyond them runs without sockets. With a context for every process
+  the kernel image grew past 8 MiB, where OVMF reserves memory, and the
+  firmware moved it.

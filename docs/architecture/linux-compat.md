@@ -324,8 +324,8 @@ Child exit raises `SIGCHLD` in the Linux parent and a failed pipe write raises
 call returns: it discards, ends the process, or builds an `rt_sigframe` and
 enters the handler, and `rt_sigreturn` restores the saved context
 (ADR 0163, ADR 0164). `rt_sigaction` refuses flags GoOS cannot honor
-(ADR 0165). `kill`, `tkill`, and `tgkill` reach the caller and its
-descendants through the family registry, never by Linux UID (ADR 0166).
+(ADR 0165). `kill`, `tkill`, and `tgkill` reach any process of the caller's family
+through the family registry, never by Linux UID (ADR 0166, ADR 0210).
 
 Image replacement resets caught dispositions to default and preserves ignored
 dispositions, the blocked mask, and pending signals. Fork copies dispositions
@@ -508,6 +508,6 @@ too (ADR 0206). `fork`, `vfork`, and two process forms of `clone` create a child
 a private copy of the caller (ADR 0158, ADR 0159), the thread form of `clone`
 a thread in the caller's address space (ADR 0177), and `wait4` reaps it
 (ADR 0161). Pipes connect them (ADR 0162), and `SIGCHLD` and `SIGPIPE`
-reach handlers (ADR 0163, ADR 0164). `kill` signals descendants (ADR 0166),
+reach handlers (ADR 0163, ADR 0164). `kill` signals the family (ADR 0166),
 a handled signal interrupts a blocked call (ADR 0167), and `poll` and
 `select` wait on several descriptors (ADR 0168).

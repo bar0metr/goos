@@ -2028,7 +2028,7 @@ static int asks_parent(int ready)
 {
 	if (write(ready, "r", 1) != 1)
 		return 2;
-	return fails(kill(getppid(), 0), EPERM) ? 0 : 1;
+	return kill(getppid(), 0) == 0 ? 0 : 1;
 }
 
 static int kill_test(void)
@@ -2073,11 +2073,10 @@ static int kill_test(void)
 	close(go[0]);
 	close(go[1]);
 
-	if (on_goos()) {
-		child = ready_child(asks_parent);
-		if (child < 0 || wait4(child, &status, 0, NULL) != child || status != 0)
-			return kill_fail("child signals its parent");
-	}
+	/* A child may signal its parent, as on Linux: both are one family. */
+	child = ready_child(asks_parent);
+	if (child < 0 || wait4(child, &status, 0, NULL) != child || status != 0)
+		return kill_fail("child signals its parent");
 
 	/* raise uses tkill and runs the handler before it returns. */
 	signal(SIGUSR2, note_kill);

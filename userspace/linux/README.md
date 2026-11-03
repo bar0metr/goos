@@ -137,9 +137,9 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `4a068a52296fca685abc2a6236f66006b6040f80335b7a3e67deadb849e9f0e6` |
-| `prebuilt/abi-probe` | `af5779253e2a822497a47c003516a62cc4723386265458ac4fa815f946c0c6fe` |
+| `prebuilt/abi-probe` | `1f18f949dc3e19d0dd592666da5db68932debda42ab435d951f84d10e5805121` |
 | `prebuilt/tty-probe` | `5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957` |
-| `prebuilt/netprobe` | `61927b262aef8fc62c44aacc3336f707b89b3b7d0c5d3012e3c41372f16d466a` |
+| `prebuilt/netprobe` | `d83916396cf5e4352b475a0d3dc6e649e68607be3f653ce525f63fdd55b8ac98` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF

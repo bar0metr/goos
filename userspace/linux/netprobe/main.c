@@ -1394,7 +1394,8 @@ static pid_t poke(int delay, uint16_t connect_port, int write_fd)
 	if (child != 0)
 		return child;
 	nap(delay);
-	kill(parent, SIGUSR1);
+	if (kill(parent, SIGUSR1) != 0 || trace)
+		fprintf(stderr, "trace poke kill errno=%d\n", errno);
 	if (connect_port != 0 || write_fd >= 0)
 		nap(200);
 	if (connect_port != 0) {

@@ -64,7 +64,7 @@ an errno; nothing is accepted and ignored.
 | `vfork(58)` | partial | a private copy as `fork`; the parent waits until the child replaces its image or exits |
 | `execve(59)` | implemented | replaces the current image with a static Linux `ET_EXEC` or supported static PIE; no interpreter, shebang, PATH search, or native GoOS image |
 | `wait4(61)` | partial | a child by PID, any child, or the children of a process group; `WNOHANG`, `WUNTRACED`, and `WCONTINUED` (ADR 0206); `rusage` holds user time only |
-| `kill(62)`, `tkill(200)`, `tgkill(234)` | partial | a PID names the caller or a descendant; `0` and `-pgid` name a group in the caller's family and session; `-1` is `EINVAL`; a fatal signal ends a sleeping target at once, a stop signal stops it |
+| `kill(62)`, `tkill(200)`, `tgkill(234)` | partial | a PID names any process of the caller's family; `0` and `-pgid` name a group in the caller's family and session; `-1` is `EINVAL`; a fatal signal ends a sleeping target at once, a stop signal stops it |
 | `fsync(74)`, `fdatasync(75)` | implemented | a regular file flushes the whole persistent volume through the VFS and succeeds only when the flush did; a directory succeeds; a pipe, terminal, or device is `EINVAL` |
 | `setpgid(109)`, `getpgrp(111)`, `setsid(112)`, `getpgid(121)`, `getsid(124)` | implemented | sessions and groups within the caller's family (ADR 0206); another family's process is `ESRCH` |
 | `exit(60)`, `exit_group(231)` | implemented | end the task, or every task of the process |
@@ -463,8 +463,9 @@ AVX state does not exist under GoOS (ADR 0163, ADR 0164, ADR 0174).
 
 `kill`, `tkill`, and `tgkill` send `SIGHUP`, `SIGINT`, `SIGQUIT`, `SIGABRT`,
 `SIGKILL`, `SIGUSR1`, `SIGUSR2`, `SIGPIPE`, `SIGALRM`, `SIGTERM`, or
-`SIGCHLD` to the caller or a descendant. Another target in the family is
-`EPERM`; one outside it, a native process included, is `ESRCH`. A PID of 0
+`SIGCHLD` to any process of the caller's family, its parent included, as a
+Linux process signals any process of its own user. A target outside the
+family, a native process included, is `ESRCH`. A PID of 0
 or below is `EINVAL`, and so is a signal outside the set. Signal 0 checks the
 target. A signal the target would die of ends it at once, even asleep in a
 call. Others wait for its next system call return (ADR 0166).
@@ -719,7 +720,7 @@ Results a correct Linux program can observe to differ:
 | Area | GoOS 0.2.1 | Linux |
 | --- | --- | --- |
 | terminal | a foreground job's only stage has one; no PTY pairs, flow control, `VTIME`, or `TOSTOP` | PTYs and the full termios set |
-| signals | delivered at system call returns; `kill` reaches the caller, its descendants, and groups of its family; file I/O is never interrupted; a launch root never stops | sent by UID, delivered at any return to user mode |
+| signals | delivered at system call returns; `kill` reaches any process and group of its family; file I/O is never interrupted; a launch root never stops | sent by UID, delivered at any return to user mode |
 | devices | `/dev/null`, `/dev/zero`, and `/dev/tty` only; `/dev` is no directory | a populated `/dev` |
 | random bytes | 256 bytes per call; seeded from jitter alone on a CPU without RDRAND | 32 MiB per call |
 | positioned I/O | three VFS exchanges per call | one atomic operation |
