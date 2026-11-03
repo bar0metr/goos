@@ -61,6 +61,17 @@ func TestDecodeSockaddrIn(t *testing.T) {
 	}
 }
 
+func TestBindPortErrno(t *testing.T) {
+	for _, test := range []struct {
+		port  uint16
+		errno abi.Errno
+	}{{0, 0}, {1, abi.EACCES}, {53, abi.EACCES}, {80, abi.EACCES}, {1023, abi.EACCES}, {1024, 0}, {8080, 0}, {65535, 0}} {
+		if errno := BindPortErrno(test.port); errno != test.errno {
+			t.Errorf("port %d: %v, want %v", test.port, errno, test.errno)
+		}
+	}
+}
+
 func TestSockaddrOutput(t *testing.T) {
 	var wire [SockaddrInSize]byte
 	for index := range wire {

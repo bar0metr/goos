@@ -203,6 +203,9 @@ func (handler *linuxCallHandler) socketControl(request linuxcompat.Request) linu
 		switch request.Number {
 		case linuxabi.SysBind:
 			address, _, errno := handler.socketAddressIn(arguments[1], arguments[2], linuxcompat.AddressBind)
+			if errno == 0 {
+				errno = linuxcompat.BindPortErrno(address.Port)
+			}
 			if errno != 0 {
 				handler.socketEnd()
 				return linuxErrno(errno)

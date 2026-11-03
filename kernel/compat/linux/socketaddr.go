@@ -83,6 +83,19 @@ func DecodeSockaddrIn(wire []byte, use AddressUse) (address SocketAddress, unspe
 	return address, false, 0
 }
 
+// UnprivilegedPortStart is Linux's ip_unprivileged_port_start. A Linux
+// program on GoOS runs as uid 1000 without CAP_NET_BIND_SERVICE.
+const UnprivilegedPortStart = 1024
+
+// BindPortErrno refuses a bind to a privileged port with EACCES, as Linux
+// refuses it to an unprivileged process. Port 0 picks an ephemeral port.
+func BindPortErrno(port uint16) abi.Errno {
+	if port != 0 && port < UnprivilegedPortStart {
+		return abi.EACCES
+	}
+	return 0
+}
+
 // EncodeSockaddrIn writes address as a complete struct sockaddr_in. Every
 // byte of target is set.
 func EncodeSockaddrIn(target *[SockaddrInSize]byte, address SocketAddress) {
