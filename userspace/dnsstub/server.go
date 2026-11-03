@@ -17,25 +17,27 @@
 // package asks it to, so the whole path runs in host tests against a real
 // stack.
 //
-// Queries. Only A and AAAA in class IN are looked up. A gets the addresses;
-// AAAA looks up the same name over IPv4 and answers with the rcode of that
-// lookup and no records, because GoOS has no IPv6: a C library asking for
-// both gets its IPv4 answer at once instead of waiting out a timeout. Other
-// types and opcodes are NOTIMP, other classes and names outside host-name
-// syntax REFUSED, and an EDNS version other than 0 BADVERS. A message too
-// short for a header, or with QR set, gets no reply; any other malformed
-// query gets FORMERR. Lookup results map to rcodes in rcodeOf. Every reply
-// fits 512 bytes (dnswire.MaxReply), so none is ever truncated.
+// Queries. The server looks up A and AAAA in class IN. A gets the
+// addresses. AAAA looks up the same name over IPv4 and answers with the
+// rcode of that lookup and no records, because GoOS has no IPv6: a C library
+// asking for both gets its IPv4 answer at once instead of waiting out a
+// timeout. Other types and opcodes get NOTIMP, other classes and names
+// outside host-name syntax REFUSED, and an EDNS version other than 0
+// BADVERS. A message too short for a header, or with QR set, gets no reply;
+// any other malformed query gets FORMERR. rcodeOf maps lookup results to
+// rcodes. A reply fits 512 bytes (dnswire.MaxReply), so the server never
+// sets TC.
 //
-// Bounds. MaxUDPRequests datagram queries and MaxConnections TCP
-// connections, each with one query at a time, are in progress at once; each
-// owns one resolver client slot from the base given to Init. The server
-// keeps one RecvFrom out, and only while a request slot is free, so a flood
-// waits in the network service's bounded queue and is dropped there; it
-// keeps one Accept out while a connection slot is free, behind a backlog of
-// Backlog. A connection must deliver each query, and take each reply, within
-// IdleTimeout; while its query is resolved, the resolver's deadline bounds
-// it instead. Everything is fixed storage; nothing allocates.
+// Bounds. The server serves MaxUDPRequests datagram queries and
+// MaxConnections TCP connections at once, each connection one query at a
+// time; each request owns one resolver client slot from the base given to
+// Init. The server keeps one RecvFrom out, and only while a request slot is
+// free, so a flood waits in the network service's bounded queue and drops
+// there. It keeps one Accept out while a connection slot is free, behind a
+// listener backlog of Backlog. A connection has IdleTimeout to deliver each
+// query and take each reply; while the resolver works on its query, the
+// resolver's deadline bounds it instead. All state is fixed storage, and no
+// path allocates.
 package dnsstub
 
 import (
