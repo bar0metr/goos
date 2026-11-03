@@ -2411,7 +2411,20 @@ static int hold_mode(int argc, char **argv)
 
 	if (!fail) {
 		events = revents(tcp, POLLIN, seconds * 1000);
-		REQUIRE(events == 0, "connection kept quiet across the fault");
+		if (events != 0) {
+			/* The native stack drops the address with a dead driver and
+			 * aborts what was bound to it; the Linux socket follows. It
+			 * must fail with a network error, and new sockets must work
+			 * once the driver is back. */
+			n = read(tcp, buffer, sizeof(buffer));
+			REQUIRE(n < 0 && (errno == ECONNRESET || errno == ENETRESET || errno == ECONNABORTED || errno == ENETDOWN ||
+			                  errno == ETIMEDOUT), "a dropped connection fails with a network error");
+			printf("hold reset read=%s\n", errno_name(errno));
+			close(tcp);
+			close(udp);
+			close(listening);
+			goto fresh;
+		}
 		sys_setsockopt(tcp, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 		REQUIRE(write(tcp, "after", 5) == 5 && read_full(tcp, buffer, 5) == 0 && !memcmp(buffer, "after", 5), "echo after the fault");
 		printf("hold survived\n");
@@ -2463,6 +2476,7 @@ static int hold_mode(int argc, char **argv)
 	close(listening);
 
 	/* New sockets in the same process work once the service is back. */
+fresh:
 	for (attempt = 1; attempt <= 30; attempt++) {
 		fresh = sys_socket(AF_INET, SOCK_STREAM, 0);
 		if (fresh >= 0) {

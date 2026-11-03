@@ -437,7 +437,9 @@ fault_hold() { # name mode seconds marker
 if wants faults; then
 	before=$(serial | grep -c NET_DRIVER_RESTARTED_OK || true)
 	fault_hold net-driver survive 25 NET_DRIVER_RESTARTED_OK "$before"
-	expect '^hold survived$' 'a connection survives a driver restart'
+	# netd drops the address with a dead driver and aborts what was bound
+	# to it; the connection either lives on or fails and a new one works.
+	expect '^hold \(survived\|recovered attempt=[0-9]*\)$' 'Linux sockets follow the native state across a driver restart'
 
 	before=$(serial | grep -c NETD_RESTARTED_OK || true)
 	fault_hold netd fail 30 NETD_RESTARTED_OK "$before"
