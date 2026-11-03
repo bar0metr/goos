@@ -155,6 +155,10 @@ Syscalls map onto native primitives:
 
 `pipe` and `pipe2` create a native stream whose two ends become open-file
 descriptions (ADR 0162). `poll` sleeps on the native wait-any table (ADR 0168).
+`select` and `pselect6` share its per-descriptor readiness and its sleep;
+they differ in reading three descriptor sets, failing with `EBADF` for a
+descriptor that is not open, and reporting an exceptional set that no GoOS
+descriptor fills.
 
 Translation runs in a separate kernel compatibility subsystem. It
 may access caller memory after the ordinary address-space checks, but authority
@@ -464,7 +468,7 @@ launch root ends every other member of its family with `SIGKILL` (ADR 0170).
 GoOS runs static x86_64 programs, musl or glibc, position-independent
 or not, with threads (ADR 0176, ADR 0177). A thread has its own TID, TLS, and
 signal mask and shares the process's pending signals; all threads share one
-CPU, and a process holds at most 8 tasks. Dynamic linking, `select`,
+CPU, and a process holds at most 8 tasks. Dynamic linking,
 nonblocking pipes, networking, `/proc`, file-backed `mmap`, and
 address-space randomization are outside it. BusyBox `sh` runs programs,
 pipelines, redirections, scripts, and background jobs without a terminal
@@ -474,5 +478,5 @@ a private copy of the caller (ADR 0158, ADR 0159), the thread form of `clone`
 a thread in the caller's address space (ADR 0177), and `wait4` reaps it
 (ADR 0161). Pipes connect them (ADR 0162), and `SIGCHLD` and `SIGPIPE`
 reach handlers (ADR 0163, ADR 0164). `kill` signals descendants (ADR 0166),
-a handled signal interrupts a blocked call (ADR 0167), and `poll` waits on
-several descriptors (ADR 0168).
+a handled signal interrupts a blocked call (ADR 0167), and `poll` and
+`select` wait on several descriptors (ADR 0168).

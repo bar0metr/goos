@@ -43,7 +43,10 @@ signal and restarts a `read` under `SA_RESTART`; `poll` checks readiness,
 `POLLHUP`, `POLLERR`, `POLLNVAL`, a timeout, and a wake-up from a child;
 `ppoll` checks a timespec timeout and the remaining time it writes back, and
 a temporary mask that lets a pending or a sent signal interrupt the call and
-comes back after the handler or a ready return; `family` leaves a child asleep
+comes back after the handler or a ready return; `select` calls `select` and
+`pselect6` directly over pipes and a file and checks the ready sets, zero and
+short timeouts, the time left both calls write back, `nfds` above the table,
+`EBADF`, `EINVAL`, `EFAULT`, and a `pselect6` mask; `family` leaves a child asleep
 for the Ctrl-C check of the boot test; `path` prints the `PATH` it got;
 `fork-fault` and `exec-vfs-loss` serve the validation kernel and VFS, which
 fail a fork mid-copy and die during an `execve`; `fpstate` checks that XMM
@@ -133,7 +136,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `4a068a52296fca685abc2a6236f66006b6040f80335b7a3e67deadb849e9f0e6` |
-| `prebuilt/abi-probe` | `3649d8d9c01af4b54fa88ea9e5121e6453b24819339b0a88c98b61336dd0e0b2` |
+| `prebuilt/abi-probe` | `af5779253e2a822497a47c003516a62cc4723386265458ac4fa815f946c0c6fe` |
 | `prebuilt/tty-probe` | `5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test

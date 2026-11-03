@@ -29,6 +29,9 @@ const linuxPollCorrelation = 1
 // EINTR: the handler that interrupted the call runs under the temporary mask
 // and its return gives the old one back.
 func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.Result {
+	if request.Number == linuxabi.SysSelect || request.Number == linuxabi.SysPselect6 {
+		return handler.Select(request)
+	}
 	local := thisCPU()
 	state, found := linuxcompat.FindProcess(handler.root)
 	if !found {
@@ -72,22 +75,11 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 	ready, interests := uint64(0), 0
 	for index := 0; index < int(count); index++ {
 		fd, events := linuxcompat.PollEntry(wire, index)
-		if description, open := state.FDs.Lookup(int(fd)); fd >= 0 && open && description.Kind == linuxcompat.FDTerminal {
-			revents := pollTerminal(state, linuxcompat.TerminalID(description.Object), events)
-			linuxcompat.SetPollRevents(wire, index, revents)
-			if revents != 0 {
-				ready++
-			} else {
-				interests = addTerminalInterests(interests, linuxcompat.TerminalID(description.Object), events)
-			}
-			continue
-		}
-		revents, entry, watch := pollDescriptor(state, fd, events)
+		var revents uint16
+		revents, interests = pollReadiness(state, fd, events, interests)
 		linuxcompat.SetPollRevents(wire, index, revents)
 		if revents != 0 {
 			ready++
-		} else if watch {
-			interests = addPollInterest(interests, entry)
 		}
 	}
 	now := nowNanos()
@@ -179,6 +171,25 @@ func (handler *linuxCallHandler) pollReturn(state *linuxcompat.ProcessState, req
 	return result
 }
 
+// pollReadiness evaluates one descriptor for poll or select, which asks for
+// events. A descriptor that is not ready adds the native waits that would
+// change it to the interests, of which there are count so far, and the new
+// count comes back with its poll events.
+func pollReadiness(state *linuxcompat.ProcessState, fd int32, events uint16, count int) (uint16, int) {
+	if description, open := state.FDs.Lookup(int(fd)); fd >= 0 && open && description.Kind == linuxcompat.FDTerminal {
+		revents := pollTerminal(state, linuxcompat.TerminalID(description.Object), events)
+		if revents == 0 {
+			count = addTerminalInterests(count, linuxcompat.TerminalID(description.Object), events)
+		}
+		return revents, count
+	}
+	revents, entry, watch := pollDescriptor(state, fd, events)
+	if revents == 0 && watch {
+		count = addPollInterest(count, entry)
+	}
+	return revents, count
+}
+
 // pollDescriptor evaluates one pollfd. watch reports a stream end that is not
 // ready yet, with the native readiness that would make it ready.
 func pollDescriptor(state *linuxcompat.ProcessState, fd int32, events uint16) (uint16, kernelwait.Entry, bool) {
@@ -229,7 +240,10 @@ func pollDescriptor(state *linuxcompat.ProcessState, fd int32, events uint16) (u
 }
 
 // addPollInterest adds a native wait entry, merging it with an earlier entry
-// for the same stream end, which two descriptors of one pipe can name.
+// for the same stream end, which two descriptors of one pipe can name. A
+// terminal adds several entries, so a full table of descriptors with one
+// among them can ask for more waits than the table holds; the rest are
+// dropped, and the call still wakes on the waits it kept and on its timer.
 func addPollInterest(count int, entry kernelwait.Entry) int {
 	local := thisCPU()
 	for index := 0; index < count; index++ {
@@ -237,6 +251,9 @@ func addPollInterest(count int, entry kernelwait.Entry) int {
 			local.linuxPollEntries[index].Events |= entry.Events
 			return count
 		}
+	}
+	if count >= len(local.linuxPollEntries) {
+		return count
 	}
 	local.linuxPollEntries[count] = entry
 	return count + 1
