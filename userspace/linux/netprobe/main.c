@@ -97,8 +97,14 @@ static int failed(const char *step)
 	return 1;
 }
 
+/* trace, set by NETPROBE_TRACE in the environment, names each step on
+ * stderr before it runs, so a step that never returns is visible. */
+static int trace;
+
 #define REQUIRE(condition, step) \
 	do { \
+		if (trace) \
+			fprintf(stderr, "step %s\n", step); \
 		if (!(condition)) \
 			return failed(step); \
 	} while (0)
@@ -413,6 +419,8 @@ static int write_full(int fd, const void *data, size_t size)
 
 		if (n < 0 && errno == EINTR)
 			continue;
+		if (trace)
+			fprintf(stderr, "trace send %ld errno=%d done=%lu\n", n, n < 0 ? errno : 0, (unsigned long)done);
 		if (n <= 0)
 			return -1;
 		done += (size_t)n;
@@ -843,6 +851,8 @@ static int stream_group(void)
 
 		while (left_bytes > 0) {
 			n = read(server, chunk, left_bytes < (long)sizeof(chunk) ? left_bytes : (long)sizeof(chunk));
+			if (trace)
+				fprintf(stderr, "trace read %ld errno=%d left=%ld\n", n, n < 0 ? errno : 0, left_bytes);
 			if (n <= 0)
 				_exit(2);
 			seen = sum_bytes(chunk, (size_t)n, seen);
@@ -1258,7 +1268,11 @@ static int udp_group(void)
 	{
 		static char back[65536];
 
-		REQUIRE(wait_datagram(receiver) == 0 && sys_recv(receiver, back, sizeof(back), 0) == 4096 && !memcmp(back, big, 4096), "4096 bytes whole");
+		REQUIRE(wait_datagram(receiver) == 0, "4096 bytes arrive");
+		n = sys_recv(receiver, back, sizeof(back), 0);
+		if (trace)
+			fprintf(stderr, "trace recv %ld errno=%d\n", n, n < 0 ? errno : 0);
+		REQUIRE(n == 4096 && !memcmp(back, big, 4096), "4096 bytes whole");
 		n = sys_send(connected, big, 65000, 0);
 		if (n == 65000) {
 			REQUIRE(wait_datagram(receiver) == 0 && sys_recv(receiver, back, sizeof(back), 0) == 65000 && !memcmp(back, big, 65000), "65000 bytes whole");
@@ -2474,6 +2488,7 @@ int main(int argc, char **argv)
 	int status = 0;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
+	trace = getenv("NETPROBE_TRACE") != NULL;
 	if (argc > 0 && argv[0] && strchr(argv[0], '/'))
 		self = argv[0];
 	signal(SIGPIPE, SIG_IGN);
