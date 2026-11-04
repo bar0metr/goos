@@ -288,6 +288,30 @@ checking its SHA-256. `netd`, `virtio-net`, `resolved` and `linuxsockd` must
 not have restarted. A `fault linuxsockd` follows, and a new `netprobe` launch
 must pass every group again.
 
+## Network benchmark
+
+```sh
+make bench-pve-linux-network                 # one VM, release image
+make bench-pve-linux-network BENCH_DIAG=1    # and a DIAG=1 counter pass
+make bench-pve-linux-network-hz              # HZ=100, 250, 1000
+```
+
+The `linux-network-bench` scenario boots a release image on four host cores,
+takes a lease on the lab bridge and pings the node at `PVE_SSH_HOST`
+(`--bench-peer` overrides it). It stages `tools/pvelab/benchpeer.py` in the
+run's directory under `/var/tmp/goos-pvelab` and starts it with the node's
+`python3` on port 47200, TCP and UDP. Each round runs `netprobe bench`,
+`netbench` and `netprobe remote` in the guest, then
+`netprobe remote-serve 47201` in the background while `benchpeer.py client`
+connects from the node. The peer stops and its directory goes away when the
+scenario ends; cleanup removes the directory after an interrupted run.
+
+Streams to and from the node measure the guest's virtio path and the bridge,
+and the node's Python runs on the other end: its time per request is part of
+the host-guest numbers. `BENCH_RUNS`, `BENCH_WARMUPS` and `BENCH_STREAM_MIB`
+change the rounds and the stream size. [Testing](testing.md#network-measurements)
+lists the targets and how to read the report.
+
 ## 7-Zip workflow
 
 The `7zip` scenario runs a static `7zzs` that you supply through a round
