@@ -667,7 +667,7 @@ checks=$((checks + 1))
 [ "$(grep -c '^dhcp REQUEST 52:54:00:00:02:10 ' "$queries" || true)" -ge 2 ] || fail left.dhcp-renew 'a lease renewal REQUEST' "$queries"
 checks=$((checks + 1))
 require_after left.udp-reload 'net reload  ' '^network configuration applied$' "$left"
-require_after left.udp-payload-limit 'udp self -s 1301 127.0.0.1 9200' '^udp: send: invalid argument$' "$left"
+require_after left.udp-payload-limit 'udp self -s 1301 127.0.0.1 9200' '^udp: send: message too long$' "$left"
 require_after left.udp-payload-kept 'udp self -s 1300 127.0.0.1 9201' '^1300 bytes from 127\.0\.0\.1:' "$left"
 require_after left.udp-cross-field 'net reload   ' 'invalid setting system\.net\.udp\.ephemeral-port-max; previous configuration kept' "$left"
 require_after left.tcp-reload 'net reload    ' '^network configuration applied$' "$left"
