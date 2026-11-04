@@ -883,3 +883,13 @@ CA-1098	goos/userspace/dnsstub	Address	process	immutable	none
 CA-1099	goos/userspace/linux	netprobe	process	immutable	none
 CA-1100	goos/userspace/linuxsockapi	noAddress	process	immutable	none
 CA-1101	goos/userspace/cmd/init	linuxSockLaunching	process	owned	none
+CA-1102	goos/userspace/bin/netbench	manifest	process	immutable	none
+CA-1103	goos/userspace/bin/netbench	loopback	process	immutable	none
+CA-1104	goos/userspace/bin/netbench	line	process	owned	none
+CA-1105	goos/userspace/bin/netbench	sink	process	owned	none
+CA-1106	goos/userspace/bin/netbench	early	process	owned	none
+CA-1107	goos/userspace/bin/netbench	heldN	process	owned	none
+CA-1108	goos/userspace/cmd/linuxsockd	tcpLayout	process	immutable	none
+CA-1109	goos/userspace/cmd/netd	gtcpMessages	process	owned	none
+CA-1110	goos/userspace/tcpapi	Layout2	process	immutable	none
+CA-1111	goos/userspace/tcpapi	Layout3	process	immutable	none
