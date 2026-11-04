@@ -206,7 +206,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -1167,6 +1167,18 @@ test-pve-linux: pve-artifacts
 # service, then a ping of the gateway the DHCP server named.
 test-pve-network: pve-artifacts
 	@$(PVELAB) run --scenario network $(PVE_RUN_FLAGS)
+
+# Linux IPv4 sockets under KVM on four host cores (ADR 0210): the netprobe
+# loopback groups and benchmarks with net0 on the lab bridge, BusyBox httpd,
+# wget and curl over loopback, and a linuxsockd fault. The validation image
+# carries the fault command.
+#   make test-pve-linux-network BUSYBOX=/path/to/busybox CURL=/path/to/curl
+test-pve-linux-network:
+	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }
+	@test -n "$(CURL)" && test -f "$(CURL)" || { echo "CURL=/path/to/static/curl is required" >&2; exit 2; }
+	@tools/linuxfixture/check-static.sh "$(BUSYBOX)" "$(CURL)"
+	@$(MAKE) --no-print-directory pve-artifacts VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX)):$(abspath $(CURL))
+	@$(PVELAB) run --scenario linux-network --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
 
 # A diagnostic run of a static 7-Zip the caller supplies on four host cores.
 # DIAG=1 gives the guest the diag command, whose DIAG linux line names the

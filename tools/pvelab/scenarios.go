@@ -192,6 +192,7 @@ var scenarios = map[string]Scenario{
 	"7zip":               sevenZipScenario{},
 	"nano":               nanoScenario{},
 	"network":            networkScenario{},
+	"linux-network":      linuxNetworkScenario{},
 	"remote-admin":       remoteAdminScenario{},
 	"threads":            threadsScenario{},
 	"goroutines":         goroutinesScenario{},
@@ -655,27 +656,10 @@ func (networkScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	if s.Report.VM.NetBridge == "" {
 		return "", failf(ClassInfra, "network", "PVE_NET_BRIDGE is empty, so the VM has no network function")
 	}
-	deadline := time.Now().Add(networkReadyTimeout)
-	var status string
-	for {
-		out, err := g.Run(ctx, "net status", commandTimeout)
-		if err != nil {
-			return "", fail(ClassScenario, "net status", err)
-		}
-		status = out
-		if strings.Contains(out, "state: ready") {
-			break
-		}
-		if time.Now().After(deadline) {
-			return "", failf(ClassScenario, "dhcp", "no address within %s; net status:\n%s", networkReadyTimeout, out)
-		}
-		select {
-		case <-ctx.Done():
-			return "", fail(ClassInfra, "dhcp", ctx.Err())
-		case <-time.After(3 * time.Second):
-		}
+	status, err := awaitLease(ctx, g)
+	if err != nil {
+		return "", err
 	}
-	g.pass("dhcp")
 	fields := statusFields(status)
 	for key, want := range map[string]string{"link": "up", "mode": "dhcp"} {
 		if fields[key] != want {
@@ -714,6 +698,30 @@ func (networkScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	g.pass("network-services-stable")
 	s.logf("ping %s: %d of %d replies", gateway, received, sent)
 	return ResultPass, nil
+}
+
+// awaitLease waits until net0 holds a DHCP address and returns the last
+// net status.
+func awaitLease(ctx context.Context, g *Guest) (string, error) {
+	deadline := time.Now().Add(networkReadyTimeout)
+	for {
+		out, err := g.Run(ctx, "net status", commandTimeout)
+		if err != nil {
+			return "", fail(ClassScenario, "net status", err)
+		}
+		if strings.Contains(out, "state: ready") {
+			g.pass("dhcp")
+			return out, nil
+		}
+		if time.Now().After(deadline) {
+			return "", failf(ClassScenario, "dhcp", "no address within %s; net status:\n%s", networkReadyTimeout, out)
+		}
+		select {
+		case <-ctx.Done():
+			return "", fail(ClassInfra, "dhcp", ctx.Err())
+		case <-time.After(3 * time.Second):
+		}
+	}
 }
 
 // serviceState reads one row from the services builtin.

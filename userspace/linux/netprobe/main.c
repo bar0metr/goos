@@ -2495,6 +2495,132 @@ fresh:
 	return 1;
 }
 
+/* --- bench -------------------------------------------------------------- */
+
+static long long now_us(void)
+{
+	struct timespec time;
+
+	clock_gettime(CLOCK_MONOTONIC, &time);
+	return time.tv_sec * 1000000LL + time.tv_nsec / 1000LL;
+}
+
+/* bench measures loopback sockets: stream throughput between two processes,
+ * one-byte request and reply, connect and close, UDP request and reply, and
+ * the time from a write to a poll waiter's return. It prints numbers, not
+ * verdicts; the lab records them. */
+static int bench_mode(void)
+{
+	static unsigned char chunk[65536];
+	const long total = 32L << 20;
+	const int rounds = 2000, connects = 200;
+	int client, server, fd, i, status, udp, peer;
+	uint16_t port;
+	long long start, elapsed;
+	long moved, n;
+	pid_t child;
+	char byte = 'x';
+
+	group = "bench";
+	REQUIRE(tcp_pair(&client, &server) == 0, "pair");
+	child = spawn();
+	if (child == 0) {
+		for (moved = 0; moved < total; moved += n)
+			if ((n = read(server, chunk, sizeof(chunk))) <= 0)
+				_exit(1);
+		_exit(write(server, &byte, 1) == 1 ? 0 : 1);
+	}
+	REQUIRE(child > 0, "fork reader");
+	start = now_us();
+	for (moved = 0; moved < total; moved += sizeof(chunk))
+		REQUIRE(write_full(client, chunk, sizeof(chunk)) == 0, "stream transfer");
+	REQUIRE(read(client, &byte, 1) == 1, "stream end");
+	elapsed = now_us() - start;
+	status = child_status(child);
+	REQUIRE(WIFEXITED(status) && WEXITSTATUS(status) == 0, "reader exit");
+	printf("bench tcp-stream bytes=%ld us=%lld MiBps=%lld\n", total, elapsed, elapsed ? (long long)total * 1000000LL / elapsed / (1 << 20) : 0);
+
+	child = spawn();
+	if (child == 0) {
+		for (i = 0; i < rounds; i++)
+			if (read(server, &byte, 1) != 1 || write(server, &byte, 1) != 1)
+				_exit(1);
+		_exit(0);
+	}
+	REQUIRE(child > 0, "fork echo");
+	start = now_us();
+	for (i = 0; i < rounds; i++)
+		REQUIRE(write(client, &byte, 1) == 1 && read(client, &byte, 1) == 1, "request and reply");
+	elapsed = now_us() - start;
+	child_status(child);
+	printf("bench tcp-request-reply rounds=%d us-per-round=%lld\n", rounds, elapsed / rounds);
+	close_pair(client, server);
+
+	fd = listener(&port, 0);
+	REQUIRE(fd >= 0, "listener");
+	start = now_us();
+	for (i = 0; i < connects; i++) {
+		client = sys_socket(AF_INET, SOCK_STREAM, 0);
+		REQUIRE(client >= 0 && connect4(client, LOOPBACK, port) == 0, "connect");
+		server = sys_accept4(fd, NULL, NULL, 0);
+		REQUIRE(server >= 0, "accept");
+		close_pair(client, server);
+	}
+	elapsed = now_us() - start;
+	close(fd);
+	printf("bench tcp-connect-close count=%d us-per-connection=%lld\n", connects, elapsed / connects);
+
+	udp = sys_socket(AF_INET, SOCK_DGRAM, 0);
+	peer = sys_socket(AF_INET, SOCK_DGRAM, 0);
+	REQUIRE(udp >= 0 && peer >= 0 && bind4(udp, LOOPBACK, 0) == 0 && bind4(peer, LOOPBACK, 0) == 0, "udp sockets");
+	REQUIRE(connect4(udp, LOOPBACK, (uint16_t)local_port(peer)) == 0 && connect4(peer, LOOPBACK, (uint16_t)local_port(udp)) == 0, "udp peers");
+	child = spawn();
+	if (child == 0) {
+		for (i = 0; i < rounds; i++)
+			if (read(peer, chunk, 64) <= 0 || write(peer, chunk, 64) != 64)
+				_exit(1);
+		_exit(0);
+	}
+	REQUIRE(child > 0, "fork udp echo");
+	start = now_us();
+	for (i = 0; i < rounds; i++)
+		REQUIRE(write(udp, chunk, 64) == 64 && read(udp, chunk, 64) == 64, "udp request and reply");
+	elapsed = now_us() - start;
+	child_status(child);
+	printf("bench udp-request-reply rounds=%d us-per-round=%lld\n", rounds, elapsed / rounds);
+	close(udp);
+	close(peer);
+
+	REQUIRE(tcp_pair(&client, &server) == 0, "poll pair");
+	elapsed = 0;
+	for (i = 0; i < 200; i++) {
+		long long sent = 0;
+		int link[2];
+
+		REQUIRE(pipe(link) == 0, "pipe");
+		child = spawn();
+		if (child == 0) {
+			long long stamp;
+
+			nap(2);
+			stamp = now_us();
+			_exit(write(link[1], &stamp, sizeof(stamp)) == sizeof(stamp) && write(client, &byte, 1) == 1 ? 0 : 1);
+		}
+		REQUIRE(child > 0, "fork waker");
+		REQUIRE(revents(server, POLLIN, 5000) & POLLIN, "poll wakes");
+		start = now_us();
+		REQUIRE(read(link[0], &sent, sizeof(sent)) == sizeof(sent) && read(server, &byte, 1) == 1, "wake stamp");
+		elapsed += start - sent;
+		child_status(child);
+		close(link[0]);
+		close(link[1]);
+	}
+	close_pair(client, server);
+	printf("bench poll-wake count=200 us-per-wake=%lld\n", elapsed / 200);
+	printf("bench ok\n");
+	return 0;
+}
+
 /* --- main -------------------------------------------------------------- */
 
 int main(int argc, char **argv)
@@ -2525,6 +2651,8 @@ int main(int argc, char **argv)
 		return inherit_mode(argc, argv);
 	if (argc > 1 && !strcmp(argv[1], "serve"))
 		return serve_mode(argc, argv);
+	if (argc == 2 && !strcmp(argv[1], "bench"))
+		return bench_mode();
 	if (argc > 1 && !strcmp(argv[1], "hold"))
 		return hold_mode(argc, argv);
 	if (argc > 2 || (argc == 2 && strcmp(argv[1], "all"))) {

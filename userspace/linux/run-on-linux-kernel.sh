@@ -56,6 +56,8 @@ cd /system/linux
 probe=/system/linux/netprobe
 echo "== default"
 $probe < /dev/null | $bb cat
+echo "== bench"
+$probe bench < /dev/null | $bb cat
 echo "== clients"
 $bb uname -r
 $bb --list | $bb grep -x -e nc -e wget -e httpd -e sha256sum | $bb tr '\n' ' '; echo
@@ -165,6 +167,7 @@ tr -d '\r' < "$log" | sed -n '/^== default/,/^== done/p'
 status=0
 if [ "$fixture" = netprobe ]; then
 	tr -d '\r' < "$log" | grep -q '^netprobe ok$' || { echo "FAIL netprobe groups" >&2; status=1; }
+	tr -d '\r' < "$log" | grep -q '^bench ok$' || { echo "FAIL netprobe bench" >&2; status=1; }
 	tr -d '\r' < "$log" | grep -q '^serve done 3 of 3$' || { echo "FAIL netprobe serve" >&2; status=1; }
 elif [ "$fixture" = tty-probe ]; then
 	tr -d '\r' < "$log" | grep -q '^tty identity ok$' || { echo "FAIL tty-probe identity" >&2; status=1; }
