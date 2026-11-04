@@ -354,6 +354,9 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-pve-linux-network BUSYBOX=/path/to/busybox CURL=/path/to/curl`
   runs the same programs under KVM on the Proxmox lab and records
   `netprobe bench` ([Proxmox lab](proxmox-lab.md#linux-sockets-workflow)).
+- `make bench-pve-linux-network` measures Linux, native and host-guest
+  networking under KVM and sets the medians against the targets
+  ([network measurements](#network-measurements)).
 - `make test-linux-network BUSYBOX=/path/to/busybox CURL=/path/to/curl` runs
   `tests/boot/linux_network.sh`, the Linux sockets gate (ADR 0210). It checks
   that both binaries are static x86_64 ELF files with the pinned SHA-256
@@ -940,6 +943,66 @@ The new workloads use only interfaces 0.2.8 had, so a baseline comes from
 the base revision with the current `userspace/bin/threadprobe` copied in:
 build its validation image, run `test-pve-threads` on it, and compare the two
 `thread-allocator.md` files.
+
+### Network measurements
+
+`make bench-pve-linux-network` measures Linux sockets, the native sessions
+under them and the lab bridge in one KVM guest on the Proxmox lab
+([Proxmox lab](proxmox-lab.md#network-benchmark)). It builds a release image
+(OPT=2, DIAG=0, VALIDATION=0) and runs two warm-up rounds and nine measured
+rounds of three benchmarks:
+
+- `netprobe bench [MiB]`: Linux sockets over loopback. A 32 MiB stream between
+  two processes, 2000 one-byte TCP request-reply rounds, 200 connections with
+  `socket`, `connect`, `accept` and both `close` calls timed one by one, 2000
+  64-byte UDP rounds, and 200 poll wakes.
+- `netbench [MiB]`: the same work through GTCP and GUDP without the Linux
+  layer, with a WaitReady in place of poll and 30 connections, the most an
+  ordinary session's TIME_WAIT budget lets one command open in a minute. One
+  process holds both ends and keeps a Read or WaitReady parked in `netd`
+  while the other end writes. Its lines carry a `native-` prefix.
+- `netprobe remote` against `tools/pvelab/benchpeer.py` on the node: a stream
+  each way, TCP and UDP request-reply, and 200 connections from the node to
+  `netprobe remote-serve` in the guest. These lines carry a `remote-` prefix.
+
+The report `build/reports/linux-network-perf-<variant>.md` (and `.json`, with
+every sample) names the variant by HZ and OPT, for example `hz100-opt2`. It
+gives the median, minimum and maximum of the nine measured rounds; warm-up
+samples stay in the JSON. Medians are compared against two sets of numbers:
+
+| Linux loopback metric | preferred | hard envelope |
+|---|---:|---:|
+| `tcp-stream` | >= 272 MiB/s | >= 258 MiB/s |
+| `tcp-request-reply` | <= 169 us | <= 178 us |
+| `tcp-connect-close` | <= 233 us | <= 245 us |
+| `udp-request-reply` | <= 137 us | <= 144 us |
+| `poll-wake` | <= 236 us | <= 248 us |
+
+`BENCH_GATE=1` fails the target when a median misses the hard envelope;
+by default the report only says so. The "Linux and native" table subtracts the
+native median from the Linux one: that difference is what the Linux adapter
+(the kernel's socket layer and `linuxsockd`) costs per operation, or per
+64 KiB for a stream. Compare reports only from the same node, VM shape and
+stream size; the report records the branch and SHA, HZ, OPT, DIAG, vCPUs, VM
+memory, QEMU version and host CPU.
+
+`BENCH_DIAG=1` adds a second VM on a DIAG=1 build. It reads `diag` before and
+after one `netprobe bench-stream` and one `netprobe bench-rr` and reports the
+change of every decimal field on every `DIAG` line, per 64 KiB written and per
+request-reply round, in `linux-network-perf-<variant>-diag.md`. The pass
+parses the lines without a list of field names, so a counter added to a DIAG
+line appears in the next report. Its timings include the counters' cost and
+are not primary results.
+
+`make bench-pve-linux-network-hz` runs the benchmark at HZ=100, 250 and 1000
+and writes `linux-network-perf-hz.md`, which flags each metric whose medians
+differ by more than 10% across the three. With `BENCH_DIAG=1` it runs the
+counter pass once, at the default HZ.
+
+Rounds start at least 65 seconds apart. A closed connection keeps its
+four-tuple for the 60-second TIME_WAIT, and a round leaves over 200 of them;
+starting the next round sooner would measure `socket()` waiting for one to
+expire.
 
 ### Native allocator measurements
 

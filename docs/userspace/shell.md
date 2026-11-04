@@ -490,6 +490,12 @@ a FIN. Errors use `tcp: OPERATION: REASON`, including `connection refused`,
 `reset`, `address in use` and `timeout`. The command receives only `tcp`,
 `tcp-tx` and `tcp-rx`; it has no direct network stack or device authority.
 
+`netbench [MiB]` times its own TCP and UDP sessions over 127.0.0.1: a stream
+of MiB (1 to 4096, default 32), one-byte request-reply, connect and close
+with each step timed, 64-byte UDP request-reply, and a WaitReady woken by a
+write. It prints `bench native-NAME key=value` lines and `bench native ok`.
+`make bench-pve-linux-network` sets them beside the Linux socket numbers.
+
 The validation build's `fault net-driver` kills the network driver once;
 PID 1 starts a new one with a new binding, and storage and the shell carry on.
 

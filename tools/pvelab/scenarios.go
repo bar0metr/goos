@@ -50,7 +50,7 @@ func (g *Guest) readFailure(class Class, stage, waitingFor string, err error) er
 	if errors.Is(err, context.Canceled) {
 		return failf(ClassInfra, stage, "interrupted")
 	}
-	return failf(ClassInfra, stage, "serial console: %v", err)
+	return failf(ClassInfra, stage, "serial console: %w", err)
 }
 
 // WaitBoot waits for the normal-mode marker and then the shell prompt.
@@ -176,7 +176,13 @@ type Session struct {
 	HostRunner      commandRunner
 	HostPTYRunner   commandRunner
 	OpenTerminal    terminalFactory
-	logf            func(string, ...any)
+	// Bench and Node serve the network benchmark scenarios; other scenarios
+	// leave them unused.
+	Bench *BenchOptions
+	Node  NodeAccess
+	logf  func(string, ...any)
+	// infof reports progress without --verbose; nil falls back to logf.
+	infof func(string, ...any)
 }
 
 type Scenario interface {
@@ -185,18 +191,20 @@ type Scenario interface {
 }
 
 var scenarios = map[string]Scenario{
-	"smoke":              smokeScenario{},
-	"lscpu":              lscpuScenario{},
-	"smp":                smpScenario{},
-	"linux":              linuxScenario{},
-	"7zip":               sevenZipScenario{},
-	"nano":               nanoScenario{},
-	"network":            networkScenario{},
-	"linux-network":      linuxNetworkScenario{},
-	"remote-admin":       remoteAdminScenario{},
-	"threads":            threadsScenario{},
-	"goroutines":         goroutinesScenario{},
-	"native-concurrency": nativeConcurrencyScenario{},
+	"smoke":               smokeScenario{},
+	"lscpu":               lscpuScenario{},
+	"smp":                 smpScenario{},
+	"linux":               linuxScenario{},
+	"7zip":                sevenZipScenario{},
+	"nano":                nanoScenario{},
+	"network":             networkScenario{},
+	"linux-network":       linuxNetworkScenario{},
+	"remote-admin":        remoteAdminScenario{},
+	"threads":             threadsScenario{},
+	"goroutines":          goroutinesScenario{},
+	"native-concurrency":  nativeConcurrencyScenario{},
+	"linux-network-bench": linuxNetworkBenchScenario{},
+	"linux-network-diag":  linuxNetworkDiagScenario{},
 }
 
 func scenarioNames() string {

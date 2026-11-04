@@ -46,6 +46,17 @@
  *   hold HOST PORT fail|survive SECONDS
  *                             hold sockets while a service is killed
  *
+ * Benchmarks print "bench NAME key=value ..." lines and end with "bench ok":
+ *
+ *   bench [MiB]               loopback stream (32 MiB by default), request
+ *                             and reply, connect and close, UDP, poll wake
+ *   bench-stream MiB          the loopback stream alone
+ *   bench-rr ROUNDS           the loopback request and reply alone
+ *   remote ADDRESS PORT [MiB] streams both ways, request and reply, and UDP
+ *                             against tools/pvelab/benchpeer.py
+ *   remote-serve PORT COUNT   answer COUNT one-byte requests from a remote
+ *                             client, one connection each
+ *
  * The bundled musl has no network, select, or stat sources, so the probe
  * makes those calls through syscall(), and "resolve" does what a libc stub
  * resolver does: /etc/hosts, then an A query over UDP to the first
@@ -2505,41 +2516,65 @@ static long long now_us(void)
 	return time.tv_sec * 1000000LL + time.tv_nsec / 1000LL;
 }
 
-/* bench measures loopback sockets: stream throughput between two processes,
- * one-byte request and reply, connect and close, UDP request and reply, and
- * the time from a write to a poll waiter's return. It prints numbers, not
- * verdicts; the lab records them. */
-static int bench_mode(void)
+static unsigned char bench_chunk[65536];
+
+/* mebibytes reads a stream size argument, 1 to 4096 MiB, as bytes. */
+static long mebibytes(const char *text)
 {
-	static unsigned char chunk[65536];
-	const long total = 32L << 20;
-	const int rounds = 2000, connects = 200;
-	int client, server, fd, i, status, udp, peer;
-	uint16_t port;
+	char *end;
+	long value = strtol(text, &end, 10);
+
+	return *end == 0 && value >= 1 && value <= 4096 ? value << 20 : -1;
+}
+
+static long long rate(long total, long long elapsed)
+{
+	return elapsed ? (long long)total * 1000000LL / elapsed / (1 << 20) : 0;
+}
+
+/* bench_stream moves total bytes from one process to another over a
+ * loopback connection; the reader answers one byte at the end. */
+static int bench_stream(long total)
+{
+	int client, server, status;
 	long long start, elapsed;
 	long moved, n;
 	pid_t child;
 	char byte = 'x';
 
-	group = "bench";
 	REQUIRE(tcp_pair(&client, &server) == 0, "pair");
 	child = spawn();
 	if (child == 0) {
 		for (moved = 0; moved < total; moved += n)
-			if ((n = read(server, chunk, sizeof(chunk))) <= 0)
+			if ((n = read(server, bench_chunk, sizeof(bench_chunk))) <= 0)
 				_exit(1);
 		_exit(write(server, &byte, 1) == 1 ? 0 : 1);
 	}
 	REQUIRE(child > 0, "fork reader");
 	start = now_us();
-	for (moved = 0; moved < total; moved += sizeof(chunk))
-		REQUIRE(write_full(client, chunk, sizeof(chunk)) == 0, "stream transfer");
+	for (moved = 0; moved < total; moved += n) {
+		n = total - moved < (long)sizeof(bench_chunk) ? total - moved : (long)sizeof(bench_chunk);
+		REQUIRE(write_full(client, bench_chunk, (size_t)n) == 0, "stream transfer");
+	}
 	REQUIRE(read(client, &byte, 1) == 1, "stream end");
 	elapsed = now_us() - start;
 	status = child_status(child);
 	REQUIRE(WIFEXITED(status) && WEXITSTATUS(status) == 0, "reader exit");
-	printf("bench tcp-stream bytes=%ld us=%lld MiBps=%lld\n", total, elapsed, elapsed ? (long long)total * 1000000LL / elapsed / (1 << 20) : 0);
+	close_pair(client, server);
+	printf("bench tcp-stream bytes=%ld us=%lld MiBps=%lld\n", total, elapsed, rate(total, elapsed));
+	return 0;
+}
 
+/* bench_request_reply sends one byte to an echoing process and waits for it
+ * to come back, rounds times. */
+static int bench_request_reply(int rounds)
+{
+	int client, server, i;
+	long long start, elapsed;
+	pid_t child;
+	char byte = 'x';
+
+	REQUIRE(tcp_pair(&client, &server) == 0, "pair");
 	child = spawn();
 	if (child == 0) {
 		for (i = 0; i < rounds; i++)
@@ -2553,22 +2588,57 @@ static int bench_mode(void)
 		REQUIRE(write(client, &byte, 1) == 1 && read(client, &byte, 1) == 1, "request and reply");
 	elapsed = now_us() - start;
 	child_status(child);
-	printf("bench tcp-request-reply rounds=%d us-per-round=%lld\n", rounds, elapsed / rounds);
 	close_pair(client, server);
+	printf("bench tcp-request-reply rounds=%d us-per-round=%lld\n", rounds, elapsed / rounds);
+	return 0;
+}
+
+/* bench_connect opens, connects, accepts and closes connects connections in
+ * one process. It times the whole loop and each of the five calls. */
+static int bench_connect(int connects)
+{
+	long long start, mark, elapsed, spent[5] = {0, 0, 0, 0, 0};
+	int fd, client, server, i;
+	uint16_t port;
 
 	fd = listener(&port, 0);
 	REQUIRE(fd >= 0, "listener");
 	start = now_us();
 	for (i = 0; i < connects; i++) {
+		mark = now_us();
 		client = sys_socket(AF_INET, SOCK_STREAM, 0);
-		REQUIRE(client >= 0 && connect4(client, LOOPBACK, port) == 0, "connect");
+		REQUIRE(client >= 0, "socket");
+		spent[0] += now_us() - mark;
+		mark = now_us();
+		REQUIRE(connect4(client, LOOPBACK, port) == 0, "connect");
+		spent[1] += now_us() - mark;
+		mark = now_us();
 		server = sys_accept4(fd, NULL, NULL, 0);
 		REQUIRE(server >= 0, "accept");
-		close_pair(client, server);
+		spent[2] += now_us() - mark;
+		mark = now_us();
+		close(client);
+		spent[3] += now_us() - mark;
+		mark = now_us();
+		close(server);
+		spent[4] += now_us() - mark;
 	}
 	elapsed = now_us() - start;
 	close(fd);
 	printf("bench tcp-connect-close count=%d us-per-connection=%lld\n", connects, elapsed / connects);
+	printf("bench tcp-socket count=%d us-per-op=%lld\n", connects, spent[0] / connects);
+	printf("bench tcp-connect count=%d us-per-op=%lld\n", connects, spent[1] / connects);
+	printf("bench tcp-accept count=%d us-per-op=%lld\n", connects, spent[2] / connects);
+	printf("bench tcp-close-client count=%d us-per-op=%lld\n", connects, spent[3] / connects);
+	printf("bench tcp-close-server count=%d us-per-op=%lld\n", connects, spent[4] / connects);
+	return 0;
+}
+
+static int bench_udp(int rounds)
+{
+	long long start, elapsed;
+	int udp, peer, i;
+	pid_t child;
 
 	udp = sys_socket(AF_INET, SOCK_DGRAM, 0);
 	peer = sys_socket(AF_INET, SOCK_DGRAM, 0);
@@ -2577,23 +2647,32 @@ static int bench_mode(void)
 	child = spawn();
 	if (child == 0) {
 		for (i = 0; i < rounds; i++)
-			if (read(peer, chunk, 64) <= 0 || write(peer, chunk, 64) != 64)
+			if (read(peer, bench_chunk, 64) <= 0 || write(peer, bench_chunk, 64) != 64)
 				_exit(1);
 		_exit(0);
 	}
 	REQUIRE(child > 0, "fork udp echo");
 	start = now_us();
 	for (i = 0; i < rounds; i++)
-		REQUIRE(write(udp, chunk, 64) == 64 && read(udp, chunk, 64) == 64, "udp request and reply");
+		REQUIRE(write(udp, bench_chunk, 64) == 64 && read(udp, bench_chunk, 64) == 64, "udp request and reply");
 	elapsed = now_us() - start;
 	child_status(child);
 	printf("bench udp-request-reply rounds=%d us-per-round=%lld\n", rounds, elapsed / rounds);
 	close(udp);
 	close(peer);
+	return 0;
+}
+
+/* bench_poll times a child's write until poll returns in the parent. */
+static int bench_poll(int count)
+{
+	long long start, elapsed = 0;
+	int client, server, i;
+	pid_t child;
+	char byte = 'x';
 
 	REQUIRE(tcp_pair(&client, &server) == 0, "poll pair");
-	elapsed = 0;
-	for (i = 0; i < 200; i++) {
+	for (i = 0; i < count; i++) {
 		long long sent = 0;
 		int link[2];
 
@@ -2616,8 +2695,213 @@ static int bench_mode(void)
 		close(link[1]);
 	}
 	close_pair(client, server);
-	printf("bench poll-wake count=200 us-per-wake=%lld\n", elapsed / 200);
+	printf("bench poll-wake count=%d us-per-wake=%lld\n", count, elapsed / count);
+	return 0;
+}
+
+/* bench measures loopback sockets: stream throughput between two processes,
+ * one-byte request and reply, connect and close with each call timed apart,
+ * UDP request and reply, and the time from a write to a poll waiter's
+ * return. It prints numbers, not verdicts; the lab records them. bench-stream
+ * and bench-rr run one measurement alone, for a diagnostic counter pass. */
+static int bench_mode(int argc, char **argv)
+{
+	long total = 32L << 20;
+	int rounds;
+
+	group = "bench";
+	if (!strcmp(argv[1], "bench-rr")) {
+		rounds = argc == 3 ? atoi(argv[2]) : 0;
+		if (rounds <= 0 || rounds > 1000000) {
+			printf("usage: netprobe bench-rr ROUNDS\n");
+			return 2;
+		}
+		if (bench_request_reply(rounds) != 0)
+			return 1;
+		printf("bench ok\n");
+		return 0;
+	}
+	if (argc == 3 && (total = mebibytes(argv[2])) < 0) {
+		printf("usage: netprobe bench|bench-stream [MiB]\n");
+		return 2;
+	}
+	if (!strcmp(argv[1], "bench-stream")) {
+		if (bench_stream(total) != 0)
+			return 1;
+		printf("bench ok\n");
+		return 0;
+	}
+	if (bench_stream(total) != 0 || bench_request_reply(2000) != 0 || bench_connect(200) != 0 ||
+	    bench_udp(2000) != 0 || bench_poll(200) != 0)
+		return 1;
 	printf("bench ok\n");
+	return 0;
+}
+
+/* --- remote bench ------------------------------------------------------- */
+
+/* The remote peer (tools/pvelab/benchpeer.py) reads a nine-byte command on
+ * each TCP connection: an opcode and a little-endian 64-bit count. 'S' reads
+ * count bytes and answers one byte, 'G' sends count bytes, 'E' echoes count
+ * single bytes. Its UDP socket on the same port echoes each datagram. */
+static int peer_command(int fd, char opcode, unsigned long long count)
+{
+	unsigned char command[9];
+	int i;
+
+	command[0] = (unsigned char)opcode;
+	for (i = 0; i < 8; i++)
+		command[1 + i] = (unsigned char)(count >> (8 * i));
+	return write_full(fd, command, sizeof(command));
+}
+
+static int peer_connect(uint32_t address, int port)
+{
+	int fd = sys_socket(AF_INET, SOCK_STREAM, 0);
+
+	if (fd < 0)
+		return -1;
+	set_int_option(fd, IPPROTO_TCP, TCP_NODELAY, 1);
+	if (connect4(fd, address, (uint16_t)port) != 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+/* remote_mode measures against a peer outside the guest: a stream to it, a
+ * stream from it, one-byte TCP request and reply, and 64-byte UDP request
+ * and reply. A UDP round with no answer within 200 ms counts as lost and
+ * goes again; the time spent waiting for it leaves the result. */
+static int remote_mode(int argc, char **argv)
+{
+	const int rounds = 2000;
+	struct timeval timeout = {0, 200000};
+	long long start, elapsed, waited = 0;
+	uint32_t address;
+	long total = 32L << 20, moved, n;
+	int port, fd, i, lost = 0;
+	char byte = 'x';
+
+	group = "remote";
+	if (argc < 4 || argc > 5 || parse_ipv4(argv[2], &address) != 0 || (port = parse_port(argv[3])) < 0 ||
+	    (argc == 5 && (total = mebibytes(argv[4])) < 0)) {
+		printf("usage: netprobe remote ADDRESS PORT [MiB]\n");
+		return 2;
+	}
+
+	fd = peer_connect(address, port);
+	REQUIRE(fd >= 0, "connect sink");
+	start = now_us();
+	REQUIRE(peer_command(fd, 'S', (unsigned long long)total) == 0, "sink command");
+	for (moved = 0; moved < total; moved += n) {
+		n = total - moved < (long)sizeof(bench_chunk) ? total - moved : (long)sizeof(bench_chunk);
+		REQUIRE(write_full(fd, bench_chunk, (size_t)n) == 0, "stream to peer");
+	}
+	REQUIRE(read(fd, &byte, 1) == 1, "sink answer");
+	elapsed = now_us() - start;
+	close(fd);
+	printf("bench remote-tcp-stream-tx bytes=%ld us=%lld MiBps=%lld\n", total, elapsed, rate(total, elapsed));
+
+	fd = peer_connect(address, port);
+	REQUIRE(fd >= 0, "connect source");
+	start = now_us();
+	REQUIRE(peer_command(fd, 'G', (unsigned long long)total) == 0, "source command");
+	for (moved = 0; moved < total; moved += n)
+		REQUIRE((n = read(fd, bench_chunk, sizeof(bench_chunk))) > 0, "stream from peer");
+	elapsed = now_us() - start;
+	close(fd);
+	printf("bench remote-tcp-stream-rx bytes=%ld us=%lld MiBps=%lld\n", total, elapsed, rate(total, elapsed));
+
+	fd = peer_connect(address, port);
+	REQUIRE(fd >= 0, "connect echo");
+	REQUIRE(peer_command(fd, 'E', (unsigned long long)rounds) == 0, "echo command");
+	start = now_us();
+	for (i = 0; i < rounds; i++)
+		REQUIRE(write(fd, &byte, 1) == 1 && read(fd, &byte, 1) == 1, "request and reply");
+	elapsed = now_us() - start;
+	close(fd);
+	printf("bench remote-tcp-request-reply rounds=%d us-per-round=%lld\n", rounds, elapsed / rounds);
+
+	fd = sys_socket(AF_INET, SOCK_DGRAM, 0);
+	REQUIRE(fd >= 0 && connect4(fd, address, (uint16_t)port) == 0, "udp socket");
+	REQUIRE(sys_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0, "udp timeout");
+	start = now_us();
+	for (i = 0; i < rounds; i++) {
+		uint32_t sequence = (uint32_t)i, echoed;
+		long long sent;
+
+		memcpy(bench_chunk, &sequence, sizeof(sequence));
+		sent = now_us();
+		REQUIRE(write(fd, bench_chunk, 64) == 64, "udp request");
+		for (;;) {
+			n = read(fd, bench_chunk, 64);
+			if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+				lost++;
+				waited += now_us() - sent;
+				REQUIRE(lost <= 20, "udp replies lost");
+				i--;
+				break;
+			}
+			REQUIRE(n == 64, "udp reply");
+			memcpy(&echoed, bench_chunk, sizeof(echoed));
+			if (echoed == sequence)
+				break;
+		}
+	}
+	elapsed = now_us() - start - waited;
+	close(fd);
+	printf("bench remote-udp-request-reply rounds=%d lost=%d us-per-round=%lld\n", rounds, lost, elapsed / rounds);
+	printf("bench remote ok\n");
+	return 0;
+}
+
+/* remote_serve_mode answers count connections from a remote client, one at a
+ * time: accept, read one byte, write it back, wait for the client's close,
+ * close. The client closing first keeps TIME_WAIT on its side, so the
+ * guest's TIME_WAIT budget stays for the loopback benchmark. A watchdog
+ * child kills the server after 90 seconds in case the client never comes. */
+static int remote_serve_mode(int argc, char **argv)
+{
+	int port, count, fd, accepted, i;
+	pid_t parent = getpid(), watchdog;
+	char byte;
+
+	if (argc != 4 || (port = parse_port(argv[2])) < 0 || (count = atoi(argv[3])) <= 0) {
+		printf("usage: netprobe remote-serve PORT COUNT\n");
+		return 2;
+	}
+	group = "remote-serve";
+	fd = sys_socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	REQUIRE(fd >= 0 && set_int_option(fd, SOL_SOCKET, SO_REUSEADDR, 1) == 0 && bind4(fd, INADDR_ANY, (uint16_t)port) == 0 &&
+	            sys_listen(fd, 16) == 0,
+	        "listen");
+	watchdog = spawn();
+	if (watchdog == 0) {
+		nap(90000);
+		kill(parent, SIGKILL);
+		_exit(0);
+	}
+	printf("remote-serve listening %d\n", port);
+	fflush(stdout);
+	for (i = 0; i < count; i++) {
+		accepted = sys_accept4(fd, NULL, NULL, SOCK_CLOEXEC);
+		if (accepted < 0 && errno == EINTR) {
+			i--;
+			continue;
+		}
+		REQUIRE(accepted >= 0, "accept");
+		set_int_option(accepted, IPPROTO_TCP, TCP_NODELAY, 1);
+		REQUIRE(read(accepted, &byte, 1) == 1 && write(accepted, &byte, 1) == 1, "request and reply");
+		REQUIRE(read(accepted, &byte, 1) == 0, "client close");
+		close(accepted);
+	}
+	close(fd);
+	if (watchdog > 0) {
+		kill(watchdog, SIGKILL);
+		child_status(watchdog);
+	}
+	printf("remote-serve done %d\n", count);
 	return 0;
 }
 
@@ -2651,15 +2935,19 @@ int main(int argc, char **argv)
 		return inherit_mode(argc, argv);
 	if (argc > 1 && !strcmp(argv[1], "serve"))
 		return serve_mode(argc, argv);
-	if (argc == 2 && !strcmp(argv[1], "bench"))
-		return bench_mode();
+	if ((argc == 2 || argc == 3) && (!strcmp(argv[1], "bench") || !strcmp(argv[1], "bench-stream") || !strcmp(argv[1], "bench-rr")))
+		return bench_mode(argc, argv);
+	if (argc > 1 && !strcmp(argv[1], "remote"))
+		return remote_mode(argc, argv);
+	if (argc > 1 && !strcmp(argv[1], "remote-serve"))
+		return remote_serve_mode(argc, argv);
 	if (argc > 1 && !strcmp(argv[1], "hold"))
 		return hold_mode(argc, argv);
 	if (argc > 2 || (argc == 2 && strcmp(argv[1], "all"))) {
 		for (i = 0; i < sizeof(groups) / sizeof(groups[0]); i++)
 			if (argc == 2 && !strcmp(argv[1], groups[i].name))
 				return run_group(&groups[i]);
-		printf("usage: netprobe [all|GROUP|resolve|fetch|connect|reset|silent|udp-echo|inherit|serve|hold] ...\n");
+		printf("usage: netprobe [all|GROUP|resolve|fetch|connect|reset|silent|udp-echo|inherit|serve|hold|bench|remote|remote-serve] ...\n");
 		return 2;
 	}
 	for (i = 0; i < sizeof(groups) / sizeof(groups[0]); i++)

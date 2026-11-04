@@ -206,7 +206,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware bench-pve-linux-network bench-pve-linux-network-hz
 
 all: iso
 
@@ -1199,6 +1199,46 @@ test-pve-nano:
 	@$(MAKE) --no-print-directory pve-artifacts DIAG=1 LINUX_EXTRA=$(abspath $(BUSYBOX)):$(abspath $(NANO))
 	@$(PVELAB) run --scenario nano --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
 
+# The network benchmark under KVM on four host cores, in one VM: two warm-up
+# and nine measured rounds of netprobe bench (Linux sockets over loopback),
+# netbench (native GTCP and GUDP over loopback) and netprobe remote against
+# benchpeer.py on the node. The image is a release build: OPT=2, DIAG=0,
+# VALIDATION=0. The report goes to build/reports/linux-network-perf-hzN-optM
+# .json and .md and sets the Linux medians against the targets.
+# BENCH_GATE=1 fails when the hard envelope is not met. BENCH_DIAG=1 adds a
+# DIAG=1 build that reports how each DIAG counter changes per 64 KiB written
+# and per request-reply round. The -hz target repeats the benchmark at HZ=100,
+# 250 and 1000 and compares the medians in linux-network-perf-hz.md; with
+# BENCH_DIAG=1 it adds the counter pass once, at HZ (default 100).
+BENCH_OPT ?= 2
+BENCH_GATE ?= 0
+BENCH_DIAG ?= 0
+BENCH_RUNS ?= 9
+BENCH_WARMUPS ?= 2
+BENCH_STREAM_MIB ?= 32
+BENCH_DIAG_ROUNDS ?= 2000
+BENCH_HZ_VALUES := 100 250 1000
+BENCH_REPORTS := $(abspath $(BUILD_DIR)/reports)
+BENCH_PVE_FLAGS = --cpu host --sockets 1 --cores 4 --bench-hz $(HZ) --bench-opt $(BENCH_OPT) \
+	--bench-runs $(BENCH_RUNS) --bench-warmups $(BENCH_WARMUPS) --bench-stream-mib $(BENCH_STREAM_MIB) \
+	--bench-diag-rounds $(BENCH_DIAG_ROUNDS) --bench-reports $(BENCH_REPORTS) $(if $(filter 1,$(BENCH_GATE)),--bench-gate)
+
+bench-pve-linux-network:
+	@$(MAKE) --no-print-directory pve-artifacts OPT=$(BENCH_OPT) DIAG=0 VALIDATION=0
+	@$(PVELAB) run --scenario linux-network-bench $(BENCH_PVE_FLAGS) --bench-diag 0 $(PVE_RUN_FLAGS)
+ifeq ($(BENCH_DIAG),1)
+	@$(MAKE) --no-print-directory pve-artifacts OPT=$(BENCH_OPT) DIAG=1 VALIDATION=0
+	@$(PVELAB) run --scenario linux-network-diag $(BENCH_PVE_FLAGS) --bench-diag 1 $(PVE_RUN_FLAGS)
+endif
+
+bench-pve-linux-network-hz:
+	@for hz in $(BENCH_HZ_VALUES); do \
+		diag=0; [ $$hz = $(HZ) ] && diag=$(BENCH_DIAG); \
+		$(MAKE) --no-print-directory bench-pve-linux-network HZ=$$hz BENCH_DIAG=$$diag || exit $$?; \
+	done
+	@$(PVELAB) bench-compare --out $(BENCH_REPORTS)/linux-network-perf-hz.md \
+		$(foreach hz,$(BENCH_HZ_VALUES),$(BENCH_REPORTS)/linux-network-perf-hz$(hz)-opt$(BENCH_OPT).json)
+
 # Boots the smoke scenario and keeps the VM for debugging; pvelab prints the
 # run ID that pvelab destroy --run takes.
 pve-run: pve-artifacts
@@ -1285,7 +1325,9 @@ help:
 	  '  test-pve-threads run native thread checks and the thread allocator benchmark on Proxmox' \
 	  '  test-pve-linux  run the static Linux programs on Proxmox' \
 	  '  test-pve-7zip LINUX_EXTRA=path  run a static 7zzs on Proxmox and report refused calls' \
-	  '  pve-run         boot on Proxmox and keep the VM for debugging'
+	  '  pve-run         boot on Proxmox and keep the VM for debugging' \
+	  '  bench-pve-linux-network [BENCH_GATE=1] [BENCH_DIAG=1]  Linux, native and host-guest network benchmark on Proxmox' \
+	  '  bench-pve-linux-network-hz  the network benchmark at HZ=100, 250 and 1000, compared'
 
 # Explicit maintenance only: local input and optional external signing key.
 TRUST_SOURCE ?= security/ca-source.pem
