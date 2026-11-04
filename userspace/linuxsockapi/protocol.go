@@ -1,24 +1,27 @@
-// Package linuxsockapi defines GLNXSOCK1, the protocol between the kernel's
+// Package linuxsockapi defines GLNXSOCK2, the protocol between the kernel's
 // Linux compatibility layer and linuxsockd (ADR 0210).
 //
 // One session serves one Linux family: a channel and one shared pool. The
-// kernel sends requests; linuxsockd answers each with one reply carrying the
-// request's correlation. No request waits in the service: an operation that
+// channel carries the control plane: the kernel sends requests and
+// linuxsockd answers each with one reply carrying the request's
+// correlation. No request waits in the service for long: an operation that
 // cannot complete now answers WouldBlock or InProgress, and the kernel
-// sleeps on readiness instead. Nothing is therefore in flight when a Linux
-// call is interrupted, except a reply the kernel has yet to read.
+// sleeps on readiness instead.
 //
-// The pool holds a readiness page, eight TX slots the kernel writes and the
-// service only reads, and eight RX slots the service writes and the kernel
-// only reads. Write and SendTo hand a TX slot to the service and their reply
-// hands it back. A Read reply with a nonzero length hands an RX slot to the
-// kernel; the Release notification hands it back. A Release may return
-// bytes the kernel did not consume; the service keeps that slot for the same
-// socket and returns its remaining bytes first on the next Read.
+// Payload moves through the pool, not through the channel. The pool holds
+// a readiness page, a ring page, eight TX slots of 16 KiB and eight RX
+// slots of 16 KiB. The kernel copies a send into TX slots it owns and
+// commits each slot on the submit ring; linuxsockd drains the slot into
+// netd and hands it back on the complete ring. linuxsockd reads ahead from
+// netd into RX slots it owns and publishes each slot to the kernel on the
+// complete ring; the kernel copies from it straight into the Linux buffer
+// and hands it back on the submit ring once a read consumed all of it.
+// Every slot carries a generation that the side handing it back repeats.
 //
-// The service publishes each socket's readiness in the readiness page and
-// sends one ReadyChanged notification when the kernel has drained the last
-// one, so a full queue never hides a change.
+// The channel only rings the doorbells: Doorbell tells linuxsockd that the
+// submit ring has entries, ReadyChanged tells the kernel that the readiness
+// page or the complete ring changed. Each side sends one only when the
+// other has cleared the matching token, so a full queue never hides work.
 package linuxsockapi
 
 import (
@@ -28,29 +31,49 @@ import (
 )
 
 const (
-	ProtocolID  = uint64(0x474c4e58534f4331) // "GLNXSOC1"
-	Version     = uint16(1)
+	ProtocolID  = uint64(0x474c4e58534f4332) // "GLNXSOC2"
+	Version     = uint16(2)
 	RequestSize = 48
 	ReplySize   = 48
 
 	// MaxSockets bounds the sockets of one family, TCP and UDP together.
 	MaxSockets = 32
 
-	SlotSize = 4096
+	SlotSize = 16384
 	TXSlots  = 8
 	RXSlots  = 8
 	pageSize = 4096
-	// The pool: the readiness page, then the TX slots, then the RX slots.
+	// SlotPages is the pages of one slot.
+	SlotPages = SlotSize / pageSize
+	// The pool: the readiness page, the ring page, the TX slots, then the
+	// RX slots.
 	ReadinessPage = 0
-	TXFirstPage   = 1
-	RXFirstPage   = TXFirstPage + TXSlots*SlotSize/pageSize
-	PoolPages     = RXFirstPage + RXSlots*SlotSize/pageSize
+	RingPage      = 1
+	TXFirstPage   = 2
+	RXFirstPage   = TXFirstPage + TXSlots*SlotPages
+	PoolPages     = RXFirstPage + RXSlots*SlotPages
 	PoolBytes     = PoolPages * pageSize
+
+	// MaxDatagram is the largest datagram either way, the GUDP limit.
+	MaxDatagram = 4096
+	// SocketTXSlots bounds the TX slots one socket holds committed, so one
+	// stream leaves room for the family's others: 64 KiB, one whole Linux
+	// write of the largest size the kernel moves in one call.
+	SocketTXSlots = 4
+	// SocketRXSlots bounds the RX slots linuxsockd fills ahead for one
+	// socket, and RXReserve the slots it always leaves free for a read the
+	// kernel asks for, so sockets with unread data cannot starve another.
+	SocketRXSlots = 4
+	RXReserve     = 2
 )
 
 // TXOffset and RXOffset locate a slot in the pool.
 func TXOffset(slot uint8) uint64 { return uint64(TXFirstPage)*pageSize + uint64(slot)*SlotSize }
 func RXOffset(slot uint8) uint64 { return uint64(RXFirstPage)*pageSize + uint64(slot)*SlotSize }
+
+// TXPage and RXPage are the pool page holding page index of a slot.
+func TXPage(slot uint8, index int) uint32 { return uint32(TXFirstPage + int(slot)*SlotPages + index) }
+func RXPage(slot uint8, index int) uint32 { return uint32(RXFirstPage + int(slot)*SlotPages + index) }
 
 type Opcode uint8
 
@@ -73,18 +96,18 @@ const (
 	// answers InProgress; its outcome arrives through readiness and
 	// GetPendingError. The reply carries Local for a completed connect.
 	OpConnect
-	// OpRead takes up to Length bytes, or one datagram, from Socket. On
-	// OK with a nonzero reply Length the reply hands over RX Slot.
-	// FlagPeek leaves the bytes in place. For a datagram the reply's Value
-	// is the datagram's full length and Address and Port its source; the
-	// part past Length is discarded unless FlagPeek is set.
-	// FlagEOF in the reply reports the end of the stream.
+	// OpRead asks for the socket's next data when the kernel holds none.
+	// The service answers OK once it published an RX slot for the socket
+	// on the complete ring, OK with FlagEOF at the end of a stream with
+	// nothing left, WouldBlock when nothing is there, or the error.
 	OpRead
-	// OpWrite sends Length bytes of TX Slot on a connected socket. The
-	// reply returns the slot and says how many bytes the socket took.
+	// OpWrite asks whether a connected socket takes data: OK means its
+	// readiness entry says so now, otherwise the result is the error a
+	// send reports. The kernel asks only when the entry does not let it
+	// commit TX slots.
 	OpWrite
-	// OpSendTo sends Length bytes of TX Slot as one datagram to Address
-	// and Port.
+	// OpSendTo asks the same for a datagram to Address and Port. An
+	// unbound socket is bound to an ephemeral port first, as Linux does.
 	OpSendTo
 	// OpShutdown shuts down Socket in direction Length (Linux SHUT_RD,
 	// SHUT_WR, or SHUT_RDWR).
@@ -112,12 +135,10 @@ const (
 	// request completes at once, so the service needs to do nothing but
 	// answer; the opcode exists so an abandoned exchange has a defined end.
 	OpCancel
-	// OpRelease is a kernel notification that returns RX Slot. Length is
-	// the count of bytes the kernel did not consume, at offset Value of
-	// the slot, for Socket; the service returns them before newer data.
-	OpRelease
-	// OpReadyChanged is a service notification: the readiness page
-	// changed. It carries nothing.
+	// OpDoorbell is a kernel notification: the submit ring has entries.
+	OpDoorbell
+	// OpReadyChanged is a service notification: the readiness page or the
+	// complete ring changed. It carries nothing.
 	OpReadyChanged
 	lastOpcode = OpReadyChanged
 )
@@ -130,18 +151,15 @@ const (
 
 // Request flags.
 const (
-	FlagPeek      = uint8(1 << 0) // Read: leave the data in place
 	FlagReuseAddr = uint8(1 << 1) // Bind: SO_REUSEADDR is set
-	FlagDiscard   = uint8(1 << 2) // Read: consume without copying (MSG_TRUNC on a stream)
 )
 
 // Reply flags.
 const (
-	FlagEOF       = uint8(1 << 0) // Read: the stream ended after these bytes
-	FlagTruncated = uint8(1 << 1) // Read: the datagram was longer than Length
+	FlagEOF = uint8(1 << 0) // Read: the stream ended and nothing is left
 )
 
-// Result is a GLNXSOCK1 result. The kernel turns it into a Linux errno with
+// Result is a GLNXSOCK2 result. The kernel turns it into a Linux errno with
 // the call's context.
 type Result uint8
 
@@ -218,15 +236,14 @@ func SessionOf(socket uint64) uint32 { return uint32(socket >> 32) }
 //	Listen:          Socket, Length (backlog)
 //	Accept:          Socket
 //	Connect:         Socket, Address, Port
-//	Read:            Socket, Flags (Peek, Discard), Length (1 to SlotSize)
-//	Write:           Socket, Slot, Length (0 to SlotSize)
-//	SendTo:          Socket, Slot, Length, Address, Port
+//	Read, Write:     Socket
+//	SendTo:          Socket, Address, Port
 //	Shutdown:        Socket, Length (0, 1, or 2)
 //	GetSockName, GetPeerName, GetPendingError, QueryReady, Close: Socket
 //	GetOption:       Socket, Level, Name
 //	SetOption:       Socket, Level, Name, Value
 //	Cancel:          Value (the abandoned correlation)
-//	Release:         Socket, Slot, Length (unread bytes), Value (their offset)
+//	Doorbell, ReadyChanged: nothing
 type Request struct {
 	Opcode  Opcode
 	Flags   uint8
@@ -247,8 +264,7 @@ type Request struct {
 //	Bind:            Local, LocalPort
 //	Accept:          Value (child), Address, Port, Local, LocalPort
 //	Connect:         Local, LocalPort on OK
-//	Read:            Slot, Length, Flags (EOF, Truncated), Value (datagram length), Address, Port (datagram source)
-//	Write, SendTo:   Slot (returned, for every result), Length (bytes taken)
+//	Read:            Flags (EOF)
 //	GetSockName:     Local, LocalPort
 //	GetPeerName:     Address, Port
 //	GetOption, SetOption, GetPendingError: Value
@@ -309,29 +325,23 @@ func requestFields(op Opcode) (field, uint8, bool) {
 		return fSocket | fLength, 0, true
 	case OpAccept, OpGetSockName, OpGetPeerName, OpGetPendingError, OpQueryReady, OpClose:
 		return fSocket, 0, true
-	case OpConnect:
+	case OpConnect, OpSendTo:
 		return fSocket | fAddress, 0, true
-	case OpRead:
-		return fSocket | fFlags | fLength, FlagPeek | FlagDiscard, true
-	case OpWrite:
-		return fSocket | fSlot | fLength, 0, true
-	case OpSendTo:
-		return fSocket | fSlot | fLength | fAddress, 0, true
+	case OpRead, OpWrite:
+		return fSocket, 0, true
 	case OpGetOption:
 		return fSocket | fLevel, 0, true
 	case OpSetOption:
 		return fSocket | fLevel | fValue, 0, true
 	case OpCancel:
 		return fValue, 0, true
-	case OpRelease:
-		return fSocket | fSlot | fLength | fValue, 0, true
-	case OpReadyChanged:
+	case OpDoorbell, OpReadyChanged:
 		return 0, 0, true
 	}
 	return 0, 0, false
 }
 
-func notification(op Opcode) bool { return op == OpRelease || op == OpReadyChanged }
+func notification(op Opcode) bool { return op == OpDoorbell || op == OpReadyChanged }
 
 var noAddress [4]byte
 
@@ -354,24 +364,18 @@ func validRequest(r *Request) bool {
 	case OpOpen:
 		return r.Length == KindStream || r.Length == KindDatagram
 	case OpConnect, OpSendTo:
-		return r.Port != 0 && r.Slot < TXSlots && r.Length <= SlotSize
-	case OpRead:
-		return r.Length >= 1 && r.Length <= SlotSize
-	case OpWrite:
-		return r.Slot < TXSlots && r.Length <= SlotSize
+		return r.Port != 0
 	case OpShutdown:
 		return r.Length <= 2
 	case OpCancel:
 		return r.Value != 0
-	case OpRelease:
-		return r.Slot < RXSlots && r.Length <= SlotSize && r.Value <= SlotSize-uint64(r.Length)
 	}
 	return true
 }
 
 // EncodeRequest fails for a request with a field its opcode does not use.
 // Notifications take correlation 0, requests a nonzero one. The kernel sends
-// requests and Release; the service sends ReadyChanged with EncodeRequest
+// requests and Doorbell; the service sends ReadyChanged with EncodeRequest
 // too, since it has no reply.
 func EncodeRequest(r *Request, correlation uint64, out *ipc.Message) bool {
 	if !validRequest(r) || notification(r.Opcode) != (correlation == 0) {
@@ -426,11 +430,9 @@ func DecodeRequest(in *ipc.Message, out *Request) (uint64, bool) {
 func replyFields(r *Reply) (field, uint8) {
 	ok := r.Result == ResultOK
 	switch r.Opcode {
-	case OpWrite, OpSendTo:
-		return fSocket | fSlot | fLength, 0
 	case OpRead:
 		if ok {
-			return fSocket | fSlot | fLength | fFlags | fValue | fAddress, FlagEOF | FlagTruncated
+			return fSocket | fFlags, FlagEOF
 		}
 	case OpOpen:
 		if ok {
@@ -487,12 +489,6 @@ func validReply(r *Reply) bool {
 		return false
 	}
 	switch r.Opcode {
-	case OpWrite, OpSendTo:
-		return r.Slot < TXSlots && r.Length <= SlotSize && (r.Result == ResultOK || r.Length == 0)
-	case OpRead:
-		if r.Result == ResultOK {
-			return r.Slot < RXSlots && r.Length <= SlotSize && (r.Length != 0 || r.Slot == 0)
-		}
 	case OpAccept:
 		if r.Result == ResultOK {
 			_, ok := SocketIndex(r.Value)

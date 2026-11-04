@@ -130,12 +130,12 @@ func TestMalformedMessageFailsOnlyThatFamily(t *testing.T) {
 	if h.svc.Counters().SessionFailures != 1 {
 		t.Fatal("session failure not counted")
 	}
-	// A Release of a slot the service never lent fails the family, as does
-	// a ReadyChanged from the kernel.
+	// A release of a slot the service never published fails the family,
+	// as does a ReadyChanged from the kernel.
 	c := h.family(3, 9)
-	h.send(c, linuxsockapi.Request{Opcode: opRelease, Socket: linuxsockapi.MakeSocket(9, 1, 0), Slot: 2})
+	h.releaseRX(c, 2, 1)
 	if !h.dropped(c) {
-		t.Fatal("forged Release accepted")
+		t.Fatal("forged release accepted")
 	}
 	d := h.family(4, 10)
 	h.send(d, linuxsockapi.Request{Opcode: linuxsockapi.OpReadyChanged})
@@ -165,6 +165,10 @@ func TestRemoveFamilyClosesEverything(t *testing.T) {
 		delete(endpoints, closed.request.Endpoint)
 	}
 	h.complete(late, NativeCompletion{Endpoint: 4242})
+	// netd answers the parked reads of the closed endpoints.
+	for h.has(NativeRead) {
+		h.complete(h.take(NativeRead), NativeCompletion{Result: NativeClosed})
+	}
 	if closed := h.take(NativeClose); closed.request.Endpoint != 4242 {
 		t.Fatal("late endpoint leaked")
 	}
@@ -227,75 +231,6 @@ func TestOpsPerFamilyBound(t *testing.T) {
 	}
 }
 
-func TestBusyBackendRetries(t *testing.T) {
-	h := newHarness(t)
-	f := h.family(1, 7)
-	id := h.connected(f)
-	other := h.connected(f)
-	h.backend.busy = true
-	correlation := h.send(f, linuxsockapi.Request{Opcode: opWrite, Socket: id, Slot: 0, Length: 3})
-	h.noReply(f, correlation)
-	h.backend.busy = false
-	// Any later completion from the backend retries what waited.
-	h.wake(h.endpoint(other), MaskWritable, 0)
-	h.complete(h.take(NativeWrite), NativeCompletion{Length: 3})
-	if reply := h.reply(f, correlation); reply.Length != 3 {
-		t.Fatalf("retried write %+v", reply)
-	}
-}
-
-func TestFamiliesProgressIndependently(t *testing.T) {
-	h := newHarness(t)
-	a := h.family(1, 7)
-	b := h.family(2, 8)
-	idA := h.connected(a)
-	idB := h.connected(b)
-	readA := h.send(a, linuxsockapi.Request{Opcode: opRead, Socket: idA, Length: 10})
-	readB := h.send(b, linuxsockapi.Request{Opcode: opRead, Socket: idB, Length: 10})
-	nativeA, nativeB := h.take(NativeRead), h.take(NativeRead)
-	if nativeA.request.Endpoint != h.endpoint(idA) {
-		nativeA, nativeB = nativeB, nativeA
-	}
-	h.complete(nativeB, NativeCompletion{Data: []byte("b")})
-	h.reply(b, readB)
-	h.noReply(a, readA)
-	h.complete(nativeA, NativeCompletion{Result: NativeWouldBlock})
-	if reply := h.reply(a, readA); reply.Result != linuxsockapi.ResultWouldBlock {
-		t.Fatalf("a %d", reply.Result)
-	}
-}
-
-func TestReadsParkedOnReleaseAreBounded(t *testing.T) {
-	h := newHarness(t)
-	f := h.family(1, 7)
-	var sockets []uint64
-	for range linuxsockapi.RXSlots {
-		id := h.connected(f)
-		correlation := h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 10})
-		h.complete(h.take(NativeRead), NativeCompletion{Data: []byte("x")})
-		h.reply(f, correlation)
-		sockets = append(sockets, id)
-	}
-	// Every RX slot is with the kernel: new reads wait, up to FamilyParked.
-	fresh := h.connected(f)
-	var parked []uint64
-	for range FamilyParked {
-		parked = append(parked, h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: fresh, Length: 10}))
-	}
-	if reply := h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: fresh, Length: 10}); reply.Result != linuxsockapi.ResultWouldBlock {
-		t.Fatalf("read past the parking bound %d", reply.Result)
-	}
-	if !h.svc.CanReceive(f) {
-		t.Fatal("parked reads stopped the family's channel")
-	}
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: sockets[0], Slot: 0})
-	read := h.take(NativeRead)
-	h.complete(read, NativeCompletion{Result: NativeWouldBlock})
-	if reply := h.reply(f, parked[0]); reply.Result != linuxsockapi.ResultWouldBlock {
-		t.Fatalf("resumed read %d", reply.Result)
-	}
-}
-
 func TestNoAnswerWithoutNative(t *testing.T) {
 	h := newHarness(t)
 	f := h.family(1, 7)
@@ -307,5 +242,23 @@ func TestNoAnswerWithoutNative(t *testing.T) {
 	h.complete(h.take(NativeReady), NativeCompletion{Mask: MaskWritable})
 	if reply := h.reply(f, correlation); linuxsockapi.Ready(reply.Value) != linuxsockapi.ReadyOut|linuxsockapi.ReadyHangup {
 		t.Fatalf("query %+v", reply)
+	}
+}
+
+func TestFamiliesProgressIndependently(t *testing.T) {
+	h := newHarness(t)
+	a := h.family(1, 7)
+	b := h.family(2, 8)
+	idA := h.connected(a)
+	idB := h.connected(b)
+	h.complete(h.readAhead(h.endpoint(idB)), NativeCompletion{Data: []byte("b")})
+	if published := h.completions(b); len(published) != 1 || published[0].Socket != idB {
+		t.Fatalf("b %+v", published)
+	}
+	if len(h.completions(a)) != 0 {
+		t.Fatal("a got b's data")
+	}
+	if reply := h.call(a, linuxsockapi.Request{Opcode: opRead, Socket: idA}); reply.Result != linuxsockapi.ResultWouldBlock {
+		t.Fatalf("a %d", reply.Result)
 	}
 }

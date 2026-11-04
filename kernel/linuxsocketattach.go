@@ -11,7 +11,7 @@ import (
 	"goos/kernel/process"
 )
 
-// LinuxNetAttach gives a Linux family a new GLNXSOCK1 session (ADR 0210).
+// LinuxNetAttach gives a Linux family a new GLNXSOCK2 session (ADR 0210).
 // The caller names the family by a process handle with Write to its launch
 // root, the one PID 1 holds from the launch, and hands over a channel with
 // Read, Write, and Wait and a pool of linuxsockapi.PoolPages pages with

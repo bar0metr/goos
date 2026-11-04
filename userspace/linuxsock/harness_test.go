@@ -105,7 +105,7 @@ func (h *harness) family(token uint64, session uint32) int {
 func (h *harness) send(family int, request linuxsockapi.Request) uint64 {
 	h.t.Helper()
 	correlation := uint64(0)
-	if request.Opcode != linuxsockapi.OpRelease && request.Opcode != linuxsockapi.OpReadyChanged {
+	if request.Opcode != linuxsockapi.OpDoorbell && request.Opcode != linuxsockapi.OpReadyChanged {
 		h.correlation++
 		correlation = h.correlation
 	}

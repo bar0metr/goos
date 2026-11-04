@@ -36,11 +36,9 @@ func validRequests() []Request {
 		{Opcode: OpListen, Socket: socket, Length: 4096},
 		{Opcode: OpAccept, Socket: socket},
 		{Opcode: OpConnect, Socket: socket, Address: peer, Port: 80},
-		{Opcode: OpRead, Socket: socket, Length: SlotSize, Flags: FlagPeek},
-		{Opcode: OpRead, Socket: socket, Length: 1, Flags: FlagDiscard},
-		{Opcode: OpWrite, Socket: socket, Slot: TXSlots - 1, Length: SlotSize},
+		{Opcode: OpRead, Socket: socket},
 		{Opcode: OpWrite, Socket: socket},
-		{Opcode: OpSendTo, Socket: socket, Slot: 2, Length: 12, Address: peer, Port: 53},
+		{Opcode: OpSendTo, Socket: socket, Address: peer, Port: 53},
 		{Opcode: OpShutdown, Socket: socket, Length: 2},
 		{Opcode: OpGetSockName, Socket: socket},
 		{Opcode: OpGetPeerName, Socket: socket},
@@ -50,7 +48,7 @@ func validRequests() []Request {
 		{Opcode: OpQueryReady, Socket: socket},
 		{Opcode: OpClose, Socket: socket},
 		{Opcode: OpCancel, Value: 99},
-		{Opcode: OpRelease, Socket: socket, Slot: RXSlots - 1, Length: 10, Value: SlotSize - 10},
+		{Opcode: OpDoorbell},
 		{Opcode: OpReadyChanged},
 	}
 }
@@ -81,17 +79,17 @@ func TestRequestsRefuseUnusedFields(t *testing.T) {
 		{Opcode: OpOpen, Length: KindStream, Socket: socket},
 		{Opcode: OpBind, Socket: 0},
 		{Opcode: OpBind, Socket: MakeSocket(1, 1, MaxSockets)},
-		{Opcode: OpBind, Socket: socket, Flags: FlagPeek},
+		{Opcode: OpBind, Socket: socket, Flags: 1},
 		{Opcode: OpAccept, Socket: socket, Port: 1},
 		{Opcode: OpConnect, Socket: socket, Address: peer},
-		{Opcode: OpRead, Socket: socket},
-		{Opcode: OpRead, Socket: socket, Length: SlotSize + 1},
-		{Opcode: OpWrite, Socket: socket, Slot: TXSlots},
+		{Opcode: OpRead, Socket: socket, Length: 1},
+		{Opcode: OpRead, Socket: socket, Flags: 1},
+		{Opcode: OpWrite, Socket: socket, Slot: 1},
+		{Opcode: OpSendTo, Socket: socket, Address: peer, Port: 53, Length: 12},
 		{Opcode: OpShutdown, Socket: socket, Length: 3},
 		{Opcode: OpGetOption, Socket: socket, Value: 1},
 		{Opcode: OpCancel},
-		{Opcode: OpRelease, Socket: socket, Slot: RXSlots},
-		{Opcode: OpRelease, Socket: socket, Length: 10, Value: SlotSize - 9},
+		{Opcode: OpDoorbell, Socket: socket},
 		{Opcode: OpReadyChanged, Socket: socket},
 	}
 	for _, request := range bad {
@@ -148,12 +146,12 @@ func validReplies() []Reply {
 		{Opcode: OpAccept, Socket: socket, Result: ResultWouldBlock},
 		{Opcode: OpConnect, Socket: socket, Address: peer, Port: 80, Local: local, LocalPort: 50000},
 		{Opcode: OpConnect, Socket: socket, Result: ResultInProgress},
-		{Opcode: OpRead, Socket: socket, Slot: 3, Length: 100, Flags: FlagTruncated, Value: 200, Address: peer, Port: 53},
+		{Opcode: OpRead, Socket: socket},
 		{Opcode: OpRead, Socket: socket, Flags: FlagEOF},
 		{Opcode: OpRead, Socket: socket, Result: ResultWouldBlock},
-		{Opcode: OpWrite, Socket: socket, Slot: 1, Length: 4000},
-		{Opcode: OpWrite, Socket: socket, Slot: 1, Result: ResultClosed},
-		{Opcode: OpSendTo, Socket: socket, Slot: 0, Result: ResultMessageSize},
+		{Opcode: OpWrite, Socket: socket},
+		{Opcode: OpWrite, Socket: socket, Result: ResultClosed},
+		{Opcode: OpSendTo, Socket: socket, Result: ResultIsConnected},
 		{Opcode: OpShutdown, Socket: socket},
 		{Opcode: OpGetSockName, Socket: socket, Local: local, LocalPort: 1},
 		{Opcode: OpGetPeerName, Socket: socket, Address: peer, Port: 2},
@@ -183,17 +181,17 @@ func TestRepliesRoundTrip(t *testing.T) {
 
 func TestRepliesRefuseUnusedFields(t *testing.T) {
 	bad := []Reply{
-		{Opcode: OpRelease},
+		{Opcode: OpDoorbell},
 		{Opcode: OpReadyChanged},
 		{Opcode: OpOpen, Result: lastResult + 1, Socket: socket},
 		{Opcode: OpOpen, Result: ResultFamilyLimit, Socket: socket},
 		{Opcode: OpListen, Socket: socket, Value: 1},
 		{Opcode: OpAccept, Socket: socket, Value: 0},
 		{Opcode: OpAccept, Socket: socket, Result: ResultWouldBlock, Value: socket},
-		{Opcode: OpRead, Socket: socket, Result: ResultWouldBlock, Slot: 1},
-		{Opcode: OpRead, Socket: socket, Slot: RXSlots, Length: 1},
+		{Opcode: OpRead, Socket: socket, Result: ResultWouldBlock, Flags: FlagEOF},
+		{Opcode: OpRead, Socket: socket, Length: 1},
 		{Opcode: OpRead, Socket: socket, Slot: 1},
-		{Opcode: OpWrite, Socket: socket, Slot: TXSlots},
+		{Opcode: OpWrite, Socket: socket, Length: 1},
 		{Opcode: OpWrite, Socket: socket, Result: ResultClosed, Length: 1},
 		{Opcode: OpQueryReady, Socket: socket, Value: 1 << 10},
 		{Opcode: OpGetPendingError, Socket: socket, Value: uint64(lastResult) + 1},
@@ -240,11 +238,14 @@ func TestSocketIdentity(t *testing.T) {
 }
 
 func TestPoolLayout(t *testing.T) {
-	if TXOffset(0) != pageSize || RXOffset(0) != 9*pageSize || PoolPages != 17 || RXOffset(RXSlots-1)+SlotSize != PoolBytes {
+	if TXOffset(0) != 2*pageSize || RXOffset(0) != 34*pageSize || PoolPages != 66 || RXOffset(RXSlots-1)+SlotSize != PoolBytes {
 		t.Fatalf("layout tx %d rx %d pages %d", TXOffset(0), RXOffset(0), PoolPages)
 	}
-	if ReadinessBytes > pageSize {
-		t.Fatal("readiness page overflows")
+	if TXPage(1, 2) != uint32(TXOffset(1)/pageSize)+2 || RXPage(7, 3)+1 != PoolPages {
+		t.Fatal("slot pages")
+	}
+	if ReadinessBytes > pageSize || RingBytes > ServiceCountersOffset || ServiceCountersOffset+8*ServiceCounterCount > pageSize {
+		t.Fatal("a page overflows")
 	}
 }
 

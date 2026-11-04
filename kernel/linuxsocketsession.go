@@ -2,9 +2,9 @@
 
 package main
 
-// The kernel half of a family's GLNXSOCK1 session (ADR 0210): sending a
-// request and waiting for its reply, draining the session channel, reading
-// readiness from the pool, and sleeping on it.
+// The kernel half of a family's GLNXSOCK2 session (ADR 0210): sending a
+// request and waiting for its reply, draining the session channel and the
+// complete ring, reading readiness from the pool, and sleeping on it.
 //
 // Every socket call of a family runs under the family's lock, so the calls
 // of one family take turns. A call that waits leaves its continuation
@@ -26,9 +26,8 @@ package main
 //
 // Draining the channel files each reply with the request it answers. A
 // reply whose caller still waits for it stays for that caller; one whose
-// caller is gone is applied: unread RX bytes go back with Release and a
-// socket opened or accepted for nobody is closed. Anything that does not
-// fit the protocol fails the session.
+// caller is gone is applied: a socket opened or accepted for nobody is
+// closed. Anything that does not fit the protocol fails the session.
 
 import (
 	"goos/internal/capability"
@@ -72,6 +71,8 @@ type linuxSocketScratch struct {
 	reply       linuxsockapi.Reply
 	pumpMessage ipc.Message
 	pumpReply   linuxsockapi.Reply
+	bell        ipc.Message
+	pieces      [linuxsockapi.RXSlots]linuxcompat.RXPiece
 	waiters     [16]sched.TaskID
 	address     [linuxcompat.SockaddrInSize]byte
 	word        [4]byte
@@ -175,21 +176,18 @@ func (handler *linuxCallHandler) socketPending() linuxcompat.Pending {
 
 // socketExchange sends one request of the call and returns its reply, or
 // blocks until it comes. blocked means the caller returns linuxBlocked; the
-// call resumes in socketAwait. TX slot data, when the request carries some,
-// is filled by fill after the slot is known, and fill reports EFAULT when
-// it found nothing to copy.
+// call resumes in socketAwait.
 //
 //go:noinline
-func (handler *linuxCallHandler) socketExchange(call *socketCall, request *linuxsockapi.Request, fill socketFill) (linuxsockapi.Reply, linuxabi.Errno, bool) {
+func (handler *linuxCallHandler) socketExchange(call *socketCall, request *linuxsockapi.Request) (linuxsockapi.Reply, linuxabi.Errno, bool) {
 	local := thisCPU()
 	if !call.live {
 		return linuxsockapi.Reply{}, linuxabi.ENETRESET, false
 	}
-	var index int
 	var correlation uint64
 	for attempt := 0; ; attempt++ {
 		var status linuxcompat.RequestStatus
-		index, correlation, status = linuxcompat.BeginRequest(call.familyID, call.endpoint.Session, handler.task, request,
+		_, correlation, status = linuxcompat.BeginRequest(call.familyID, call.endpoint.Session, handler.task, request,
 			amd64.TimerTicks()+linuxVFSReplyTicks, true)
 		if status == linuxcompat.RequestStarted {
 			break
@@ -208,18 +206,6 @@ func (handler *linuxCallHandler) socketExchange(call *socketCall, request *linux
 		}
 		linuxcompat.SyscallContinuations.ResumeContext(handler.task)
 		linuxcompat.RemoveSocketWaiter(handler.task)
-	}
-	if request.Opcode == linuxsockapi.OpWrite || request.Opcode == linuxsockapi.OpSendTo {
-		request.Slot = uint8(index)
-		if fill.active {
-			copied, ok := handler.fillTX(call, uint8(index), fill)
-			if !ok {
-				woken := linuxcompat.CancelRequest(call.familyID, correlation, local.linuxSocket.waiters[:])
-				wakeSocketWaiters(local.linuxSocket.waiters[:woken])
-				return linuxsockapi.Reply{}, linuxabi.EFAULT, false
-			}
-			request.Length = uint32(copied)
-		}
 	}
 	if !linuxcompat.SyscallContinuations.Issue(handler.task, 1, correlation) ||
 		!linuxsockapi.EncodeRequest(request, correlation, &local.linuxSocket.message) {
@@ -287,45 +273,6 @@ func (handler *linuxCallHandler) socketAwait(call *socketCall) (linuxsockapi.Rep
 	return linuxsockapi.Reply{}, 0, true
 }
 
-// socketFill says where the bytes of a send come from: the user range at
-// address, or a vector, from byte position on, length bytes at most.
-type socketFill struct {
-	active   bool
-	address  uint64
-	wire     []byte
-	position uint64
-	length   uint64
-}
-
-// fillTX copies a send's bytes into TX slot index. It stops at the first
-// byte the program cannot read and reports false only when that is the
-// first.
-func (handler *linuxCallHandler) fillTX(call *socketCall, index uint8, fill socketFill) (uint64, bool) {
-	page, found := socketPoolPage(call.endpoint, uint32(linuxsockapi.TXOffset(index)/vm.PageSize))
-	if !found {
-		return 0, false
-	}
-	length := min(fill.length, uint64(linuxsockapi.SlotSize))
-	copied := uint64(0)
-	for copied < length {
-		address, room := fill.address+fill.position+copied, length-copied
-		if fill.wire != nil {
-			piece, remaining, ok := linuxcompat.VectorPiece(fill.wire, fill.position+copied)
-			if !ok {
-				break
-			}
-			address = piece
-			room = min(room, remaining)
-		}
-		room = min(room, vm.PageSize-address%vm.PageSize)
-		if !vm.CopyIn(handler.root, address, page[copied:copied+room]) {
-			break
-		}
-		copied += room
-	}
-	return copied, copied != 0 || length == 0
-}
-
 // socketPoolPage returns one page of a session's pool.
 func socketPoolPage(endpoint linuxcompat.NetEndpoint, index uint32) ([]byte, bool) {
 	object, found := sharedObjects.Find(endpoint.PoolObject)
@@ -357,7 +304,7 @@ func socketReadiness(call *socketCall) (linuxsockapi.Readiness, bool) {
 	case linuxsockapi.EntryBusy:
 		// The service is rewriting the entry, and may have been preempted
 		// doing it. Not ready yet: its notification follows the write.
-		return linuxsockapi.Readiness{Socket: call.socket.Identity}, true
+		state = linuxsockapi.Readiness{Socket: call.socket.Identity}
 	case linuxsockapi.EntryInvalid:
 		failSocketSession(call.familyID, call.endpoint, socketFailedReadiness)
 		return linuxsockapi.Readiness{}, false
@@ -365,7 +312,13 @@ func socketReadiness(call *socketCall) (linuxsockapi.Readiness, bool) {
 	if state.Socket != call.socket.Identity {
 		return linuxsockapi.Readiness{}, false
 	}
-	return state, true
+	// The entry first, then the ring: the service publishes a slot before
+	// the entry that counts it gone from netd, so whatever the entry no
+	// longer counts is on the ring by now.
+	if !drainSocketData(call.familyID, call.endpoint) {
+		return linuxsockapi.Readiness{}, false
+	}
+	return linuxcompat.MergeReadiness(call.familyID, call.endpoint.Session, call.socket.Datagram, state), true
 }
 
 // sleepOutcome is how a readiness sleep went.
@@ -477,7 +430,10 @@ func pumpSocketSession(familyID uint64, endpoint linuxcompat.NetEndpoint, self s
 		}
 	}
 	flushSocketSession(familyID, endpoint)
-	return true
+	if !releaseSocketOrphans(familyID, endpoint) {
+		return false
+	}
+	return drainSocketData(familyID, endpoint)
 }
 
 // socketOwnerWaits reports whether task's call still waits for correlation.
@@ -486,31 +442,16 @@ func socketOwnerWaits(task sched.TaskID, correlation uint64) bool {
 	return active && pending.Issued && pending.Correlation == correlation
 }
 
-// applySocketCleanup carries out what an abandoned reply left: a Release
-// for unread RX bytes, a Close for a socket nobody installs.
+// applySocketCleanup carries out what an abandoned reply left: a Close for
+// a socket nobody installs.
 func applySocketCleanup(familyID uint64, endpoint linuxcompat.NetEndpoint, cleanup linuxcompat.SocketCleanup) {
 	if cleanup.Close != 0 {
 		sendSocketClose(familyID, endpoint, cleanup.Close)
 	}
-	if cleanup.Release {
-		flushSocketSession(familyID, endpoint)
-	}
 }
 
-// flushSocketSession sends the Releases and Closes a full queue deferred.
+// flushSocketSession sends the Closes a full queue deferred.
 func flushSocketSession(familyID uint64, endpoint linuxcompat.NetEndpoint) {
-	local := thisCPU()
-	for attempt := 0; attempt < linuxsockapi.RXSlots; attempt++ {
-		release, slot, found := linuxcompat.PendingRelease(familyID)
-		if !found || !linuxsockapi.EncodeRequest(&release, 0, &local.linuxSocket.pumpMessage) {
-			break
-		}
-		if channelSend(endpoint.Channel, endpoint.Side, &local.linuxSocket.pumpMessage, nil, nil, nil) != ipc.StatusOK {
-			break
-		}
-		linuxcompat.SlotReleased(familyID, slot)
-		wakeIPCWaiters(endpoint.Channel, endpoint.Side^1, ipc.WaitMessage)
-	}
 	for attempt := 0; attempt < linuxcompat.MaxSockets; attempt++ {
 		identity, found := linuxcompat.TakeDeferredClose(familyID)
 		if !found {
@@ -526,6 +467,10 @@ func flushSocketSession(familyID uint64, endpoint linuxcompat.NetEndpoint) {
 // reply. One that cannot go now is deferred to the next drain.
 func sendSocketClose(familyID uint64, endpoint linuxcompat.NetEndpoint, identity uint64) bool {
 	local := thisCPU()
+	// The RX slots it had queued go back before the Close.
+	if rings, found := socketPoolPage(endpoint, linuxsockapi.RingPage); found && linuxcompat.RXDrop(familyID, endpoint.Session, rings, identity) {
+		ringSocketDoorbell(endpoint, rings)
+	}
 	request := linuxsockapi.Request{Opcode: linuxsockapi.OpClose, Socket: identity}
 	_, correlation, status := linuxcompat.BeginRequest(familyID, endpoint.Session, 0, &request, 0, false)
 	if status == linuxcompat.RequestFailed {
@@ -550,13 +495,6 @@ func sendSocketClose(familyID uint64, endpoint linuxcompat.NetEndpoint, identity
 	return true
 }
 
-// releaseRXSlot returns a held RX slot with the bytes the call left unread.
-func releaseRXSlot(familyID uint64, endpoint linuxcompat.NetEndpoint, slot uint8, unread uint32, offset uint32) {
-	if linuxcompat.ReleaseSlot(familyID, slot, unread, offset) {
-		flushSocketSession(familyID, endpoint)
-	}
-}
-
 // failSocketSession ends a session that broke: its channel side closes, so
 // the service sees the family go, and every waiter of the family on the
 // channel wakes to find its socket failed.
@@ -569,6 +507,7 @@ const (
 	socketFailedReceive                            // the channel failed or the service died
 	socketFailedMessage                            // a message the protocol does not allow
 	socketFailedHolder                             // the process holding the session ended
+	socketFailedRing                               // a ring entry broke the protocol
 )
 
 func failSocketSession(familyID uint64, endpoint linuxcompat.NetEndpoint, reason socketFailure) {

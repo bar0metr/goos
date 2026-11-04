@@ -9,7 +9,7 @@ import (
 )
 
 // The family network context (ADR 0210). One Linux family has at most one
-// GLNXSOCK1 session: a channel and a pool PID 1 granted its launch, or gave
+// GLNXSOCK2 session: a channel and a pool PID 1 granted its launch, or gave
 // it later with LinuxNetAttach. Their handles live in the handle table of
 // the process that received them, the launch root; every process and thread
 // of the family uses the session through this context, which caches the
@@ -17,15 +17,15 @@ import (
 //
 // The context also holds what the session's exchanges share: the
 // correlation counter, the requests in flight with the replies that came
-// for them, the RX slots the kernel holds, the Close requests still to
-// send, and the family's socket table. Each function here is one step under
+// for them, the TX and RX slots of the data plane (socketdata.go), the
+// Close requests still to send, and the family's socket table. Each function here is one step under
 // the tables lock; the kernel sends and receives messages between steps,
 // with the lock released.
 
 const (
-	// MaxSocketRequests bounds the requests one family has in flight. Each
-	// owns the TX slot with its index, so a Write always finds its slot.
-	MaxSocketRequests = linuxsockapi.TXSlots
+	// MaxSocketRequests bounds the control requests one family has in
+	// flight.
+	MaxSocketRequests = 8
 	// MaxSockets bounds the sockets of one family.
 	MaxSockets = linuxsockapi.MaxSockets
 	// socketWaiterSlots bounds the tasks that wait for a request slot.
@@ -52,6 +52,9 @@ type NetSocket struct {
 	ShutRead   bool
 	ShutWrite  bool
 	Connecting bool
+	// Connected: a stream connect returned success to the program; a later
+	// one is EISCONN.
+	Connected bool
 	// RecvTimeout and SendTimeout are SO_RCVTIMEO and SO_SNDTIMEO in
 	// nanoseconds; zero waits without limit.
 	RecvTimeout uint64
@@ -84,15 +87,6 @@ type socketRequest struct {
 	reply       linuxsockapi.Reply
 }
 
-type heldSlot struct {
-	socket uint64
-	length uint32
-	offset uint32
-	held   bool
-	// unsent marks a Release that could not be queued yet.
-	unsent bool
-}
-
 // NetEndpoint is what one exchange needs of the session.
 type NetEndpoint struct {
 	Session    uint32
@@ -113,7 +107,7 @@ type NetContext struct {
 	correlation  uint64
 	requests     [MaxSocketRequests]socketRequest
 	sockets      [MaxSockets]NetSocket
-	rx           [linuxsockapi.RXSlots]heldSlot
+	data         dataPlane
 	closes       [pendingCloseSlots]uint64
 	closeCount   uint8
 	waiters      [socketWaiterSlots]sched.TaskID
@@ -147,7 +141,7 @@ func (context *NetContext) reset(familyID uint64) {
 	context.correlation = firstSocketCorrelation - 1
 	clear(context.requests[:])
 	clear(context.sockets[:])
-	clear(context.rx[:])
+	context.data = dataPlane{}
 	clear(context.closes[:])
 	context.closeCount = 0
 	clear(context.waiters[:])
@@ -243,7 +237,7 @@ func AttachNet(familyID uint64, grant NetGrant, replaceLive bool) (old NetGrant,
 	context.channelGrant, context.poolGrant = grant.ChannelHandle, grant.PoolHandle
 	context.attached, context.failed = true, false
 	clear(context.requests[:])
-	clear(context.rx[:])
+	context.data = dataPlane{}
 	clear(context.closes[:])
 	context.closeCount = 0
 	noteNetHeld(&netDiagnostics.Attaches)
@@ -312,6 +306,7 @@ func NewSocket(familyID uint64, session uint32, identity uint64, datagram bool) 
 			generation = 1
 		}
 		*socket = NetSocket{Identity: identity, Session: session, Datagram: datagram, generation: generation, used: true}
+		context.data.forgetAccepted(identity)
 		noteNetHeld(&netDiagnostics.Opens)
 		return socketObject(contextIndex, slot, generation), true
 	}
@@ -371,6 +366,7 @@ func StoreSocket(object uint64, socket NetSocket) bool {
 	}
 	entry.Listening, entry.ReuseAddr, entry.ShutRead, entry.ShutWrite = socket.Listening, socket.ReuseAddr, socket.ShutRead, socket.ShutWrite
 	entry.Connecting, entry.RecvTimeout, entry.SendTimeout = socket.Connecting, socket.RecvTimeout, socket.SendTimeout
+	entry.Connected = socket.Connected
 	return true
 }
 
@@ -514,14 +510,10 @@ func CancelRequest(familyID uint64, correlation uint64, waiters []sched.TaskID) 
 	return context.freeHeld(request, waiters)
 }
 
-// SocketCleanup is what a reply nobody takes leaves to do: return an RX
-// slot, and close a socket the service opened or accepted for nobody.
+// SocketCleanup is what a reply nobody takes leaves to do: close a socket
+// the service opened or accepted for nobody.
 type SocketCleanup struct {
-	Release      bool
-	ReleaseSlot  uint8
-	ReleaseOwner uint64
-	ReleaseBytes uint32
-	Close        uint64
+	Close uint64
 }
 
 // MessageVerdict classifies one message from the session channel.
@@ -582,28 +574,11 @@ func ClassifySocketMessage(familyID uint64, session uint32, message *ipc.Message
 		if reply.Result == linuxsockapi.ResultOK && (reply.Value == reply.Socket || context.knownIdentityHeld(reply.Value)) {
 			return MessageMalformed, 0, 0
 		}
-	case linuxsockapi.OpRead:
-		if reply.Result == linuxsockapi.ResultOK && reply.Length != 0 && request.flags&linuxsockapi.FlagDiscard == 0 && (int(reply.Slot) >= len(context.rx) || context.rx[reply.Slot].held) {
-			return MessageMalformed, 0, 0
-		}
-	case linuxsockapi.OpWrite, linuxsockapi.OpSendTo:
-		if int(reply.Slot) != requestIndex(context, request) {
-			return MessageMalformed, 0, 0
-		}
 	}
 	if request.state == requestAbandoned {
 		return MessageReply, 0, correlation
 	}
 	return MessageReply, request.task, correlation
-}
-
-func requestIndex(context *NetContext, request *socketRequest) int {
-	for index := 0; index < MaxSocketRequests; index++ {
-		if &context.requests[index] == request {
-			return index
-		}
-	}
-	return -1
 }
 
 func (context *NetContext) knownIdentityHeld(identity uint64) bool {
@@ -616,7 +591,7 @@ func (context *NetContext) knownIdentityHeld(identity uint64) bool {
 }
 
 // DeliverReply stores a classified reply for its owner, which takes it with
-// TakeReply. A Read reply's RX slot is the kernel's from here on.
+// TakeReply.
 func DeliverReply(familyID uint64, correlation uint64, reply *linuxsockapi.Reply) bool {
 	tablesLock.Lock()
 	defer tablesLock.Unlock()
@@ -628,23 +603,16 @@ func DeliverReply(familyID uint64, correlation uint64, reply *linuxsockapi.Reply
 	if !ok || request.state != requestSent {
 		return false
 	}
-	if request.flags&linuxsockapi.FlagDiscard == 0 {
-		context.holdReplySlotHeld(reply)
-	}
 	request.reply, request.state = *reply, requestReplied
+	if reply.Opcode == linuxsockapi.OpAccept && reply.Result == linuxsockapi.ResultOK {
+		context.data.noteAccepted(reply.Value)
+	}
 	return true
 }
 
-func (context *NetContext) holdReplySlotHeld(reply *linuxsockapi.Reply) {
-	if reply.Opcode == linuxsockapi.OpRead && reply.Result == linuxsockapi.ResultOK && reply.Length != 0 && int(reply.Slot) < len(context.rx) {
-		context.rx[reply.Slot] = heldSlot{socket: reply.Socket, held: true}
-	}
-}
-
 // AbandonReply applies a classified reply whose owner is gone and frees its
-// request. cleanup says what to send: the reply's RX bytes go back with
-// Release, which makes the service return them first, and a socket the reply
-// created for nobody is closed.
+// request. cleanup says what to send: a socket the reply created for nobody
+// is closed.
 func AbandonReply(familyID uint64, correlation uint64, reply *linuxsockapi.Reply, waiters []sched.TaskID) (cleanup SocketCleanup, woken int) {
 	tablesLock.Lock()
 	defer tablesLock.Unlock()
@@ -656,16 +624,12 @@ func AbandonReply(familyID uint64, correlation uint64, reply *linuxsockapi.Reply
 	if !ok {
 		return SocketCleanup{}, 0
 	}
-	cleanup = abandonedCleanup(reply, request.flags)
-	if cleanup.Release && int(cleanup.ReleaseSlot) < len(context.rx) {
-		context.rx[cleanup.ReleaseSlot] = heldSlot{socket: reply.Socket, length: reply.Length, held: true, unsent: true}
-	}
+	cleanup = abandonedCleanup(reply)
 	noteNetHeld(&netDiagnostics.Abandoned)
 	return cleanup, context.freeHeld(request, waiters)
 }
 
-// A Discard read consumes without copying and lends no slot.
-func abandonedCleanup(reply *linuxsockapi.Reply, flags uint8) SocketCleanup {
+func abandonedCleanup(reply *linuxsockapi.Reply) SocketCleanup {
 	if reply.Result != linuxsockapi.ResultOK {
 		return SocketCleanup{}
 	}
@@ -674,10 +638,6 @@ func abandonedCleanup(reply *linuxsockapi.Reply, flags uint8) SocketCleanup {
 		return SocketCleanup{Close: reply.Socket}
 	case linuxsockapi.OpAccept:
 		return SocketCleanup{Close: reply.Value}
-	case linuxsockapi.OpRead:
-		if reply.Length != 0 && flags&linuxsockapi.FlagDiscard == 0 {
-			return SocketCleanup{Release: true, ReleaseSlot: reply.Slot, ReleaseOwner: reply.Socket, ReleaseBytes: reply.Length}
-		}
 	}
 	return SocketCleanup{}
 }
@@ -733,10 +693,7 @@ func AbandonRequest(familyID uint64, correlation uint64, waiters []sched.TaskID)
 	if request.state != requestReplied {
 		return SocketCleanup{}, 0
 	}
-	cleanup = abandonedCleanup(&request.reply, request.flags)
-	if cleanup.Release && int(cleanup.ReleaseSlot) < len(context.rx) {
-		context.rx[cleanup.ReleaseSlot] = heldSlot{socket: request.reply.Socket, length: request.reply.Length, held: true, unsent: true}
-	}
+	cleanup = abandonedCleanup(&request.reply)
 	noteNetHeld(&netDiagnostics.Abandoned)
 	return cleanup, context.freeHeld(request, waiters)
 }
@@ -758,48 +715,6 @@ func AbandonTask(task sched.TaskID) {
 			}
 		}
 	}
-}
-
-// ReleaseSlot records how much of a held RX slot the kernel left unread.
-// The caller sends the Release and confirms it with SlotReleased; one that
-// cannot be queued stays recorded for the next flush.
-func ReleaseSlot(familyID uint64, slot uint8, unread uint32, offset uint32) bool {
-	tablesLock.Lock()
-	defer tablesLock.Unlock()
-	context, _, found := netContextHeld(familyID)
-	if !found || int(slot) >= len(context.rx) || !context.rx[slot].held {
-		return false
-	}
-	held := &context.rx[slot]
-	held.length, held.offset, held.unsent = unread, offset, true
-	return true
-}
-
-// SlotReleased ends the kernel's hold of an RX slot whose Release is queued.
-func SlotReleased(familyID uint64, slot uint8) {
-	tablesLock.Lock()
-	defer tablesLock.Unlock()
-	if context, _, found := netContextHeld(familyID); found && int(slot) < len(context.rx) {
-		context.rx[slot] = heldSlot{}
-	}
-}
-
-// PendingRelease returns the first RX slot whose Release is still to send.
-func PendingRelease(familyID uint64) (request linuxsockapi.Request, slot uint8, found bool) {
-	tablesLock.Lock()
-	defer tablesLock.Unlock()
-	context, _, ok := netContextHeld(familyID)
-	if !ok {
-		return linuxsockapi.Request{}, 0, false
-	}
-	for index := 0; index < len(context.rx); index++ {
-		held := &context.rx[index]
-		if held.held && held.unsent {
-			return linuxsockapi.Request{Opcode: linuxsockapi.OpRelease, Socket: held.socket, Slot: uint8(index),
-				Length: held.length, Value: uint64(held.offset)}, uint8(index), true
-		}
-	}
-	return linuxsockapi.Request{}, 0, false
 }
 
 // DeferClose records a Close the kernel could not send now.
@@ -848,6 +763,13 @@ type NetDiagnostics struct {
 	Abandoned       uint64
 	Requests        uint64
 	ReplyTimeouts   uint64
+	// The data plane: TX slots committed, RX slots received, Doorbell
+	// notifications sent, bytes copied between Linux buffers and the pool.
+	RingTX        uint64
+	RingRX        uint64
+	Doorbells     uint64
+	BytesToPool   uint64
+	BytesFromPool uint64
 }
 
 var netDiagnostics NetDiagnostics
@@ -882,6 +804,9 @@ const (
 	NetInterrupted
 	NetRequests
 	NetReplyTimeouts
+	NetDoorbells
+	NetBytesToPool
+	NetBytesFromPool
 )
 
 // NoteNet adds amount to one counter.
@@ -911,6 +836,12 @@ func NoteNet(counter NetCounter, amount uint64) {
 		target = &netDiagnostics.Requests
 	case NetReplyTimeouts:
 		target = &netDiagnostics.ReplyTimeouts
+	case NetDoorbells:
+		target = &netDiagnostics.Doorbells
+	case NetBytesToPool:
+		target = &netDiagnostics.BytesToPool
+	case NetBytesFromPool:
+		target = &netDiagnostics.BytesFromPool
 	}
 	if target != nil {
 		addNet(target, amount)

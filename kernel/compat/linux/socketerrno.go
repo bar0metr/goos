@@ -5,7 +5,7 @@ import (
 	"goos/userspace/linuxsockapi"
 )
 
-// SocketCall is the Linux call a GLNXSOCK1 result answers. Some results
+// SocketCall is the Linux call a GLNXSOCK2 result answers. Some results
 // mean different things to different calls, as they do on Linux.
 type SocketCall uint8
 
@@ -25,7 +25,7 @@ const (
 	SocketCallOption
 )
 
-// SocketErrno is the one translation of a GLNXSOCK1 result into a Linux
+// SocketErrno is the one translation of a GLNXSOCK2 result into a Linux
 // errno. Every result has an entry; none falls back to EIO.
 //
 //	OK                  0

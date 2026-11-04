@@ -85,8 +85,8 @@ func TestBackendLossFailsSocketsAndRecovers(t *testing.T) {
 	f := h.family(1, 7)
 	stream := h.connected(f)
 	datagram := boundDatagram(h, f)
-	read := h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: stream, Length: 10})
-	nativeRead := h.take(NativeRead)
+	read := h.send(f, linuxsockapi.Request{Opcode: linuxsockapi.OpQueryReady, Socket: stream})
+	nativeRead := h.readAhead(h.endpoint(stream))
 	oldGeneration := h.generation[TCP]
 	kernelScan(h, f)
 	h.svc.BackendDown(TCP, oldGeneration)
@@ -107,7 +107,7 @@ func TestBackendLossFailsSocketsAndRecovers(t *testing.T) {
 	if reply := h.call(f, linuxsockapi.Request{Opcode: linuxsockapi.OpGetPendingError, Socket: stream}); reply.Value != uint64(linuxsockapi.ResultServiceLost) {
 		t.Fatalf("SO_ERROR %+v", reply)
 	}
-	if reply := h.call(f, linuxsockapi.Request{Opcode: opWrite, Socket: stream, Slot: 0, Length: 1}); reply.Result != linuxsockapi.ResultServiceLost {
+	if reply := h.call(f, linuxsockapi.Request{Opcode: opWrite, Socket: stream}); reply.Result != linuxsockapi.ResultServiceLost {
 		t.Fatalf("write on dead %d", reply.Result)
 	}
 	if reply := h.call(f, linuxsockapi.Request{Opcode: opOpen, Length: linuxsockapi.KindStream}); reply.Result != linuxsockapi.ResultDown {
@@ -133,7 +133,7 @@ func TestBackendReplacedTakesOldDown(t *testing.T) {
 	f := h.family(1, 7)
 	id := boundDatagram(h, f)
 	h.up(UDP)
-	if reply := h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 1}); reply.Result != linuxsockapi.ResultServiceLost {
+	if reply := h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: id}); reply.Result != linuxsockapi.ResultServiceLost {
 		t.Fatalf("read after replacement %d", reply.Result)
 	}
 }
@@ -146,9 +146,8 @@ func TestUnsupportedWaitLeavesSocketUsable(t *testing.T) {
 	if h.has(NativeWaitReady) {
 		t.Fatal("wait submitted")
 	}
-	correlation := h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 4})
-	h.complete(h.take(NativeRead), NativeCompletion{Data: []byte("ok")})
-	if reply := h.reply(f, correlation); reply.Length != 2 {
-		t.Fatalf("read %+v", reply)
+	h.complete(h.readAhead(h.endpoint(id)), NativeCompletion{Data: []byte("ok")})
+	if published := h.completions(f); len(published) != 1 || published[0].Length != 2 {
+		t.Fatalf("read ahead %+v", published)
 	}
 }

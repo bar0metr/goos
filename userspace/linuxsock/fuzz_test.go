@@ -15,7 +15,11 @@ func FuzzService(f *testing.F) {
 	f.Add([]byte{5, 0, 0, 0, 0, 0, 0, 0, 1}, []byte{3, 3, 3, 3})
 	f.Fuzz(func(t *testing.T, script []byte, answers []byte) {
 		h := newHarness(t)
+		if len(answers) > 0 && answers[0]&1 != 0 {
+			h.svc.SetWarm(int(answers[0]) % 4)
+		}
 		family := h.family(1, 7)
+		rings := h.rings(family)
 		for len(script) >= 8 && h.svc.Family(family) {
 			step := script[:8]
 			script = script[8:]
@@ -33,8 +37,17 @@ func FuzzService(f *testing.F) {
 			if request.Socket == 0 && request.Opcode != linuxsockapi.OpOpen && request.Opcode != linuxsockapi.OpCancel {
 				request.Socket = linuxsockapi.MakeSocket(7, 1, int(step[5]%32))
 			}
+			// Some steps commit or hand back slots on the submit ring instead.
+			if step[0]%23 == 22 {
+				entry := linuxsockapi.RingEntry{Kind: linuxsockapi.RingKind(step[1]%2 + 1), Slot: step[2] % 9, Length: uint32(step[3]) * 70,
+					Socket: request.Socket, Generation: uint32(step[6]), Flags: step[7] & 1}
+				if entry.Kind == linuxsockapi.RingRelease {
+					entry.Length, entry.Flags, entry.Socket = 0, 0, 0
+				}
+				linuxsockapi.PushSubmit(rings, &entry)
+			}
 			correlation := uint64(step[0]) + 1
-			if request.Opcode == linuxsockapi.OpRelease || request.Opcode == linuxsockapi.OpReadyChanged {
+			if request.Opcode == linuxsockapi.OpDoorbell || request.Opcode == linuxsockapi.OpReadyChanged {
 				correlation = 0
 			}
 			var message ipc.Message
@@ -63,6 +76,12 @@ func FuzzService(f *testing.F) {
 			h.svc.Flush(family)
 		}
 		h.svc.RemoveFamily(family)
+		// netd answers whatever is still parked.
+		for len(h.backend.log) > 0 {
+			entry := h.backend.log[0]
+			h.backend.log = h.backend.log[1:]
+			h.complete(entry, NativeCompletion{Result: NativeClosed})
+		}
 		h.svc.BackendDown(TCP, h.generation[TCP])
 		h.svc.BackendDown(UDP, h.generation[UDP])
 		for index := range h.svc.sockets {

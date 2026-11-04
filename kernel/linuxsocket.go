@@ -105,7 +105,7 @@ func (handler *linuxCallHandler) socketCreate(request linuxcompat.Request) linux
 		if kind.Datagram {
 			message.Length = linuxsockapi.KindDatagram
 		}
-		reply, errno, blocked = handler.socketExchange(call, message, socketFill{})
+		reply, errno, blocked = handler.socketExchange(call, message)
 	}
 	if blocked {
 		return linuxBlocked
@@ -240,7 +240,7 @@ func (handler *linuxCallHandler) socketControl(request linuxcompat.Request) linu
 				return linuxErrno(errno)
 			}
 		}
-		reply, errno, blocked = handler.socketExchange(call, message, socketFill{})
+		reply, errno, blocked = handler.socketExchange(call, message)
 	}
 	if blocked {
 		return linuxBlocked
@@ -364,6 +364,10 @@ func (handler *linuxCallHandler) socketConnect(request linuxcompat.Request) linu
 		return linuxErrno(errno)
 	}
 	timeout := call.socket.SendTimeout
+	if !resumed && call.socket.Connected && !call.socket.Datagram {
+		handler.socketEnd()
+		return linuxErrno(linuxabi.EISCONN)
+	}
 	if !resumed && call.socket.Connecting {
 		// A connect already under way: once it finished, this one reports
 		// its outcome, 0 or the error, and a later one EISCONN; before
@@ -390,16 +394,28 @@ func (handler *linuxCallHandler) socketConnect(request linuxcompat.Request) linu
 					return result
 				}
 			}
-			if state, live := socketReadiness(call); live && state.Ready&(linuxsockapi.ReadyOut|linuxsockapi.ReadyError|linuxsockapi.ReadyHangup) == 0 {
+			state, live := socketReadiness(call)
+			if live && state.Ready&(linuxsockapi.ReadyOut|linuxsockapi.ReadyError|linuxsockapi.ReadyHangup) == 0 {
 				if result, done := handler.socketWait(call, linuxsockapi.ReadyOut, pending.Note, timeout, 0); done {
 					return result
 				}
+				state, live = socketReadiness(call)
 			}
-			reply, errno, blocked = handler.socketExchange(call, socketRequestFor(linuxsockapi.OpGetPendingError, call.socket.Identity), socketFill{})
+			if live && state.State&linuxsockapi.EntrySend != 0 && state.Error == linuxsockapi.ResultOK && state.Ready&linuxsockapi.ReadyError == 0 {
+				// The entry shows the stream established with no error, all
+				// SO_ERROR would say.
+				handler.socketEnd()
+				socket := call.socket
+				socket.Connecting, socket.Connected = false, true
+				linuxcompat.StoreSocket(call.object, socket)
+				linuxcompat.NoteNet(linuxcompat.NetConnects, 1)
+				return linuxcompat.Result{}
+			}
+			reply, errno, blocked = handler.socketExchange(call, socketRequestFor(linuxsockapi.OpGetPendingError, call.socket.Identity))
 		default:
 			address, unspecified, errno := handler.socketAddressIn(request.Arguments[1], request.Arguments[2], linuxcompat.AddressConnect)
 			if errno == 0 && unspecified {
-				// Dissolving an association has no GLNXSOCK1 operation.
+				// Dissolving an association has no GLNXSOCK2 operation.
 				errno = linuxabi.EOPNOTSUPP
 			}
 			if errno == 0 && address.Port == 0 {
@@ -419,7 +435,7 @@ func (handler *linuxCallHandler) socketConnect(request linuxcompat.Request) linu
 			}
 			message := socketRequestFor(linuxsockapi.OpConnect, call.socket.Identity)
 			message.Address, message.Port = address.Address, address.Port
-			reply, errno, blocked = handler.socketExchange(call, message, socketFill{})
+			reply, errno, blocked = handler.socketExchange(call, message)
 		}
 		if blocked {
 			return linuxBlocked
@@ -437,6 +453,8 @@ func (handler *linuxCallHandler) socketConnect(request linuxcompat.Request) linu
 			if outcome := linuxsockapi.Result(reply.Value); outcome != linuxsockapi.ResultOK {
 				return linuxErrno(linuxcompat.SocketErrno(outcome, linuxcompat.SocketCallConnect))
 			}
+			socket.Connected = !socket.Datagram
+			linuxcompat.StoreSocket(call.object, socket)
 			linuxcompat.NoteNet(linuxcompat.NetConnects, 1)
 			return linuxcompat.Result{}
 		case reply.Result == linuxsockapi.ResultInProgress && !call.socket.Datagram:
@@ -455,6 +473,10 @@ func (handler *linuxCallHandler) socketConnect(request linuxcompat.Request) linu
 		linuxcompat.StoreSocket(call.object, socket)
 		if reply.Result != linuxsockapi.ResultOK {
 			return linuxErrno(linuxcompat.SocketErrno(reply.Result, linuxcompat.SocketCallConnect))
+		}
+		if !socket.Datagram {
+			socket.Connected = true
+			linuxcompat.StoreSocket(call.object, socket)
 		}
 		linuxcompat.NoteNet(linuxcompat.NetConnects, 1)
 		return linuxcompat.Result{}
@@ -517,7 +539,7 @@ func (handler *linuxCallHandler) socketAccept(request linuxcompat.Request) linux
 				}
 				resumed = true
 			}
-			reply, errno, blocked = handler.socketExchange(call, socketRequestFor(linuxsockapi.OpAccept, call.socket.Identity), socketFill{})
+			reply, errno, blocked = handler.socketExchange(call, socketRequestFor(linuxsockapi.OpAccept, call.socket.Identity))
 		}
 		if blocked {
 			return linuxBlocked
@@ -614,7 +636,7 @@ func (handler *linuxCallHandler) socketOption(request linuxcompat.Request) linux
 				return linuxErrno(errno)
 			}
 		}
-		reply, errno, blocked = handler.socketExchange(call, message, socketFill{})
+		reply, errno, blocked = handler.socketExchange(call, message)
 	}
 	if blocked {
 		return linuxBlocked

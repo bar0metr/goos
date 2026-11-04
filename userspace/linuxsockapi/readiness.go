@@ -20,6 +20,7 @@ import (
 //	  16  Ready mask
 //	  20  readable bytes, or the next datagram's length
 //	  24  pending error, a Result
+//	  28  data-plane state, Entry* bits
 //
 // An entry is read by copying it between two loads of its sequence; an odd
 // or changed sequence means the copy raced a write and is taken again.
@@ -35,16 +36,34 @@ const (
 	offEntryReady    = 16
 	offEntryReadable = 20
 	offEntryError    = 24
+	offEntryState    = 28
 	ReadinessBytes   = headerSize + MaxSockets*entrySize
 )
 
-// Readiness is one socket's published state.
+// Readiness is one socket's published state. Ready and Readable describe
+// what linuxsockd and netd hold, not the RX slots the kernel holds already;
+// the kernel adds those.
 type Readiness struct {
 	Socket   uint64
 	Ready    Ready
 	Readable uint32
 	Error    Result
+	State    EntryState
 }
+
+// EntryState tells the kernel which sends it may commit to TX slots.
+type EntryState uint32
+
+const (
+	// EntrySend: the socket takes sends through TX slots now: a connected
+	// stream with its write side open and no pending error, or a datagram
+	// socket with a port.
+	EntrySend EntryState = 1 << iota
+	// EntryConnected: a datagram socket has a fixed peer, so a send naming
+	// an address asks with OpSendTo first.
+	EntryConnected
+	allStates = EntrySend | EntryConnected
+)
 
 func entryOffset(index int) int { return headerSize + index*entrySize }
 
@@ -70,6 +89,7 @@ func Publish(page []byte, index int, state Readiness) {
 	atomic.StoreUint32(word(page, base+offEntryReady), uint32(state.Ready&allReady))
 	atomic.StoreUint32(word(page, base+offEntryReadable), state.Readable)
 	atomic.StoreUint32(word(page, base+offEntryError), uint32(state.Error))
+	atomic.StoreUint32(word(page, base+offEntryState), uint32(state.State&allStates))
 	atomic.StoreUint32(sequence, start+1)
 }
 
@@ -106,11 +126,12 @@ func ReadEntry(page []byte, index int, tries int) (Readiness, EntryStatus) {
 			Ready:    Ready(atomic.LoadUint32(word(page, base+offEntryReady))),
 			Readable: atomic.LoadUint32(word(page, base+offEntryReadable)),
 			Error:    Result(atomic.LoadUint32(word(page, base+offEntryError))),
+			State:    EntryState(atomic.LoadUint32(word(page, base+offEntryState))),
 		}
 		if atomic.LoadUint32(sequence) != before {
 			continue
 		}
-		if state.Ready&^allReady != 0 || state.Error > lastResult {
+		if state.Ready&^allReady != 0 || state.Error > lastResult || state.State&^allStates != 0 {
 			return Readiness{}, EntryInvalid
 		}
 		return state, EntrySettled

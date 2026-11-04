@@ -140,6 +140,9 @@ type NativeRequest struct {
 	Length   uint32
 	Mask     NativeMask
 	Data     []byte
+	// Offset is a stream write's position: the bytes the endpoint took
+	// before the write's first one, modulo 2^32.
+	Offset uint32
 }
 
 // NativeCompletion is the answer to one NativeRequest. Data is valid only
@@ -193,7 +196,7 @@ type Transport interface {
 	Drop(family int)
 }
 
-// nativeResult maps a native outcome onto GLNXSOCK1.
+// nativeResult maps a native outcome onto GLNXSOCK2.
 func nativeResult(result NativeResult) linuxsockapi.Result {
 	switch result {
 	case NativeOK, NativeEOF:

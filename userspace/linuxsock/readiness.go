@@ -20,11 +20,18 @@ func (s *Service) readiness(sock *socket) linuxsockapi.Readiness {
 	var readable uint32
 	m := sock.mask
 	const in, out, hangup, readHangup = linuxsockapi.ReadyIn, linuxsockapi.ReadyOut, linuxsockapi.ReadyHangup, linuxsockapi.ReadyReadHangup
+	var state linuxsockapi.EntryState
 	switch {
 	case sock.dead:
 		ready = in | out | hangup | readHangup
 	case !sock.stream:
 		ready = out
+		if !sock.writeShut && (sock.state == stateBound || sock.state == stateConnected) {
+			state |= linuxsockapi.EntrySend
+		}
+		if sock.state == stateConnected {
+			state |= linuxsockapi.EntryConnected
+		}
 		if m&MaskReadable != 0 {
 			ready |= in
 			readable = sock.readable
@@ -36,7 +43,7 @@ func (s *Service) readiness(sock *socket) linuxsockapi.Readiness {
 			ready |= hangup
 		}
 	case sock.state == stateListening:
-		if m&MaskAcceptable != 0 && !sock.readShut {
+		if (m&MaskAcceptable != 0 || sock.acceptLen != 0) && !sock.readShut {
 			ready = in
 		}
 	case sock.state == stateUnbound, sock.state == stateBound:
@@ -45,20 +52,25 @@ func (s *Service) readiness(sock *socket) linuxsockapi.Readiness {
 	case sock.state == stateFailed:
 		ready = in | out | hangup | readHangup
 	default:
+		// The bytes netd holds; the kernel adds the RX slots it has. Writes
+		// go to TX slots, so a connected stream is writable whenever the
+		// kernel has slot credit, which only the kernel knows.
 		readClosed := sock.readShut || m&MaskReceiveEOF != 0
 		writeClosed := sock.writeShut || m&MaskWriteClosed != 0
-		readable = uint32(sock.retainedLength)
 		if m&MaskReadable != 0 {
-			readable += sock.readable
+			readable = sock.readable
 		}
-		if readable != 0 || readClosed || m&MaskHungUp != 0 {
+		// End of file counts once netd has nothing more: the read that
+		// reported it came after every byte, which went to the ring first.
+		if readable != 0 || sock.readShut || sock.eof || m&MaskReceiveEOF != 0 && sock.readsOut == 0 || m&MaskHungUp != 0 {
 			ready |= in
 		}
 		if readClosed {
 			ready |= readHangup
 		}
-		if m&MaskWritable != 0 || writeClosed || m&MaskHungUp != 0 {
-			ready |= out
+		ready |= out
+		if !writeClosed && m&MaskHungUp == 0 && sock.pending == linuxsockapi.ResultOK && !sock.fetching && !sock.txDropped {
+			state |= linuxsockapi.EntrySend
 		}
 		if readClosed && writeClosed || m&MaskHungUp != 0 {
 			ready |= hangup
@@ -67,7 +79,7 @@ func (s *Service) readiness(sock *socket) linuxsockapi.Readiness {
 	if sock.pending != linuxsockapi.ResultOK || sock.fetching || m&MaskPendingError != 0 && sock.stream && !sock.dead {
 		ready |= linuxsockapi.ReadyError
 	}
-	return linuxsockapi.Readiness{Socket: sock.id, Ready: ready, Readable: readable, Error: sock.pending}
+	return linuxsockapi.Readiness{Socket: sock.id, Ready: ready, Readable: readable, Error: sock.pending, State: state}
 }
 
 // publish writes a socket's entry when it changed and owes the family a
@@ -77,7 +89,7 @@ func (s *Service) publish(global int) {
 		return
 	}
 	sock := &s.sockets[global]
-	if !sock.used || sock.opening {
+	if !sock.used || sock.opening || sock.closing {
 		return
 	}
 	state := s.readiness(sock)
@@ -97,6 +109,9 @@ func (s *Service) publish(global int) {
 // stays owed and goes from Flush.
 func (s *Service) notify(index int) {
 	f := &s.families[index]
+	if f.rings != nil {
+		linuxsockapi.StoreServiceCounters(f.rings, &f.stats)
+	}
 	if !f.notify {
 		return
 	}
@@ -156,6 +171,9 @@ func (s *Service) waited(global int, serial uint32, c *NativeCompletion) {
 func (s *Service) observe(global int, mask NativeMask, readable uint32) {
 	sock := &s.sockets[global]
 	sock.mask, sock.readable = mask, readable
+	if mask&MaskWritable != 0 && sock.txBlocked {
+		sock.txBlocked = false
+	}
 	if sock.stream && sock.state == stateConnecting {
 		switch {
 		case mask&MaskConnected != 0:
@@ -169,4 +187,5 @@ func (s *Service) observe(global int, mask NativeMask, readable uint32) {
 		s.fetchError(global)
 	}
 	s.publish(global)
+	s.kick(global)
 }

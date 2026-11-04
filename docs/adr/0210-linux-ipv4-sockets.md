@@ -28,10 +28,10 @@ Linux program
    | socket syscalls
    v
 kernel/compat/linux  -- descriptors, errno, signals, poll/select, sockaddr
-   | GLNXSOCK1, one session per Linux family
+   | GLNXSOCK2, one session per Linux family
    v
 linuxsockd  -- Linux socket objects, readiness, options
-   | GTCP version 2          | GUDP version 2
+   | GTCP version 3          | GUDP version 2
    v                         v
 netd  -- TCBs, UDP endpoints, bind conflicts, routing, ARP
 ```
@@ -45,7 +45,7 @@ launch authority.
 
 ### Family sessions
 
-A family session is one channel and one 17-page pool
+A family session is one channel and one 66-page pool
 (`userspace/linuxsockapi`). PID 1 creates both for every Linux launch while
 `linuxsockd` is running and grants them to the launch as two more roles,
 after `vfs` and the optional `linux-tty`:
@@ -61,29 +61,69 @@ keeps both roles for the family, not for one process: `fork`, threads and
 `execve` share the session, and an independent launch has its own. A launch
 without the roles runs; `socket(AF_INET, ...)` fails with `ENETDOWN`.
 
-The pool is a readiness page, eight TX slots the kernel writes and eight RX
-slots the service writes, 4096 bytes each. A slot changes owner only by
-message, as in GUDP1: Write and SendTo lend a TX slot until their reply; a
-Read reply with data lends an RX slot until the kernel's Release
-notification. No message carries an address.
+The pool is a readiness page, a ring page, eight TX slots and eight RX
+slots of 16 KiB each. The channel carries the control plane and the
+doorbells; payload never travels in a message, and no message carries an
+address.
 
-### GLNXSOCK1
+### Data plane
+
+A Linux send copies the program's bytes into TX slots the kernel owns and
+commits each slot on the submit ring of the ring page: slot, length, socket,
+a generation, and a datagram's destination. The call returns once its
+slots are committed. `linuxsockd` queues the slots per socket in ring order
+and drains each queue into `netd`, then hands every slot back on the
+complete ring with the generation the commit gave it. One socket holds at
+most four TX slots, 64 KiB, so a stream leaves room for the family's other
+sockets; a whole 64 KiB `write` enters the pool in one call.
+
+For receive, `linuxsockd` keeps reads parked in `netd` for every socket that
+can receive, each into an RX slot it reserved. A read that `netd` answers
+fills its slot, and the slot goes on the complete ring for its socket, with
+a datagram's source. The kernel queues published slots per socket in ring
+order and copies from them straight into the Linux buffer; a slot goes back
+on the submit ring once reads consumed all of it, or at once for a
+datagram. One socket holds at most four RX slots, and the service always
+leaves two free, so sockets with unread data cannot starve another: a
+socket without a read ahead gets its data through a Read request, which
+reads from `netd` into any free slot.
+
+Ownership is explicit on both sides. A TX slot is free, being filled by one
+call, committed, or held by the service; an RX slot is free, under a read,
+published, or held by the kernel. A slot handed back with the wrong
+generation, a slot published twice, a full ring or an entry outside the
+layout fails the family session.
+
+Each ring has a doorbell. The kernel sends a Doorbell notification only when
+it claims the doorbell token, which the service clears before it drains the
+submit ring; the service drains the ring before every message it takes, so a
+Doorbell lost to a full queue loses nothing. The complete ring shares the
+readiness token and its ReadyChanged notification.
+
+### GLNXSOCK2
 
 Requests are fixed 48-byte bodies with a nonzero correlation; replies echo
 it. Unused fields and reserved bytes are zero; a malformed message fails the
 family session. The operations are Open, Bind, Listen, Accept, Connect,
 Read, Write, SendTo, Shutdown, GetSockName, GetPeerName, GetOption,
 SetOption, GetPendingError, QueryReady, Close and Cancel, plus two
-notifications: Release from the kernel and ReadyChanged from the service.
+notifications: Doorbell from the kernel and ReadyChanged from the service.
+Read, Write and SendTo carry no data. The kernel sends Read only when it
+holds nothing for the socket; the reply says to look at the complete ring
+again, to wait, or that the stream ended. It sends Write or SendTo only when
+the readiness entry does not let it commit a send, and the reply is the
+error the send reports, or OK once the socket takes sends: an unbound
+datagram socket binds to an ephemeral port first.
 
 No request waits in the service. An operation that cannot finish answers
 WouldBlock, or InProgress for a connect, and the kernel sleeps on readiness.
 An interrupted Linux call therefore never leaves a read, write, accept or
 connect in flight. The one exchange in flight is a reply not yet read, and
 the kernel reads every reply, so it can still apply one whose caller went
-away: unread RX bytes go back with Release, which tells the service to
-return them first on the next Read of that socket, and an accepted child
-nobody installs is closed.
+away: an accepted child nobody installs is closed. Bytes a send committed
+belong to the socket: a signal after the commit cannot take them back, and a
+call interrupted after some slots went returns the bytes it committed.
+Received slots stay queued for the socket across an interrupted read.
 
 Socket identities carry the session generation, a per-slot generation and
 the family table index. A reused slot or a new session never matches an old
@@ -92,8 +132,14 @@ identity.
 ### Readiness
 
 The service publishes each socket's state in the readiness page: a Ready
-mask (in, out, error, hangup, read hangup), the bytes a read returns now,
-and the pending error. Each entry is guarded by a sequence count, odd while
+mask (in, out, error, hangup, read hangup), the bytes `netd` holds for a
+read, the pending error, and whether the kernel may commit sends now and,
+for a datagram socket, whether it has a fixed peer. The kernel adds what it
+holds itself: queued RX slots make a socket readable and count in FIONREAD,
+and a socket that sends through slots is writable only while it has slot
+credit. The kernel reads an entry before it drains the complete ring: the
+service publishes a slot before the entry that stops counting its bytes, so
+the end of a stream never overtakes its last bytes. Each entry is guarded by a sequence count, odd while
 it is rewritten. After a change the service sends ReadyChanged only when
 the token word says none is outstanding; the kernel clears the token before
 it reads the entries. A change after that read draws a new notification, and
@@ -199,9 +245,12 @@ static libc resolves names with ordinary socket traffic.
   sockets, netlink, `epoll` and ancillary data fail explicitly.
 - A payload byte is copied twice more than a native client copies it:
   user memory to the family pool, then to the GTCP pool.
-- Native protocol versions move to GTCP 2, GUDP 2 and GNETCTL 5. Every
-  client builds against the new codecs, and each decoder rejects any other
-  version.
+- A send succeeds once its bytes are in the pool. A transport error that
+  `netd` reports later becomes the socket's pending error, as a Linux
+  socket's does for bytes already in its send buffer.
+- Native protocol versions move to GTCP 2, GUDP 2 and GNETCTL 5, and GTCP 3
+  for the session of `linuxsockd`. Every client builds against the new
+  codecs, and each decoder rejects any other version.
 
 ## Amendments
 

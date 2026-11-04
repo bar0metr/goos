@@ -1,7 +1,6 @@
 package linuxsock
 
 import (
-	"bytes"
 	"testing"
 
 	"goos/userspace/linuxsockapi"
@@ -17,8 +16,8 @@ const (
 	opWrite    = linuxsockapi.OpWrite
 	opSendTo   = linuxsockapi.OpSendTo
 	opShutdown = linuxsockapi.OpShutdown
-	opRelease  = linuxsockapi.OpRelease
 	opClose    = linuxsockapi.OpClose
+	opGetName  = linuxsockapi.OpGetSockName
 )
 
 func TestOpenAssignsIdentityAndArmsWait(t *testing.T) {
@@ -71,7 +70,7 @@ func TestListenBindsFirstAndClampsBacklog(t *testing.T) {
 	if reply := h.call(f, linuxsockapi.Request{Opcode: opConnect, Socket: id, Address: peerAddress, Port: 1}); reply.Result != linuxsockapi.ResultIsConnected {
 		t.Fatalf("connect on listener %d", reply.Result)
 	}
-	if reply := h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 10}); reply.Result != linuxsockapi.ResultNotConnected {
+	if reply := h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: id}); reply.Result != linuxsockapi.ResultNotConnected {
 		t.Fatalf("read on listener %d", reply.Result)
 	}
 }
@@ -164,7 +163,7 @@ func TestNonblockingConnect(t *testing.T) {
 	if reply := h.call(f, linuxsockapi.Request{Opcode: opConnect, Socket: id, Address: peerAddress, Port: 80}); reply.Result != linuxsockapi.ResultAlready {
 		t.Fatalf("second connect %d", reply.Result)
 	}
-	if reply := h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 1}); reply.Result != linuxsockapi.ResultWouldBlock {
+	if reply := h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: id}); reply.Result != linuxsockapi.ResultWouldBlock {
 		t.Fatalf("read while connecting %d", reply.Result)
 	}
 	if reply := h.call(f, linuxsockapi.Request{Opcode: linuxsockapi.OpGetSockName, Socket: id}); reply.Local != localAddress || reply.LocalPort != 40000 {
@@ -287,275 +286,11 @@ func readBytes(h *harness, f int, reply linuxsockapi.Reply) []byte {
 	return h.pools[f][offset : offset+uint64(reply.Length)]
 }
 
-func TestStreamReadAndRetainedBytes(t *testing.T) {
-	h := newHarness(t)
-	f := h.family(1, 7)
-	id := h.connected(f)
-	h.wake(h.endpoint(id), MaskWritable|MaskReadable, 10)
-	if state := h.readiness(f, id); state.Ready != linuxsockapi.ReadyIn|linuxsockapi.ReadyOut || state.Readable != 10 {
-		t.Fatalf("readable %+v", state)
-	}
-	correlation := h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 100})
-	read := h.take(NativeRead)
-	if read.request.Length != 100 || read.request.Flags != NativeNoWait {
-		t.Fatalf("read %+v", read.request)
-	}
-	h.complete(read, NativeCompletion{Data: []byte("0123456789")})
-	reply := h.reply(f, correlation)
-	if reply.Result != linuxsockapi.ResultOK || string(readBytes(h, f, reply)) != "0123456789" {
-		t.Fatalf("read %+v", reply)
-	}
-	// A second read waits for the slot's Release, so bytes stay in order.
-	second := h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 100})
-	h.noReply(f, second)
-	if h.has(NativeRead) {
-		t.Fatal("read past a lent slot")
-	}
-	// The kernel took four bytes; six come back.
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: reply.Slot, Length: 6, Value: 4})
-	again := h.reply(f, second)
-	if again.Result != linuxsockapi.ResultOK || string(readBytes(h, f, again)) != "456789" {
-		t.Fatalf("retained read %+v %q", again, readBytes(h, f, again))
-	}
-	if h.has(NativeRead) {
-		t.Fatal("retained bytes read from netd")
-	}
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: again.Slot})
-	if h.svc.families[f].rxUsed != 0 {
-		t.Fatalf("slots still used %b", h.svc.families[f].rxUsed)
-	}
-}
-
-func TestShortReadOfRetainedKeepsTail(t *testing.T) {
-	h := newHarness(t)
-	f := h.family(1, 7)
-	id := h.connected(f)
-	correlation := h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 100})
-	h.complete(h.take(NativeRead), NativeCompletion{Data: []byte("abcdefghij")})
-	first := h.reply(f, correlation)
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: first.Slot, Length: 10})
-	short := h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 3})
-	if string(readBytes(h, f, short)) != "abc" {
-		t.Fatalf("short %q", readBytes(h, f, short))
-	}
-	// One of the three comes back unread; it and the tail are next.
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: short.Slot, Length: 1, Value: 2})
-	rest := h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 100})
-	if string(readBytes(h, f, rest)) != "cdefghij" {
-		t.Fatalf("rest %q", readBytes(h, f, rest))
-	}
-	// Everything consumed: the next read goes to netd.
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: rest.Slot})
-	h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 1})
-	h.complete(h.take(NativeRead), NativeCompletion{Data: []byte("0123")})
-	if h.dropped(f) {
-		t.Fatal("dropped")
-	}
-	// A Release that leaves a gap before the tail is malformed.
-	other := h.connected(f)
-	correlation = h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: other, Length: 100})
-	h.complete(h.take(NativeRead), NativeCompletion{Data: []byte("abcdefghij")})
-	lent := h.reply(f, correlation)
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: other, Slot: lent.Slot, Length: 10})
-	short = h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: other, Length: 3})
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: other, Slot: short.Slot, Length: 1})
-	if !h.dropped(f) {
-		t.Fatal("a Release with a gap before the tail was accepted")
-	}
-}
-
-func TestPeekOfNativeDataIsNotRetained(t *testing.T) {
-	h := newHarness(t)
-	f := h.family(1, 7)
-	id := h.connected(f)
-	correlation := h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 100, Flags: linuxsockapi.FlagPeek})
-	read := h.take(NativeRead)
-	if read.request.Flags&NativePeek == 0 {
-		t.Fatal("peek not passed to netd")
-	}
-	h.complete(read, NativeCompletion{Data: []byte("xyz")})
-	reply := h.reply(f, correlation)
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: reply.Slot, Length: 3})
-	h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 100})
-	if !h.has(NativeRead) {
-		t.Fatal("peeked bytes were retained as well as left in netd")
-	}
-}
-
-func TestReadEOFAndReset(t *testing.T) {
-	h := newHarness(t)
-	f := h.family(1, 7)
-	id := h.connected(f)
-	correlation := h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 10})
-	h.complete(h.take(NativeRead), NativeCompletion{Result: NativeEOF})
-	if reply := h.reply(f, correlation); reply.Result != linuxsockapi.ResultOK || reply.Length != 0 || reply.Flags != linuxsockapi.FlagEOF {
-		t.Fatalf("eof %+v", reply)
-	}
-	other := h.connected(f)
-	h.wake(h.endpoint(other), MaskPendingError|MaskHungUp, 0)
-	h.complete(h.take(NativeError), NativeCompletion{Value: uint32(NativeReset)})
-	if state := h.readiness(f, other); state.Ready&linuxsockapi.ReadyError == 0 || state.Ready&linuxsockapi.ReadyHangup == 0 {
-		t.Fatalf("reset readiness %+v", state)
-	}
-	correlation = h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: other, Length: 10})
-	h.complete(h.take(NativeRead), NativeCompletion{Result: NativeEOF})
-	if reply := h.reply(f, correlation); reply.Result != linuxsockapi.ResultOK {
-		t.Fatalf("buffered EOF first %+v", reply)
-	}
-	correlation = h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: other, Length: 10})
-	h.complete(h.take(NativeRead), NativeCompletion{Result: NativeWouldBlock})
-	if reply := h.reply(f, correlation); reply.Result != linuxsockapi.ResultReset {
-		t.Fatalf("reset read %+v", reply)
-	}
-}
-
-func TestWriteCopiesTXSlotAndReturnsIt(t *testing.T) {
-	h := newHarness(t)
-	f := h.family(1, 7)
-	id := h.connected(f)
-	offset := linuxsockapi.TXOffset(3)
-	copy(h.pools[f][offset:], "hello world")
-	correlation := h.send(f, linuxsockapi.Request{Opcode: opWrite, Socket: id, Slot: 3, Length: 11})
-	write := h.take(NativeWrite)
-	if !bytes.Equal(write.data, []byte("hello world")) || write.request.Flags&NativeNoWait == 0 {
-		t.Fatalf("write %+v %q", write.request, write.data)
-	}
-	// The slot is the service's until the reply: a second write naming it
-	// is malformed.
-	h.complete(write, NativeCompletion{Length: 5})
-	reply := h.reply(f, correlation)
-	if reply.Result != linuxsockapi.ResultOK || reply.Slot != 3 || reply.Length != 5 {
-		t.Fatalf("partial write %+v", reply)
-	}
-	correlation = h.send(f, linuxsockapi.Request{Opcode: opWrite, Socket: id, Slot: 3, Length: 6})
-	h.complete(h.take(NativeWrite), NativeCompletion{Result: NativeWouldBlock})
-	if reply := h.reply(f, correlation); reply.Result != linuxsockapi.ResultWouldBlock || reply.Slot != 3 {
-		t.Fatalf("full write %+v", reply)
-	}
-	h.send(f, linuxsockapi.Request{Opcode: opWrite, Socket: id, Slot: 1, Length: 1})
-	h.send(f, linuxsockapi.Request{Opcode: opWrite, Socket: id, Slot: 1, Length: 1})
-	if !h.dropped(f) {
-		t.Fatal("a TX slot lent twice did not end the session")
-	}
-}
-
 func TestWriteOnUnconnectedStream(t *testing.T) {
 	h := newHarness(t)
 	f := h.family(1, 7)
 	id := h.open(f, linuxsockapi.KindStream)
-	if reply := h.call(f, linuxsockapi.Request{Opcode: opWrite, Socket: id, Slot: 0, Length: 1}); reply.Result != linuxsockapi.ResultClosed || reply.Slot != 0 {
+	if reply := h.call(f, linuxsockapi.Request{Opcode: opWrite, Socket: id}); reply.Result != linuxsockapi.ResultClosed {
 		t.Fatalf("write unconnected %+v", reply)
 	}
-}
-
-func TestShutdown(t *testing.T) {
-	h := newHarness(t)
-	f := h.family(1, 7)
-	id := h.connected(f)
-	if reply := h.call(f, linuxsockapi.Request{Opcode: opShutdown, Socket: h.open(f, linuxsockapi.KindStream), Length: shutWrite}); reply.Result != linuxsockapi.ResultNotConnected {
-		t.Fatalf("shutdown unconnected %d", reply.Result)
-	}
-	// Linux: after SHUT_RD the bytes already buffered stay readable, then
-	// reads end.
-	correlation := h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 10})
-	h.complete(h.take(NativeRead), NativeCompletion{Data: []byte("abc")})
-	first := h.reply(f, correlation)
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: first.Slot, Length: 3})
-	h.wake(h.endpoint(id), MaskReadable|MaskWritable, 20)
-	if reply := h.call(f, linuxsockapi.Request{Opcode: opShutdown, Socket: id, Length: shutRead}); reply.Result != linuxsockapi.ResultOK {
-		t.Fatalf("SHUT_RD %d", reply.Result)
-	}
-	if state := h.readiness(f, id); state.Ready&linuxsockapi.ReadyIn == 0 || state.Ready&linuxsockapi.ReadyReadHangup == 0 || state.Readable != 23 {
-		t.Fatalf("SHUT_RD readiness %+v", state)
-	}
-	retained := h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 10})
-	if string(readBytes(h, f, retained)) != "abc" {
-		t.Fatalf("retained after SHUT_RD %q", readBytes(h, f, retained))
-	}
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: retained.Slot})
-	correlation = h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 100})
-	h.complete(h.take(NativeRead), NativeCompletion{Data: make([]byte, 20)})
-	buffered := h.reply(f, correlation)
-	if buffered.Length != 20 {
-		t.Fatalf("buffered after SHUT_RD %+v", buffered)
-	}
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: buffered.Slot})
-	correlation = h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 10})
-	h.complete(h.take(NativeRead), NativeCompletion{Result: NativeWouldBlock})
-	if reply := h.reply(f, correlation); reply.Result != linuxsockapi.ResultOK || reply.Flags != linuxsockapi.FlagEOF {
-		t.Fatalf("read after SHUT_RD drained %+v", reply)
-	}
-	correlation = h.send(f, linuxsockapi.Request{Opcode: opShutdown, Socket: id, Length: shutWrite})
-	h.complete(h.take(NativeShutdownWrite), NativeCompletion{})
-	if reply := h.reply(f, correlation); reply.Result != linuxsockapi.ResultOK {
-		t.Fatalf("SHUT_WR %d", reply.Result)
-	}
-	if reply := h.call(f, linuxsockapi.Request{Opcode: opShutdown, Socket: id, Length: shutBoth}); reply.Result != linuxsockapi.ResultOK || h.has(NativeShutdownWrite) {
-		t.Fatalf("repeated shutdown %+v", reply)
-	}
-	if reply := h.call(f, linuxsockapi.Request{Opcode: opWrite, Socket: id, Slot: 2, Length: 1}); reply.Result != linuxsockapi.ResultClosed {
-		t.Fatalf("write after SHUT_WR %d", reply.Result)
-	}
-	if state := h.readiness(f, id); state.Ready&linuxsockapi.ReadyHangup == 0 || state.Ready&linuxsockapi.ReadyOut == 0 {
-		t.Fatalf("both shut readiness %+v", state)
-	}
-}
-
-func TestCloseReleasesEndpointAndIdentity(t *testing.T) {
-	h := newHarness(t)
-	f := h.family(1, 7)
-	id := h.connected(f)
-	endpoint := h.endpoint(id)
-	correlation := h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 10})
-	h.complete(h.take(NativeRead), NativeCompletion{Data: []byte("abc")})
-	lent := h.reply(f, correlation)
-	if reply := h.call(f, linuxsockapi.Request{Opcode: opClose, Socket: id}); reply.Result != linuxsockapi.ResultOK {
-		t.Fatalf("close %d", reply.Result)
-	}
-	if closed := h.take(NativeClose); closed.request.Endpoint != endpoint {
-		t.Fatalf("closed %d", closed.request.Endpoint)
-	}
-	if state := h.readiness(f, id); state.Socket != 0 {
-		t.Fatalf("entry not cleared %+v", state)
-	}
-	// The lent slot comes back after the close, unread bytes and all.
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: lent.Slot, Length: 3})
-	if h.dropped(f) || h.svc.families[f].rxUsed != 0 {
-		t.Fatal("late Release mishandled")
-	}
-	if reply := h.call(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 1}); reply.Result != linuxsockapi.ResultStale {
-		t.Fatalf("closed identity %d", reply.Result)
-	}
-	// The slot is reused under a new generation.
-	again := h.open(f, linuxsockapi.KindStream)
-	oldIndex, _ := linuxsockapi.SocketIndex(id)
-	newIndex, _ := linuxsockapi.SocketIndex(again)
-	if oldIndex != newIndex || again == id {
-		t.Fatalf("reuse %x %x", id, again)
-	}
-	if reply := h.call(f, linuxsockapi.Request{Opcode: linuxsockapi.OpGetSockName, Socket: id}); reply.Result != linuxsockapi.ResultStale {
-		t.Fatalf("old generation %d", reply.Result)
-	}
-}
-
-// netd answers a held wait only when the mask changes, so a stream whose
-// reads used up the reported count while Readable stays set asks again
-// rather than publishing an empty socket nobody wakes.
-func TestDrainedCountRefreshesReadable(t *testing.T) {
-	h := newHarness(t)
-	f := h.family(1, 7)
-	id := h.connected(f)
-	h.wake(h.endpoint(id), MaskWritable|MaskReadable, 4)
-	correlation := h.send(f, linuxsockapi.Request{Opcode: opRead, Socket: id, Length: 100})
-	h.complete(h.take(NativeRead), NativeCompletion{Data: []byte("0123")})
-	reply := h.reply(f, correlation)
-	// Nothing is published as readable until netd says so.
-	if state := h.readiness(f, id); state.Ready&linuxsockapi.ReadyIn != 0 {
-		t.Fatalf("readiness while the count is refreshed %+v", state)
-	}
-	h.complete(h.take(NativeReady), NativeCompletion{Mask: MaskWritable | MaskReadable, Readable: 3000})
-	if state := h.readiness(f, id); state.Ready&linuxsockapi.ReadyIn == 0 || state.Readable != 3000 {
-		t.Fatalf("refreshed readiness %+v", state)
-	}
-	h.send(f, linuxsockapi.Request{Opcode: opRelease, Socket: id, Slot: reply.Slot})
 }

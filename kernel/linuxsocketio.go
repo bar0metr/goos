@@ -3,10 +3,13 @@
 package main
 
 // Socket data transfer: read, readv, recvfrom and recvmsg take bytes from
-// RX slots, write, writev, sendto and sendmsg put them in TX slots, one
-// slot of at most 4096 bytes per exchange. One call moves at most
-// MaxVectorBytes, as a file read does; a longer request returns short and
-// the program continues.
+// the RX slots the service filled ahead for the socket; write, writev,
+// sendto and sendmsg copy into TX slots and return once the slots are
+// committed, without waiting for netd. A request goes to the service only
+// when the kernel holds nothing to read, or the socket's readiness entry
+// does not let it commit a send. One call moves at most MaxVectorBytes, as
+// a file read does; a longer request returns short and the program
+// continues.
 
 import (
 	"encoding/binary"
@@ -333,8 +336,6 @@ func (handler *linuxCallHandler) socketReceive(request linuxcompat.Request, call
 				}
 				pending = handler.socketPending()
 			}
-			// After SHUT_RD the service still returns what it had buffered,
-			// then end of file, as Linux does.
 			if partial >= transfer.limit {
 				handler.socketEnd()
 				return linuxcompat.Result{Value: partial}
@@ -349,21 +350,43 @@ func (handler *linuxCallHandler) socketReceive(request linuxcompat.Request, call
 				}
 				resumed, pending = true, handler.socketPending()
 			}
-			if state, live := socketReadiness(call); live && state.Ready&(linuxsockapi.ReadyIn|linuxsockapi.ReadyReadHangup|linuxsockapi.ReadyError|linuxsockapi.ReadyHangup) == 0 && state.Readable == 0 {
+			state, live := socketReadiness(call)
+			if live {
+				moved, took, errno := handler.takeRX(call, transfer, partial, peek, discard)
+				if errno != 0 && moved == 0 {
+					handler.socketEnd()
+					return socketShort(partial, errno)
+				}
+				if took {
+					linuxcompat.NoteNet(linuxcompat.NetBytesReceived, moved)
+					if call.socket.Datagram {
+						handler.socketEnd()
+						linuxcompat.NoteNet(linuxcompat.NetDatagramsReceived, 1)
+						if transfer.flags&linuxabi.MessageTrunc != 0 {
+							return linuxcompat.Result{Value: transfer.datagramLength}
+						}
+						return linuxcompat.Result{Value: moved}
+					}
+					partial += moved
+					if peek || !waitAll || partial >= transfer.limit || errno != 0 {
+						handler.socketEnd()
+						return linuxcompat.Result{Value: partial}
+					}
+					handler.socketProgress(partial)
+					pending = handler.socketPending()
+					continue
+				}
+			}
+			// After SHUT_RD the service still returns what it had buffered,
+			// then end of file, as Linux does.
+			if live && state.Ready&(linuxsockapi.ReadyIn|linuxsockapi.ReadyReadHangup|linuxsockapi.ReadyError|linuxsockapi.ReadyHangup) == 0 && state.Readable == 0 {
 				if result, done := handler.socketStall(call, linuxsockapi.ReadyIn, nonBlocking, partial != 0 && !waitAll, partial, timeout); done {
 					return result
 				}
 				pending = handler.socketPending()
 				continue
 			}
-			message := socketRequestFor(linuxsockapi.OpRead, call.socket.Identity)
-			message.Length = uint32(min(transfer.limit-partial, uint64(linuxsockapi.SlotSize)))
-			if peek {
-				message.Flags = linuxsockapi.FlagPeek
-			} else if discard {
-				message.Flags = linuxsockapi.FlagDiscard
-			}
-			reply, errno, blocked = handler.socketExchange(call, message, socketFill{})
+			reply, errno, blocked = handler.socketExchange(call, socketRequestFor(linuxsockapi.OpRead, call.socket.Identity))
 		}
 		if blocked {
 			return linuxBlocked
@@ -374,54 +397,25 @@ func (handler *linuxCallHandler) socketReceive(request linuxcompat.Request, call
 		}
 		switch reply.Result {
 		case linuxsockapi.ResultOK:
+			if reply.Flags&linuxsockapi.FlagEOF != 0 {
+				handler.socketEnd()
+				return linuxcompat.Result{Value: partial}
+			}
+			// The data is on the complete ring; the next round takes it.
+			pending = handler.socketPending()
 		case linuxsockapi.ResultWouldBlock:
 			linuxcompat.NoteNet(linuxcompat.NetWouldBlock, 1)
 			if result, done := handler.socketStall(call, linuxsockapi.ReadyIn, nonBlocking, partial != 0 && !waitAll, partial, timeout); done {
 				return result
 			}
 			pending = handler.socketPending()
-			continue
 		default:
 			handler.socketEnd()
 			return socketShort(partial, linuxcompat.SocketErrno(reply.Result, linuxcompat.SocketCallRead))
 		}
-		moved := uint64(reply.Length)
-		if moved != 0 && !discard {
-			copied := handler.deliverRX(call, reply.Slot, transfer, partial, moved)
-			releaseRXSlot(call.familyID, call.endpoint, reply.Slot, uint32(moved-copied), uint32(copied))
-			if copied == 0 && partial == 0 {
-				handler.socketEnd()
-				return linuxErrno(linuxabi.EFAULT)
-			}
-			moved = copied
-		}
-		partial += moved
-		linuxcompat.NoteNet(linuxcompat.NetBytesReceived, moved)
-		if call.socket.Datagram {
-			handler.socketEnd()
-			linuxcompat.NoteNet(linuxcompat.NetDatagramsReceived, 1)
-			transfer.source = linuxcompat.SocketAddress{Address: reply.Address, Port: reply.Port}
-			transfer.datagramLength, transfer.truncated = reply.Value, reply.Flags&linuxsockapi.FlagTruncated != 0
-			if transfer.flags&linuxabi.MessageTrunc != 0 {
-				return linuxcompat.Result{Value: reply.Value}
-			}
-			return linuxcompat.Result{Value: partial}
-		}
-		if reply.Flags&linuxsockapi.FlagEOF != 0 || reply.Length == 0 || peek || partial >= transfer.limit {
-			handler.socketEnd()
-			return linuxcompat.Result{Value: partial}
-		}
-		handler.socketProgress(partial)
-		pending = handler.socketPending()
-		if !waitAll {
-			if state, live := socketReadiness(call); !live || state.Readable == 0 {
-				handler.socketEnd()
-				return linuxcompat.Result{Value: partial}
-			}
-		}
 	}
 	handler.socketEnd()
-	return linuxcompat.Result{Value: partial}
+	return socketShort(partial, linuxabi.EAGAIN)
 }
 
 // socketStall handles a socket that cannot move bytes now. With bytes
@@ -449,43 +443,18 @@ func socketShort(partial uint64, errno linuxabi.Errno) linuxcompat.Result {
 	return linuxErrno(errno)
 }
 
-// deliverRX copies length bytes of an RX slot to the receive's buffer from
-// byte position on and returns how many reached it.
-func (handler *linuxCallHandler) deliverRX(call *socketCall, slot uint8, transfer *socketTransfer, position uint64, length uint64) uint64 {
-	page, found := socketPoolPage(call.endpoint, uint32(linuxsockapi.RXOffset(slot)/vm.PageSize))
-	if !found {
-		return 0
-	}
-	length = min(length, uint64(linuxsockapi.SlotSize), transfer.limit-position)
-	copied := uint64(0)
-	for copied < length {
-		address, room := transfer.address+position+copied, length-copied
-		if transfer.wire != nil {
-			piece, remaining, ok := linuxcompat.VectorPiece(transfer.wire, position+copied)
-			if !ok {
-				break
-			}
-			address, room = piece, min(room, remaining)
-		}
-		room = min(room, vm.PageSize-address%vm.PageSize)
-		if !vm.CopyOut(handler.root, address, page[copied:copied+room]) {
-			break
-		}
-		copied += room
-	}
-	return copied
-}
-
 // socketSend sends up to transfer.limit bytes. A blocking stream send waits
-// for room until it has sent everything this call may; a nonblocking one
-// sends what fits and is EAGAIN only when nothing did. A datagram goes in
-// one piece of at most one slot, or fails with EMSGSIZE.
+// for TX slot credit until it has committed everything this call may; a
+// nonblocking one commits what fits and is EAGAIN only when nothing did. A
+// datagram goes in one piece of at most MaxDatagram bytes, or fails with
+// EMSGSIZE. A send counts as done once its slots are committed: an error
+// netd reports later waits in SO_ERROR, as a Linux socket's would.
 //
 //go:noinline
 func (handler *linuxCallHandler) socketSend(request linuxcompat.Request, call *socketCall, transfer *socketTransfer, pending linuxcompat.Pending, resumed bool) linuxcompat.Result {
 	timeout := call.socket.SendTimeout
 	nonBlocking := socketNonBlocking(call, transfer.flags)
-	if call.socket.Datagram && transfer.limit > linuxsockapi.SlotSize {
+	if call.socket.Datagram && transfer.limit > linuxsockapi.MaxDatagram {
 		handler.socketEnd()
 		return linuxErrno(linuxabi.EMSGSIZE)
 	}
@@ -494,6 +463,9 @@ func (handler *linuxCallHandler) socketSend(request linuxcompat.Request, call *s
 		partial = pending.Partial
 	}
 	sent := false
+	// checked: the service accepted a datagram's address on a connected
+	// socket, which the readiness entry cannot tell.
+	checked := false
 	for round := 0; round < linuxSocketRounds; round++ {
 		var reply linuxsockapi.Reply
 		var errno linuxabi.Errno
@@ -525,21 +497,47 @@ func (handler *linuxCallHandler) socketSend(request linuxcompat.Request, call *s
 				}
 				resumed, pending = true, handler.socketPending()
 			}
-			if !call.socket.Datagram {
-				if state, live := socketReadiness(call); live && state.Ready&(linuxsockapi.ReadyOut|linuxsockapi.ReadyError|linuxsockapi.ReadyHangup) == 0 {
+			state, live := socketReadiness(call)
+			direct := live && state.State&linuxsockapi.EntrySend != 0
+			if call.socket.Datagram {
+				connected := state.State&linuxsockapi.EntryConnected != 0
+				direct = direct && (connected && (!transfer.hasDestination || checked) || !connected && transfer.hasDestination)
+			}
+			if direct {
+				moved, status, errno := handler.commitTX(call, transfer, partial)
+				if errno != 0 {
+					handler.socketEnd()
+					return socketShort(partial, errno)
+				}
+				if status == linuxcompat.DataNone {
+					linuxcompat.NoteNet(linuxcompat.NetWouldBlock, 1)
 					if result, done := handler.socketStall(call, linuxsockapi.ReadyOut, nonBlocking, false, partial, timeout); done {
 						return result
 					}
 					pending = handler.socketPending()
 					continue
 				}
+				partial += moved
+				sent = true
+				linuxcompat.NoteNet(linuxcompat.NetBytesSent, moved)
+				if call.socket.Datagram {
+					handler.socketEnd()
+					linuxcompat.NoteNet(linuxcompat.NetDatagramsSent, 1)
+					return linuxcompat.Result{Value: partial}
+				}
+				if partial >= transfer.limit {
+					handler.socketEnd()
+					return linuxcompat.Result{Value: partial}
+				}
+				handler.socketProgress(partial)
+				pending = handler.socketPending()
+				continue
 			}
 			message := socketRequestFor(linuxsockapi.OpWrite, call.socket.Identity)
 			if transfer.hasDestination {
 				message.Opcode, message.Address, message.Port = linuxsockapi.OpSendTo, transfer.destination.Address, transfer.destination.Port
 			}
-			fill := socketFill{active: true, address: transfer.address, wire: transfer.wire, position: partial, length: transfer.limit - partial}
-			reply, errno, blocked = handler.socketExchange(call, message, fill)
+			reply, errno, blocked = handler.socketExchange(call, message)
 		}
 		if blocked {
 			return linuxBlocked
@@ -550,13 +548,15 @@ func (handler *linuxCallHandler) socketSend(request linuxcompat.Request, call *s
 		}
 		switch reply.Result {
 		case linuxsockapi.ResultOK:
+			// The socket takes sends now; the next round commits.
+			checked = true
+			pending = handler.socketPending()
 		case linuxsockapi.ResultWouldBlock:
 			linuxcompat.NoteNet(linuxcompat.NetWouldBlock, 1)
 			if result, done := handler.socketStall(call, linuxsockapi.ReadyOut, nonBlocking, false, partial, timeout); done {
 				return result
 			}
 			pending = handler.socketPending()
-			continue
 		default:
 			handler.socketEnd()
 			context := linuxcompat.SocketCallWrite
@@ -565,21 +565,7 @@ func (handler *linuxCallHandler) socketSend(request linuxcompat.Request, call *s
 			}
 			return socketShort(partial, linuxcompat.SocketErrno(reply.Result, context))
 		}
-		partial += uint64(reply.Length)
-		sent = true
-		linuxcompat.NoteNet(linuxcompat.NetBytesSent, uint64(reply.Length))
-		if call.socket.Datagram {
-			handler.socketEnd()
-			linuxcompat.NoteNet(linuxcompat.NetDatagramsSent, 1)
-			return linuxcompat.Result{Value: partial}
-		}
-		if partial >= transfer.limit {
-			handler.socketEnd()
-			return linuxcompat.Result{Value: partial}
-		}
-		handler.socketProgress(partial)
-		pending = handler.socketPending()
 	}
 	handler.socketEnd()
-	return linuxcompat.Result{Value: partial}
+	return socketShort(partial, linuxabi.EAGAIN)
 }

@@ -109,9 +109,6 @@ func issue(t *testing.T, service *fakeService, endpoint NetEndpoint, task sched.
 	if status != RequestStarted {
 		t.Fatalf("begin %v", status)
 	}
-	if request.Opcode == linuxsockapi.OpWrite || request.Opcode == linuxsockapi.OpSendTo {
-		request.Slot = uint8(index)
-	}
 	var message ipc.Message
 	if !linuxsockapi.EncodeRequest(&request, correlation, &message) {
 		t.Fatalf("encode %+v", request)
@@ -192,37 +189,8 @@ func TestSocketSessionOpenReply(t *testing.T) {
 func TestSocketSessionAbandonedReplies(t *testing.T) {
 	service, endpoint := newTestSession(t)
 	socket := linuxsockapi.MakeSocket(5, 1, 4)
-	// A read whose caller gave up: the RX bytes go back with Release.
-	_, read := issue(t, service, endpoint, testTask, linuxsockapi.Request{Opcode: linuxsockapi.OpRead, Socket: socket, Length: 100})
-	if cleanup, _ := AbandonRequest(testFamily, read, nil); cleanup != (SocketCleanup{}) {
-		t.Fatalf("abandoning a request in flight cleaned up %+v", cleanup)
-	}
-	_, seen := service.request()
-	service.reply(linuxsockapi.Reply{Opcode: linuxsockapi.OpRead, Socket: socket, Slot: 3, Length: 60}, seen)
 	var reply linuxsockapi.Reply
-	verdict, owner, correlation := drain(t, service, endpoint, &reply)
-	if verdict != MessageReply || owner != 0 || correlation != read {
-		t.Fatalf("abandoned read: %v %v %d", verdict, owner, correlation)
-	}
-	cleanup, _ := AbandonReply(testFamily, correlation, &reply, nil)
-	if !cleanup.Release || cleanup.ReleaseSlot != 3 || cleanup.ReleaseBytes != 60 {
-		t.Fatalf("cleanup %+v", cleanup)
-	}
-	release, slot, found := PendingRelease(testFamily)
-	if !found || slot != 3 || release.Length != 60 || release.Value != 0 || release.Socket != socket {
-		t.Fatalf("release %+v", release)
-	}
-	var message ipc.Message
-	if !linuxsockapi.EncodeRequest(&release, 0, &message) || service.send(0, &message) != ipc.StatusOK {
-		t.Fatal("release send")
-	}
-	SlotReleased(testFamily, slot)
-	if got, _ := service.request(); got.Opcode != linuxsockapi.OpRelease || got.Length != 60 {
-		t.Fatalf("service got %+v", got)
-	}
-	if _, _, found := PendingRelease(testFamily); found {
-		t.Fatal("release still pending")
-	}
+	var seen uint64
 	// An accept whose caller is gone: the child is closed.
 	_, accept := issue(t, service, endpoint, testTask, linuxsockapi.Request{Opcode: linuxsockapi.OpAccept, Socket: socket})
 	_, seen = service.request()
@@ -257,9 +225,9 @@ func TestSocketSessionRejectsMismatchedReplies(t *testing.T) {
 		t.Fatalf("wrong opcode accepted: %v", verdict)
 	}
 	// The other socket of the family is not this request's.
-	_, write := issue(t, service, endpoint, testTask, linuxsockapi.Request{Opcode: linuxsockapi.OpWrite, Socket: socket, Length: 10})
+	_, write := issue(t, service, endpoint, testTask, linuxsockapi.Request{Opcode: linuxsockapi.OpWrite, Socket: socket})
 	_, seen = service.request()
-	service.reply(linuxsockapi.Reply{Opcode: linuxsockapi.OpWrite, Socket: linuxsockapi.MakeSocket(5, 1, 5), Slot: 1, Length: 10}, seen)
+	service.reply(linuxsockapi.Reply{Opcode: linuxsockapi.OpWrite, Socket: linuxsockapi.MakeSocket(5, 1, 5)}, seen)
 	if verdict, _, _ := drain(t, service, endpoint, &reply); verdict != MessageMalformed {
 		t.Fatalf("another socket's reply accepted: %v", verdict)
 	}
@@ -277,21 +245,6 @@ func TestSocketSessionRejectsMismatchedReplies(t *testing.T) {
 	}
 	if verdict, _, _ := ClassifySocketMessage(testFamily, endpoint.Session, roundTripMessage(t, &notification), &reply); verdict != MessageReadyChanged {
 		t.Fatalf("ReadyChanged: %v", verdict)
-	}
-}
-
-func TestSocketSessionWriteSlotMustMatch(t *testing.T) {
-	service, endpoint := newTestSession(t)
-	socket := linuxsockapi.MakeSocket(5, 1, 4)
-	index, _ := issue(t, service, endpoint, testTask, linuxsockapi.Request{Opcode: linuxsockapi.OpWrite, Socket: socket, Length: 10})
-	request, seen := service.request()
-	if int(request.Slot) != index {
-		t.Fatalf("write used slot %d, request %d", request.Slot, index)
-	}
-	service.reply(linuxsockapi.Reply{Opcode: linuxsockapi.OpWrite, Socket: socket, Slot: uint8(index + 1), Length: 10}, seen)
-	var reply linuxsockapi.Reply
-	if verdict, _, _ := drain(t, service, endpoint, &reply); verdict != MessageMalformed {
-		t.Fatalf("another slot accepted: %v", verdict)
 	}
 }
 

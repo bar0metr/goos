@@ -18,6 +18,7 @@ import (
 	"goos/kernel/sched"
 	"goos/kernel/stream"
 	kernelwait "goos/kernel/wait"
+	"goos/userspace/linuxsockapi"
 )
 
 var diagRing diag.Ring
@@ -251,6 +252,7 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("shootdown-ipis", targets)
 	out.uint("shootdown-timeouts", timeouts)
 	out.end()
+	dumpWakeLatency(out)
 	// One line per lock level ever taken; spin times are TSC cycles.
 	for level := lock.Level(1); int(level) < lock.Levels; level++ {
 		stats := lock.Statistics(level)
@@ -391,7 +393,13 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("abandoned", network.Abandoned)
 	out.uint("interrupted", network.Interrupted)
 	out.uint("session-failures", network.SessionFailures)
+	out.uint("ring-tx", network.RingTX)
+	out.uint("ring-rx", network.RingRX)
+	out.uint("doorbells", network.Doorbells)
+	out.uint("bytes-to-pool", network.BytesToPool)
+	out.uint("bytes-from-pool", network.BytesFromPool)
 	out.end()
+	dumpSocketServices(out)
 	for index := 0; index < linuxcompat.MaxTerminals; index++ {
 		id, terminal, live := linuxcompat.TerminalAt(index)
 		if !live {
@@ -547,4 +555,68 @@ func boolDiag(value bool) uint64 {
 		return 1
 	}
 	return 0
+}
+
+// dumpWakeLatency prints the time from a wake to the switch onto the woken
+// task: the count, the mean, and the bucket bounds of three percentiles, in
+// microseconds.
+func dumpWakeLatency(out diagWriter) {
+	latency := amd64.ReadWakeLatency()
+	hz := monotonicClock.Hz()
+	micros := func(cycles uint64) uint64 {
+		if hz == 0 {
+			return 0
+		}
+		return cycles / (hz / 1_000_000)
+	}
+	percentile := func(share uint64) uint64 {
+		want := (latency.Count*share + 99) / 100
+		seen := uint64(0)
+		for bucket := 0; bucket < amd64.WakeBuckets; bucket++ {
+			seen += latency.Buckets[bucket]
+			if seen >= want && want != 0 {
+				return micros(amd64.WakeBucketBound(bucket))
+			}
+		}
+		return 0
+	}
+	out.text("DIAG wake")
+	out.uint("count", latency.Count)
+	if latency.Count != 0 {
+		out.uint("mean-us", micros(latency.Cycles/latency.Count))
+	} else {
+		out.uint("mean-us", 0)
+	}
+	out.uint("p50-us", percentile(50))
+	out.uint("p90-us", percentile(90))
+	out.uint("p99-us", percentile(99))
+	out.end()
+}
+
+// dumpSocketServices prints the data-plane counters linuxsockd keeps in
+// each live family session's ring page.
+func dumpSocketServices(out diagWriter) {
+	var families [linuxcompat.MaxNetFamilies]uint64
+	var endpoints [linuxcompat.MaxNetFamilies]linuxcompat.NetEndpoint
+	count := linuxcompat.LiveSessions(&families, &endpoints)
+	for index := 0; index < count; index++ {
+		rings, found := socketPoolPage(endpoints[index], linuxsockapi.RingPage)
+		if !found {
+			continue
+		}
+		counters := linuxsockapi.LoadServiceCounters(rings)
+		out.text("DIAG linuxsockd")
+		out.uint("family", families[index])
+		out.uint("requests", counters.Requests)
+		out.uint("doorbells", counters.Doorbells)
+		out.uint("ring-tx", counters.RingTX)
+		out.uint("ring-releases", counters.RingReleases)
+		out.uint("ring-tx-done", counters.RingTXDone)
+		out.uint("ring-rx-data", counters.RingRXData)
+		out.uint("native-writes", counters.NativeWrites)
+		out.uint("native-reads", counters.NativeReads)
+		out.uint("tx-bytes-copied", counters.TXBytesCopied)
+		out.uint("rx-bytes-copied", counters.RXBytesCopied)
+		out.end()
+	}
 }

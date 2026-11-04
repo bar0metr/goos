@@ -2,18 +2,26 @@
 // objects for the kernel's family sessions, kept over native TCP and UDP
 // endpoints in netd.
 //
-// The core runs in one event loop and never waits. Every GLNXSOCK1 request
+// The core runs in one event loop and never waits. Every GLNXSOCK2 request
 // becomes an operation that either answers at once from local state or
 // issues one native request that netd completes at once (NoWait), sometimes
 // two in a row (an unbound listen binds first). An operation may wait in
-// the service only for a resource another prompt exchange frees: a native
-// pool slot, a family RX slot the kernel is about to release, or room in the
-// family's channel for its reply.
+// the service only for something another prompt exchange brings: a native
+// pool slot, a read ahead under way, a TX queue draining before SHUT_WR, or
+// room in the family's channel for its reply.
+//
+// Payload never travels in a request (dataplane.go). The kernel commits TX
+// slots on the family's submit ring; the core queues them per socket and
+// drains each queue into netd with pipelined NoWait writes, handing every
+// slot back on the complete ring once netd took all of it. For each
+// readable socket the core keeps reads parked in netd that fill RX slots,
+// and publishes each filled slot on the complete ring.
 //
 // Readiness is learned from one NativeWaitReady held per endpoint. Each
 // change is published in the family's readiness page; a ReadyChanged
 // notification follows when no other is outstanding, and one that finds
-// the queue full is sent again from Flush.
+// the queue full is sent again from Flush. The same notification covers
+// the complete ring.
 //
 // Everything is bounded and static: MaxFamilies families, MaxSockets sockets
 // in all and linuxsockapi.MaxSockets per family, FamilyOps requests per
@@ -31,14 +39,18 @@ const (
 	// FamilyOps bounds a family's requests in the service. The event loop
 	// stops reading a family's channel while it has that many.
 	FamilyOps = 16
-	// FamilyParked bounds a family's reads that wait for a Release; a read
-	// past it answers WouldBlock. With FamilyOps twice as large, half of a
-	// family's operations always make progress, so the Releases behind them
-	// are always read.
+	// FamilyParked bounds a family's requests that wait for a read ahead
+	// or a free RX slot; one past it answers WouldBlock. With FamilyOps
+	// twice as large, half of a family's operations always make progress.
 	FamilyParked = linuxsockapi.RXSlots
-	// MaxOps holds every family's requests and two internal operations per
-	// socket, a pending-error fetch and a readable-count refresh.
-	MaxOps = MaxFamilies*FamilyOps + 2*MaxSockets
+	// dataOps bounds the native reads and writes of the data plane: every
+	// family RX slot under a read, and NativeWriteDepth writes for as many
+	// sockets as the native TX slots of both sessions can carry at once.
+	dataOps = MaxFamilies*linuxsockapi.RXSlots + 2*nativeTXSlots
+	// MaxOps holds every family's requests, two internal operations per
+	// socket, a pending-error fetch and a readable-count refresh, and the
+	// data plane's.
+	MaxOps = MaxFamilies*FamilyOps + 2*MaxSockets + dataOps + warmOps + acceptOps
 	// MaxBacklog is the native listen backlog limit; Linux backlogs are
 	// clamped to it.
 	MaxBacklog = 8
@@ -63,6 +75,33 @@ type socket struct {
 	used    bool
 	stream  bool
 	opening bool // its Open or Accept has not completed
+	// closing: the kernel closed the socket while its TX queue still held
+	// bytes. It stays until netd took them, then closes its endpoint.
+	closing bool
+	// eof: a native read reported the end of the stream.
+	eof bool
+	// txBlocked: netd's send buffer was full; the queue waits for a mask
+	// with Writable. txStall: a write took less than it carried, so the
+	// writes after it took nothing; the queue sends again from the first
+	// byte netd did not take once every write answered.
+	txBlocked bool
+	txStall   bool
+	// txDropped: an error dropped the queue while writes were in netd; the
+	// slots they carry go back as they answer.
+	txDropped bool
+	// shutQueued: SHUT_WR waits for the TX queue to drain into netd.
+	shutQueued bool
+	// Children a listener accepted ahead, oldest first, and its accepts
+	// ahead in netd.
+	acceptq      [AcceptAhead]int16
+	acceptSerial [AcceptAhead]uint32
+	acceptLen    uint8
+	accepting    uint8
+	// rxBurst: the last read ahead filled its slot, so more may follow.
+	rxBurst bool
+	// wantTX, wantRX: a native slot was busy; the pump tries again.
+	wantTX bool
+	wantRX bool
 	// dead: the native session the socket lived on is gone.
 	dead      bool
 	readShut  bool
@@ -80,23 +119,21 @@ type socket struct {
 	// reported it yet.
 	connectDone bool
 	reuse       bool
-	// lentPeek and lentRetained describe the lent slot: data a native peek
-	// left in netd, or bytes the socket had retained.
-	lentPeek     bool
-	lentRetained bool
-	family       int8
-	index        uint8
-	state        sockState
-	proto        Proto
-	// lent is the family RX slot a stream read lent to the kernel, retained
-	// the slot holding bytes a Release returned unread; -1 for none.
-	lent           int8
-	retained       int8
-	retainedLength uint16
-	lentLength     uint16
-	// tail counts bytes of the lent slot past lentLength: retained bytes a
-	// short read did not hand over.
-	tail       uint16
+	family      int8
+	index       uint8
+	state       sockState
+	proto       Proto
+	// The TX queue: family TX slots in commit order. txAccepted counts the
+	// head slot's bytes netd took, txSent the bytes past them in writes not
+	// yet answered; txStream is the stream offset netd took up to, which
+	// every write names.
+	txq        [linuxsockapi.TXSlots]uint8
+	txqLen     uint8
+	writesOut  uint8
+	readsOut   uint8
+	txAccepted uint32
+	txSent     uint32
+	txStream   uint32
 	endpoint   uint32
 	serial     uint32
 	generation uint64
@@ -118,6 +155,7 @@ type family struct {
 	token    uint64
 	session  uint32
 	pool     []byte
+	rings    []byte
 	count    int
 	inflight int
 	parked   int
@@ -125,11 +163,24 @@ type family struct {
 	// slots maps a family socket index to a global socket, plus one.
 	slots       [linuxsockapi.MaxSockets]int16
 	generations [linuxsockapi.MaxSockets]uint32
-	rxUsed      uint8
-	rxLent      uint8
-	txHeld      uint8
-	rxOwner     [linuxsockapi.RXSlots]int16
-	rxSerial    [linuxsockapi.RXSlots]uint32
+	// TX slots the kernel committed and the core still holds, with what
+	// each carries. txInFlight marks a datagram slot under a write.
+	txHeld     uint8
+	txInFlight uint8
+	txGen      [linuxsockapi.TXSlots]uint32
+	txLength   [linuxsockapi.TXSlots]uint32
+	txDest     [linuxsockapi.TXSlots]bool
+	txAddress  [linuxsockapi.TXSlots][4]byte
+	txPort     [linuxsockapi.TXSlots]uint16
+	// RX slots: rxUsed holds the ones under a read or published, rxPub the
+	// published ones the kernel has not handed back, each with its owner
+	// and the generation the kernel repeats.
+	rxUsed   uint8
+	rxPub    uint8
+	rxOwner  [linuxsockapi.RXSlots]int16
+	rxSerial [linuxsockapi.RXSlots]uint32
+	rxGen    [linuxsockapi.RXSlots]uint32
+	stats    linuxsockapi.ServiceCounters
 }
 
 type opState uint8
@@ -153,6 +204,17 @@ const (
 	// up the count netd last reported while its Readable bit stays set:
 	// netd answers a held wait only when the mask changes.
 	kindRefresh
+	// kindTX is one native write of a socket's TX queue; length is what it
+	// carries and slot the datagram's TX slot.
+	kindTX
+	// kindRX is one native read into RX slot rx.
+	kindRX
+	// kindShutdown is the half-close a SHUT_WR left for after the queue.
+	kindShutdown
+	// kindWarm opens an endpoint for the pool; it belongs to no family.
+	kindWarm
+	// kindAccept accepts a child ahead for listener socket into child.
+	kindAccept
 )
 
 type op struct {
@@ -163,6 +225,8 @@ type op struct {
 	family int8
 	stage  uint8
 	rx     int8
+	slot   uint8
+	length uint32
 	native NativeOp
 	proto  Proto
 	socket int16
@@ -212,14 +276,15 @@ type Service struct {
 	sockets   [MaxSockets]socket
 	ops       [MaxOps]op
 	backends  [UDP + 1]backendState
+	warm      [UDP + 1]warmPool
 	closes    [closeSlots]pendingClose
 	serial    uint32
 	// Work the pump retries; zero skips the scan.
-	submits, waits, closing int
-	counters                linuxsockapi.Counters
-	message                 ipc.Message
-	request                 linuxsockapi.Request
-	native                  NativeRequest
+	submits, waits, closing, kicks int
+	counters                       linuxsockapi.Counters
+	message                        ipc.Message
+	request                        linuxsockapi.Request
+	native                         NativeRequest
 }
 
 func (s *Service) Init(backend Backend, transport Transport) {
@@ -256,13 +321,13 @@ func (s *Service) AddFamily(token uint64, session uint32, pool []byte) (int, lin
 		return -1, linuxsockapi.ControlBusy
 	}
 	f := &s.families[free]
-	f.used, f.notify, f.token, f.session, f.pool = true, false, token, session, pool[:linuxsockapi.PoolBytes]
-	f.count, f.inflight, f.parked, f.replies = 0, 0, 0, 0
-	f.rxUsed, f.rxLent, f.txHeld = 0, 0, 0
-	for index := range f.slots {
-		f.slots[index] = 0
-	}
+	generations := f.generations
+	*f = family{}
+	f.generations = generations
+	f.used, f.token, f.session, f.pool = true, token, session, pool[:linuxsockapi.PoolBytes]
+	f.rings = f.pool[linuxsockapi.RingPage*4096 : (linuxsockapi.RingPage+1)*4096]
 	linuxsockapi.InitReadiness(f.pool, session)
+	linuxsockapi.InitRings(f.rings)
 	return free, linuxsockapi.ControlOK
 }
 
@@ -351,11 +416,18 @@ func (s *Service) Receive(index int, message *ipc.Message) {
 		s.failFamily(index)
 		return
 	}
-	if s.request.Opcode == linuxsockapi.OpRelease {
-		s.release(index)
-		s.pump()
+	// The kernel commits to the rings before it sends, so what a request
+	// follows is in the queues before the request runs.
+	if !s.drainSubmit(index) {
 		return
 	}
+	if s.request.Opcode == linuxsockapi.OpDoorbell {
+		s.families[index].stats.Doorbells++
+		s.pump()
+		s.notify(index)
+		return
+	}
+	s.families[index].stats.Requests++
 	o := s.newOp(index, kindRequest)
 	if o == nil {
 		// The event loop reads only while CanReceive holds.
@@ -374,17 +446,7 @@ func (s *Service) Receive(index int, message *ipc.Message) {
 // take records what the request lends and the socket it names. It reports
 // false when the request ended the family or was answered.
 func (s *Service) take(o *op) bool {
-	f := &s.families[o.family]
 	r := &o.request
-	if r.Opcode == linuxsockapi.OpWrite || r.Opcode == linuxsockapi.OpSendTo {
-		bit := uint8(1) << r.Slot
-		if f.txHeld&bit != 0 {
-			s.failFamily(int(o.family))
-			return false
-		}
-		f.txHeld |= bit
-		o.reply.Slot = r.Slot
-	}
 	switch r.Opcode {
 	case linuxsockapi.OpOpen:
 		o.reply.Socket = 0
@@ -411,7 +473,7 @@ func (s *Service) lookup(index int, id uint64) (int, linuxsockapi.Result) {
 		return -1, linuxsockapi.ResultStale
 	}
 	global := int(f.slots[slot] - 1)
-	if sock := &s.sockets[global]; sock.id != id || sock.opening {
+	if sock := &s.sockets[global]; sock.id != id || sock.opening || sock.closing {
 		return -1, linuxsockapi.ResultStale
 	}
 	return global, linuxsockapi.ResultOK
@@ -452,7 +514,7 @@ func (s *Service) allocSocket(index int, stream bool) int {
 	}
 	sock := &s.sockets[global]
 	*sock = socket{used: true, stream: stream, opening: true, family: int8(index), index: uint8(slot), proto: proto,
-		lent: -1, retained: -1, serial: s.nextSerial(), id: linuxsockapi.MakeSocket(f.session, generation, slot)}
+		serial: s.nextSerial(), id: linuxsockapi.MakeSocket(f.session, generation, slot)}
 	f.slots[slot] = int16(global + 1)
 	f.count++
 	return global
@@ -464,6 +526,7 @@ func (s *Service) adopt(global int, endpoint uint32, generation uint64) {
 	sock.opening, sock.endpoint, sock.generation = false, endpoint, generation
 	s.arm(global)
 	s.publish(global)
+	s.kick(global)
 }
 
 // releaseSocket frees a socket and closes its native endpoint. publish
@@ -477,13 +540,15 @@ func (s *Service) releaseSocket(global int, publish bool) {
 	if sock.endpoint != 0 && !sock.dead {
 		s.queueClose(sock.proto, sock.generation, sock.endpoint)
 	}
-	if sock.retained >= 0 {
-		s.freeRX(f, uint8(sock.retained))
-	}
+	s.dropTX(global)
+	s.dropAccepted(sock)
 	if sock.needWait {
 		s.waits--
 	}
-	if publish && !sock.opening {
+	if sock.wantTX || sock.wantRX {
+		s.kicks--
+	}
+	if publish && !sock.opening && !sock.closing {
 		linuxsockapi.Publish(f.pool, int(sock.index), linuxsockapi.Readiness{})
 	}
 	f.slots[sock.index] = 0
@@ -504,10 +569,22 @@ func (s *Service) socketOf(o *op) *socket {
 
 // --- RX slots ------------------------------------------------------------------
 
-func (s *Service) reserveRX(f *family) int8 {
+// reserveRX takes a free RX slot for a read into it, leaving reserve slots
+// free.
+func (s *Service) reserveRX(f *family, global int, reserve int) int8 {
+	free := 0
+	for slot := uint8(0); slot < linuxsockapi.RXSlots; slot++ {
+		if f.rxUsed&(1<<slot) == 0 {
+			free++
+		}
+	}
+	if free <= reserve {
+		return -1
+	}
 	for slot := uint8(0); slot < linuxsockapi.RXSlots; slot++ {
 		if f.rxUsed&(1<<slot) == 0 {
 			f.rxUsed |= 1 << slot
+			f.rxOwner[slot], f.rxSerial[slot] = int16(global+1), s.sockets[global].serial
 			return int8(slot)
 		}
 	}
@@ -516,7 +593,23 @@ func (s *Service) reserveRX(f *family) int8 {
 
 func (s *Service) freeRX(f *family, slot uint8) {
 	f.rxUsed &^= 1 << slot
+	f.rxPub &^= 1 << slot
 	f.rxOwner[slot], f.rxSerial[slot] = 0, 0
+}
+
+// rxOf reports the RX slots that belong to a socket: under a read for it
+// or published to the kernel for it.
+func (s *Service) rxOf(f *family, global int) (held int, published int) {
+	sock := &s.sockets[global]
+	for slot := 0; slot < linuxsockapi.RXSlots; slot++ {
+		if f.rxUsed&(1<<slot) != 0 && int(f.rxOwner[slot]) == global+1 && f.rxSerial[slot] == sock.serial {
+			held++
+			if f.rxPub&(1<<slot) != 0 {
+				published++
+			}
+		}
+	}
+	return held, published
 }
 
 func (s *Service) rxSlot(f *family, slot uint8) []byte {
@@ -524,73 +617,9 @@ func (s *Service) rxSlot(f *family, slot uint8) []byte {
 	return f.pool[offset : offset+linuxsockapi.SlotSize]
 }
 
-func (s *Service) txSlot(f *family, slot uint8, length uint32) []byte {
+func (s *Service) txSlot(f *family, slot uint8) []byte {
 	offset := linuxsockapi.TXOffset(slot)
-	return f.pool[offset : offset+uint64(length)]
-}
-
-// lend hands a filled RX slot to the kernel with the reply about to go.
-func (s *Service) lend(f *family, slot uint8, global int) {
-	f.rxLent |= 1 << slot
-	f.rxOwner[slot], f.rxSerial[slot] = int16(global+1), s.sockets[global].serial
-}
-
-// release takes back an RX slot. Unread bytes of a stream stay with the
-// socket, moved to the start of the slot, and are the next read's first.
-func (s *Service) release(index int) {
-	f := &s.families[index]
-	r := &s.request
-	bit := uint8(1) << r.Slot
-	if f.rxLent&bit == 0 {
-		s.failFamily(index)
-		return
-	}
-	f.rxLent &^= bit
-	var sock *socket
-	global := int(f.rxOwner[r.Slot]) - 1
-	if global >= 0 {
-		candidate := &s.sockets[global]
-		if candidate.used && candidate.serial == f.rxSerial[r.Slot] {
-			sock = candidate
-		}
-	}
-	if sock != nil && sock.id != r.Socket {
-		s.failFamily(index)
-		return
-	}
-	if sock == nil || !sock.stream || sock.lent != int8(r.Slot) {
-		s.freeRX(f, r.Slot)
-		return
-	}
-	sock.lent = -1
-	unread, offset := uint32(r.Length), uint32(r.Value)
-	lent, tail := uint32(sock.lentLength), uint32(sock.tail)
-	if offset+unread > lent || tail != 0 && unread != 0 && offset+unread != lent {
-		s.failFamily(index)
-		return
-	}
-	start, end := lent, lent+tail
-	switch {
-	case sock.lentRetained && sock.lentPeek:
-		// A peek of retained bytes consumed nothing.
-		start = 0
-	case sock.lentPeek:
-		// The bytes are still in netd.
-		start, end = 0, 0
-	case unread != 0:
-		start = offset
-	}
-	if end == start {
-		s.freeRX(f, r.Slot)
-		s.publish(global)
-		return
-	}
-	data := s.rxSlot(f, r.Slot)
-	copy(data, data[start:end])
-	sock.retained, sock.retainedLength = int8(r.Slot), uint16(end-start)
-	sock.lentLength, sock.tail = 0, 0
-	f.rxOwner[r.Slot], f.rxSerial[r.Slot] = 0, 0
-	s.publish(global)
+	return f.pool[offset : offset+uint64(f.txLength[slot])]
 }
 
 // --- operations ----------------------------------------------------------------
@@ -630,7 +659,7 @@ func (s *Service) freeOp(o *op) {
 	if o.state == opSubmit {
 		s.submits--
 	}
-	if !o.orphan {
+	if !o.orphan && o.family >= 0 {
 		f := &s.families[o.family]
 		if o.parked {
 			f.parked--
@@ -642,11 +671,11 @@ func (s *Service) freeOp(o *op) {
 			s.freeRX(f, uint8(o.rx))
 		}
 		if o.kind == kindRequest {
-			if r := &o.request; r.Opcode == linuxsockapi.OpWrite || r.Opcode == linuxsockapi.OpSendTo {
-				f.txHeld &^= 1 << r.Slot
-			}
 			f.inflight--
 		}
+	} else if o.rx >= 0 {
+		// The family is gone and its pool with it; the slot needs no care.
+		o.rx = -1
 	}
 	if o.child >= 0 {
 		if child := &s.sockets[o.child]; child.used && child.serial == o.childSerial && child.opening {
@@ -714,11 +743,7 @@ func (s *Service) finish(o *op, result linuxsockapi.Result) {
 		if r.Opcode == linuxsockapi.OpOpen || r.Opcode == linuxsockapi.OpCancel {
 			socketID = 0
 		}
-		slot := uint8(0)
-		if r.Opcode == linuxsockapi.OpWrite || r.Opcode == linuxsockapi.OpSendTo {
-			slot = r.Slot
-		}
-		o.reply = linuxsockapi.Reply{Opcode: r.Opcode, Result: result, Socket: socketID, Slot: slot}
+		o.reply = linuxsockapi.Reply{Opcode: r.Opcode, Result: result, Socket: socketID}
 	}
 	o.reply.Result = result
 	o.state = opReply
@@ -734,9 +759,6 @@ func (s *Service) sendReply(o *op) bool {
 		o.reply = linuxsockapi.Reply{Opcode: r.Opcode, Result: linuxsockapi.ResultInvalidArgument, Socket: r.Socket}
 		if r.Opcode == linuxsockapi.OpOpen || r.Opcode == linuxsockapi.OpCancel {
 			o.reply.Socket = 0
-		}
-		if r.Opcode == linuxsockapi.OpWrite || r.Opcode == linuxsockapi.OpSendTo {
-			o.reply.Slot = r.Slot
 		}
 		if !linuxsockapi.EncodeReply(&o.reply, o.correlation, &s.message) {
 			s.freeOp(o)
@@ -809,6 +831,8 @@ func (s *Service) BackendUp(proto Proto, generation uint64) linuxsockapi.Control
 		s.BackendDown(proto, b.generation)
 	}
 	b.up, b.generation = true, generation
+	s.warm[proto].full = false
+	s.refill(proto)
 	return linuxsockapi.ControlOK
 }
 
@@ -833,6 +857,7 @@ func (s *Service) BackendDown(proto Proto, generation uint64) {
 		return
 	}
 	b.up = false
+	s.dropWarm(proto)
 	for i := range s.closes {
 		if c := &s.closes[i]; c.used && c.proto == proto && c.generation == generation {
 			c.used = false
@@ -853,6 +878,7 @@ func (s *Service) BackendDown(proto Proto, generation uint64) {
 			sock.pending = linuxsockapi.ResultServiceLost
 		}
 		s.counters.BackendLosses++
+		s.dropTX(i)
 		s.publish(i)
 	}
 	for i := range s.ops {
@@ -894,6 +920,10 @@ func (s *Service) queueClose(proto Proto, generation uint64, endpoint uint32) {
 	if !s.backends[proto].up || s.backends[proto].generation != generation || endpoint == 0 {
 		return
 	}
+	if s.warm[proto].full {
+		s.warm[proto].full = false
+		defer s.refill(proto)
+	}
 	s.native = NativeRequest{Op: NativeClose, Endpoint: endpoint}
 	if s.backend.Submit(proto, makeTag(tagClose, 0, 1), &s.native) != SubmitBusy {
 		return
@@ -933,6 +963,18 @@ func (s *Service) pump() {
 				}
 			}
 		}
+		kicked := false
+		if s.kicks != 0 {
+			before := s.kicks
+			for i := range s.sockets {
+				if sock := &s.sockets[i]; sock.wantTX || sock.wantRX {
+					s.kicks--
+					sock.wantTX, sock.wantRX = false, false
+					s.kick(i)
+				}
+			}
+			kicked = s.kicks < before
+		}
 		if s.submits != 0 {
 			before := s.submits
 			for i := range s.ops {
@@ -942,6 +984,7 @@ func (s *Service) pump() {
 			}
 			progress = s.submits < before
 		}
+		progress = progress || kicked
 	}
 }
 

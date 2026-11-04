@@ -80,7 +80,7 @@ type StandardStreams struct {
 }
 
 // NetRole and NetPoolRole are the startup names of a family's network
-// session: its GLNXSOCK1 channel and its pool (ADR 0210).
+// session: its GLNXSOCK2 channel and its pool (ADR 0210).
 const (
 	NetRole     = "linux-net"
 	NetPoolRole = "linux-net-pool"

@@ -20,6 +20,9 @@ func (s *Service) step(o *op) {
 	case kindRefresh:
 		s.stepRefresh(o)
 		return
+	case kindTX, kindRX, kindShutdown, kindWarm, kindAccept:
+		// Data-plane operations issue their request when they are made.
+		return
 	}
 	r := &o.request
 	if r.Opcode == linuxsockapi.OpOpen {
@@ -70,9 +73,7 @@ func (s *Service) step(o *op) {
 		s.native = NativeRequest{Op: NativeReady, Endpoint: sock.endpoint}
 		s.submit(o, sock.proto)
 	case linuxsockapi.OpClose:
-		s.counters.Closes++
-		s.releaseSocket(int(o.socket), true)
-		s.finish(o, linuxsockapi.ResultOK)
+		s.stepClose(o, sock)
 	default:
 		s.finish(o, linuxsockapi.ResultInvalidArgument)
 	}
@@ -86,6 +87,10 @@ func (s *Service) done(o *op, c *NativeCompletion) {
 	// An endpoint a completion created belongs to no one unless a handler
 	// takes it.
 	created := c.Result == NativeOK && (c.Op == NativeOpen || c.Op == NativeAccept) && c.Endpoint != 0
+	if o.kind == kindWarm {
+		s.doneWarm(o, c)
+		return
+	}
 	if o.orphan {
 		if created {
 			s.queueClose(o.proto, o.generation, c.Endpoint)
@@ -99,6 +104,23 @@ func (s *Service) done(o *op, c *NativeCompletion) {
 		return
 	case kindRefresh:
 		s.doneRefresh(o, c)
+		return
+	case kindTX:
+		s.doneTX(o, c)
+		return
+	case kindRX:
+		s.doneRX(o, c)
+		return
+	case kindAccept:
+		s.doneAcceptAhead(o, c)
+		return
+	case kindShutdown:
+		global := int(o.socket)
+		live := s.socketOf(o) != nil
+		s.freeOp(o)
+		if live {
+			s.publish(global)
+		}
 		return
 	}
 	r := &o.request
@@ -146,8 +168,6 @@ func (s *Service) done(o *op, c *NativeCompletion) {
 		s.doneConnect(o, sock, c)
 	case NativeRead:
 		s.doneRead(o, sock, c)
-	case NativeWrite, NativeSendTo:
-		s.doneWrite(o, sock, c)
 	case NativeShutdownWrite:
 		if c.Result == NativeOK {
 			sock.writeShut = true
@@ -198,6 +218,13 @@ func (s *Service) stepOpen(o *op) {
 			return
 		}
 		o.socket, o.socketSerial = int16(global), s.sockets[global].serial
+	}
+	if endpoint, ok := s.takeWarm(proto); ok {
+		s.counters.Opens++
+		s.adopt(int(o.socket), endpoint, s.backends[proto].generation)
+		o.reply.Socket = s.sockets[o.socket].id
+		s.finish(o, linuxsockapi.ResultOK)
+		return
 	}
 	s.native = NativeRequest{Op: NativeOpen}
 	s.submit(o, proto)
@@ -268,6 +295,8 @@ func (s *Service) doneBind(o *op, sock *socket, c *NativeCompletion) {
 		return
 	}
 	sock.state, sock.local, sock.localPort = stateBound, c.Local, c.LocalPort
+	s.publish(int(o.socket))
+	s.kick(int(o.socket))
 	if o.request.Opcode == linuxsockapi.OpBind {
 		o.reply.Local, o.reply.LocalPort = c.Local, c.LocalPort
 		s.finish(o, linuxsockapi.ResultOK)
@@ -326,6 +355,19 @@ func (s *Service) stepAccept(o *op, sock *socket) {
 		s.finish(o, linuxsockapi.ResultInvalidArgument)
 		return
 	}
+	if o.child < 0 && s.takeAccepted(o, sock) {
+		return
+	}
+	if o.child < 0 && sock.accepting != 0 {
+		// A child accepted ahead is on its way from netd.
+		if !s.park(o) {
+			s.finish(o, linuxsockapi.ResultWouldBlock)
+			return
+		}
+		s.wait(o)
+		return
+	}
+	s.unpark(o)
 	if o.child < 0 {
 		if s.families[o.family].count >= linuxsockapi.MaxSockets {
 			s.finish(o, linuxsockapi.ResultFamilyLimit)
@@ -442,6 +484,7 @@ func (s *Service) doneConnect(o *op, sock *socket, c *NativeCompletion) {
 		if c.Result == NativeOK && sock.stream {
 			sock.state, sock.connectDone = stateConnected, true
 			s.publish(int(o.socket))
+			s.kick(int(o.socket))
 			s.finish(o, linuxsockapi.ResultInProgress)
 			return
 		}
@@ -453,6 +496,7 @@ func (s *Service) doneConnect(o *op, sock *socket, c *NativeCompletion) {
 		}
 		sock.state = stateConnected
 		s.publish(int(o.socket))
+		s.kick(int(o.socket))
 		o.reply.Address, o.reply.Port = r.Address, r.Port
 		o.reply.Local, o.reply.LocalPort = sock.local, sock.localPort
 		s.finish(o, linuxsockapi.ResultOK)
@@ -475,15 +519,18 @@ func (s *Service) doneConnect(o *op, sock *socket, c *NativeCompletion) {
 	}
 }
 
-// stepRead serves a stream's retained bytes first and keeps one lent slot
-// per stream, so bytes leave in order and a Release always knows its
-// socket.
+// stepRead answers a kernel that holds no data for the socket and asks
+// for more. Data always reaches the kernel through the complete ring: the
+// answer only says whether to look there, to wait, or that the stream
+// ended. A read ahead under way that netd will answer at once is waited
+// for; with none, the read goes to netd directly into any free RX slot,
+// since the reserve exists for it.
 func (s *Service) stepRead(o *op, sock *socket) {
 	if !s.usable(o, sock) {
 		return
 	}
-	r := &o.request
 	f := &s.families[o.family]
+	global := int(o.socket)
 	if sock.stream {
 		switch sock.state {
 		case stateConnecting:
@@ -498,35 +545,46 @@ func (s *Service) stepRead(o *op, sock *socket) {
 			s.finish(o, linuxsockapi.ResultNotConnected)
 			return
 		}
-	} else if sock.state == stateUnbound && !sock.readShut {
+	} else if sock.state == stateUnbound {
 		// Nothing can arrive at a datagram socket without a port.
 		if sock.pending != linuxsockapi.ResultOK {
 			s.finishPending(o, sock)
 			return
 		}
+		if sock.readShut {
+			o.reply.Flags = linuxsockapi.FlagEOF
+			s.finish(o, linuxsockapi.ResultOK)
+			return
+		}
 		s.finish(o, linuxsockapi.ResultWouldBlock)
 		return
 	}
-	if sock.readShut && !sock.stream && sock.state == stateUnbound {
-		o.reply.Flags = linuxsockapi.FlagEOF
-		s.finish(o, linuxsockapi.ResultOK)
-		return
-	}
-	if sock.stream && sock.lent >= 0 {
-		if !s.park(o) {
-			s.finish(o, linuxsockapi.ResultWouldBlock)
+	if o.rx < 0 {
+		if _, published := s.rxOf(f, global); published != 0 {
+			// Published after the kernel last drained the ring.
+			s.unpark(o)
+			s.finish(o, linuxsockapi.ResultOK)
 			return
 		}
-		s.wait(o)
-		return
-	}
-	if sock.stream && sock.retained >= 0 {
-		s.unpark(o)
-		s.readRetained(o, sock)
-		return
-	}
-	if o.rx < 0 {
-		if o.rx = s.reserveRX(f); o.rx < 0 {
+		if sock.eof {
+			s.endRead(o, sock)
+			return
+		}
+		if sock.readsOut != 0 {
+			if sock.mask&MaskReadable == 0 || sock.readable == 0 {
+				s.endRead(o, sock)
+				return
+			}
+			// netd holds bytes, so the read ahead is about to come back.
+			if !s.park(o) {
+				s.finish(o, linuxsockapi.ResultWouldBlock)
+				return
+			}
+			s.refreshReadable(global)
+			s.wait(o)
+			return
+		}
+		if o.rx = s.reserveRX(f, global, 0); o.rx < 0 {
 			if !s.park(o) {
 				s.finish(o, linuxsockapi.ResultWouldBlock)
 				return
@@ -536,30 +594,23 @@ func (s *Service) stepRead(o *op, sock *socket) {
 		}
 	}
 	s.unpark(o)
-	s.native = NativeRequest{Op: NativeRead, Flags: NativeNoWait, Endpoint: sock.endpoint, Length: r.Length}
-	if r.Flags&linuxsockapi.FlagPeek != 0 {
-		s.native.Flags |= NativePeek
-	}
+	s.native = NativeRequest{Op: NativeRead, Flags: NativeNoWait, Endpoint: sock.endpoint, Length: NativeSlotSize}
 	s.submit(o, sock.proto)
 }
 
-// readRetained lends the slot holding a stream's unread bytes. A short read
-// leaves the rest past the reply's length, still in the slot.
-func (s *Service) readRetained(o *op, sock *socket) {
-	f := &s.families[o.family]
-	slot := uint8(sock.retained)
-	length := min(uint32(sock.retainedLength), o.request.Length)
-	sock.lentLength, sock.tail = uint16(length), sock.retainedLength-uint16(length)
-	sock.lentPeek = o.request.Flags&linuxsockapi.FlagPeek != 0
-	sock.lentRetained = true
-	sock.lent, sock.retained, sock.retainedLength = int8(slot), -1, 0
-	s.lend(f, slot, int(o.socket))
-	if !sock.lentPeek {
-		s.counters.BytesIn += uint64(length)
+// endRead answers a read with nothing to give: the pending error, the end
+// of the stream, or WouldBlock.
+func (s *Service) endRead(o *op, sock *socket) {
+	s.unpark(o)
+	switch {
+	case sock.pending != linuxsockapi.ResultOK:
+		s.finishPending(o, sock)
+	case sock.eof || sock.readShut || sock.stream && sock.mask&(MaskReceiveEOF|MaskHungUp) != 0 && sock.readsOut == 0:
+		o.reply.Flags = linuxsockapi.FlagEOF
+		s.finish(o, linuxsockapi.ResultOK)
+	default:
+		s.finish(o, linuxsockapi.ResultWouldBlock)
 	}
-	o.reply.Slot, o.reply.Length = slot, length
-	s.publish(int(o.socket))
-	s.finish(o, linuxsockapi.ResultOK)
 }
 
 func (s *Service) finishPending(o *op, sock *socket) {
@@ -569,30 +620,24 @@ func (s *Service) finishPending(o *op, sock *socket) {
 	s.finish(o, result)
 }
 
+// doneRead takes the answer to a read the kernel asked for: a filled slot
+// goes on the complete ring like a read ahead's.
 func (s *Service) doneRead(o *op, sock *socket, c *NativeCompletion) {
-	f := &s.families[o.family]
-	r := &o.request
-	peek := r.Flags&linuxsockapi.FlagPeek != 0
+	global := int(o.socket)
 	switch c.Result {
 	case NativeOK:
 	case NativeEOF:
+		sock.eof = true
 		sock.mask |= MaskReceiveEOF
-		o.reply.Flags = linuxsockapi.FlagEOF
-		s.publish(int(o.socket))
-		s.finish(o, linuxsockapi.ResultOK)
+		s.publish(global)
+		s.endRead(o, sock)
 		return
 	case NativeWouldBlock:
-		if sock.pending != linuxsockapi.ResultOK {
-			s.finishPending(o, sock)
-			return
-		}
-		if sock.readShut {
-			// Shut for reading and nothing buffered: end of file.
-			o.reply.Flags = linuxsockapi.FlagEOF
-			s.finish(o, linuxsockapi.ResultOK)
-			return
-		}
-		s.finish(o, linuxsockapi.ResultWouldBlock)
+		sock.mask &^= MaskReadable
+		sock.readable = 0
+		s.refreshReadable(global)
+		s.publish(global)
+		s.endRead(o, sock)
 		return
 	default:
 		if sock.pending != linuxsockapi.ResultOK {
@@ -602,138 +647,84 @@ func (s *Service) doneRead(o *op, sock *socket, c *NativeCompletion) {
 		s.finish(o, nativeResult(c.Result))
 		return
 	}
-	length := min(uint32(len(c.Data)), r.Length, linuxsockapi.SlotSize)
-	if length != 0 {
-		slot := uint8(o.rx)
-		copy(s.rxSlot(f, slot), c.Data[:length])
-		s.lend(f, slot, int(o.socket))
-		o.rx = -1
-		o.reply.Slot, o.reply.Length = slot, length
-	}
-	if sock.stream {
-		if length != 0 {
-			sock.lent, sock.lentLength, sock.tail = int8(o.reply.Slot), uint16(length), 0
-			sock.lentPeek, sock.lentRetained = peek, false
-		}
-		if !peek {
-			s.counters.BytesIn += uint64(length)
-			sock.readable -= min(sock.readable, length)
-			if sock.readable == 0 && sock.mask&MaskReadable != 0 {
-				s.refreshReadable(int(o.socket))
-			}
-		}
-		s.publish(int(o.socket))
-		s.finish(o, linuxsockapi.ResultOK)
+	f := &s.families[o.family]
+	slot := uint8(o.rx)
+	length := min(uint32(len(c.Data)), linuxsockapi.SlotSize)
+	copy(s.rxSlot(f, slot), c.Data[:length])
+	o.rx = -1
+	if !s.publishRX(int(o.family), global, slot, length, c) {
 		return
 	}
-	full := c.Full
-	if full < uint32(len(c.Data)) {
-		full = uint32(len(c.Data))
-	}
-	if full > r.Length {
-		o.reply.Flags = linuxsockapi.FlagTruncated
-	}
-	o.reply.Value, o.reply.Address, o.reply.Port = uint64(full), c.Address, c.Port
-	if !peek {
+	if sock.stream {
+		s.counters.BytesIn += uint64(length)
+		sock.readable -= min(sock.readable, length)
+		if sock.readable == 0 && sock.mask&MaskReadable != 0 {
+			s.refreshReadable(global)
+		}
+	} else {
 		s.counters.DatagramsIn++
-		// The queue may be empty now; until netd says, the socket is not
-		// readable, and the held wait may still name the mask it has.
 		sock.mask &^= MaskReadable
-		s.refreshReadable(int(o.socket))
-		s.publish(int(o.socket))
+		sock.readable = 0
+		s.refreshReadable(global)
 	}
+	s.publish(global)
 	s.finish(o, linuxsockapi.ResultOK)
 }
 
-// stepWrite sends from the TX slot the kernel lent. A stream that is not
-// connected answers as Linux's does: EPIPE (Closed) unless a connect is
-// under way. A datagram sent to an address on a connected socket must name
-// its peer: netd keeps a connected endpoint to its peer.
+// stepWrite answers a kernel whose readiness entry does not let it commit
+// a send: OK once the socket takes sends, otherwise what a send reports.
+// A stream that is not connected answers as Linux's does: EPIPE (Closed)
+// unless a connect is under way. A datagram sent to an address on a
+// connected socket must name its peer: netd keeps a connected endpoint to
+// its peer. An unbound datagram socket binds first.
 func (s *Service) stepWrite(o *op, sock *socket, addressed bool) {
 	if !s.usable(o, sock) {
 		return
 	}
 	r := &o.request
-	f := &s.families[o.family]
 	if sock.stream {
 		switch {
 		case sock.pending != linuxsockapi.ResultOK && sock.state != stateConnecting:
 			s.finishPending(o, sock)
-			return
-		case sock.writeShut:
+		case sock.writeShut || sock.mask&(MaskWriteClosed|MaskHungUp) != 0 && sock.state == stateConnected:
 			s.finish(o, linuxsockapi.ResultClosed)
-			return
 		case sock.state == stateConnecting:
 			s.finish(o, linuxsockapi.ResultWouldBlock)
-			return
 		case sock.state != stateConnected:
 			s.finish(o, linuxsockapi.ResultClosed)
-			return
-		case r.Length == 0:
+		default:
 			s.finish(o, linuxsockapi.ResultOK)
-			return
 		}
-		s.native = NativeRequest{Op: NativeWrite, Flags: NativeNoWait, Endpoint: sock.endpoint, Data: s.txSlot(f, r.Slot, r.Length)}
-		s.submit(o, TCP)
-		return
-	}
-	if sock.writeShut {
-		s.finish(o, linuxsockapi.ResultClosed)
-		return
-	}
-	if !addressed {
-		if sock.state != stateConnected {
-			s.finish(o, linuxsockapi.ResultDestinationRequired)
-			return
-		}
-		s.native = NativeRequest{Op: NativeWrite, Endpoint: sock.endpoint, Data: s.txSlot(f, r.Slot, r.Length)}
-		s.submit(o, UDP)
 		return
 	}
 	switch {
-	case sock.state == stateConnected && (r.Address != sock.peer || r.Port != sock.peerPort):
+	case sock.writeShut:
+		s.finish(o, linuxsockapi.ResultClosed)
+	case !addressed && sock.state != stateConnected:
+		s.finish(o, linuxsockapi.ResultDestinationRequired)
+	case addressed && sock.state == stateConnected && (r.Address != sock.peer || r.Port != sock.peerPort):
 		s.finish(o, linuxsockapi.ResultIsConnected)
-	case sock.state == stateConnected:
-		s.native = NativeRequest{Op: NativeWrite, Endpoint: sock.endpoint, Data: s.txSlot(f, r.Slot, r.Length)}
-		s.submit(o, UDP)
 	case sock.state == stateUnbound:
 		s.bindAny(o, sock)
 	default:
-		s.native = NativeRequest{Op: NativeSendTo, Endpoint: sock.endpoint, Address: r.Address, Port: r.Port,
-			Data: s.txSlot(f, r.Slot, r.Length)}
-		s.submit(o, UDP)
+		s.finish(o, linuxsockapi.ResultOK)
 	}
 }
 
-func (s *Service) doneWrite(o *op, sock *socket, c *NativeCompletion) {
-	r := &o.request
-	if sock.stream && (c.Result == NativeWouldBlock || c.Result == NativeOK && c.Length == 0 && r.Length != 0) {
-		// The send buffer is full now, whatever the last mask said; a
-		// fresh mask decides when it has room again, since the held wait
-		// may still name the mask it has now.
-		sock.mask &^= MaskWritable
-		s.refreshReadable(int(o.socket))
-		s.publish(int(o.socket))
-		s.finish(o, linuxsockapi.ResultWouldBlock)
-		return
-	}
-	if c.Result != NativeOK {
-		s.finish(o, nativeResult(c.Result))
-		return
-	}
-	if !sock.stream {
-		s.counters.DatagramsOut++
-		o.reply.Length = r.Length
+// stepClose closes a socket the kernel no longer has. Bytes still queued
+// go to netd first, so the stream ends after them; the socket lingers
+// without readiness until then and its endpoint closes once they are in.
+func (s *Service) stepClose(o *op, sock *socket) {
+	global := int(o.socket)
+	if sock.txqLen != 0 && !sock.dead && !sock.txDropped {
+		linuxsockapi.Publish(s.families[o.family].pool, int(sock.index), linuxsockapi.Readiness{})
+		sock.closing = true
 		s.finish(o, linuxsockapi.ResultOK)
+		s.kick(global)
 		return
 	}
-	taken := min(c.Length, r.Length)
-	if taken == 0 && r.Length != 0 {
-		s.finish(o, linuxsockapi.ResultWouldBlock)
-		return
-	}
-	s.counters.BytesOut += uint64(taken)
-	o.reply.Length = taken
+	s.counters.Closes++
+	s.releaseSocket(global, true)
 	s.finish(o, linuxsockapi.ResultOK)
 }
 
@@ -752,6 +743,15 @@ func (s *Service) stepShutdown(o *op, sock *socket) {
 		s.publish(int(o.socket))
 	}
 	if !write || sock.writeShut || sock.state == stateListening {
+		s.finish(o, linuxsockapi.ResultOK)
+		return
+	}
+	if sock.txqLen != 0 && !sock.dead && !sock.txDropped {
+		// The half-close follows the bytes already reported written; it
+		// goes to netd once they did, and the call returns now, as Linux's
+		// does.
+		sock.writeShut, sock.shutQueued = true, true
+		s.publish(int(o.socket))
 		s.finish(o, linuxsockapi.ResultOK)
 		return
 	}

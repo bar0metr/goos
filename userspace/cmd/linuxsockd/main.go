@@ -1,7 +1,7 @@
 //go:build goos_userspace
 
 // Command linuxsockd keeps the Linux socket objects of every Linux family
-// (ADR 0210). The kernel talks GLNXSOCK1 to it over one family session per
+// (ADR 0210). The kernel talks GLNXSOCK2 to it over one family session per
 // Linux launch; it keeps each socket over a native TCP or UDP endpoint in
 // netd. PID 1 hands it the family sessions and the native sessions over
 // GLNXCTL1. It holds no VFS, configuration, device or launch authority.
@@ -75,6 +75,7 @@ func userspaceMain() {
 		fatal("LINUXSOCKD_CONTROL_MISSING\n")
 	}
 	core.Init(backend{}, transport{})
+	core.SetWarm(linuxsock.MaxWarm)
 	mark("LINUXSOCKD_STARTED_OK\n")
 	serve()
 }
