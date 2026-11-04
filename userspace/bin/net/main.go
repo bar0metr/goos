@@ -192,6 +192,14 @@ func tcp(reply *netapi.Reply) {
 	limits = appendDecimal(limits, uint64(reply.TCPSendBuffer))
 	limits = append(limits, '/')
 	field("limits", appendDecimal(limits, uint64(reply.TCPReceiveBuffer)))
+	messages := append(text[:0], "v2 requests "...)
+	messages = appendDecimal(messages, reply.GTCP2Requests)
+	messages = append(messages, " replies "...)
+	messages = appendDecimal(messages, reply.GTCP2Replies)
+	messages = append(messages, " v3 requests "...)
+	messages = appendDecimal(messages, reply.GTCP3Requests)
+	messages = append(messages, " replies "...)
+	field("gtcp", appendDecimal(messages, reply.GTCP3Replies))
 }
 
 func reload() {

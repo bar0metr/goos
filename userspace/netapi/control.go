@@ -9,14 +9,16 @@ import (
 const (
 	ControlProtocolID = uint64(0x474e455443544c31)
 	// Version 3 adds capability-bound TCP sessions, version 4 the resolver's
-	// TCP session, version 5 the endpoint quota of a TCP or UDP session.
-	ControlVersion = uint16(5)
+	// TCP session, version 5 the endpoint quota of a TCP or UDP session,
+	// version 6 the GTCP version of a TCP session.
+	ControlVersion = uint16(6)
 	ControlSize    = 16
 
 	controlOpcode     = 0
 	controlClass      = 1
 	controlQuota      = 2
-	controlReserved   = 3
+	controlTCPVersion = 3
+	controlReserved   = 4
 	controlGeneration = 8
 
 	// OrdinarySessionQuota is the endpoint quota of a command's or the
@@ -88,11 +90,15 @@ const (
 
 // ControlRequest is one control request. Quota is the number of endpoints
 // the session may hold, 1 to MaxSessionQuota, for ControlAddTCPSession and
-// ControlAddUDPSession, and zero for every other opcode.
+// ControlAddUDPSession, and zero for every other opcode. TCPVersion is the
+// GTCP version a ControlAddTCPSession session speaks, which fixes its slot
+// pools (tcpapi.LayoutFor); it is zero for every other opcode. The codec
+// requires it nonzero; netd refuses a version it does not serve.
 type ControlRequest struct {
 	Opcode     ControlOpcode
 	Rights     RightsClass
 	Quota      uint8
+	TCPVersion uint8
 	Generation uint64
 }
 
@@ -125,7 +131,7 @@ func validControlRequest(r *ControlRequest) bool {
 	if r.Opcode != ControlAddUDPSession && r.Opcode != ControlAddTCPSession {
 		sessionQuota = r.Quota == 0
 	}
-	if !sessionQuota {
+	if !sessionQuota || (r.TCPVersion != 0) != (r.Opcode == ControlAddTCPSession) {
 		return false
 	}
 	switch r.Opcode {
@@ -158,6 +164,7 @@ func EncodeControlRequest(r *ControlRequest, attachments []handle.ID, correlatio
 	out.Payload[controlOpcode] = byte(r.Opcode)
 	out.Payload[controlClass] = byte(r.Rights)
 	out.Payload[controlQuota] = r.Quota
+	out.Payload[controlTCPVersion] = r.TCPVersion
 	binary.LittleEndian.PutUint64(out.Payload[controlGeneration:], r.Generation)
 	return true
 }
@@ -173,6 +180,7 @@ func DecodeControlRequest(in *ipc.Message, out *ControlRequest) (correlation uin
 		Opcode:     ControlOpcode(payload[controlOpcode]),
 		Rights:     RightsClass(payload[controlClass]),
 		Quota:      payload[controlQuota],
+		TCPVersion: payload[controlTCPVersion],
 		Generation: binary.LittleEndian.Uint64(payload[controlGeneration:]),
 	}
 	count, known := controlHandles(r.Opcode)

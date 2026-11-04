@@ -254,6 +254,12 @@ static libc resolves names with ordinary socket traffic.
 
 ## Amendments
 
+- `linuxsockd`'s TCP session speaks GTCP 3, which PID 1 names in GNETCTL
+  version 6: 16 KiB slots, eight each way, a stream offset on every write so
+  pipelined writes of one endpoint keep their order, and up to four parked
+  reads per endpoint. Other sessions keep GTCP 2. See the GTCP 3 section of
+  [the networking architecture](../architecture/networking.md).
+
 - `kill`, `tkill` and `tgkill` reach any process of the caller's family,
   where ADR 0166 allowed only the caller and its descendants. A Linux server
   or test helper commonly signals its parent; the family stays the boundary,

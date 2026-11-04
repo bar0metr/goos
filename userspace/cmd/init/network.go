@@ -266,18 +266,20 @@ func openUDPSession() ([3]handle.ID, bool) {
 	return openUDPSessionQuota(netapi.OrdinarySessionQuota)
 }
 
-// openTCPSession asks for a TCP session with the ordinary endpoint quota.
+// openTCPSession asks for a GTCP 2 session with the ordinary endpoint quota.
 func openTCPSession() ([3]handle.ID, bool) {
-	return openTCPSessionQuota(netapi.OrdinarySessionQuota)
+	return openTCPSessionQuota(netapi.OrdinarySessionQuota, tcpapi.Layout2)
 }
 
 // openLinuxSocketSessions opens the TCP and UDP sessions of linuxsockd, the
 // Linux socket service, each with the largest endpoint quota,
-// netapi.MaxSessionQuota, so one service can back many Linux sockets. Each
-// result is a session's channel, TX pool and RX pool. Ordinary commands and
-// the resolver keep the ordinary quota. On failure nothing stays open.
+// netapi.MaxSessionQuota, so one service can back many Linux sockets. Its
+// TCP session speaks GTCP 3, whose 16 KiB slots carry stream data in larger
+// units. Each result is a session's channel, TX pool and RX pool. Ordinary
+// commands and the resolver keep the ordinary quota and GTCP 2. On failure
+// nothing stays open.
 func openLinuxSocketSessions() (tcp, udp [3]handle.ID, ok bool) {
-	if tcp, ok = openTCPSessionQuota(netapi.MaxSessionQuota); !ok {
+	if tcp, ok = openTCPSessionQuota(netapi.MaxSessionQuota, tcpapi.Layout3); !ok {
 		return tcp, udp, false
 	}
 	if udp, ok = openUDPSessionQuota(netapi.MaxSessionQuota); !ok {
@@ -344,8 +346,9 @@ func openUDPSessionQuota(quota uint8) ([3]handle.ID, bool) {
 }
 
 // openTCPSessionQuota creates the channel and directionally restricted
-// stream pools for one GTCP client whose endpoints are bounded by quota.
-func openTCPSessionQuota(quota uint8) ([3]handle.ID, bool) {
+// stream pools for one GTCP client whose endpoints are bounded by quota and
+// which speaks layout's version over pools of layout's size.
+func openTCPSessionQuota(quota uint8, layout tcpapi.Layout) ([3]handle.ID, bool) {
 	var none [3]handle.ID
 	if netControl == 0 {
 		return none, false
@@ -354,8 +357,8 @@ func openTCPSessionQuota(quota uint8) ([3]handle.ID, bool) {
 	if !createChannel(&pair) {
 		return none, false
 	}
-	tx, txStatus := sys.MemoryCreate(tcpapi.TXPoolPages)
-	rx, rxStatus := sys.MemoryCreate(tcpapi.RXPoolPages)
+	tx, txStatus := sys.MemoryCreate(layout.TXPoolPages())
+	rx, rxStatus := sys.MemoryCreate(layout.RXPoolPages())
 	if txStatus != kcall.StatusOK || rxStatus != kcall.StatusOK {
 		closePair(pair)
 		closeOpen(tx)
@@ -378,7 +381,8 @@ func openTCPSessionQuota(quota uint8) ([3]handle.ID, bool) {
 	correlation++
 	var message ipc.Message
 	attachments := [...]handle.ID{handle.ID(pair[1]), serviceTX, serviceRX}
-	request := netapi.ControlRequest{Opcode: netapi.ControlAddTCPSession, Rights: netapi.RightsTCP, Quota: quota}
+	request := netapi.ControlRequest{Opcode: netapi.ControlAddTCPSession, Rights: netapi.RightsTCP, Quota: quota,
+		TCPVersion: uint8(layout.Version)}
 	if !netapi.EncodeControlRequest(&request, attachments[:], correlation, &message) || !sendMessage(uint64(netControl), message) {
 		closePair(pair)
 		for _, id := range [...]handle.ID{serviceTX, serviceRX, clientTX, clientRX} {

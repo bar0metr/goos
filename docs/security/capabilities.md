@@ -441,7 +441,8 @@ check reads them.
 It holds no VFS session, configuration session, network administration
 session, device other than the console, IRQ, DMA, or launch channel. Its
 native sessions carry the same rights as a command's; only the endpoint
-quota differs, and PID 1 names it in GNETCTL version 5. A compromised
+quota and the TCP session's GTCP version differ, and PID 1 names both in
+GNETCTL version 6. The GTCP 3 session's pools hold 128 KiB each. A compromised
 `linuxsockd` reaches every Linux socket and the TCP and UDP endpoints it
 backs, and nothing else.
 

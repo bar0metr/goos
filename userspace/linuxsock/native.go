@@ -3,6 +3,23 @@ package linuxsock
 import (
 	"goos/kernel/ipc"
 	"goos/userspace/linuxsockapi"
+	"goos/userspace/tcpapi"
+	"goos/userspace/udpapi"
+)
+
+// The native sessions' sizes (GTCP 3, GUDP 2). A TCP NativeWrite carries at
+// most NativeStreamSlot bytes and a TCP NativeRead returns at most that many;
+// the backend sends a longer write's first NativeStreamSlot bytes only. One
+// TCP endpoint should have at most NativePipelinedWrites writes in flight
+// and holds at most NativeQueuedReads blocking reads, answered in order; a
+// session has NativeStreamTXSlots write slots over all its endpoints. A
+// datagram holds at most NativeDatagramSlot bytes.
+const (
+	NativeStreamSlot      = tcpapi.SlotSize3
+	NativeStreamTXSlots   = tcpapi.TXSlots3
+	NativePipelinedWrites = tcpapi.PipelinedWrites3
+	NativeQueuedReads     = tcpapi.QueuedReads3
+	NativeDatagramSlot    = udpapi.SlotSize
 )
 
 // Proto names the native session a request goes to.
@@ -14,7 +31,7 @@ const (
 )
 
 // NativeOp is one operation of the native TCP or UDP protocol, in the form
-// the service needs from GTCP version 2 and GUDP version 2 (ADR 0210).
+// the service needs from GTCP version 3 and GUDP version 2 (ADR 0210).
 // Every operation but WaitReady completes at once in netd.
 type NativeOp uint8
 
@@ -139,10 +156,13 @@ type NativeRequest struct {
 	Port     uint16
 	Length   uint32
 	Mask     NativeMask
-	Data     []byte
-	// Offset is a stream write's position: the bytes the endpoint took
-	// before the write's first one, modulo 2^32.
+	// Offset is a TCP NativeWrite's stream offset: the bytes of Endpoint's
+	// stream netd had taken, mod 2^32, counting writes in order. netd takes
+	// nothing from a write whose Offset is past its count (WouldBlock) or
+	// behind it (InvalidArgument), so a write sent after one that took a
+	// prefix takes nothing and the core resends from the first byte left.
 	Offset uint32
+	Data   []byte
 }
 
 // NativeCompletion is the answer to one NativeRequest. Data is valid only

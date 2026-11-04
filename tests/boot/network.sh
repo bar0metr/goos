@@ -600,6 +600,7 @@ require_after left.tcp-listener 'tcp listen -W 8000 -c 1 -b 192.0.2.10 9303' '^1
 require_after right.tcp-client 'tcp connect -W 8000 192.0.2.10 9303 guest stream' '^12 bytes: guest stream$' "$right"
 require_after left.tcp-status 'net status  ' '^tcp:$' "$left"
 require_after left.tcp-limits 'net status  ' '^  limits: ports 49152-65535 backlog 8 buffers 16384/16384$' "$left"
+require_after left.tcp-gtcp 'net status  ' '^  gtcp: v2 requests [1-9][0-9]* replies [1-9][0-9]* v3 requests [0-9][0-9]* replies [0-9][0-9]*$' "$left"
 require_after left.dns-fallback 'resolve fallback.test' '^fallback\.test: 192\.0\.2\.12 (dns, ttl 60 s)$' "$left"
 [ "$(queried fallback.test)" = 2 ] || fail left.edns-fallback "two queries for fallback.test, one with EDNS and one without" "$queries"
 checks=$((checks + 1))

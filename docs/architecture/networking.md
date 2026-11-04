@@ -76,12 +76,12 @@ and [the evidence report](../development/crypto-feasibility.md).
 
 ```text
 resolve             ping                         net    udp, tcp, dnsq
-  | GRESOLV1          | GRESOLV1, GNETAPI version 4 | GNETAPI v4 | GUDP 2 / GTCP 2
+  | GRESOLV1          | GRESOLV1, GNETAPI version 5 | GNETAPI v5 | GUDP 2 / GTCP 2
   v                   +-------------+---------------+--------------------+
 resolved  <-- GNETCTL --  PID 1     |  one private session per command
   |  hosts: GHST1 on its configuration session
   |  GUDP 2 session, GTCP 2 session v
-  |  and GNETAPI status     netd  <---- GNETCTL version 5 ----  PID 1
+  |  and GNETAPI status     netd  <---- GNETCTL version 6 ----  PID 1
   +-------------------------------->|  lo, Ethernet, ARP, IPv4, ICMP echo,
                                     |  DHCP client, UDP endpoints, TCP TCBs
                                     |
@@ -283,6 +283,40 @@ clears the pending transport error; a `Connect`, `Read` or `Write` reply
 that reports the error clears it too. `Option` reads the send MSS, the send
 and receive buffer sizes and the TTL.
 
+### GTCP 3
+
+`linuxsockd`'s TCP session speaks GTCP version 3; every other session
+speaks version 2. PID 1 names the version in byte 3 of
+`ControlAddTCPSession` (GNETCTL version 6), and the version fixes the pools
+(`tcpapi.LayoutFor`): version 2 has four TX and eight RX slots of 4 KiB,
+version 3 eight TX and eight RX slots of 16 KiB, 128 KiB a pool. `netd`
+checks that each mapped pool holds its layout, decodes every message of the
+session with that layout, and closes the session on a message of another
+version. The replies and every opcode keep version 2's layout and rules,
+except for two changes.
+
+- Requests grow to 28 bytes. Bytes 24..27 hold a `Write`'s stream offset:
+  the bytes the endpoint had accepted from the client since it opened, mod
+  2^32, when the client sent the write. A client may send several `NoWait`
+  writes of one endpoint without waiting for replies, and should keep at
+  most four (64 KiB) in flight. `netd` takes bytes only from a write whose
+  offset equals the endpoint's count. When an earlier write took a prefix,
+  a later one names an offset past the count and answers `WouldBlock`
+  with nothing taken; the client resends from its first unaccepted byte.
+  An offset behind the count answers `InvalidArgument` and takes nothing.
+  Every other opcode carries a zero offset.
+- An endpoint holds up to four parked `Read`s. `netd` answers them in the
+  order they arrived, each with up to its `Length` bytes in an RX slot of
+  its own, and a read that finds every RX slot lent waits for a `Release`.
+  A `NoWait` read on an endpoint with parked reads answers `WouldBlock`,
+  since arriving bytes belong to the parked ones. `Close` answers a held
+  `WaitReady` first, then the parked reads in order, all with `Closed`.
+
+`netd` serves a session's channel until its queue is empty before it waits
+again, so it takes a batch of writes and reads of one endpoint in one
+activation. A version 3 session maps 256 KiB of pools in both `netd` and
+`linuxsockd`, against 48 KiB for version 2.
+
 A bind follows the Linux SO_REUSEADDR rule: it conflicts with any endpoint
 or TIME_WAIT four-tuple on the same port whose address overlaps, equal or
 either one the wildcard, unless both carry `ReuseAddr` and the holder is not
@@ -302,7 +336,7 @@ can lower these limits but cannot allocate more storage.
 ### Session quotas
 
 Each TCP and UDP session has an endpoint quota that PID 1 names in
-GNETCTL version 5 (`ControlAddTCPSession` and `ControlAddUDPSession` carry
+GNETCTL version 6 (`ControlAddTCPSession` and `ControlAddUDPSession` carry
 it in byte 2, 1 to 64). Commands and `resolved` get the ordinary quota of
 8; `max-endpoints-per-session` can lower it. PID 1 asks for 64 for
 `linuxsockd`, and the tuning does not lower a grant above the ordinary
@@ -321,7 +355,11 @@ wildcard and loopback listeners remain. A plain link-down leaves connection
 state to its retransmission deadlines.
 
 `net status` obtains TCP counters and limits through the separate TCP status
-operation in GNETAPI version 4. Stream contents are never diagnostic data.
+operation in GNETAPI version 5. Version 5 adds four `uint64` counters at
+reply bytes 152..183: GTCP 2 requests decoded and replies sent, then the
+same for GTCP 3, over every session. `net status` prints them on its `gtcp`
+line; their deltas give GTCP messages per byte moved. Stream contents are
+never diagnostic data.
 See ADR 0196 for the state, ownership and protocol rules.
 
 ## Names

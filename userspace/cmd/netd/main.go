@@ -618,7 +618,9 @@ func handleRequest(index int, correlation uint64) {
 			TCPMaxEndpoints: limits.MaxEndpoints, TCPSessionEndpoints: limits.SessionEndpoints, TCPListenBacklog: limits.ListenBacklog,
 			TCPSendBuffer: limits.SendBuffer, TCPReceiveBuffer: limits.ReceiveBuffer,
 			TCPConnectTimeoutMS: uint32(limits.ConnectTimeout / 1_000_000), TCPRTOMinMS: uint32(limits.RTOMin / 1_000_000),
-			TCPRTOMaxMS: uint32(limits.RTOMax / 1_000_000), TCPTimeWaitMS: uint32(limits.TimeWait / 1_000_000)}
+			TCPRTOMaxMS: uint32(limits.RTOMax / 1_000_000), TCPTimeWaitMS: uint32(limits.TimeWait / 1_000_000),
+			GTCP2Requests: gtcpMessages[0][0], GTCP2Replies: gtcpMessages[0][1],
+			GTCP3Requests: gtcpMessages[1][0], GTCP3Replies: gtcpMessages[1][1]}
 		for index, count := range snapshot.States {
 			answer.TCPStates[index] = uint16(count)
 		}

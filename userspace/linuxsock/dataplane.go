@@ -25,17 +25,21 @@ import "goos/userspace/linuxsockapi"
 const (
 	// NativeSlotSize is the most one native write or read carries: the
 	// GTCP 3 slot of linuxsockd's session.
-	NativeSlotSize = 16384
+	NativeSlotSize = NativeStreamSlot
 	// NativeWriteDepth bounds a stream's writes in netd at once, and
 	// NativeReadDepth its reads parked there: GTCP 3 accepts pipelined
 	// writes with offsets and queues that many reads per endpoint.
-	NativeWriteDepth = 4
-	NativeReadDepth  = 4
+	NativeWriteDepth = NativePipelinedWrites
+	NativeReadDepth  = NativeQueuedReads
 	// datagramWriteDepth bounds a datagram socket's sends in netd at once.
 	datagramWriteDepth = 2
 	// nativeTXSlots is the TX slots of both native sessions.
-	nativeTXSlots = 8 + 4
+	nativeTXSlots = NativeStreamTXSlots + 4
 )
+
+// The family slot and the native one match, so a slot never splits.
+var _ [NativeSlotSize - linuxsockapi.SlotSize]byte
+var _ [linuxsockapi.SlotSize - NativeSlotSize]byte
 
 // drainSubmit takes every entry of a family's submit ring. It reports
 // false when an entry broke the protocol and the family is gone.

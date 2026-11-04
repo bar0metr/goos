@@ -26,6 +26,12 @@ congestion control, close states and TIME_WAIT remain in `userspace/network`.
 The resolver now repeats a truncated UDP answer over a GTCP1 session
 (ADR 0194, ADR 0196). Linux programs reach TCP and UDP through `linuxsockd`
 (ADR 0210). IPv6 and persistent DNS-over-TCP connections remain out of scope.
+`linuxsockd`'s TCP session speaks GTCP 3 (16 KiB slots, ordered pipelined
+writes, queued reads), which PID 1 selects through GNETCTL version 6; other
+sessions keep GTCP 2. `net status` reports GTCP requests and replies per
+version (GNETAPI version 5). The protocol tests are in
+`userspace/tcpapi/version3_test.go` and `userspace/tcpserve/version3_test.go`;
+see the GTCP 3 section of [the networking architecture](../architecture/networking.md).
 
 ADR 0198 selects native TLS 1.3 above GTCP1, with explicit system roots,
 kernel entropy and REALTIME. TLS and X.509 remain application parsers; network
