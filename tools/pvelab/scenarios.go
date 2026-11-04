@@ -50,7 +50,7 @@ func (g *Guest) readFailure(class Class, stage, waitingFor string, err error) er
 	if errors.Is(err, context.Canceled) {
 		return failf(ClassInfra, stage, "interrupted")
 	}
-	return failf(ClassInfra, stage, "serial console: %v", err)
+	return failf(ClassInfra, stage, "serial console: %w", err)
 }
 
 // WaitBoot waits for the normal-mode marker and then the shell prompt.

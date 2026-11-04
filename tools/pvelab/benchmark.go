@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -467,7 +468,6 @@ func (linuxNetworkBenchScenario) Run(ctx context.Context, s *Session) (Result, e
 	if o == nil || o.Runs < 1 {
 		return "", failf(ClassConfig, "bench", "the benchmark needs --bench-runs and the other --bench flags make passes")
 	}
-	g := s.Guest
 	guest, err := benchPrepare(ctx, s)
 	if err != nil {
 		return "", err
@@ -488,9 +488,9 @@ func (linuxNetworkBenchScenario) Run(ctx context.Context, s *Session) (Result, e
 		s.Node.Unstage(cctx)
 	}()
 
-	size := strconv.Itoa(o.StreamMiB)
 	var runs []BenchRun
 	var began time.Time
+	reconnects := 0
 	for i := 0; i < o.Warmups+o.Runs; i++ {
 		if wait := time.Until(began.Add(benchSpacing)); i > 0 && wait > 0 {
 			select {
@@ -500,27 +500,21 @@ func (linuxNetworkBenchScenario) Run(ctx context.Context, s *Session) (Result, e
 			}
 		}
 		began = time.Now()
-		run := BenchRun{Index: i, Warmup: i < o.Warmups}
-		steps := []struct{ check, command, done string }{
-			{"netprobe-bench", "/system/linux/netprobe bench " + size, "bench ok"},
-			{"netbench", "netbench " + size, "bench native ok"},
-			{"netprobe-remote", fmt.Sprintf("/system/linux/netprobe remote %s %d %s", o.Peer, benchPeerPort, size), "bench remote ok"},
-		}
-		for _, step := range steps {
-			out, err := g.Run(ctx, step.command, netprobeTimeout)
-			if err != nil {
-				return "", fail(ClassScenario, step.check, err)
+		run, err := benchRound(ctx, s, peerDir, guest, i)
+		if err != nil && errors.Is(err, errConsoleClosed) && s.ReconnectSerial != nil && reconnects < 2 {
+			// Someone opening the VM's serial terminal in the Proxmox UI
+			// takes the console over. Attach again and repeat the round.
+			reconnects++
+			s.progress("round %d: %v; attaching the console again and repeating the round", i+1, err)
+			if rerr := s.ReconnectSerial(ctx); rerr != nil {
+				return "", fail(ClassInfra, "console", rerr)
 			}
-			if err := g.Expect(step.check, out, step.done); err != nil {
-				return "", err
-			}
-			run.Lines = append(run.Lines, benchOutput(out)...)
+			i--
+			continue
 		}
-		served, err := benchAcceptClose(ctx, s, peerDir, guest)
 		if err != nil {
 			return "", err
 		}
-		run.Lines = append(run.Lines, served...)
 		label := "measured"
 		if run.Warmup {
 			label = "warm-up"
@@ -545,6 +539,34 @@ func (linuxNetworkBenchScenario) Run(ctx context.Context, s *Session) (Result, e
 		return "", failf(ClassScenario, "bench-gate", "the Linux loopback medians miss the hard envelope; see %s", path)
 	}
 	return ResultPass, nil
+}
+
+// benchRound runs the three benchmarks and the accept-close exchange once.
+func benchRound(ctx context.Context, s *Session, peerDir, guest string, index int) (BenchRun, error) {
+	o, g := s.Bench, s.Guest
+	size := strconv.Itoa(o.StreamMiB)
+	run := BenchRun{Index: index, Warmup: index < o.Warmups}
+	steps := []struct{ check, command, done string }{
+		{"netprobe-bench", "/system/linux/netprobe bench " + size, "bench ok"},
+		{"netbench", "netbench " + size, "bench native ok"},
+		{"netprobe-remote", fmt.Sprintf("/system/linux/netprobe remote %s %d %s", o.Peer, benchPeerPort, size), "bench remote ok"},
+	}
+	for _, step := range steps {
+		out, err := g.Run(ctx, step.command, netprobeTimeout)
+		if err != nil {
+			return run, fail(ClassScenario, step.check, err)
+		}
+		if err := g.Expect(step.check, out, step.done); err != nil {
+			return run, err
+		}
+		run.Lines = append(run.Lines, benchOutput(out)...)
+	}
+	served, err := benchAcceptClose(ctx, s, peerDir, guest)
+	if err != nil {
+		return run, err
+	}
+	run.Lines = append(run.Lines, served...)
+	return run, nil
 }
 
 // benchOutput keeps the bench lines of a command's output.
