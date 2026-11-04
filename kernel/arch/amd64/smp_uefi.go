@@ -179,6 +179,9 @@ func schedSwitch(action uint64) uint64 {
 		taskExitCodes[previous] = killCodes[previous]
 	}
 	next := runState.Switch(cpu, sched.Action(action))
+	if diag.Enabled {
+		noteRunSwitch(cpu, previous)
+	}
 	if diag.Enabled && next != sched.Idle && next != previous {
 		noteWakeRun(next)
 	}

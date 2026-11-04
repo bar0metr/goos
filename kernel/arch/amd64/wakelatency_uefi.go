@@ -26,7 +26,29 @@ type WakeLatency struct {
 var (
 	wakeStamps  [sched.MaxTasks]uint64
 	wakeLatency WakeLatency
+	// runCycles is each task slot's time on a processor; runStart the
+	// TSC when each processor last switched.
+	runCycles [sched.MaxTasks]uint64
+	runStart  [MaxCPUs]uint64
 )
+
+// noteRunSwitch charges the time since the processor last switched to the
+// task it leaves.
+func noteRunSwitch(cpu int, previous int) {
+	now := ReadTSC()
+	if previous >= 0 && previous < len(runCycles) && runStart[cpu] != 0 {
+		runCycles[previous] += now - runStart[cpu]
+	}
+	runStart[cpu] = now
+}
+
+// TaskRunCycles is a task slot's time on a processor, in TSC cycles.
+func TaskRunCycles(slot int) uint64 {
+	if slot < 0 || slot >= len(runCycles) {
+		return 0
+	}
+	return runCycles[slot]
+}
 
 func noteWakeStart(slot int) {
 	if slot >= 0 && slot < len(wakeStamps) && wakeStamps[slot] == 0 {

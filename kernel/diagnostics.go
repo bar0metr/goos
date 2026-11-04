@@ -464,6 +464,9 @@ func dumpProcess(out diagWriter, owner *process.Process, state amd64.SchedulerSt
 		}
 		out.hex("task", uint64(task))
 		out.word("state", taskState)
+		if valid {
+			out.uint("run-us", cyclesToMicros(amd64.TaskRunCycles(int(slot))))
+		}
 	}
 	out.uint("free-handles", uint64(owner.Handles().Available()))
 	out.end()
@@ -560,15 +563,17 @@ func boolDiag(value bool) uint64 {
 // dumpWakeLatency prints the time from a wake to the switch onto the woken
 // task: the count, the mean, and the bucket bounds of three percentiles, in
 // microseconds.
+func cyclesToMicros(cycles uint64) uint64 {
+	hz := monotonicClock.Hz()
+	if hz < 1_000_000 {
+		return 0
+	}
+	return cycles / (hz / 1_000_000)
+}
+
 func dumpWakeLatency(out diagWriter) {
 	latency := amd64.ReadWakeLatency()
-	hz := monotonicClock.Hz()
-	micros := func(cycles uint64) uint64 {
-		if hz == 0 {
-			return 0
-		}
-		return cycles / (hz / 1_000_000)
-	}
+	micros := cyclesToMicros
 	percentile := func(share uint64) uint64 {
 		want := (latency.Count*share + 99) / 100
 		seen := uint64(0)
