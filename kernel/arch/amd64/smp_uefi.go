@@ -4,6 +4,7 @@ package amd64
 
 import (
 	"goos/internal/validation"
+	"goos/kernel/diag"
 	"goos/kernel/lock"
 	"goos/kernel/sched"
 	"math/bits"
@@ -178,6 +179,9 @@ func schedSwitch(action uint64) uint64 {
 		taskExitCodes[previous] = killCodes[previous]
 	}
 	next := runState.Switch(cpu, sched.Action(action))
+	if diag.Enabled && next != sched.Idle && next != previous {
+		noteWakeRun(next)
+	}
 	if next != sched.Idle && next >= kernelTasks {
 		noteParallel(taskRoots[next])
 	}
@@ -407,6 +411,9 @@ func wakeSlotFromInterrupt(slot uint64) {
 func wakeSlot(slot int) bool {
 	cpu := CPUIndex()
 	flags := lockScheduler()
+	if diag.Enabled && !runState.OnProcessor(slot) {
+		noteWakeStart(slot)
+	}
 	target, ok := runState.Wake(slot, cpu)
 	schedulerLock.Unlock()
 	if target != sched.Idle {
@@ -423,6 +430,9 @@ func WakeTaskID(task uint64) bool {
 	slot, ok := runState.Alive(sched.TaskID(task))
 	target := sched.Idle
 	if ok {
+		if diag.Enabled && !runState.OnProcessor(slot) {
+			noteWakeStart(slot)
+		}
 		target, ok = runState.Wake(slot, cpu)
 	}
 	schedulerLock.Unlock()

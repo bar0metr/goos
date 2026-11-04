@@ -245,6 +245,11 @@ func (core *Core) Terminate(slot int, self int) (int, bool) {
 	return Idle, true
 }
 
+// OnProcessor reports whether a processor runs the task now.
+func (core *Core) OnProcessor(slot int) bool {
+	return core.inRange(slot) && core.running&bit(slot) != 0
+}
+
 // Runnable reports whether a task wants a processor.
 func (core *Core) Runnable(slot int) bool {
 	return core.inRange(slot) && core.runnable&bit(slot) != 0
