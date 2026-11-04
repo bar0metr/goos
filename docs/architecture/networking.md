@@ -308,8 +308,11 @@ it in byte 2, 1 to 64). Commands and `resolved` get the ordinary quota of
 `linuxsockd`, and the tuning does not lower a grant above the ordinary
 quota. `netd` holds 8 TCP and 8 UDP sessions. Its per-session tables and the
 TIME_WAIT tombstone table fit the largest quota, so a session at 64 cannot
-take another session's share: an owner keeps up to its quota of tombstones,
-and at least 8. A passive child counts against its listener's session.
+take another session's share: an owner keeps four tombstones for each
+endpoint of its quota, and at least 32, in a table of 2048. A server that
+clients close first leaves one per connection; at 64 endpoints `linuxsockd`
+serves 320 connections in a TIME_WAIT interval before `Open` waits for one to
+expire. A passive child counts against its listener's session.
 
 Traffic to `127.0.0.0/8` or the current interface address is fed back through
 the TCP parser and state machine. It does not use ARP or the virtio driver.

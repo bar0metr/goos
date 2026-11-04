@@ -257,12 +257,13 @@ func TestTCPTombstoneSharesPerOwner(t *testing.T) {
 	h.stack.TCPClose(2, held, h.now)
 
 	// Owner 1 recycles until its share is full.
-	for round := 0; round < MaxTCPEndpointsPerSession; round++ {
+	share := h.stack.tcpTombstoneShare(1)
+	for round := 0; round < share; round++ {
 		id := h.recycle(1)
 		h.stack.TCPClose(1, id, h.now)
 		h.peerTimeWait(1, uint16(60+round))
 	}
-	if h.tombstones(1) != MaxTCPEndpointsPerSession || h.timeWaits(1) != 1 {
+	if h.tombstones(1) != share || h.timeWaits(1) != 1 {
 		t.Fatalf("tombstones %d TIME_WAIT %d", h.tombstones(1), h.timeWaits(1))
 	}
 	if _, result := h.stack.TCPOpen(1); result != ResultBusy {
@@ -307,7 +308,7 @@ func TestTCPCloseOwnerKeepsTimeWait(t *testing.T) {
 func TestTCPShortConnectionsPastTheLimit(t *testing.T) {
 	h := readyWithPeer(t)
 	seen := map[TCPTuple]bool{}
-	limit := MaxTCPEndpointsPerSession + MaxTCPEndpointsPerSession
+	limit := MaxTCPEndpointsPerSession + h.stack.tcpTombstoneShare(1)
 	for round := 0; round < limit; round++ {
 		_, tuple := h.peerTimeWait(1, 53)
 		if seen[tuple] {

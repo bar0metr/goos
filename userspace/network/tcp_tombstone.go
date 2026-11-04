@@ -1,18 +1,23 @@
 package network
 
 const (
+	// tcpTombstonesPerEndpoint is how many TIME_WAIT four-tuples an owner
+	// may keep for each endpoint of its quota. A server that a client
+	// closes first leaves one per connection for time-wait-ms, so a quota's
+	// worth would stop it after a few hundred connections a minute.
+	tcpTombstonesPerEndpoint = 4
 	// tcpTombstoneSlots holds the TIME_WAIT four-tuples owners have moved
-	// out of their endpoint slots. One owner holds at most its quota of
-	// them, and each owner's share fits at the largest quota, so the table
-	// can never fill and no owner can use up another's share.
-	tcpTombstoneSlots = MaxTCPSessions * MaxTCPSessionQuota
+	// out of their endpoint slots. Each owner's share fits at the largest
+	// quota, so the table can never fill and no owner can use up another's
+	// share.
+	tcpTombstoneSlots = MaxTCPSessions * MaxTCPSessionQuota * tcpTombstonesPerEndpoint
 )
 
-// tcpTombstoneShare is how many tombstones owner may hold: its quota, and
-// never less than the ordinary quota, so a lowered tuning does not shrink
-// the share an ordinary session always had.
+// tcpTombstoneShare is how many tombstones owner may hold: four per
+// endpoint of its quota, and never fewer than for the ordinary quota, so a
+// lowered tuning does not shrink the share an ordinary session always had.
 func (stack *Stack) tcpTombstoneShare(owner int) int {
-	return max(stack.tcpOwnerQuota(owner), MaxTCPEndpointsPerSession)
+	return max(stack.tcpOwnerQuota(owner), MaxTCPEndpointsPerSession) * tcpTombstonesPerEndpoint
 }
 
 // tcpTombstone keeps what a TIME_WAIT connection protects after its endpoint

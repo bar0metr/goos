@@ -95,8 +95,9 @@ selection skips it and `Connect` with an explicit port refuses it with
 `AddressInUse`. A segment for it is handled as TIME_WAIT handles one: a
 retransmitted FIN is acknowledged again and restarts the interval, and
 anything else, a new SYN or a reset included, is dropped without a reply or
-a TCB. The table holds 64 tombstones, eight per session, so one owner can
-never take another's share. An owner whose share is full gets `Busy` from
+a TCB. The table holds four tombstones for each endpoint of the largest
+session quota, 2048, and an owner's share is four per endpoint of its own
+quota (ADR 0210), so one owner can never take another's share. An owner whose share is full gets `Busy` from
 `Open` until a tombstone or a TIME_WAIT expires; protection is never
 dropped to make room. Ending a session keeps its TIME_WAIT connections
 until they expire, and a later session in the same place may recycle them.
