@@ -638,8 +638,24 @@ func benchAcceptClose(ctx context.Context, s *Session, peerDir, guest string) ([
 	if err != nil {
 		return nil, fail(ClassScenario, "remote-accept-close", err)
 	}
-	// Let the server's closing line land before the next command.
-	time.Sleep(500 * time.Millisecond)
+	// The background job prints its lines and the shell redraws its prompt
+	// after the command above returned. Read through the job's end and
+	// drop the rest, or the next command would take a redrawn prompt for
+	// its own.
+	jobCtx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	tail, err := g.con.ReadUntil(jobCtx, []byte("] done"))
+	if err != nil {
+		return nil, g.readFailure(ClassScenario, "remote-serve", "] done", err)
+	}
+	select {
+	case <-time.After(settleTime):
+	case <-ctx.Done():
+	}
+	tail = append(tail, g.con.Drain()...)
+	if !strings.Contains(string(tail), fmt.Sprintf("remote-serve done %d", benchServeConn)) {
+		return nil, failf(ClassScenario, "remote-serve", "the guest server did not answer every connection:\n%s", tail)
+	}
 	return benchOutput(string(out)), nil
 }
 
