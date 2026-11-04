@@ -305,9 +305,33 @@ loopback (run 20261104T163631Z):
 | write to a `poll` waiter's return | 236 us |
 
 The same probe on Linux 6.12 under TCG measured 272 MiB/s, 169 us, 233 us,
-137 us and 423 us. The stream rate is far from Linux; every 4 KiB chunk
-crosses the kernel, `linuxsockd` and `netd`, and the waits between them
-follow the scheduler's tick. These numbers are a record, not a gate.
+137 us and 423 us. That first data path moved at most 4 KiB per GLNXSOCK
+exchange and ran each exchange through `linuxsockd` and the native session
+before it started the next chunk. Channel and readiness wakes go through
+`WakeTaskID` and a reschedule IPI; the timer tick provides deadlines and
+preemption and is not the ordinary socket wake path.
+
+`make bench-pve-linux-network` measures the same host and VM shape with a
+release build (OPT=2, DIAG=0, VALIDATION=0, HZ=100), two warm-up rounds and
+nine measured ones, and reports medians. Host: Xeon Gold 6240, Proxmox 7.4,
+QEMU 7.2. Native is the same operation over GTCP 2 and GUDP 2 from one
+native process, without the Linux bridge.
+
+| Measurement | 4 KiB exchanges | Shared data plane | Native |
+| --- | --- | --- | --- |
+| TCP stream, 32 MiB | 15.2 MiB/s | 71.7 MiB/s | 64.2 MiB/s |
+| TCP one-byte request and reply | 418 us | 234 us | 119 us |
+| TCP connect, accept and close | 842 us | 799 us | 658 us |
+| UDP 64-byte request and reply | 399 us | 255 us | 88 us |
+| write to a `poll` waiter's return | 165 us | 199 us | 51 us |
+
+The diagnostic build counted, per 64 KiB of stream, 321 context switches
+and about 170 reschedule IPIs before the data plane, and 25 switches and
+12 IPIs after it; one stream write now takes four TX slots and one
+doorbell. The median time from a wake to the woken task running stayed
+between 7 and 13 us, so the scheduler is not what remains: the native
+numbers show `netd` itself spending 120 us on a request and reply and
+274 us on a connect.
 
 Under KVM three defects showed that TCG had hidden: `WaitAny` refused a
 writable wait on a channel, which `linuxsockd` uses while a family's queue
