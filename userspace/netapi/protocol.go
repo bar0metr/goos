@@ -9,9 +9,10 @@ import (
 
 const (
 	ProtocolID = uint64(0x474e455441504931)
-	// Version 4 adds a separate bounded TCP diagnostics reply. A
-	// message of an older version is not this protocol and fails decoding.
-	Version          = uint16(4)
+	// Version 4 adds a separate bounded TCP diagnostics reply, version 5
+	// its GTCP message counters. A message of an older version is not this
+	// protocol and fails decoding.
+	Version          = uint16(5)
 	RequestSize      = 24
 	ReplySize        = 248
 	MaxServers       = 4
@@ -71,6 +72,7 @@ const (
 	replyTCPConnections = 84
 	replyTCPStates      = 88
 	replyTCPLimits      = 120
+	replyTCPMessages    = 152
 
 	// flagRateLimited is the only flag: the next address claim waits for
 	// the conflict rate limit.
@@ -79,6 +81,8 @@ const (
 	udpCounterCount = 7
 	tcpCounterCount = 9
 	tcpStateCount   = 14
+	// gtcpCounterCount: requests and replies of GTCP 2, then of GTCP 3.
+	gtcpCounterCount = 4
 
 	addressSize = 4
 	macSize     = 6
@@ -284,6 +288,9 @@ type Reply struct {
 	TCPMaxEndpoints, TCPSessionEndpoints, TCPListenBacklog         uint8
 	TCPSendBuffer, TCPReceiveBuffer                                uint16
 	TCPConnectTimeoutMS, TCPRTOMinMS, TCPRTOMaxMS, TCPTimeWaitMS   uint32
+	// GTCP2Requests and the rest count the client messages netd decoded and
+	// the replies it sent, per GTCP version, over every session.
+	GTCP2Requests, GTCP2Replies, GTCP3Requests, GTCP3Replies uint64
 }
 
 func (r *Reply) udpCounters() [udpCounterCount]*uint64 {
@@ -296,6 +303,10 @@ func (r *Reply) tcpCounters() [tcpCounterCount]*uint64 {
 		&r.TCPDropChecksum, &r.TCPDropNoTCB, &r.TCPDropWindow, &r.TCPDropMalformed}
 }
 
+func (r *Reply) gtcpCounters() [gtcpCounterCount]*uint64 {
+	return [gtcpCounterCount]*uint64{&r.GTCP2Requests, &r.GTCP2Replies, &r.GTCP3Requests, &r.GTCP3Replies}
+}
+
 func (r *Reply) tcpEmpty() bool {
 	copy := *r
 	copy.TCPRX, copy.TCPTX, copy.TCPRetransmits, copy.TCPRXReset, copy.TCPTXReset = 0, 0, 0, 0, 0
@@ -306,6 +317,7 @@ func (r *Reply) tcpEmpty() bool {
 	copy.TCPMaxEndpoints, copy.TCPSessionEndpoints, copy.TCPListenBacklog = 0, 0, 0
 	copy.TCPSendBuffer, copy.TCPReceiveBuffer = 0, 0
 	copy.TCPConnectTimeoutMS, copy.TCPRTOMinMS, copy.TCPRTOMaxMS, copy.TCPTimeWaitMS = 0, 0, 0, 0
+	copy.GTCP2Requests, copy.GTCP2Replies, copy.GTCP3Requests, copy.GTCP3Replies = 0, 0, 0, 0
 	return copy == *r
 }
 
@@ -415,6 +427,9 @@ func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
 		binary.LittleEndian.PutUint32(payload[replyTCPLimits+16:], r.TCPRTOMinMS)
 		binary.LittleEndian.PutUint32(payload[replyTCPLimits+20:], r.TCPRTOMaxMS)
 		binary.LittleEndian.PutUint32(payload[replyTCPLimits+24:], r.TCPTimeWaitMS)
+		for index, counter := range r.gtcpCounters() {
+			binary.LittleEndian.PutUint64(payload[replyTCPMessages+8*index:], *counter)
+		}
 		return true
 	}
 	payload[replyState] = byte(r.State)
@@ -471,7 +486,7 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 	if Opcode(payload[replyOpcode]) == OpTCPStatus {
 		if opcode != OpTCPStatus || !zero(payload[2:replyTCPCounters]) || !zero(payload[replyTCPConnections+2:replyTCPStates]) ||
 			!zero(payload[replyTCPStates+2*tcpStateCount:replyTCPLimits]) || payload[replyTCPLimits+7] != 0 ||
-			!zero(payload[replyTCPLimits+28:ReplySize]) {
+			!zero(payload[replyTCPLimits+28:replyTCPMessages]) || !zero(payload[replyTCPMessages+8*gtcpCounterCount:ReplySize]) {
 			return false
 		}
 		r := Reply{Opcode: OpTCPStatus, Result: Result(payload[replyResult]),
@@ -489,6 +504,9 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 		}
 		for index := range r.TCPStates {
 			r.TCPStates[index] = binary.LittleEndian.Uint16(payload[replyTCPStates+2*index:])
+		}
+		for index, counter := range r.gtcpCounters() {
+			*counter = binary.LittleEndian.Uint64(payload[replyTCPMessages+8*index:])
 		}
 		if !validReply(&r) {
 			return false
@@ -568,6 +586,7 @@ func validReply(r *Reply) bool {
 		base.TCPMaxEndpoints, base.TCPSessionEndpoints, base.TCPListenBacklog = 0, 0, 0
 		base.TCPSendBuffer, base.TCPReceiveBuffer = 0, 0
 		base.TCPConnectTimeoutMS, base.TCPRTOMinMS, base.TCPRTOMaxMS, base.TCPTimeWaitMS = 0, 0, 0, 0
+		base.GTCP2Requests, base.GTCP2Replies, base.GTCP3Requests, base.GTCP3Replies = 0, 0, 0, 0
 		if base != (Reply{Opcode: OpTCPStatus, Result: r.Result}) {
 			return false
 		}

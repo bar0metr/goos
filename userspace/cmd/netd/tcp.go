@@ -28,13 +28,27 @@ type tcpSession struct {
 type tcpReplier struct{ index int }
 
 func (r tcpReplier) Reply(out *tcpapi.Reply, correlation uint64) bool {
-	return tcpapi.EncodeReply(out, correlation, &reply) && sendOn(tcpSessions[r.index].channel, &reply)
+	current := &tcpSessions[r.index]
+	if !current.state.Encode(out, correlation, &reply) || !sendOn(current.channel, &reply) {
+		return false
+	}
+	gtcpCounters(current.state.Layout().Version)[1]++
+	return true
 }
 
 var (
 	tcpSessions [network.MaxTCPSessions]tcpSession
 	tcpIn       tcpapi.Request
+	// gtcpMessages counts requests decoded and replies sent: GTCP 2, then 3.
+	gtcpMessages [2][2]uint64
 )
+
+func gtcpCounters(version uint16) *[2]uint64 {
+	if version == tcpapi.Version3 {
+		return &gtcpMessages[1]
+	}
+	return &gtcpMessages[0]
+}
 
 func addTCPSession() netapi.ControlResult {
 	channel, tx, rx := message.Handles[0], message.Handles[1], message.Handles[2]
@@ -58,7 +72,11 @@ func addTCPSession() netapi.ControlResult {
 	if index < 0 {
 		return refuse(netapi.ControlBusy)
 	}
-	const txPool, rxPool = tcpapi.TXSlots * tcpapi.SlotSize, tcpapi.RXSlots * tcpapi.SlotSize
+	layout, known := tcpapi.LayoutFor(uint16(control.TCPVersion))
+	if !known {
+		return refuse(netapi.ControlInvalidArgument)
+	}
+	txPool, rxPool := layout.TXPool(), layout.RXPool()
 	txBase, txSize, txStatus := sys.MemoryMapAnywhere(tx, false)
 	if txStatus != kcall.StatusOK || txSize < txPool {
 		if txStatus == kcall.StatusOK {
@@ -78,7 +96,7 @@ func addTCPSession() netapi.ControlResult {
 	current.channel, current.txHandle, current.rxHandle = channel, tx, rx
 	current.txBase, current.txSize, current.rxBase, current.rxSize = txBase, txSize, rxBase, rxSize
 	// The control codec admits quotas 1 to netapi.MaxSessionQuota only.
-	if !current.state.StartQuota(&stack, index, int(control.Quota), sys.Window(txBase, txPool), sys.Window(rxBase, rxPool), clockNanos()) {
+	if !current.state.StartLayout(&stack, index, int(control.Quota), layout, sys.Window(txBase, txPool), sys.Window(rxBase, rxPool), clockNanos()) {
 		closeTCPSession(index, "quota invalid")
 		return netapi.ControlInvalidArgument
 	}
@@ -118,12 +136,14 @@ func serviceTCP(index int) {
 			closeTCPSession(index, "message invalid")
 			return
 		}
-		correlation, valid := tcpapi.DecodeRequest(&message, &tcpIn)
+		// A message of another GTCP version than the session's fails here.
+		correlation, valid := current.state.Decode(&message, &tcpIn)
 		if !valid {
 			closeAttached()
 			closeTCPSession(index, "request invalid")
 			return
 		}
+		gtcpCounters(current.state.Layout().Version)[0]++
 		if fault := current.state.Handle(&stack, &tcpIn, correlation, clockNanos(), tcpReplier{index}); fault != tcpserve.FaultNone {
 			closeTCPSession(index, string(fault))
 			return

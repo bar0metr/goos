@@ -2,12 +2,12 @@
 
 package main
 
-// The native backend: the GTCP 2 and GUDP 2 sessions PID 1 hands over with
+// The native backend: the GTCP 3 and GUDP 2 sessions PID 1 hands over with
 // ControlSetTCP and ControlSetUDP, behind linuxsock.Backend. This file is
-// the only one that knows the native wire. Every request it sends answers
-// at once in netd, except WaitReady, which netd holds until the endpoint's
-// mask changes. GUDP has no pending error and no buffer options: those
-// requests answer SubmitUnsupported.
+// the only one that knows the native wire. netd answers a NoWait request at
+// once; it holds a WaitReady until the endpoint's mask changes and a
+// blocking Read until bytes arrive. GUDP has no pending error and no buffer
+// options: those requests answer SubmitUnsupported.
 
 import (
 	"goos/internal/capability"
@@ -20,6 +20,9 @@ import (
 	"goos/userspace/tcpapi"
 	"goos/userspace/udpapi"
 )
+
+// tcpLayout is the GTCP version and pools of the TCP session.
+var tcpLayout = tcpapi.Layout3
 
 // nativeLink is one native session.
 type nativeLink struct {
@@ -62,21 +65,30 @@ func (backend) Submit(proto linuxsock.Proto, tag uint64, request *linuxsock.Nati
 	}
 	link.flushReleases()
 	slot, lent := uint8(0), false
+	data := request.Data
 	if request.Op == linuxsock.NativeWrite || request.Op == linuxsock.NativeSendTo {
+		size := uint64(udpapi.SlotSize)
+		if proto == linuxsock.TCP {
+			// A stream write sends what fits; the reply's Length says so.
+			size = uint64(tcpLayout.SlotSize)
+			data = data[:min(uint64(len(data)), size)]
+		} else if uint64(len(data)) > size {
+			return linuxsock.SubmitUnsupported
+		}
 		free, ok := link.txLent.Free()
 		if !ok {
 			return linuxsock.SubmitBusy
 		}
 		slot, lent = free, true
-		copy(link.tx[uint64(slot)*tcpapi.SlotSize:], request.Data)
+		copy(link.tx[uint64(slot)*size:uint64(slot+1)*size], data)
 	}
 	var encoded bool
 	if proto == linuxsock.TCP {
-		status := encodeTCP(request, slot)
+		status := encodeTCP(request, slot, len(data))
 		if status != linuxsock.SubmitAccepted {
 			return status
 		}
-		encoded = tcpapi.EncodeRequest(&tcpRequest, tag, &nativeOut)
+		encoded = tcpLayout.EncodeRequest(&tcpRequest, tag, &nativeOut)
 	} else {
 		status := encodeUDP(request, slot)
 		if status != linuxsock.SubmitAccepted {
@@ -100,7 +112,7 @@ func (backend) Submit(proto linuxsock.Proto, tag uint64, request *linuxsock.Nati
 	return linuxsock.SubmitAccepted
 }
 
-func encodeTCP(r *linuxsock.NativeRequest, slot uint8) linuxsock.SubmitStatus {
+func encodeTCP(r *linuxsock.NativeRequest, slot uint8, length int) linuxsock.SubmitStatus {
 	tcpRequest = tcpapi.Request{Endpoint: r.Endpoint}
 	if r.Flags&linuxsock.NativeNoWait != 0 {
 		tcpRequest.Flags |= tcpapi.FlagNoWait
@@ -123,9 +135,10 @@ func encodeTCP(r *linuxsock.NativeRequest, slot uint8) linuxsock.SubmitStatus {
 	case linuxsock.NativeConnect:
 		tcpRequest.Opcode, tcpRequest.Address, tcpRequest.Port = tcpapi.OpConnect, r.Address, r.Port
 	case linuxsock.NativeRead:
-		tcpRequest.Opcode, tcpRequest.Length = tcpapi.OpRead, uint16(min(r.Length, tcpapi.SlotSize))
+		tcpRequest.Opcode, tcpRequest.Length = tcpapi.OpRead, uint16(min(r.Length, tcpLayout.SlotSize))
 	case linuxsock.NativeWrite:
-		tcpRequest.Opcode, tcpRequest.Slot, tcpRequest.Length = tcpapi.OpWrite, slot, uint16(len(r.Data))
+		tcpRequest.Opcode, tcpRequest.Slot, tcpRequest.Length = tcpapi.OpWrite, slot, uint16(length)
+		tcpRequest.Offset = r.Offset
 	case linuxsock.NativeShutdownWrite:
 		tcpRequest.Opcode = tcpapi.OpShutdownWrite
 	case linuxsock.NativeClose:
@@ -365,10 +378,10 @@ func udpResult(result udpapi.Result) linuxsock.NativeResult {
 	return linuxsock.NativeClosed
 }
 
-// completeTCP turns a GTCP 2 reply into completion.
+// completeTCP turns a GTCP 3 reply into completion.
 func completeTCP(link *nativeLink) (uint64, bool) {
 	tcpReply = tcpapi.Reply{}
-	correlation, ok := tcpapi.DecodeReply(&nativeIn, &tcpReply)
+	correlation, ok := tcpLayout.DecodeReply(&nativeIn, &tcpReply)
 	if !ok {
 		return 0, false
 	}
@@ -392,7 +405,8 @@ func completeTCP(link *nativeLink) (uint64, bool) {
 			if !link.rxLend(r.Slot) {
 				return 0, false
 			}
-			completion.Data = link.rx[uint64(r.Slot)*tcpapi.SlotSize : uint64(r.Slot)*tcpapi.SlotSize+uint64(r.Length)]
+			offset := tcpLayout.Offset(r.Slot)
+			completion.Data = link.rx[offset : offset+uint64(r.Length)]
 		}
 	case tcpapi.OpWrite:
 		completion.Op, completion.Length = linuxsock.NativeWrite, uint32(r.Length)
@@ -493,7 +507,7 @@ func (link *nativeLink) flushReleases() {
 		var encoded bool
 		if link.proto == linuxsock.TCP {
 			request := tcpapi.Request{Opcode: tcpapi.OpRelease, Slot: slot}
-			encoded = tcpapi.EncodeRequest(&request, 0, &nativeOut)
+			encoded = tcpLayout.EncodeRequest(&request, 0, &nativeOut)
 		} else {
 			request := udpapi.Request{Opcode: udpapi.OpRelease, Slot: slot}
 			encoded = udpapi.EncodeRequest(&request, 0, &nativeOut)
@@ -517,7 +531,7 @@ func (link *nativeLink) send(message *ipc.Message) kcall.Status {
 // channel, the TX pool the service writes and the RX pool it reads.
 func setLink(proto linuxsock.Proto, generation uint64, channel, tx, rx handle.ID) bool {
 	const rw = capability.Read | capability.Write | capability.Wait
-	txPool, rxPool := uint64(tcpapi.TXSlots*tcpapi.SlotSize), uint64(tcpapi.RXSlots*tcpapi.SlotSize)
+	txPool, rxPool := tcpLayout.TXPool(), tcpLayout.RXPool()
 	if proto == linuxsock.UDP {
 		txPool, rxPool = udpapi.TXSlots*udpapi.SlotSize, udpapi.RXSlots*udpapi.SlotSize
 	}
@@ -545,7 +559,7 @@ func setLink(proto linuxsock.Proto, generation uint64, channel, tx, rx handle.ID
 	*link = nativeLink{proto: proto, generation: generation, channel: channel, txHandle: tx, rxHandle: rx,
 		txBase: txBase, txSize: txSize, rxBase: rxBase, rxSize: rxSize,
 		tx: sys.Window(txBase, txPool), rx: sys.Window(rxBase, rxPool)}
-	slots := uint8(tcpapi.TXSlots)
+	slots := tcpLayout.TXSlots
 	if proto == linuxsock.UDP {
 		slots = udpapi.TXSlots
 	}

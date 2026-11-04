@@ -11,7 +11,25 @@
 // OpWaitReady parks until the mask differs from the one the request names.
 // Neither consumes a byte.
 //
-// Request body, 24 bytes:
+// Version 3 (Layout3) has eight TX and eight RX slots of 16 KiB each and a
+// 28-byte request whose last four bytes are a Write's stream offset: the
+// count of bytes the endpoint had accepted from the client, mod 2^32, when
+// the client sent it. A client may send several NoWait Writes of one
+// endpoint back to back. netd takes bytes from a Write only when its offset
+// equals the endpoint's accepted count, so a Write sent after one that took
+// a prefix answers ResultWouldBlock with nothing taken, and the client
+// resends from its first unaccepted byte. A Write whose offset lies behind
+// the count answers ResultInvalidArgument and takes nothing. An endpoint
+// holds up to QueuedReads3 parked Reads; netd answers them in the order
+// they arrived, each with an RX slot of its own. A NoWait Read behind
+// parked ones answers ResultWouldBlock. Version 2 keeps one parked Read and
+// no offset.
+//
+// PID 1 picks a session's version when it creates the session; netd decodes
+// that session's messages with its Layout and fails a message of another
+// version.
+//
+// Request body, 24 bytes (28 in version 3):
 //
 //	0      opcode
 //	1      slot     Write: TX slot
@@ -25,6 +43,7 @@
 //	18..19 mask     WaitReady: the mask the client last saw
 //	20     option   Option: Option* selector
 //	21..23 reserved
+//	24..27 offset   version 3 Write: stream offset of the slot's first byte
 //
 // Reply body, 32 bytes:
 //
@@ -59,7 +78,57 @@ const (
 	pageSize    = 4096
 	TXPoolPages = TXSlots * SlotSize / pageSize
 	RXPoolPages = RXSlots * SlotSize / pageSize
+
+	Version3     = uint16(3)
+	RequestSize3 = 28
+	SlotSize3    = 16384
+	TXSlots3     = 8
+	RXSlots3     = 8
+	// QueuedReads3 is the most parked Reads one version 3 endpoint holds.
+	QueuedReads3 = 4
+	// PipelinedWrites3 is how many NoWait Writes of one endpoint a version
+	// 3 client should have in flight at most: 64 KiB, half the TX slots.
+	// netd answers each Write before it takes the next message, so it does
+	// not count them; the session's TX slots are the hard bound.
+	PipelinedWrites3 = 4
 )
+
+// Layout is one protocol version and the slot pools it implies. A session
+// speaks exactly one Layout; Slots bitmasks bound either count to 8.
+type Layout struct {
+	Version     uint16
+	RequestSize uint16
+	SlotSize    uint32
+	TXSlots     uint8
+	RXSlots     uint8
+	QueuedReads uint8
+}
+
+var (
+	Layout2 = Layout{Version: Version, RequestSize: RequestSize, SlotSize: SlotSize, TXSlots: TXSlots, RXSlots: RXSlots, QueuedReads: 1}
+	Layout3 = Layout{Version: Version3, RequestSize: RequestSize3, SlotSize: SlotSize3, TXSlots: TXSlots3, RXSlots: RXSlots3,
+		QueuedReads: QueuedReads3}
+)
+
+// LayoutFor returns the Layout of a protocol version netd serves.
+func LayoutFor(version uint16) (Layout, bool) {
+	switch version {
+	case Version:
+		return Layout2, true
+	case Version3:
+		return Layout3, true
+	}
+	return Layout{}, false
+}
+
+func (l Layout) TXPool() uint64           { return uint64(l.TXSlots) * uint64(l.SlotSize) }
+func (l Layout) RXPool() uint64           { return uint64(l.RXSlots) * uint64(l.SlotSize) }
+func (l Layout) TXPoolPages() uint64      { return l.TXPool() / pageSize }
+func (l Layout) RXPoolPages() uint64      { return l.RXPool() / pageSize }
+func (l Layout) Offset(slot uint8) uint64 { return uint64(slot) * uint64(l.SlotSize) }
+
+// StreamOffsets reports whether Writes carry a stream offset.
+func (l Layout) StreamOffsets() bool { return l.RequestSize > RequestSize }
 
 type Opcode uint8
 
@@ -160,6 +229,8 @@ type Request struct {
 	Flags    uint8
 	Mask     uint16
 	Option   uint8
+	// Offset is a version 3 Write's stream offset; zero otherwise.
+	Offset uint32
 }
 
 type Reply struct {
@@ -192,8 +263,11 @@ func allowedFlags(opcode Opcode) uint8 {
 	return 0
 }
 
-func validRequest(r *Request) bool {
+func validRequest(l *Layout, r *Request) bool {
 	none := r.Address == noAddress && r.Port == 0
+	if r.Offset != 0 && (r.Opcode != OpWrite || !l.StreamOffsets()) {
+		return false
+	}
 	if r.Flags&^allowedFlags(r.Opcode) != 0 || (r.Mask != 0 && r.Opcode != OpWaitReady) || (r.Option != 0) != (r.Opcode == OpOption) {
 		return false
 	}
@@ -213,24 +287,39 @@ func validRequest(r *Request) bool {
 	case OpConnect:
 		return r.Endpoint != 0 && r.Address != noAddress && r.Port != 0 && r.Slot == 0 && r.Length == 0 && r.Backlog == 0
 	case OpWrite:
-		return r.Endpoint != 0 && r.Slot < TXSlots && r.Length <= SlotSize && r.Backlog == 0 && none
+		return r.Endpoint != 0 && r.Slot < l.TXSlots && uint32(r.Length) <= l.SlotSize && r.Backlog == 0 && none
 	case OpRead:
-		return r.Endpoint != 0 && r.Slot == 0 && r.Length > 0 && r.Length <= SlotSize && r.Backlog == 0 && none
+		return r.Endpoint != 0 && r.Slot == 0 && r.Length > 0 && uint32(r.Length) <= l.SlotSize && r.Backlog == 0 && none
 	case OpRelease:
-		return r.Endpoint == 0 && r.Slot < RXSlots && r.Length == 0 && r.Backlog == 0 && none
+		return r.Endpoint == 0 && r.Slot < l.RXSlots && r.Length == 0 && r.Backlog == 0 && none
 	}
 	return false
 }
 
+// EncodeRequest, DecodeRequest, EncodeReply and DecodeReply speak version 2.
 func EncodeRequest(r *Request, correlation uint64, out *ipc.Message) bool {
-	if !validRequest(r) || (r.Opcode == OpRelease) != (correlation == 0) {
+	return Layout2.EncodeRequest(r, correlation, out)
+}
+
+func DecodeRequest(in *ipc.Message, out *Request) (uint64, bool) {
+	return Layout2.DecodeRequest(in, out)
+}
+
+func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
+	return Layout2.EncodeReply(r, correlation, out)
+}
+
+func DecodeReply(in *ipc.Message, out *Reply) (uint64, bool) { return Layout2.DecodeReply(in, out) }
+
+func (l Layout) EncodeRequest(r *Request, correlation uint64, out *ipc.Message) bool {
+	if !l.known() || !validRequest(&l, r) || (r.Opcode == OpRelease) != (correlation == 0) {
 		return false
 	}
 	kind := ipc.KindRequest
 	if r.Opcode == OpRelease {
 		kind = ipc.KindNotification
 	}
-	prepare(out, kind, correlation, RequestSize)
+	prepare(out, l.Version, kind, correlation, l.RequestSize)
 	out.Payload[0], out.Payload[1] = byte(r.Opcode), r.Slot
 	binary.LittleEndian.PutUint32(out.Payload[4:8], r.Endpoint)
 	copy(out.Payload[8:12], r.Address[:])
@@ -239,19 +328,25 @@ func EncodeRequest(r *Request, correlation uint64, out *ipc.Message) bool {
 	out.Payload[16], out.Payload[17] = r.Backlog, r.Flags
 	binary.LittleEndian.PutUint16(out.Payload[18:20], r.Mask)
 	out.Payload[20] = r.Option
+	if l.StreamOffsets() {
+		binary.LittleEndian.PutUint32(out.Payload[24:28], r.Offset)
+	}
 	return true
 }
 
-func DecodeRequest(in *ipc.Message, out *Request) (uint64, bool) {
-	if in.ProtocolID != ProtocolID || in.Version != Version || in.PayloadSize != RequestSize || in.HandleCount != 0 ||
-		!zero(in.Payload[2:4]) || !zero(in.Payload[21:RequestSize]) {
+func (l Layout) DecodeRequest(in *ipc.Message, out *Request) (uint64, bool) {
+	if !l.known() || in.ProtocolID != ProtocolID || in.Version != l.Version || in.PayloadSize != l.RequestSize || in.HandleCount != 0 ||
+		!zero(in.Payload[2:4]) || !zero(in.Payload[21:24]) {
 		return 0, false
 	}
 	r := Request{Opcode: Opcode(in.Payload[0]), Slot: in.Payload[1], Endpoint: binary.LittleEndian.Uint32(in.Payload[4:8]),
 		Port: binary.LittleEndian.Uint16(in.Payload[12:14]), Length: binary.LittleEndian.Uint16(in.Payload[14:16]),
 		Backlog: in.Payload[16], Flags: in.Payload[17], Mask: binary.LittleEndian.Uint16(in.Payload[18:20]), Option: in.Payload[20]}
 	copy(r.Address[:], in.Payload[8:12])
-	if !validRequest(&r) {
+	if l.StreamOffsets() {
+		r.Offset = binary.LittleEndian.Uint32(in.Payload[24:28])
+	}
+	if !validRequest(&l, &r) {
 		return 0, false
 	}
 	if r.Opcode == OpRelease {
@@ -267,7 +362,7 @@ func DecodeRequest(in *ipc.Message, out *Request) (uint64, bool) {
 
 // validReply requires the request's endpoint, except that a failed Open has
 // no endpoint to name.
-func validReply(r *Reply) bool {
+func validReply(l *Layout, r *Reply) bool {
 	if r.Opcode < OpOpen || r.Opcode > lastOpcode || r.Opcode == OpRelease || r.Result > lastResult {
 		return false
 	}
@@ -289,7 +384,7 @@ func validReply(r *Reply) bool {
 		return false
 	}
 	if r.Opcode == OpWrite {
-		return r.Slot < TXSlots && r.Length <= SlotSize && !addressed && !readiness
+		return r.Slot < l.TXSlots && uint32(r.Length) <= l.SlotSize && !addressed && !readiness
 	}
 	if r.Result == ResultInProgress {
 		return r.Slot == 0 && r.Length == 0 && r.Address != noAddress && r.Port != 0 && r.Local != noAddress && r.LocalPort != 0
@@ -305,7 +400,7 @@ func validReply(r *Reply) bool {
 	case OpAccept, OpConnect:
 		return r.Slot == 0 && r.Address != noAddress && r.Port != 0 && r.Length == 0 && r.Local != noAddress && r.LocalPort != 0 && !readiness
 	case OpRead:
-		return r.Slot < RXSlots && r.Length > 0 && r.Length <= SlotSize && !addressed && !readiness
+		return r.Slot < l.RXSlots && r.Length > 0 && uint32(r.Length) <= l.SlotSize && !addressed && !readiness
 	case OpReady, OpWaitReady:
 		return r.Slot == 0 && r.Length == 0 && !addressed && r.Mask&^ReadyAll == 0
 	case OpError:
@@ -316,11 +411,11 @@ func validReply(r *Reply) bool {
 	return false
 }
 
-func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
-	if correlation == 0 || !validReply(r) {
+func (l Layout) EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
+	if !l.known() || correlation == 0 || !validReply(&l, r) {
 		return false
 	}
-	prepare(out, ipc.KindReply, correlation, ReplySize)
+	prepare(out, l.Version, ipc.KindReply, correlation, ReplySize)
 	out.Payload[0], out.Payload[1], out.Payload[2], out.Payload[3] = byte(r.Opcode), byte(r.Result), r.Slot, byte(r.Error)
 	binary.LittleEndian.PutUint32(out.Payload[4:8], r.Endpoint)
 	copy(out.Payload[8:12], r.Address[:])
@@ -334,8 +429,8 @@ func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
 	return true
 }
 
-func DecodeReply(in *ipc.Message, out *Reply) (uint64, bool) {
-	if in.ProtocolID != ProtocolID || in.Version != Version || in.Kind != ipc.KindReply || in.Correlation == 0 ||
+func (l Layout) DecodeReply(in *ipc.Message, out *Reply) (uint64, bool) {
+	if !l.known() || in.ProtocolID != ProtocolID || in.Version != l.Version || in.Kind != ipc.KindReply || in.Correlation == 0 ||
 		in.PayloadSize != ReplySize || in.HandleCount != 0 {
 		return 0, false
 	}
@@ -346,7 +441,7 @@ func DecodeReply(in *ipc.Message, out *Reply) (uint64, bool) {
 		Room: binary.LittleEndian.Uint32(in.Payload[28:32])}
 	copy(r.Address[:], in.Payload[8:12])
 	copy(r.Local[:], in.Payload[16:20])
-	if !validReply(&r) {
+	if !validReply(&l, &r) {
 		return 0, false
 	}
 	*out = r
@@ -402,13 +497,20 @@ func zero(data []byte) bool {
 	return true
 }
 
-func prepare(out *ipc.Message, kind ipc.Kind, correlation uint64, size uint16) {
+// known reports whether l is one of the layouts LayoutFor returns, so a
+// zero or hand-built Layout encodes and decodes nothing.
+func (l Layout) known() bool {
+	known, ok := LayoutFor(l.Version)
+	return ok && known == l
+}
+
+func prepare(out *ipc.Message, version uint16, kind ipc.Kind, correlation uint64, size uint16) {
 	for index := range out.Payload[:] {
 		out.Payload[index] = 0
 	}
 	for index := range out.Handles[:] {
 		out.Handles[index] = 0
 	}
-	out.ProtocolID, out.Version, out.Kind = ProtocolID, Version, kind
+	out.ProtocolID, out.Version, out.Kind = ProtocolID, version, kind
 	out.Correlation, out.PayloadSize, out.HandleCount = correlation, size, 0
 }

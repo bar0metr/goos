@@ -2,14 +2,18 @@
 // channel, handle, or VM mapping code, so host tests exercise the same request
 // sequencing netd uses.
 //
-// Each endpoint holds at most one parked Accept, Connect, Read, Write and
-// WaitReady. A request with FlagNoWait never parks. A WaitReady parks while
+// Each endpoint holds at most one parked Accept, Connect, Write and
+// WaitReady, and as many parked Reads as its session's Layout allows: one in
+// version 2, tcpapi.QueuedReads3 in version 3, answered in arrival order. A
+// request with FlagNoWait never parks. A version 3 endpoint counts the bytes
+// it accepted and takes a Write only at that stream offset. A WaitReady parks while
 // the endpoint's mask equals the mask the request names; Deliver answers it
 // once the mask differs. If the endpoint changes between a client's Ready
 // and its WaitReady, netd answers the WaitReady at once.
 package tcpserve
 
 import (
+	"goos/kernel/ipc"
 	"goos/userspace/network"
 	"goos/userspace/tcpapi"
 )
@@ -26,46 +30,65 @@ const (
 	FaultUnreachable Fault = "client unreachable"
 )
 
+// parkedRead is one Read waiting for bytes.
+type parkedRead struct {
+	correlation uint64
+	max         uint16
+	peek        bool
+}
+
 type waiter struct {
-	id          network.TCPEndpointID
-	accept      uint64
-	connect     uint64
-	read        uint64
-	readMax     uint16
-	readPeek    bool
+	id      network.TCPEndpointID
+	accept  uint64
+	connect uint64
+	// reads[:readCount] wait in arrival order.
+	reads       [tcpapi.QueuedReads3]parkedRead
+	readCount   uint8
 	write       uint64
 	writeSlot   uint8
 	writeLength uint16
-	ready       uint64
-	readyMask   uint16
+	// accepted counts the bytes the endpoint took from the client, mod
+	// 2^32: the stream offset a version 3 Write must name.
+	accepted  uint32
+	ready     uint64
+	readyMask uint16
 }
 
 // Session's endpoint table fits the largest quota a session can be granted;
 // the stack enforces the session's own quota.
 type Session struct {
 	owner     int
+	layout    tcpapi.Layout
 	tx, rx    []byte
 	rxSlots   tcpapi.Slots
 	endpoints [network.MaxTCPSessionQuota]waiter
 	reply     tcpapi.Reply
 }
 
-// Start begins a session with the ordinary endpoint quota.
+// Start begins a version 2 session with the ordinary endpoint quota.
 func (s *Session) Start(stack *network.Stack, owner int, tx, rx []byte, now uint64) {
 	s.StartQuota(stack, owner, 0, tx, rx, now)
 }
 
-// StartQuota begins a session whose owner may hold quota endpoints, 1 to
-// network.MaxTCPSessionQuota; zero is the ordinary quota. Anything the owner
-// held before is closed first.
+// StartQuota begins a version 2 session whose owner may hold quota
+// endpoints, 1 to network.MaxTCPSessionQuota; zero is the ordinary quota.
 func (s *Session) StartQuota(stack *network.Stack, owner, quota int, tx, rx []byte, now uint64) bool {
+	return s.StartLayout(stack, owner, quota, tcpapi.Layout2, tx, rx, now)
+}
+
+// StartLayout begins a session that speaks layout's version over tx and rx,
+// which must hold layout's pools. Anything the owner held before is closed
+// first.
+func (s *Session) StartLayout(stack *network.Stack, owner, quota int, layout tcpapi.Layout, tx, rx []byte, now uint64) bool {
 	stack.TCPCloseOwner(owner, now)
-	if !stack.SetTCPQuota(owner, quota) {
+	known, ok := tcpapi.LayoutFor(layout.Version)
+	if !ok || known != layout || uint64(len(tx)) < layout.TXPool() || uint64(len(rx)) < layout.RXPool() ||
+		!stack.SetTCPQuota(owner, quota) {
 		stack.SetTCPQuota(owner, 0)
 		return false
 	}
-	s.owner, s.tx, s.rx = owner, tx, rx
-	s.rxSlots.Reset(tcpapi.RXSlots)
+	s.owner, s.layout, s.tx, s.rx = owner, layout, tx, rx
+	s.rxSlots.Reset(layout.RXSlots)
 	for index := range s.endpoints {
 		s.endpoints[index] = waiter{}
 	}
@@ -76,7 +99,7 @@ func (s *Session) End(stack *network.Stack, now uint64) {
 	stack.TCPCloseOwner(s.owner, now)
 	stack.SetTCPQuota(s.owner, 0)
 	s.tx, s.rx = nil, nil
-	s.rxSlots.Reset(tcpapi.RXSlots)
+	s.rxSlots.Reset(s.layout.RXSlots)
 	for index := range s.endpoints {
 		s.endpoints[index] = waiter{}
 	}
@@ -84,11 +107,26 @@ func (s *Session) End(stack *network.Stack, now uint64) {
 
 func (s *Session) RXLent(slot uint8) bool { return s.rxSlots.Lent(slot) }
 
+// Layout is the version and pools the session speaks.
+func (s *Session) Layout() tcpapi.Layout { return s.layout }
+
+// Decode decodes a client message of the session's version. A message of
+// another version fails, and netd ends the session.
+func (s *Session) Decode(in *ipc.Message, out *tcpapi.Request) (uint64, bool) {
+	return s.layout.DecodeRequest(in, out)
+}
+
+// Encode encodes a reply in the session's version.
+func (s *Session) Encode(reply *tcpapi.Reply, correlation uint64, out *ipc.Message) bool {
+	return s.layout.EncodeReply(reply, correlation, out)
+}
+
 func (s *Session) Waiting() int {
 	count := 0
 	for index := range s.endpoints {
 		w := &s.endpoints[index]
-		for _, correlation := range [...]uint64{w.accept, w.connect, w.read, w.write, w.ready} {
+		count += int(w.readCount)
+		for _, correlation := range [...]uint64{w.accept, w.connect, w.write, w.ready} {
 			if correlation != 0 {
 				count++
 			}
@@ -160,22 +198,38 @@ func (s *Session) Handle(stack *network.Stack, request *tcpapi.Request, correlat
 			reply.Result, reply.Slot = tcpapi.ResultBusy, request.Slot
 			break
 		}
-		offset := tcpapi.Offset(request.Slot)
-		written, result := stack.TCPWrite(s.owner, id, s.tx[offset:offset+uint64(request.Length)], now)
+		reply.Slot = request.Slot
+		if s.layout.StreamOffsets() {
+			if ahead := request.Offset - held.accepted; ahead != 0 {
+				// Ahead: an earlier Write left bytes the client resends
+				// first. Behind: bytes the endpoint already took.
+				reply.Result = tcpapi.ResultWouldBlock
+				if ahead >= 1<<31 {
+					reply.Result = tcpapi.ResultInvalidArgument
+				}
+				break
+			}
+		}
+		written, result := s.write(stack, held, request.Slot, request.Length, now)
 		if result == network.ResultBusy {
 			if noWait {
-				reply.Result, reply.Slot = tcpapi.ResultWouldBlock, request.Slot
+				reply.Result = tcpapi.ResultWouldBlock
 				break
 			}
 			held.write, held.writeSlot, held.writeLength = correlation, request.Slot, request.Length
 			return FaultNone
 		}
 		s.reported(stack, id, result)
-		reply.Result, reply.Slot, reply.Length = Result(result), request.Slot, uint16(written)
+		reply.Result, reply.Length = Result(result), uint16(written)
 	case tcpapi.OpRead:
 		held := s.find(id)
-		if held == nil || held.read != 0 {
+		if held == nil || held.readCount >= s.layout.QueuedReads {
 			reply.Result = tcpapi.ResultBusy
+			break
+		}
+		if noWait && held.readCount != 0 {
+			// Bytes that arrive go to the parked Reads first.
+			reply.Result = tcpapi.ResultWouldBlock
 			break
 		}
 		if _, free := s.rxSlots.Free(); noWait && !free {
@@ -183,11 +237,12 @@ func (s *Session) Handle(stack *network.Stack, request *tcpapi.Request, correlat
 			reply.Result = tcpapi.ResultBusy
 			break
 		}
-		held.read, held.readMax, held.readPeek = correlation, request.Length, request.Flags&tcpapi.FlagPeek != 0
-		if fault := s.deliverRead(stack, held, now, out); fault != FaultNone || !noWait || held.read == 0 {
+		held.reads[held.readCount] = parkedRead{correlation: correlation, max: request.Length, peek: request.Flags&tcpapi.FlagPeek != 0}
+		held.readCount++
+		if fault := s.deliverRead(stack, held, now, out); fault != FaultNone || !noWait || held.readCount == 0 {
 			return fault
 		}
-		held.read, held.readMax, held.readPeek = 0, 0, false
+		held.readCount, held.reads[0] = 0, parkedRead{}
 		reply.Result = tcpapi.ResultWouldBlock
 	case tcpapi.OpRelease:
 		if !s.rxSlots.Return(request.Slot) {
@@ -339,46 +394,58 @@ func (s *Session) deliverAccept(stack *network.Stack, held *waiter, out Replier)
 	return FaultNone
 }
 
+// deliverRead answers parked Reads in arrival order while bytes, an end of
+// stream or an error, and free RX slots, allow.
 func (s *Session) deliverRead(stack *network.Stack, held *waiter, now uint64, out Replier) Fault {
-	if held.read == 0 {
-		return FaultNone
-	}
-	slot, free := s.rxSlots.Free()
-	if !free {
-		return FaultNone
-	}
-	offset := tcpapi.Offset(slot)
-	dst := s.rx[offset : offset+uint64(held.readMax)]
-	var read int
-	var result network.Result
-	if held.readPeek {
-		read, result = stack.TCPPeek(s.owner, held.id, dst)
-	} else {
-		read, result = stack.TCPRead(s.owner, held.id, dst, now)
-	}
-	if result == network.ResultBusy {
-		return FaultNone
-	}
-	reply := tcpapi.Reply{Opcode: tcpapi.OpRead, Result: Result(result), Endpoint: uint32(held.id)}
-	if result == network.ResultOK {
-		s.rxSlots.Lend(slot)
-		reply.Slot, reply.Length = slot, uint16(read)
-	}
-	s.reported(stack, held.id, result)
-	correlation := held.read
-	held.read, held.readMax, held.readPeek = 0, 0, false
-	if !out.Reply(&reply, correlation) {
-		return FaultUnreachable
+	for held.readCount != 0 {
+		slot, free := s.rxSlots.Free()
+		if !free {
+			return FaultNone
+		}
+		head := held.reads[0]
+		offset := s.layout.Offset(slot)
+		dst := s.rx[offset : offset+uint64(head.max)]
+		var read int
+		var result network.Result
+		if head.peek {
+			read, result = stack.TCPPeek(s.owner, held.id, dst)
+		} else {
+			read, result = stack.TCPRead(s.owner, held.id, dst, now)
+		}
+		if result == network.ResultBusy {
+			return FaultNone
+		}
+		reply := tcpapi.Reply{Opcode: tcpapi.OpRead, Result: Result(result), Endpoint: uint32(held.id)}
+		if result == network.ResultOK {
+			s.rxSlots.Lend(slot)
+			reply.Slot, reply.Length = slot, uint16(read)
+		}
+		s.reported(stack, held.id, result)
+		for index := uint8(1); index < held.readCount; index++ {
+			held.reads[index-1] = held.reads[index]
+		}
+		held.readCount--
+		held.reads[held.readCount] = parkedRead{}
+		if !out.Reply(&reply, head.correlation) {
+			return FaultUnreachable
+		}
 	}
 	return FaultNone
+}
+
+// write offers one TX slot's bytes to the stack and counts what it took.
+func (s *Session) write(stack *network.Stack, held *waiter, slot uint8, length uint16, now uint64) (int, network.Result) {
+	offset := s.layout.Offset(slot)
+	written, result := stack.TCPWrite(s.owner, held.id, s.tx[offset:offset+uint64(length)], now)
+	held.accepted += uint32(written)
+	return written, result
 }
 
 func (s *Session) deliverWrite(stack *network.Stack, held *waiter, now uint64, out Replier) Fault {
 	if held.write == 0 {
 		return FaultNone
 	}
-	offset := tcpapi.Offset(held.writeSlot)
-	written, result := stack.TCPWrite(s.owner, held.id, s.tx[offset:offset+uint64(held.writeLength)], now)
+	written, result := s.write(stack, held, held.writeSlot, held.writeLength, now)
 	if result == network.ResultBusy {
 		return FaultNone
 	}
@@ -414,6 +481,8 @@ func (s *Session) deliverReady(stack *network.Stack, held *waiter, out Replier) 
 	return FaultNone
 }
 
+// cancel answers everything parked on held with ResultClosed, the queued
+// Reads in arrival order.
 func (s *Session) cancel(held *waiter, out Replier) Fault {
 	for _, pending := range [...]struct {
 		opcode      tcpapi.Opcode
@@ -422,13 +491,19 @@ func (s *Session) cancel(held *waiter, out Replier) Fault {
 	}{
 		{tcpapi.OpWaitReady, held.ready, 0},
 		{tcpapi.OpAccept, held.accept, 0}, {tcpapi.OpConnect, held.connect, 0},
-		{tcpapi.OpRead, held.read, 0}, {tcpapi.OpWrite, held.write, held.writeSlot},
+		{tcpapi.OpWrite, held.write, held.writeSlot},
 	} {
 		if pending.correlation == 0 {
 			continue
 		}
 		reply := tcpapi.Reply{Opcode: pending.opcode, Result: tcpapi.ResultClosed, Endpoint: uint32(held.id), Slot: pending.slot}
 		if !out.Reply(&reply, pending.correlation) {
+			return FaultUnreachable
+		}
+	}
+	for index := uint8(0); index < held.readCount; index++ {
+		reply := tcpapi.Reply{Opcode: tcpapi.OpRead, Result: tcpapi.ResultClosed, Endpoint: uint32(held.id)}
+		if !out.Reply(&reply, held.reads[index].correlation) {
 			return FaultUnreachable
 		}
 	}

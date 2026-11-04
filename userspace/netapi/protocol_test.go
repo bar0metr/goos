@@ -177,7 +177,8 @@ func replies() []Reply {
 			TCPEndpoints: 3, TCPListeners: 1, TCPConnections: 2, TCPStates: [tcpStateCount]uint16{0, 1, 1, 1},
 			TCPEphemeralMin: 49152, TCPEphemeralMax: 65535, TCPMaxEndpoints: 32, TCPSessionEndpoints: 8,
 			TCPListenBacklog: 8, TCPSendBuffer: 16384, TCPReceiveBuffer: 16384,
-			TCPConnectTimeoutMS: 30000, TCPRTOMinMS: 1000, TCPRTOMaxMS: 60000, TCPTimeWaitMS: 60000},
+			TCPConnectTimeoutMS: 30000, TCPRTOMinMS: 1000, TCPRTOMaxMS: 60000, TCPTimeWaitMS: 60000,
+			GTCP2Requests: 5, GTCP2Replies: 6, GTCP3Requests: 1 << 40, GTCP3Replies: ^uint64(0)},
 		{Opcode: OpTCPStatus, Result: ResultPermissionDenied},
 	}
 }
@@ -271,7 +272,8 @@ func TestReplyUnusedBytes(t *testing.T) {
 		16: append([]int{replyServerN}, span(replyServerGen, replyServers)...),
 		18: append(append(append(span(replyTCPCounters, replyTCPConnections+2),
 			span(replyTCPStates, replyTCPStates+2*tcpStateCount)...),
-			span(replyTCPLimits, replyTCPLimits+7)...), span(replyTCPLimits+8, replyTCPLimits+28)...),
+			span(replyTCPLimits, replyTCPLimits+7)...), append(span(replyTCPLimits+8, replyTCPLimits+28),
+			span(replyTCPMessages, replyTCPMessages+8*gtcpCounterCount)...)...),
 	}
 	for index, reply := range replies() {
 		mask := [ReplySize]bool{0: true, 1: true}
@@ -311,7 +313,8 @@ func TestReplyRejects(t *testing.T) {
 		{"version 1", func(m *ipc.Message) { m.Version = 1 }},
 		{"version 2", func(m *ipc.Message) { m.Version = 2 }},
 		{"version 3", func(m *ipc.Message) { m.Version = 3 }},
-		{"version 5", func(m *ipc.Message) { m.Version = 5 }},
+		{"version 4", func(m *ipc.Message) { m.Version = 4 }},
+		{"version 6", func(m *ipc.Message) { m.Version = 6 }},
 		{"request kind", func(m *ipc.Message) { m.Kind = ipc.KindRequest }},
 		{"correlation", func(m *ipc.Message) { m.Correlation = 8 }},
 		{"short", func(m *ipc.Message) { m.PayloadSize = ReplySize - 1 }},
