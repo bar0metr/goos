@@ -244,10 +244,13 @@ func (stack *Stack) handleACK(entry *tcpEndpoint, segment tcpSegment, now uint64
 			acked = int(entry.sendSent)
 		}
 		if acked > 0 {
-			copy(entry.send[:], entry.send[acked:entry.sendLen])
+			entry.sendHead = ringAdvance(int(entry.sendHead), acked, TCPSendCapacity)
 			entry.sendLen -= uint16(acked)
 			entry.sendSent -= uint16(acked)
 			entry.sendSeq += uint32(acked)
+			if entry.sendLen == 0 {
+				entry.sendHead = 0
+			}
 		}
 	}
 	if entry.rttAt != 0 && seqGE(acknowledgment, entry.rttSeq) && !entry.retransmit {
@@ -381,7 +384,7 @@ func (stack *Stack) appendTCPReceive(entry *tcpEndpoint, payload []byte) {
 	if len(payload) == 0 {
 		return
 	}
-	copy(entry.receive[entry.recvLen:], payload)
+	ringStore(entry.receive[:], int(entry.recvHead), int(entry.recvLen), payload)
 	entry.recvLen += uint16(len(payload))
 	entry.rcvNxt += uint32(len(payload))
 }
@@ -529,7 +532,7 @@ func (stack *Stack) pumpTCP(entry *tcpEndpoint, now uint64) {
 		if entry.rttAt == 0 {
 			entry.rttAt, entry.rttSeq = now, entry.sndNxt
 		}
-		if !stack.sendTCP(entry, tcpFlagACK|tcpFlagPSH, sequence, entry.rcvNxt, entry.send[start:int(start)+length], now) {
+		if !stack.sendTCPData(entry, tcpFlagACK|tcpFlagPSH, sequence, int(start), length, now) {
 			// The RTO timer pumps again, so a full TX queue or a missing
 			// neighbour cannot strand buffered data.
 			entry.sendSent -= uint16(length)
@@ -574,7 +577,7 @@ func (stack *Stack) retransmitTCP(entry *tcpEndpoint, now uint64) {
 	default:
 		if entry.sendSent != 0 {
 			length := min(int(entry.sendSent), int(tcpSMSS(entry)))
-			sent = stack.sendTCP(entry, tcpFlagACK|tcpFlagPSH, entry.sendSeq, entry.rcvNxt, entry.send[:length], now)
+			sent = stack.sendTCPData(entry, tcpFlagACK|tcpFlagPSH, entry.sendSeq, 0, length, now)
 		} else if entry.finSent && entry.sndUna == entry.finSequence {
 			sent = stack.sendTCP(entry, tcpFlagFIN|tcpFlagACK, entry.finSequence, entry.rcvNxt, nil, now)
 		} else {
@@ -607,13 +610,18 @@ func (stack *Stack) updateRTO(entry *tcpEndpoint, sample uint64) {
 }
 
 func (stack *Stack) sendTCP(entry *tcpEndpoint, flags uint8, sequence, acknowledgment uint32, payload []byte, now uint64) bool {
+	return stack.sendTCPParts(entry, flags, sequence, acknowledgment, payload, nil, now)
+}
+
+// sendTCPParts sends a segment whose payload continues in tail.
+func (stack *Stack) sendTCPParts(entry *tcpEndpoint, flags uint8, sequence, acknowledgment uint32, payload, tail []byte, now uint64) bool {
 	route, result := stack.udpRoute(entry.local, entry.remote)
 	if result != ResultOK {
 		return false
 	}
 	segment := tcpSegment{sourcePort: entry.port, destinationPort: entry.remotePort, sequence: sequence,
 		acknowledgment: acknowledgment, flags: flags, window: uint16(min(stack.tcpAdvertisedWindow(entry), 65535)),
-		mss: entry.localMSS, payload: payload}
+		mss: entry.localMSS, payload: payload, tail: tail}
 	if route.path == udpLocal {
 		var bytes [MTU]byte
 		length := putTCP(bytes[:], entry.local, entry.remote, segment)
@@ -624,7 +632,7 @@ func (stack *Stack) sendTCP(entry *tcpEndpoint, flags uint8, sequence, acknowled
 	}
 	mac, known := stack.lookupNeighbor(route.nextHop, now)
 	if !known {
-		if len(payload) != 0 || flags&(tcpFlagSYN|tcpFlagFIN) != 0 {
+		if len(payload)+len(tail) != 0 || flags&(tcpFlagSYN|tcpFlagFIN) != 0 {
 			entry.l2Pending = true
 		}
 		stack.resolve(route.nextHop, now)
@@ -695,7 +703,7 @@ func (stack *Stack) advanceTCP(now uint64) {
 					continue
 				}
 				entry.persist++
-				stack.sendTCP(entry, tcpFlagACK, entry.sndNxt, entry.rcvNxt, entry.send[entry.sendSent:entry.sendSent+1], now)
+				stack.sendTCPData(entry, tcpFlagACK, entry.sndNxt, int(entry.sendSent), 1, now)
 				increment(&stack.tcpStats.Retransmits)
 				entry.rto = min(max(entry.rto*2, stack.tuning.TCP.RTOMin), stack.tuning.TCP.RTOMax)
 				entry.rtoDeadline = addTime(now, entry.rto)
