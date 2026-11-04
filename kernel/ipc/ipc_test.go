@@ -191,3 +191,28 @@ func BenchmarkChannelPingPong(b *testing.B) {
 		channel.Receive(1)
 	}
 }
+
+func TestSendStatusReportsRoomInThePeerQueue(t *testing.T) {
+	channel := NewChannel()
+	if status := channel.SendStatus(0); status != StatusOK {
+		t.Fatalf("empty queue = %d", status)
+	}
+	for index := 0; index < QueueCapacity; index++ {
+		if status := channel.Send(0, message(KindNotification, 0), nil, nil, nil); status != StatusOK {
+			t.Fatalf("send %d = %d", index, status)
+		}
+	}
+	if status := channel.SendStatus(0); status != StatusResourceExhausted {
+		t.Fatalf("full queue = %d", status)
+	}
+	if _, status := channel.Receive(1); status != StatusOK {
+		t.Fatalf("receive = %d", status)
+	}
+	if status := channel.SendStatus(0); status != StatusOK {
+		t.Fatalf("after a receive = %d", status)
+	}
+	channel.Close(1)
+	if status := channel.SendStatus(0); status != StatusPeerDied {
+		t.Fatalf("closed peer = %d", status)
+	}
+}

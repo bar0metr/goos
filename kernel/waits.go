@@ -346,10 +346,11 @@ func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent
 	}
 	switch typeID {
 	case handle.TypeChannel:
-		if events == 0 || events & ^(kcall.WaitReadable|kcall.WaitPeerClosed) != 0 {
+		// A sender may also wait for room in its peer's queue.
+		if events == 0 || events & ^(kcall.WaitReadable|kcall.WaitPeerClosed|kcall.WaitWritable) != 0 {
 			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyEvents
 		}
-		if !authority.Allows(capability.Read | capability.Wait) {
+		if !authority.Allows(capability.Read|capability.Wait) || events&kcall.WaitWritable != 0 && !authority.Allows(capability.Write) {
 			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyRights
 		}
 		object, side, valid := ipc.DecodeEndpointObject(authority.Object())
@@ -483,9 +484,11 @@ func readyWaitAny(owner *process.Process, entries []kernelwait.Entry) uint64 {
 			channel, found := channelRegistry.Acquire(entry.Key.Object)
 			if found {
 				status := channel.ReceiveStatus(entry.Key.Side)
+				room := channel.SendStatus(entry.Key.Side)
 				channel.Unlock()
 				ready = status == ipc.StatusOK && entry.Events&kernelwait.Readable != 0 ||
-					status == ipc.StatusPeerDied && entry.Events&kernelwait.PeerClosed != 0
+					status == ipc.StatusPeerDied && entry.Events&kernelwait.PeerClosed != 0 ||
+					room == ipc.StatusOK && entry.Events&kernelwait.Writable != 0
 			}
 		case kernelwait.KindStream:
 			endpoint, found := streamRegistry.Lookup(entry.Key.Object)

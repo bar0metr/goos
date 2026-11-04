@@ -194,6 +194,24 @@ func (channel *Channel) ReceiveInto(side uint8, out *Message) Status {
 	return StatusOK
 }
 
+// SendStatus reports whether side could queue a message now: OK while the
+// peer's inbound queue has room, PeerDied once the peer is gone, and
+// ResourceExhausted while the queue is full. WaitAny uses it for a sender
+// that waits for room.
+func (channel *Channel) SendStatus(side uint8) Status {
+	channel.held()
+	if channel == nil || side > 1 || !channel.alive[side] {
+		return StatusInvalidArgument
+	}
+	if !channel.alive[side^1] {
+		return StatusPeerDied
+	}
+	if channel.inbound[side^1].count == QueueCapacity {
+		return StatusResourceExhausted
+	}
+	return StatusOK
+}
+
 // ReceiveStatus observes endpoint readiness without consuming a message.
 // WaitAny uses it after registering interest so the observation and the
 // subsequent decision to block cannot lose an intervening state change.

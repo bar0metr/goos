@@ -67,7 +67,16 @@ func channelReceive(channelID uint64, side uint8, out *ipc.Message) ipc.Status {
 	}
 	status := channel.ReceiveInto(side, out)
 	channel.Unlock()
+	if status == ipc.StatusOK {
+		publishChannelRoom(channelID, side)
+	}
 	return status
+}
+
+// publishChannelRoom tells a sender waiting for room on the other side that
+// side took a message out of its queue.
+func publishChannelRoom(channelID uint64, side uint8) {
+	publishWaitAny(kernelwait.Key{Kind: kernelwait.KindChannel, Object: channelID, Side: side ^ 1}, kernelwait.Writable)
 }
 
 // channelSideOpen reports whether side of the channel is open.
@@ -384,6 +393,7 @@ func (handler nativeCallHandler) IPCReceive(channel uint64, address uint64, capa
 	if status != ipc.StatusOK {
 		return status
 	}
+	publishChannelRoom(channelID, side)
 	size, ok := ipc.Encode(message, local.ipcWireData[:])
 	if !ok || uint64(size) > capacity {
 		return kcall.StatusResourceExhausted
