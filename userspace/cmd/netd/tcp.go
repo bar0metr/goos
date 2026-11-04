@@ -5,6 +5,7 @@ package main
 import (
 	"goos/internal/capability"
 	"goos/kernel/handle"
+	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	syslog "goos/userspace/log"
 	"goos/userspace/netapi"
@@ -23,16 +24,75 @@ type tcpSession struct {
 	rxBase   uint64
 	rxSize   uint64
 	state    tcpserve.Session
+	// Replies a full client queue held back, oldest first. They go before
+	// any newer one, so the client sees its replies in order.
+	held      [tcpHeldReplies]heldReply
+	heldFirst int
+	heldCount int
+}
+
+// tcpHeldReplies bounds the replies one session may have waiting for room
+// in its queue: a client with every parked request of a full quota answered
+// at once, as a burst of readiness changes does.
+const tcpHeldReplies = 128
+
+type heldReply struct {
+	reply       tcpapi.Reply
+	correlation uint64
 }
 
 type tcpReplier struct{ index int }
 
+// Reply sends a reply, or holds it while the client's queue is full. It
+// reports false when the client is gone or holds too many.
 func (r tcpReplier) Reply(out *tcpapi.Reply, correlation uint64) bool {
 	current := &tcpSessions[r.index]
-	if !current.state.Encode(out, correlation, &reply) || !sendOn(current.channel, &reply) {
+	if current.heldCount == 0 {
+		switch sendTCPReply(current, out, correlation) {
+		case kcall.StatusOK:
+			return true
+		case kcall.StatusPeerDied, kcall.StatusCorruptData:
+			return false
+		}
+	}
+	if current.heldCount == len(current.held) {
 		return false
 	}
-	gtcpCounters(current.state.Layout().Version)[1]++
+	current.held[(current.heldFirst+current.heldCount)%len(current.held)] = heldReply{reply: *out, correlation: correlation}
+	current.heldCount++
+	return true
+}
+
+func sendTCPReply(current *tcpSession, out *tcpapi.Reply, correlation uint64) kcall.Status {
+	if !current.state.Encode(out, correlation, &reply) {
+		return kcall.StatusCorruptData
+	}
+	size, ok := ipc.EncodeFrom(&reply, wire[:])
+	if !ok {
+		return kcall.StatusCorruptData
+	}
+	status := sys.IPCSend(current.channel, wire[:size])
+	if status == kcall.StatusOK {
+		gtcpCounters(current.state.Layout().Version)[1]++
+	}
+	return status
+}
+
+// flushTCPReplies sends the held replies while the queue has room. It
+// reports false when the client is gone.
+func flushTCPReplies(current *tcpSession) bool {
+	for current.heldCount != 0 {
+		held := &current.held[current.heldFirst]
+		switch sendTCPReply(current, &held.reply, held.correlation) {
+		case kcall.StatusOK:
+		case kcall.StatusPeerDied, kcall.StatusCorruptData:
+			return false
+		default:
+			return true
+		}
+		current.heldFirst = (current.heldFirst + 1) % len(current.held)
+		current.heldCount--
+	}
 	return true
 }
 
@@ -122,6 +182,10 @@ func closeTCPSession(index int, reason string) {
 
 func serviceTCP(index int) {
 	current := &tcpSessions[index]
+	if !flushTCPReplies(current) {
+		closeTCPSession(index, "")
+		return
+	}
 	for current.channel != 0 {
 		status := receiveOn(current.channel)
 		if status == kcall.StatusNotFound {

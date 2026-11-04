@@ -215,11 +215,17 @@ func buildInterests() int {
 	for index := range udpSessions {
 		if udpSessions[index].channel != 0 {
 			add(udpSessions[index].channel, udpOwner+index)
+			if udpSessions[index].heldCount != 0 {
+				interests[count-1].Events |= kcall.WaitWritable
+			}
 		}
 	}
 	for index := range tcpSessions {
 		if tcpSessions[index].channel != 0 {
 			add(tcpSessions[index].channel, tcpOwner+index)
+			if tcpSessions[index].heldCount != 0 {
+				interests[count-1].Events |= kcall.WaitWritable
+			}
 		}
 	}
 	return count

@@ -12,6 +12,7 @@ package main
 import (
 	"goos/internal/capability"
 	"goos/kernel/handle"
+	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	syslog "goos/userspace/log"
 	"goos/userspace/netapi"
@@ -32,13 +33,66 @@ type udpSession struct {
 	rxBase   uint64
 	rxSize   uint64
 	state    udpserve.Session
+	// Replies a full client queue held back, oldest first, as for TCP.
+	held      [udpHeldReplies]heldUDPReply
+	heldFirst int
+	heldCount int
 }
 
-// udpReplier sends replies on one session's channel.
+const udpHeldReplies = 128
+
+type heldUDPReply struct {
+	reply       udpapi.Reply
+	correlation uint64
+}
+
+// udpReplier sends replies on one session's channel, or holds them while
+// its queue is full.
 type udpReplier struct{ index int }
 
 func (r udpReplier) Reply(out *udpapi.Reply, correlation uint64) bool {
-	return udpapi.EncodeReply(out, correlation, &reply) && sendOn(udpSessions[r.index].channel, &reply)
+	current := &udpSessions[r.index]
+	if current.heldCount == 0 {
+		switch sendUDPReply(current, out, correlation) {
+		case kcall.StatusOK:
+			return true
+		case kcall.StatusPeerDied, kcall.StatusCorruptData:
+			return false
+		}
+	}
+	if current.heldCount == len(current.held) {
+		return false
+	}
+	current.held[(current.heldFirst+current.heldCount)%len(current.held)] = heldUDPReply{reply: *out, correlation: correlation}
+	current.heldCount++
+	return true
+}
+
+func sendUDPReply(current *udpSession, out *udpapi.Reply, correlation uint64) kcall.Status {
+	if !udpapi.EncodeReply(out, correlation, &reply) {
+		return kcall.StatusCorruptData
+	}
+	size, ok := ipc.EncodeFrom(&reply, wire[:])
+	if !ok {
+		return kcall.StatusCorruptData
+	}
+	return sys.IPCSend(current.channel, wire[:size])
+}
+
+func flushUDPReplies(current *udpSession) bool {
+	for current.heldCount != 0 {
+		held := &current.held[current.heldFirst]
+		switch sendUDPReply(current, &held.reply, held.correlation) {
+		case kcall.StatusOK:
+		case kcall.StatusPeerDied, kcall.StatusCorruptData:
+			return false
+		default:
+			return true
+		}
+		current.heldFirst = (current.heldFirst + 1) % len(current.held)
+		current.heldCount--
+	}
+	return true
 }
 
 var (
@@ -118,6 +172,10 @@ func closeUDPSession(index int, reason string) {
 
 func serviceUDP(index int) {
 	current := &udpSessions[index]
+	if !flushUDPReplies(current) {
+		closeUDPSession(index, "")
+		return
+	}
 	for current.channel != 0 {
 		status := receiveOn(current.channel)
 		if status == kcall.StatusNotFound {

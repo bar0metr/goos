@@ -287,8 +287,12 @@ description of kind `FDSocket`; `dup`, `fork` and `execve` treat it like any
 other description, and the last reference closes it.
 
 The kernel holds no TCP or UDP state. Each family has one session to
-`linuxsockd`: a channel and a 17-page pool that PID 1 grants at launch as
-`linux-net` and `linux-net-pool`. A request never waits in the service.
+`linuxsockd`: a channel and a 66-page pool that PID 1 grants at launch as
+`linux-net` and `linux-net-pool`. Payload moves through the pool's 16 KiB
+slots: a send copies into TX slots and returns once they are committed on
+the pool's submit ring, and a read copies from the RX slots `linuxsockd`
+filled ahead from `netd`. The channel carries requests, their replies and
+the two rings' doorbells. A request never waits in the service.
 When a socket is not ready, the calling task sleeps through its
 continuation on the family channel, with a timer for `SO_RCVTIMEO` or
 `SO_SNDTIMEO`, and reads the socket's state again from the pool's readiness
