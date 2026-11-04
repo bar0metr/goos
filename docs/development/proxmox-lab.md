@@ -270,6 +270,24 @@ edit, suspends on ^T^Z, and redraws after `fg`. nano then reopens the file from
 the native shell, and `cat` reads the saved bytes. Any step that does not show
 its text within `--workload-timeout` fails the run.
 
+## Linux sockets workflow
+
+The `linux-network` scenario runs Linux IPv4 sockets on four host cores under
+KVM (ADR 0210). You supply static `busybox` and `curl`; the image is a
+validation build, for the `fault` command.
+
+```sh
+make test-pve-linux-network BUSYBOX=/path/to/busybox CURL=/path/to/curl
+```
+
+The guest takes a DHCP lease on the lab bridge, runs the sixteen `netprobe`
+loopback groups and `netprobe bench`, whose lines go to
+`linux-network-bench.txt` in the run directory, and fetches a file from
+BusyBox `httpd` with BusyBox `wget` and curl by the name `localhost`,
+checking its SHA-256. `netd`, `virtio-net`, `resolved` and `linuxsockd` must
+not have restarted. A `fault linuxsockd` follows, and a new `netprobe` launch
+must pass every group again.
+
 ## 7-Zip workflow
 
 The `7zip` scenario runs a static `7zzs` that you supply through a round

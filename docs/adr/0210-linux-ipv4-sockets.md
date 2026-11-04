@@ -235,3 +235,28 @@ loopback groups, which match a Linux 6.12 kernel, libc DNS through the
 local server with the TCP fallback, TCP client and server against the host,
 UDP, descriptor inheritance, BusyBox 1.38.0 `nc`, `wget` and `httpd`, curl
 8.22.0, and the `net-driver`, `netd` and `linuxsockd` faults.
+
+`make test-pve-linux-network` passes on the Proxmox lab with KVM, one socket
+of four host cores and 1 GiB: the same groups, BusyBox `httpd` serving
+`wget` and curl, and a `linuxsockd` fault. `netprobe bench` measured over
+loopback (run 20261104T163631Z):
+
+| Measurement | Result |
+| --- | --- |
+| TCP stream between two processes, 32 MiB | 7 MiB/s |
+| TCP one-byte request and reply | 815 us |
+| TCP connect, accept and close | 1362 us |
+| UDP 64-byte request and reply | 879 us |
+| write to a `poll` waiter's return | 236 us |
+
+The same probe on Linux 6.12 under TCG measured 272 MiB/s, 169 us, 233 us,
+137 us and 423 us. The stream rate is far from Linux; every 4 KiB chunk
+crosses the kernel, `linuxsockd` and `netd`, and the waits between them
+follow the scheduler's tick. These numbers are a record, not a gate.
+
+Under KVM three defects showed that TCG had hidden: `WaitAny` refused a
+writable wait on a channel, which `linuxsockd` uses while a family's queue
+is full; the kernel failed a session when the service was preempted in the
+middle of rewriting a readiness entry; and a server that clients close
+first ran out of TIME_WAIT tombstones after about 128 connections a minute.
+

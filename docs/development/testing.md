@@ -351,6 +351,9 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   repository carries no BusyBox. See the
   [static application catalog](linux-application-compatibility.md) for the
   tested operations and limits.
+- `make test-pve-linux-network BUSYBOX=/path/to/busybox CURL=/path/to/curl`
+  runs the same programs under KVM on the Proxmox lab and records
+  `netprobe bench` ([Proxmox lab](proxmox-lab.md#linux-sockets-workflow)).
 - `make test-linux-network BUSYBOX=/path/to/busybox CURL=/path/to/curl` runs
   `tests/boot/linux_network.sh`, the Linux sockets gate (ADR 0210). It checks
   that both binaries are static x86_64 ELF files with the pinned SHA-256
