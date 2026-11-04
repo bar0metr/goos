@@ -73,12 +73,26 @@ func Publish(page []byte, index int, state Readiness) {
 	atomic.StoreUint32(sequence, start+1)
 }
 
-// Read copies entry index. It reports false when the entry raced a writer
-// tries times in a row, or holds a value outside the protocol: a service
-// that never settles an entry is treated as a broken peer.
-func Read(page []byte, index int, tries int) (Readiness, bool) {
+// EntryStatus says how a read of an entry went.
+type EntryStatus uint8
+
+const (
+	// EntrySettled: the copy is one state the service published.
+	EntrySettled EntryStatus = iota
+	// EntryBusy: the service was rewriting the entry on every try. Its
+	// write ends with a ReadyChanged notification, so a reader treats the
+	// socket as not ready yet and waits for that.
+	EntryBusy
+	// EntryInvalid: the index or page is wrong, or the entry holds a value
+	// outside the protocol. The service is broken.
+	EntryInvalid
+)
+
+// ReadEntry copies entry index by copying it between two loads of its
+// sequence, at most tries times.
+func ReadEntry(page []byte, index int, tries int) (Readiness, EntryStatus) {
 	if index < 0 || index >= MaxSockets || len(page) < ReadinessBytes {
-		return Readiness{}, false
+		return Readiness{}, EntryInvalid
 	}
 	base := entryOffset(index)
 	sequence := word(page, base+offEntrySequence)
@@ -97,11 +111,17 @@ func Read(page []byte, index int, tries int) (Readiness, bool) {
 			continue
 		}
 		if state.Ready&^allReady != 0 || state.Error > lastResult {
-			return Readiness{}, false
+			return Readiness{}, EntryInvalid
 		}
-		return state, true
+		return state, EntrySettled
 	}
-	return Readiness{}, false
+	return Readiness{}, EntryBusy
+}
+
+// Read is ReadEntry that reports only whether it got a settled state.
+func Read(page []byte, index int, tries int) (Readiness, bool) {
+	state, status := ReadEntry(page, index, tries)
+	return state, status == EntrySettled
 }
 
 // ClaimToken is the service's half of the coalescing rule: it reports true

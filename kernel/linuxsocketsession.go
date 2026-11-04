@@ -32,6 +32,7 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
 	"goos/kernel/clock"
 	linuxcompat "goos/kernel/compat/linux"
@@ -235,7 +236,7 @@ func (handler *linuxCallHandler) socketExchange(call *socketCall, request *linux
 		if status == ipc.StatusResourceExhausted {
 			return linuxsockapi.Reply{}, linuxabi.ENOBUFS, false
 		}
-		failSocketSession(call.familyID, call.endpoint)
+		failSocketSession(call.familyID, call.endpoint, socketFailedSend)
 		return linuxsockapi.Reply{}, linuxabi.ENETRESET, false
 	}
 	linuxcompat.NoteNet(linuxcompat.NetRequests, 1)
@@ -351,10 +352,14 @@ func socketReadiness(call *socketCall) (linuxsockapi.Readiness, bool) {
 	if !valid || !found || linuxsockapi.Magic(page) != linuxsockapi.ReadinessMagic {
 		return linuxsockapi.Readiness{}, false
 	}
-	state, settled := linuxsockapi.Read(page, index, linuxSocketReadTries)
-	if !settled {
-		// A service that never settles an entry is broken.
-		failSocketSession(call.familyID, call.endpoint)
+	state, status := linuxsockapi.ReadEntry(page, index, linuxSocketReadTries)
+	switch status {
+	case linuxsockapi.EntryBusy:
+		// The service is rewriting the entry, and may have been preempted
+		// doing it. Not ready yet: its notification follows the write.
+		return linuxsockapi.Readiness{Socket: call.socket.Identity}, true
+	case linuxsockapi.EntryInvalid:
+		failSocketSession(call.familyID, call.endpoint, socketFailedReadiness)
 		return linuxsockapi.Readiness{}, false
 	}
 	if state.Socket != call.socket.Identity {
@@ -447,7 +452,7 @@ func pumpSocketSession(familyID uint64, endpoint linuxcompat.NetEndpoint, self s
 			break
 		}
 		if status != ipc.StatusOK {
-			failSocketSession(familyID, endpoint)
+			failSocketSession(familyID, endpoint, socketFailedReceive)
 			return false
 		}
 		verdict, owner, correlation := linuxcompat.ClassifySocketMessage(familyID, endpoint.Session, &scratch.pumpMessage, &scratch.pumpReply)
@@ -467,7 +472,7 @@ func pumpSocketSession(familyID uint64, endpoint linuxcompat.NetEndpoint, self s
 			applySocketCleanup(familyID, endpoint, cleanup)
 			wakeSocketWaiters(scratch.waiters[:woken])
 		default:
-			failSocketSession(familyID, endpoint)
+			failSocketSession(familyID, endpoint, socketFailedMessage)
 			return false
 		}
 	}
@@ -555,12 +560,24 @@ func releaseRXSlot(familyID uint64, endpoint linuxcompat.NetEndpoint, slot uint8
 // failSocketSession ends a session that broke: its channel side closes, so
 // the service sees the family go, and every waiter of the family on the
 // channel wakes to find its socket failed.
-func failSocketSession(familyID uint64, endpoint linuxcompat.NetEndpoint) {
+// socketFailure names why a family session failed, for the kernel log.
+type socketFailure uint8
+
+const (
+	socketFailedSend      socketFailure = iota + 1 // a request could not be queued
+	socketFailedReadiness                          // a readiness entry held values outside the protocol
+	socketFailedReceive                            // the channel failed or the service died
+	socketFailedMessage                            // a message the protocol does not allow
+	socketFailedHolder                             // the process holding the session ended
+)
+
+func failSocketSession(familyID uint64, endpoint linuxcompat.NetEndpoint, reason socketFailure) {
 	local := thisCPU()
 	_, woken, failed := linuxcompat.FailNet(familyID, endpoint.Session, local.linuxSocket.waiters[:])
 	if !failed {
 		return
 	}
+	kernelLogUints(logfmt.Warn, "linux socket session failed", "family", familyID, "reason", uint64(reason))
 	wakeSocketWaiters(local.linuxSocket.waiters[:woken])
 	if closeChannelSide(endpoint.Channel, endpoint.Side) {
 		wakeIPCWaiters(endpoint.Channel, endpoint.Side^1, ipc.WaitPeerDied)
@@ -600,7 +617,7 @@ func endLinuxNetHolder(exited *process.Process, familyID uint64) {
 		return
 	}
 	if endpoint, live, _ := linuxcompat.NetSession(familyID); live {
-		failSocketSession(familyID, endpoint)
+		failSocketSession(familyID, endpoint, socketFailedHolder)
 	}
 }
 

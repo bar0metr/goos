@@ -312,3 +312,26 @@ func TestReadinessReadsAreConsistent(t *testing.T) {
 	}
 	group.Wait()
 }
+
+// An entry a writer holds is busy, not broken: the kernel waits for the
+// notification instead of failing the session.
+func TestReadEntryTellsBusyFromInvalid(t *testing.T) {
+	page := make([]byte, pageSize)
+	InitReadiness(page, 1)
+	Publish(page, 3, Readiness{Socket: socket, Ready: ReadyOut})
+	if state, status := ReadEntry(page, 3, 4); status != EntrySettled || state.Ready != ReadyOut {
+		t.Fatalf("settled %+v %d", state, status)
+	}
+	*word(page, entryOffset(3)+offEntrySequence) |= 1
+	if _, status := ReadEntry(page, 3, 4); status != EntryBusy {
+		t.Fatalf("held entry %d", status)
+	}
+	*word(page, entryOffset(3)+offEntrySequence) &^= 1
+	page[entryOffset(3)+offEntryReady] = 0xff
+	if _, status := ReadEntry(page, 3, 4); status != EntryInvalid {
+		t.Fatalf("undefined bits %d", status)
+	}
+	if _, status := ReadEntry(page, MaxSockets, 4); status != EntryInvalid {
+		t.Fatal("index past the table")
+	}
+}
