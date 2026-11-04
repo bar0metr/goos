@@ -32,6 +32,8 @@ type tcpSegment struct {
 	window          uint16
 	mss             uint16
 	payload         []byte
+	// tail continues payload on output only; parseTCP never sets it.
+	tail []byte
 }
 
 // parseTCP validates the complete header and options before a caller looks up
@@ -94,14 +96,14 @@ func parseTCP(packet ipv4Packet) (tcpSegment, tcpStatus) {
 	return segment, tcpOK
 }
 
-// putTCP writes a header, an MSS option on SYN, and payload. It returns the
-// segment length. The caller must provide enough space.
+// putTCP writes a header, an MSS option on SYN, payload and tail. It returns
+// the segment length. The caller must provide enough space.
 func putTCP(out []byte, source, destination IPv4, segment tcpSegment) int {
 	headerLength := tcpHeaderSize
 	if segment.flags&tcpFlagSYN != 0 {
 		headerLength += 4
 	}
-	length := headerLength + len(segment.payload)
+	length := headerLength + len(segment.payload) + len(segment.tail)
 	for index := 0; index < headerLength; index++ {
 		out[index] = 0
 	}
@@ -116,7 +118,8 @@ func putTCP(out []byte, source, destination IPv4, segment tcpSegment) int {
 		out[20], out[21] = tcpOptionMSS, 4
 		binary.BigEndian.PutUint16(out[22:24], segment.mss)
 	}
-	copy(out[headerLength:length], segment.payload)
+	copied := copy(out[headerLength:length], segment.payload)
+	copy(out[headerLength+copied:length], segment.tail)
 	sum := pseudoHeaderSum(source, destination, protocolTCP, length)
 	binary.BigEndian.PutUint16(out[16:18], checksumFold(checksumAdd(sum, out[:length])))
 	return length

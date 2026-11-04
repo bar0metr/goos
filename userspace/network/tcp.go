@@ -95,11 +95,14 @@ type tcpEndpoint struct {
 	peerMSS        uint16
 	localMSS       uint16
 
+	// send and receive are rings; tcp_ring.go describes the indexing.
 	send     [TCPSendCapacity]byte
 	sendSeq  uint32
+	sendHead uint16
 	sendLen  uint16
 	sendSent uint16
 	receive  [TCPReceiveCapacity]byte
+	recvHead uint16
 	recvLen  uint16
 	reorder  [MaxTCPOutOfOrderSegments]tcpReorder
 
@@ -146,8 +149,11 @@ type TCPStats struct {
 	RX, TX, Retransmits, RXReset, TXReset uint64
 	DropChecksum, DropNoTCB, DropWindow   uint64
 	DropMalformed                         uint64
-	Endpoints, Listeners, Connections     int
-	States                                [TCPClosed + 1]int
+	// SplitSegments counts data segments sent from both ends of the send
+	// ring, which putTCP joins in the packet buffer.
+	SplitSegments                     uint64
+	Endpoints, Listeners, Connections int
+	States                            [TCPClosed + 1]int
 }
 
 func (stack *Stack) resetTCP() {
@@ -372,7 +378,7 @@ func (stack *Stack) TCPWrite(owner int, id TCPEndpointID, data []byte, now uint6
 	if len(data) > free {
 		data = data[:free]
 	}
-	copy(entry.send[entry.sendLen:], data)
+	ringStore(entry.send[:], int(entry.sendHead), int(entry.sendLen), data)
 	entry.sendLen += uint16(len(data))
 	stack.pumpTCP(entry, now)
 	return len(data), ResultOK
@@ -395,9 +401,12 @@ func (stack *Stack) TCPRead(owner int, id TCPEndpointID, dst []byte, now uint64)
 		return 0, ResultBusy
 	}
 	length := min(len(dst), int(entry.recvLen))
-	copy(dst, entry.receive[:length])
-	copy(entry.receive[:], entry.receive[length:entry.recvLen])
+	ringLoad(dst, entry.receive[:], int(entry.recvHead), length)
+	entry.recvHead = ringAdvance(int(entry.recvHead), length, TCPReceiveCapacity)
 	entry.recvLen -= uint16(length)
+	if entry.recvLen == 0 {
+		entry.recvHead = 0
+	}
 	stack.sendTCP(entry, tcpFlagACK, entry.sndNxt, entry.rcvNxt, nil, now)
 	return length, ResultOK
 }

@@ -114,7 +114,7 @@ func (stack *Stack) TCPPeek(owner int, id TCPEndpointID, dst []byte) (int, Resul
 		}
 		return 0, ResultBusy
 	}
-	return copy(dst, entry.receive[:entry.recvLen]), ResultOK
+	return ringLoad(dst, entry.receive[:], int(entry.recvHead), min(len(dst), int(entry.recvLen))), ResultOK
 }
 
 // TCPOptions are the effective values behind the socket options a caller
