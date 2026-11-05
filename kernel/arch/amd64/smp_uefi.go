@@ -14,7 +14,9 @@ import (
 // MaxCPUs bounds the processors the kernel runs on.
 const MaxCPUs = sched.MaxCPUs
 
-// Slots 0-63 are tasks; slot idleBase+n is processor n's idle loop.
+// Slots below sched.MaxTasks are tasks; slot idleBase+n is processor n's idle
+// loop. io.S sizes its per-slot tables with the same bounds
+// (GOOS_MAX_TASKS, GOOS_SLOT_COUNT).
 const (
 	idleBase  = sched.MaxTasks
 	slotCount = idleBase + MaxCPUs
@@ -763,19 +765,20 @@ func ReplaceTaskAddressSpace(task sched.TaskID, pageTable uint64) bool {
 // SchedulerState is a snapshot of the run state. Current is the calling
 // processor's slot.
 type SchedulerState struct {
-	Runnable uint64
-	Dead     uint64
+	Runnable sched.TaskSet
+	Dead     sched.TaskSet
 	Count    uint64
 	Current  uint64
-	Running  uint64
+	Running  sched.TaskSet
 	Online   uint64
 	Stats    sched.Stats
 }
 
 func ReadSchedulerState() SchedulerState {
 	cpu := CPUIndex()
+	var snapshot sched.Snapshot
 	flags := lockScheduler()
-	snapshot := runState.Snapshot()
+	runState.Snapshot(&snapshot)
 	current := asmSlot(runState.Current(cpu), cpu)
 	unlockScheduler(flags)
 	return SchedulerState{Runnable: snapshot.Runnable, Dead: snapshot.Dead, Count: uint64(snapshot.Count),
@@ -793,14 +796,9 @@ func TaskStackTop(slot uint64) uint64 {
 
 // FreeTaskSlots counts the slots a new task can take.
 func FreeTaskSlots() int {
-	snapshot := ReadSchedulerState()
 	flags := lockScheduler()
-	vacant := runState.Snapshot().Vacant
+	free := runState.FreeSlots()
 	unlockScheduler(flags)
-	free := sched.MaxTasks - int(snapshot.Count)
-	for ; vacant != 0; vacant &= vacant - 1 {
-		free++
-	}
 	return free
 }
 

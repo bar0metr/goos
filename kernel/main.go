@@ -13,6 +13,7 @@ import (
 	"goos/kernel/boot"
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/clock"
+	linuxcompat "goos/kernel/compat/linux"
 	kernelconsole "goos/kernel/console"
 	"goos/kernel/deadline"
 	"goos/kernel/device"
@@ -386,9 +387,11 @@ func main() {
 	streamWaitSet.UseDeadlines(&deadlines, deadline.SourceStream)
 	processWaitSet.UseDeadlines(&deadlines, deadline.SourceProcess)
 	waitAnyTable.UseDeadlines(&deadlines, deadline.SourceWaitAny)
+	waitAnyTable.SetStorage(pageObjects[kernelwait.Operation]{})
 	streamRegistry.SetStorage(pageObjects[stream.Stream]{})
 	sharedObjects.SetStorage(pageObjects[shmem.Object]{})
 	executables.SetStorage(pageObjects[executable.Object]{})
+	linuxcompat.SyscallContinuations.SetStorage(pageObjects[linuxcompat.Continuation]{})
 	if !built {
 		console.WriteString("PANIC: page-table construction failed\n")
 		for {

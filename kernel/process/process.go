@@ -10,15 +10,22 @@ import (
 )
 
 // MaxProcesses is the system-wide process limit. A process needs at least one
-// of the scheduler's sched.MaxTasks task slots, so more processes than slots
-// could never run; the kernel allocates a process record's pages the first
-// time a slot is used (ADR 0111). MaxExitEvents keeps one exit report per
-// process until PID 1 collects it.
+// of the scheduler's sched.MaxTasks task slots, so MaxProcesses may not exceed
+// it; the slots beyond MaxProcesses go to threads. The Linux layer keeps a
+// static record of several KiB per process, so the process bound stays at 64
+// while tasks went to 256 (ADR 0111). The kernel allocates a process record's
+// pages the first time a slot is used. MaxExitEvents keeps one exit report
+// per process until PID 1 collects it. MaxTasksPerProcess is the structural
+// bound of one process's task table; the task quota is the policy bound and
+// binds first.
 const (
-	MaxTasksPerProcess = 32
-	MaxProcesses       = sched.MaxTasks
+	MaxTasksPerProcess = 64
+	MaxProcesses       = 64
 	MaxExitEvents      = MaxProcesses
 )
+
+// A process needs a task, so more processes than task slots could never run.
+var _ = [sched.MaxTasks - MaxProcesses]struct{}{}
 
 type ID uint64
 
