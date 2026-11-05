@@ -3,7 +3,9 @@
 ## Status
 
 Accepted. Extends ADR 0059 and ADR 0071. Amended by ADR 0113: persisted records
-now carry UTC realtime timestamps.
+now carry UTC realtime timestamps. Amended by ADR 0211: the service waits on
+its log cursor instead of a timer, reads the ring in batches, and keeps four
+rotated segments of 16 MiB.
 
 ## Context
 
@@ -54,18 +56,17 @@ boot, and starting at the newest would mean the log never covers its own start.
 **The file lives on `/state`.** A log is mutable system state: not user data,
 and not part of the immutable system image.
 
-**It is bounded and rotates once.** The live file is capped and, when it crosses
+**It is bounded and rotates.** The live file is capped and, when it crosses
 the bound, the previous rotation is removed, the live file is renamed over it
-and a fresh one is created. History is therefore between one and two bounds,
-which is what one FAT32 file can hold here anyway. The validation build uses a
-smaller bound so a single boot test session crosses it; only the threshold
-differs, and the rotation the test exercises is the one a release build
-performs.
+and a fresh one is created. The first version kept one previous file with a
+24 KiB bound; ADR 0211 replaced that with four segments of 16 MiB. The
+validation build uses a smaller bound so a single boot test session crosses
+it; only the threshold differs, and the rotation the test exercises is the one
+a release build performs.
 
-**It drains on a timer, not on an event.** There is no event source for "a
-record was written", so the service sleeps between passes rather than being
-woken. One wake per second is not the polling ADR 0051 moved away from: it is a
-bounded periodic task with nothing to wait on.
+**It drained on a timer.** When this service arrived there was no event source
+for "a record was written", so it slept between passes. Cursor-aware log
+readiness came later, and ADR 0211 moved the service onto it.
 
 **A failure is reported once.** Logging from the log service produces records
 the service will itself try to persist, so repeating a failure every pass would
@@ -105,9 +106,9 @@ records to a service endpoint, removing the timer. It makes the kernel a client
 of a userspace queue on a path that must work when that service is dead or slow,
 and the queue's backpressure would then apply to logging itself.
 
-**Unbounded growth with no rotation.** Simpler, and a FAT32 file here tops out
-at 64 KiB anyway, so the bound would just arrive as a write error instead of a
-rotation. One rotation is a few lines and keeps the log useful after it fills.
+**Unbounded growth with no rotation.** Simpler, but a full volume would then
+end the log with a write error, and nothing would ever free the space. A
+rotation is a few lines and keeps the log useful after it fills.
 
 ## Consequences
 

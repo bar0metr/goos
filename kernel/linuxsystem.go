@@ -496,8 +496,9 @@ func (handler *linuxCallHandler) nanosleep(request linuxcompat.Request) linuxcom
 	return linuxBlocked
 }
 
-// prlimit reports the fixed limits of the calling process. It changes none:
-// a new limit is refused with EPERM, which is what Linux answers a process
+// prlimit reports the limits of the calling process and changes
+// RLIMIT_NOFILE within its hard limit. Every other resource is fixed: a new
+// limit for one is refused with EPERM, which is what Linux answers a process
 // that may not raise its limits.
 func (handler *linuxCallHandler) prlimit(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
 	local := thisCPU()
@@ -505,16 +506,26 @@ func (handler *linuxCallHandler) prlimit(state *linuxcompat.ProcessState, argume
 	if pid != 0 && pid != uint64(state.PID) {
 		return linuxErrno(linuxabi.ESRCH)
 	}
-	limit, errno := linuxcompat.ResourceLimit(resource, linuxelf.DefaultStackReserve)
+	openSoft, openHard := state.FDs.Limits()
+	soft, hard, errno := linuxcompat.ResourceLimit(resource, linuxelf.DefaultStackReserve, uint64(openSoft), uint64(openHard))
 	if errno != 0 {
 		return linuxErrno(errno)
 	}
 	if replacement != 0 {
-		return linuxErrno(linuxabi.EPERM)
+		if resource != linuxabi.ResourceOpenFiles {
+			return linuxErrno(linuxabi.EPERM)
+		}
+		if !vm.CopyIn(handler.root, replacement, local.linuxRlimit[:]) {
+			return linuxErrno(linuxabi.EFAULT)
+		}
+		newSoft, newHard := linuxcompat.DecodeRlimit(&local.linuxRlimit)
+		if errno := state.FDs.SetLimits(newSoft, newHard); errno != 0 {
+			return linuxErrno(errno)
+		}
 	}
 	if previous != 0 {
-		putUint64(local.linuxRlimit[0:8], limit)
-		putUint64(local.linuxRlimit[8:16], limit)
+		putUint64(local.linuxRlimit[0:8], soft)
+		putUint64(local.linuxRlimit[8:16], hard)
 		if !vm.CopyOut(handler.root, previous, local.linuxRlimit[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}

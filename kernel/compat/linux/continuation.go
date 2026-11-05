@@ -4,6 +4,7 @@ import (
 	"goos/internal/limits"
 	"goos/kernel/compat/linux/abi"
 	"goos/kernel/lock"
+	"goos/kernel/objects"
 	"goos/kernel/sched"
 )
 
@@ -56,9 +57,21 @@ func (state *Continuation) Path() []byte { return state.path[:state.pathSize] }
 // identity prevents a stale wake from attaching to a reused slot. Its lock
 // makes each method one step, so a wake from another processor lands before
 // or after the owner's own step, never inside it.
+//
+// A slot's record takes its pages from storage the first time the slot's
+// task blocks in a Linux call, and keeps them for every later task of the
+// slot (ADR 0111): over 8 KiB for each of sched.MaxTasks slots would be
+// static memory most slots never touch.
 type ContinuationTable struct {
 	lock    lock.Spin
-	entries [sched.MaxTasks]Continuation
+	entries [sched.MaxTasks]*Continuation
+	storage objects.Storage[Continuation]
+}
+
+// SetStorage installs where records are allocated. The kernel installs page
+// storage at boot; without it, records come from the Go heap on a host.
+func (table *ContinuationTable) SetStorage(storage objects.Storage[Continuation]) {
+	table.storage = storage
 }
 
 func (set *ContinuationTable) take() {
@@ -70,7 +83,7 @@ var SyscallContinuations ContinuationTable
 
 func (table *ContinuationTable) beginHeld(task sched.TaskID, request Request, path []byte) bool {
 	slot, _, valid := task.Parts()
-	if table == nil || !valid || len(path) > limits.PathMax || table.entries[slot].Task != 0 {
+	if table == nil || !valid || len(path) > limits.PathMax || table.entries[slot] != nil && table.entries[slot].Task != 0 {
 		return false
 	}
 	for _, character := range path {
@@ -78,9 +91,16 @@ func (table *ContinuationTable) beginHeld(task sched.TaskID, request Request, pa
 			return false
 		}
 	}
+	if table.entries[slot] == nil {
+		record, ok := objects.Or(table.storage).New()
+		if !ok {
+			return false
+		}
+		table.entries[slot] = record
+	}
 	// The record is filled in place. It is over 4 KiB, and a value that size
 	// built on the way in would land on the kernel heap, which never frees.
-	entry := &table.entries[slot]
+	entry := table.entries[slot]
 	*entry = Continuation{}
 	entry.Task, entry.Number, entry.Arguments = task, request.Number, request.Arguments
 	entry.Stage, entry.Phase, entry.pathSize = 1, ContinuationReady, uint16(len(path))
@@ -230,10 +250,10 @@ func (table *ContinuationTable) entry(task sched.TaskID) (*Continuation, bool) {
 		return nil, false
 	}
 	slot, _, valid := task.Parts()
-	if !valid || table.entries[slot].Task != task {
+	if !valid || table.entries[slot] == nil || table.entries[slot].Task != task {
 		return nil, false
 	}
-	return &table.entries[slot], true
+	return table.entries[slot], true
 }
 
 func (table *ContinuationTable) Begin(task sched.TaskID, request Request, path []byte) bool {

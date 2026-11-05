@@ -231,15 +231,56 @@ func serviceTCP(index int) {
 	}
 }
 
-func deliverTCP(now uint64) {
+// deliverTCP runs each session's Deliver in up to tcpDeliverRounds rounds.
+// A loopback read or write one session's Deliver makes reaches the peer at
+// once, and the peer's session may have had its turn this round, so a
+// round in which two or more sessions ran and one made progress is
+// followed by another. It reports whether a session spent its budget with
+// work left, or the last round still made progress: then the loop must
+// not sleep.
+func deliverTCP(now uint64) bool {
+	for round := 0; round < tcpDeliverRounds; round++ {
+		more, progressed, active := false, false, 0
+		for index := range tcpSessions {
+			current := &tcpSessions[index]
+			if current.channel == 0 {
+				continue
+			}
+			active++
+			fault, left := current.state.Deliver(&stack, now, tcpReplier{index})
+			if fault != tcpserve.FaultNone {
+				closeTCPSession(index, string(fault))
+				continue
+			}
+			more = more || left
+			progressed = progressed || current.state.Progressed()
+		}
+		if more {
+			return true
+		}
+		if !progressed || active < 2 {
+			return false
+		}
+	}
+	return true
+}
+
+// tcpDeliverRounds bounds deliverTCP's rounds. The second round finds
+// nothing in the common case and confirms the sessions settled.
+const tcpDeliverRounds = 2
+
+// stalledTCP names a session, endpoint and parked request that Deliver
+// would answer now, for the validation build's check before netd sleeps.
+func stalledTCP() (session int, endpoint uint32, op string, found bool) {
 	for index := range tcpSessions {
 		if tcpSessions[index].channel == 0 {
 			continue
 		}
-		if fault := tcpSessions[index].state.Deliver(&stack, now, tcpReplier{index}); fault != tcpserve.FaultNone {
-			closeTCPSession(index, string(fault))
+		if endpoint, op, found := tcpSessions[index].state.Runnable(&stack); found {
+			return index, endpoint, op, true
 		}
 	}
+	return 0, 0, "", false
 }
 
 // dumpTCP logs every TCP endpoint's transport state and every session's

@@ -65,28 +65,20 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 			end += nowNanos()
 		}
 	}
-	if count > linuxcompat.LinuxMaxPollFD {
+	if soft, _ := state.FDs.Limits(); !linuxcompat.PollCount(count, soft) {
 		return handler.pollReturn(state, request, end, linuxErrno(linuxabi.EINVAL))
 	}
-	wire := local.linuxPollWire[:count*linuxcompat.PollFDSize]
-	if count != 0 && !vm.CopyIn(handler.root, address, wire) {
-		return handler.pollReturn(state, request, end, linuxErrno(linuxabi.EFAULT))
-	}
-	ready, interests := uint64(0), 0
-	for index := 0; index < int(count); index++ {
-		fd, events := linuxcompat.PollEntry(wire, index)
-		var revents uint16
-		revents, interests = pollReadiness(state, fd, events, interests)
-		linuxcompat.SetPollRevents(wire, index, revents)
-		if revents != 0 {
-			ready++
-		}
+	ready, interests, errno := handler.pollScan(state, address, int(count), false)
+	if errno != 0 {
+		return handler.pollReturn(state, request, end, linuxErrno(errno))
 	}
 	now := nowNanos()
 	expired := finite && (end == 0 || now >= end)
 	if ready != 0 || expired {
-		if count != 0 && !vm.CopyOut(handler.root, address, wire) {
-			return handler.pollReturn(state, request, end, linuxErrno(linuxabi.EFAULT))
+		// The second pass writes what it finds; the count it returns
+		// matches the revents the caller reads.
+		if ready, _, errno = handler.pollScan(state, address, int(count), true); errno != 0 {
+			return handler.pollReturn(state, request, end, linuxErrno(errno))
 		}
 		return handler.pollReturn(state, request, end, linuxcompat.Result{Value: ready})
 	}
@@ -99,6 +91,7 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 	if finite {
 		deadline = amd64.TimerTicks() + linuxcompat.RemainingTicks(end-now, clock.TicksPerSecond, linuxSleepTicks)
 	}
+	deadline = pollRescanDeadline(interests, deadline)
 	if !linuxcompat.SyscallContinuations.Begin(handler.task, request, nil) ||
 		!linuxcompat.SyscallContinuations.Annotate(handler.task, nil, end) ||
 		!linuxcompat.SyscallContinuations.Issue(handler.task, 1, linuxPollCorrelation) ||
@@ -110,6 +103,53 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 	}
 	rearmSocketInterests(local.linuxPollEntries[:interests])
 	return linuxBlocked
+}
+
+// pollScan evaluates the count pollfd entries at address, PollWindow at a
+// time, and reports how many are ready and how many native interests the
+// rest added. With write set it stores each revents back.
+func (handler *linuxCallHandler) pollScan(state *linuxcompat.ProcessState, address uint64, count int, write bool) (uint64, int, linuxabi.Errno) {
+	local := thisCPU()
+	ready, interests := uint64(0), 0
+	for base := 0; base < count; base += linuxcompat.PollWindow {
+		window := count - base
+		if window > linuxcompat.PollWindow {
+			window = linuxcompat.PollWindow
+		}
+		wire := local.linuxPollWire[:window*linuxcompat.PollFDSize]
+		at := address + uint64(base*linuxcompat.PollFDSize)
+		if !vm.CopyIn(handler.root, at, wire) {
+			return 0, 0, linuxabi.EFAULT
+		}
+		for index := 0; index < window; index++ {
+			fd, events := linuxcompat.PollEntry(wire, index)
+			var revents uint16
+			revents, interests = pollReadiness(state, fd, events, interests)
+			if write {
+				linuxcompat.SetPollRevents(wire, index, revents)
+			}
+			if revents != 0 {
+				ready++
+			}
+		}
+		if write && !vm.CopyOut(handler.root, at, wire) {
+			return 0, 0, linuxabi.EFAULT
+		}
+	}
+	return ready, interests, 0
+}
+
+// pollRescanDeadline bounds the sleep of a poll or select whose interests
+// filled the wait: the descriptors left out wake no one, so the call scans
+// again on the next tick.
+func pollRescanDeadline(interests int, deadline uint64) uint64 {
+	if interests < len(thisCPU().linuxPollEntries) {
+		return deadline
+	}
+	if next := amd64.TimerTicks() + 1; deadline == 0 || next < deadline {
+		return next
+	}
+	return deadline
 }
 
 // pollTimeout reads the timeout of poll or ppoll and installs the temporary

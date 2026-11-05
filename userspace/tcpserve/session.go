@@ -65,6 +65,9 @@ type Session struct {
 	reply     tcpapi.Reply
 	// delivered counts the answers of the Deliver pass under way.
 	delivered int
+	// progressed records whether the last Deliver call answered a request
+	// or closed a child.
+	progressed bool
 }
 
 // Start begins a version 2 session with the ordinary endpoint quota.
@@ -258,7 +261,10 @@ func (s *Session) Handle(stack *network.Stack, request *tcpapi.Request, correlat
 		if !s.rxSlots.Return(request.Slot) {
 			return FaultRelease
 		}
-		return s.Deliver(stack, now, out)
+		// The event loop calls Deliver again before it sleeps, so work
+		// left over after this call's budget waits only for that call.
+		fault, _ := s.Deliver(stack, now, out)
+		return fault
 	case tcpapi.OpShutdownWrite:
 		reply.Result = Result(stack.TCPShutdownWrite(s.owner, id, now))
 	case tcpapi.OpReady:
@@ -336,24 +342,84 @@ func (s *Session) reported(stack *network.Stack, id network.TCPEndpointID, resul
 
 // Deliver answers every parked request that can finish now. One answer can
 // make another possible, as a read that empties a peer's receive buffer
-// gives the other end send room, and the service sleeps after Deliver until
-// its next event, so passes repeat until one answers nothing.
-func (s *Session) Deliver(stack *network.Stack, now uint64, out Replier) Fault {
+// gives the other end send room, so passes repeat until one answers
+// nothing. A call runs at most maxDeliverPasses passes, so one session
+// cannot hold netd's loop. More reports that the last pass still answered
+// something: requests may be runnable, and the caller must call Deliver
+// again before it sleeps.
+func (s *Session) Deliver(stack *network.Stack, now uint64, out Replier) (fault Fault, more bool) {
+	s.progressed = false
 	for pass := 0; pass < maxDeliverPasses; pass++ {
 		s.delivered = 0
 		if fault := s.deliverPass(stack, now, out); fault != FaultNone {
-			return fault
+			return fault, false
 		}
 		if s.delivered == 0 {
-			break
+			return FaultNone, false
 		}
+		s.progressed = true
 	}
-	return FaultNone
+	return FaultNone, true
 }
 
-// maxDeliverPasses bounds Deliver's passes; every endpoint has at most a
-// few parked requests, so the passes settle long before it.
+// Progressed reports whether the last Deliver call answered a request or
+// closed a child. Its reads and writes reach loopback peers at once, so a
+// parked request of another session may finish now.
+func (s *Session) Progressed() bool { return s.progressed }
+
+// maxDeliverPasses is the work budget of one Deliver call, in passes over
+// the endpoint table.
 const maxDeliverPasses = 16
+
+// Runnable names a parked request a Deliver pass would answer now, with
+// the endpoint it waits on. It changes nothing, and it finds nothing after
+// a Deliver call that reported no more work.
+func (s *Session) Runnable(stack *network.Stack) (endpoint uint32, op string, found bool) {
+	for index := range s.endpoints {
+		held := &s.endpoints[index]
+		if op := s.runnable(stack, held); op != "" {
+			return uint32(held.id), op, true
+		}
+	}
+	return 0, "", false
+}
+
+// runnable names the first parked request of held that its deliver
+// function would answer now, or returns "". It mirrors their busy tests.
+func (s *Session) runnable(stack *network.Stack, held *waiter) string {
+	if held.connect == 0 && held.accept == 0 && held.readCount == 0 && held.write == 0 && held.ready == 0 {
+		return ""
+	}
+	ready, result := stack.TCPReadiness(s.owner, held.id)
+	if held.connect != 0 {
+		if _, _, done := stack.TCPConnectResult(s.owner, held.id); done {
+			return "connect"
+		}
+	}
+	if held.accept != 0 && (result != network.ResultOK || ready.Mask&network.TCPReadyListening == 0 || ready.Mask&network.TCPReadyAcceptable != 0) {
+		return "accept"
+	}
+	if _, free := s.rxSlots.Free(); held.readCount != 0 && free {
+		var probe [1]byte
+		if held.reads[0].max == 0 {
+			return "read"
+		}
+		if _, peeked := stack.TCPPeek(s.owner, held.id, probe[:]); peeked != network.ResultBusy {
+			return "read"
+		}
+	}
+	if held.write != 0 {
+		busy := result == network.ResultOK && held.writeLength != 0 && ready.Mask&network.TCPReadyConnected != 0 &&
+			ready.Mask&(network.TCPReadyWritable|network.TCPReadyWriteClosed) == 0
+		if !busy {
+			return "write"
+		}
+	}
+	if held.ready != 0 && (result != network.ResultOK || uint16(ready.Mask) != held.readyMask) {
+		return "wait-ready"
+	}
+	return ""
+}
 
 // deliver sends one answer of a Deliver pass and counts it.
 func (s *Session) deliver(out Replier, reply *tcpapi.Reply, correlation uint64) bool {
@@ -416,7 +482,10 @@ func (s *Session) deliverAccept(stack *network.Stack, held *waiter, out Replier)
 	if result == network.ResultOK {
 		free := s.find(0)
 		if free == nil {
+			// Closing the child is progress: the listener may hold another
+			// child for the next pass.
 			stack.TCPClose(s.owner, child, 0)
+			s.delivered++
 			return FaultNone
 		}
 		*free = waiter{id: child}

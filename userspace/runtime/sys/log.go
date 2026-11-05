@@ -11,12 +11,26 @@ import (
 
 // LogBatch borrows a fixed snapshot from caller-owned storage. First is the
 // next cursor after an overwrite; records have sequences First..First+Count-1.
-// Total is the snapshot's end cursor, not a live index into the current ring.
+// Total is the ring's end when the kernel took the snapshot. A batch carries at
+// most kcall.LogReadMax records, so Next can fall short of Total; the reader
+// continues from Next until the two meet.
 type LogBatch struct {
 	Oldest, Total, First uint64
 	Count                int
 	Gap                  bool
 	wire                 []byte
+}
+
+// Next is the cursor that follows the batch's last record.
+func (batch LogBatch) Next() uint64 { return batch.First + uint64(batch.Count) }
+
+// Lost is how many records the ring overwrote before the reader at cursor got
+// to them.
+func (batch LogBatch) Lost(cursor uint64) uint64 {
+	if !batch.Gap {
+		return 0
+	}
+	return batch.First - cursor
 }
 
 func (batch LogBatch) Record(index int) (logfmt.Record, bool) {
@@ -36,7 +50,7 @@ func DecodeLogBatch(data []byte, cursor uint64) (LogBatch, bool) {
 		return LogBatch{}, false
 	}
 	batch := LogBatch{Oldest: binary.LittleEndian.Uint64(data[0:8]), Total: binary.LittleEndian.Uint64(data[8:16]), First: binary.LittleEndian.Uint64(data[16:24]), Count: int(binary.LittleEndian.Uint32(data[24:28])), Gap: binary.LittleEndian.Uint32(data[28:32]) == 1, wire: data}
-	if batch.Total-batch.Oldest > kcall.LogReadMax || batch.Count < 0 || batch.Count > kcall.LogReadMax || binary.LittleEndian.Uint32(data[28:32]) > 1 {
+	if logfmt.SequenceBefore(batch.Total, batch.Oldest) || batch.Total-batch.Oldest > kcall.LogRingCapacity || batch.Count < 0 || batch.Count > kcall.LogReadMax || binary.LittleEndian.Uint32(data[28:32]) > 1 {
 		return LogBatch{}, false
 	}
 	first := cursor
@@ -45,7 +59,7 @@ func DecodeLogBatch(data []byte, cursor uint64) (LogBatch, bool) {
 	}
 	count := uint64(0)
 	if logfmt.SequenceBefore(first, batch.Total) {
-		count = batch.Total - first
+		count = min(batch.Total-first, kcall.LogReadMax)
 	}
 	if batch.First != first || uint64(batch.Count) != count || batch.Gap != logfmt.SequenceBefore(cursor, batch.Oldest) {
 		return LogBatch{}, false
@@ -58,7 +72,7 @@ func DecodeLogBatch(data []byte, cursor uint64) (LogBatch, bool) {
 	return batch, true
 }
 
-// LogReadSequence reads up to 64 records atomically. Storage must remain live
+// LogReadSequence reads up to kcall.LogReadMax records atomically. Storage must remain live
 // until the returned batch is no longer used; large storage belongs in BSS.
 func LogReadSequence(device handle.ID, cursor uint64, target *[kcall.LogReadSize]byte) (LogBatch, kcall.Status) {
 	if target == nil {

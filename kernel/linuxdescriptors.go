@@ -59,21 +59,18 @@ func (handler *linuxCallHandler) Descriptor(request linuxcompat.Request) linuxco
 	return linuxErrno(linuxabi.ENOSYS)
 }
 
-// descriptorIndex narrows a descriptor argument. Anything out of the table
-// becomes an index no lookup accepts.
+// descriptorIndex narrows a descriptor argument. Anything past the largest
+// table becomes an index no lookup accepts.
 func descriptorIndex(value uint64) int {
-	if value >= linuxcompat.LinuxMaxFD {
+	if value >= linuxcompat.LinuxFDCeiling {
 		return -1
 	}
 	return int(value)
 }
 
-func duplicated(fd int, ok bool) linuxcompat.Result {
-	if !ok {
-		if fd == -2 {
-			return linuxErrno(linuxabi.EBADF)
-		}
-		return linuxErrno(linuxabi.EMFILE)
+func duplicated(fd int, errno linuxabi.Errno) linuxcompat.Result {
+	if errno != 0 {
+		return linuxErrno(errno)
 	}
 	return linuxcompat.Result{Value: uint64(fd)}
 }
@@ -87,7 +84,9 @@ func (handler *linuxCallHandler) duplicateOnto(request linuxcompat.Request, stat
 		return linuxErrno(errno)
 	}
 	if !active {
-		if _, open := state.FDs.Lookup(fd); !open || target >= linuxcompat.LinuxMaxFD {
+		// A target at or above RLIMIT_NOFILE is EBADF, as on Linux.
+		soft, _ := state.FDs.Limits()
+		if _, open := state.FDs.Lookup(fd); !open || target >= uint64(soft) {
 			return linuxErrno(linuxabi.EBADF)
 		}
 		if released, last, errno := linuxcompat.CloseFD(handler.root, int(target)); errno == 0 && last {
@@ -110,8 +109,8 @@ func (handler *linuxCallHandler) duplicateOnto(request linuxcompat.Request, stat
 			handler.vfsFinish()
 		}
 	}
-	if !state.FDs.DuplicateAt(fd, int(target), closeOnExec) {
-		return linuxErrno(linuxabi.EBADF)
+	if errno := state.FDs.DuplicateAt(fd, int(target), closeOnExec); errno != 0 {
+		return linuxErrno(errno)
 	}
 	return linuxcompat.Result{Value: target}
 }
@@ -164,7 +163,7 @@ func (handler *linuxCallHandler) fcntl(state *linuxcompat.ProcessState, fd int, 
 	}
 	switch command {
 	case linuxabi.FcntlDupFD, linuxabi.FcntlDupFDCloExec:
-		if argument >= linuxcompat.LinuxMaxFD {
+		if argument >= linuxcompat.LinuxFDCeiling {
 			return linuxErrno(linuxabi.EINVAL)
 		}
 		return duplicated(state.FDs.Duplicate(fd, int(argument), command == linuxabi.FcntlDupFDCloExec))

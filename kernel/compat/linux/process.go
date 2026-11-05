@@ -194,18 +194,27 @@ func (state *ProcessState) closeOnExecHeld(released *Released) {
 	if state == nil {
 		return
 	}
-	for fd := 0; fd < LinuxMaxFD; fd++ {
+	for fd := 0; fd < state.FDs.capacity(); fd++ {
 		closeOnExec, open := state.FDs.closeOnExecHeld(fd)
-		if !open || !closeOnExec {
-			continue
-		}
-		description, last, closed := state.FDs.closeHeld(fd)
-		if closed && last && description.Kind == FDVFSDirectory {
-			releaseDirectoryHeld(state.FamilyID, description.Object)
-		} else if closed && last {
-			released.add(description)
+		if open && closeOnExec {
+			state.dropDescriptorHeld(fd, released)
 		}
 	}
+}
+
+// dropDescriptorHeld closes fd. When that was the last reference, a
+// directory is released here and anything else parks in released.
+func (state *ProcessState) dropDescriptorHeld(fd int, released *Released) {
+	index, last, closed := state.FDs.dropHeld(fd)
+	if !closed || !last {
+		return
+	}
+	if slot := &openDescriptions[index]; slot.description.Kind == FDVFSDirectory {
+		releaseDirectoryHeld(state.FamilyID, slot.description.Object)
+		*slot = descriptionSlot{}
+		return
+	}
+	released.park(index)
 }
 
 func (state *ProcessState) closeOnExecVFSHeld(target []uint64) int {
@@ -213,31 +222,33 @@ func (state *ProcessState) closeOnExecVFSHeld(target []uint64) int {
 	if state == nil {
 		return 0
 	}
-	count := 0
-	for fd := 0; fd < LinuxMaxFD; fd++ {
-		entry := state.FDs.entries[fd]
-		if !entry.open || !entry.CloseOnExec {
-			continue
-		}
-		duplicate := false
-		marked := 0
-		for other := 0; other < LinuxMaxFD; other++ {
-			candidate := state.FDs.entries[other]
-			if candidate.open && candidate.description == entry.description && candidate.CloseOnExec {
-				marked++
-				if other < fd {
-					duplicate = true
-				}
+	// The first pass counts the marked descriptors of each description in
+	// its slot. The second takes a VFS file whose every reference is marked,
+	// at its lowest descriptor, and clears the count so later duplicates
+	// pass over it.
+	table := &state.FDs
+	for fd := 0; fd < table.capacity(); fd++ {
+		if entry := table.openEntry(fd); entry != nil && entry.CloseOnExec {
+			if slot, valid := table.description(entry.description); valid {
+				slot.marks++
 			}
 		}
-		if duplicate {
+	}
+	count := 0
+	for fd := 0; fd < table.capacity(); fd++ {
+		entry := table.openEntry(fd)
+		if entry == nil || !entry.CloseOnExec {
 			continue
 		}
-		slot, valid := state.FDs.description(entry.description)
-		if valid && slot.description.Kind == FDVFSFile && int(slot.description.References) == marked && count < len(target) {
+		slot, valid := table.description(entry.description)
+		if !valid || slot.marks == 0 {
+			continue
+		}
+		if slot.description.Kind == FDVFSFile && slot.marks == slot.description.References && count < len(target) {
 			target[count] = slot.description.Object
 			count++
 		}
+		slot.marks = 0
 	}
 	return count
 }
@@ -382,7 +393,7 @@ func launchHandleCount(data startup.Data, streams StandardStreams) int {
 	return count
 }
 
-func forkProcessHeld(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsHandle handle.ID) bool {
+func forkProcessHeld(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsHandle handle.ID, owner *process.Process) bool {
 	guard.Check()
 	parent, found := findProcessHeld(parentRoot)
 	if !found || childRoot == 0 || vfsHandle == 0 || record.State != ProcessRunning ||
@@ -403,7 +414,7 @@ func forkProcessHeld(parentRoot uint64, childRoot uint64, record ProcessRecord, 
 	}
 	child := &processStates[free]
 	*child = ProcessState{}
-	if !child.FDs.inheritHeld(&parent.FDs) {
+	if !child.FDs.inheritHeld(&parent.FDs, owner) {
 		releaseVFSContextHeld(parent.FamilyID)
 		*child = ProcessState{}
 		return false
@@ -658,10 +669,7 @@ func allocateFDHeld(root uint64, description FileDescription, closeOnExec bool) 
 			if processStates[index].Root != root {
 				continue
 			}
-			if fd, ok := processStates[index].FDs.allocateHeld(description, closeOnExec); ok {
-				return fd, 0
-			}
-			return -1, abi.EMFILE
+			return processStates[index].FDs.allocateHeld(description, closeOnExec)
 		}
 	}
 	return -1, abi.EBADF
@@ -679,7 +687,7 @@ func closeFDHeld(root uint64, fd int) (FileDescription, bool, abi.Errno) {
 
 func descriptionOfHeld(root uint64, fd uint64) (*FileDescription, bool) {
 	guard.Check()
-	if state, found := findProcessHeld(root); found && fd < LinuxMaxFD {
+	if state, found := findProcessHeld(root); found && fd < LinuxFDCeiling {
 		return state.FDs.descriptionHeld(int(fd))
 	}
 	return nil, false
@@ -780,14 +788,10 @@ func closeProcessFDs(state *ProcessState, released *Released) {
 	if state == nil {
 		return
 	}
-	for fd := 0; fd < LinuxMaxFD; fd++ {
-		description, last, closed := state.FDs.closeHeld(fd)
-		if closed && last && description.Kind == FDVFSDirectory {
-			releaseDirectoryHeld(state.FamilyID, description.Object)
-		} else if closed && last {
-			released.add(description)
-		}
+	for fd := 0; fd < state.FDs.capacity(); fd++ {
+		state.dropDescriptorHeld(fd, released)
 	}
+	state.FDs.releasePages()
 }
 
 // ReplaceRoot commits a prepared address space while retaining process
@@ -830,10 +834,25 @@ func InstallProcess(root uint64, goosProcessID process.ID, data startup.Data, st
 // RegisterChild. The child shares its parent's open-file descriptions and
 // family VFS context and copies everything else. It inherits no pending
 // signal, syscall continuation, or clear-child-tid address. The caller owns
-// rollback through RemoveProcess if a later step fails.
-func ForkProcess(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsHandle handle.ID) bool {
+// rollback through RemoveProcess if a later step fails. owner is the child's
+// native process, which pays for the pages of its descriptor table; nil
+// charges no one.
+func ForkProcess(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsHandle handle.ID, owner *process.Process) bool {
 	tablesLock.Lock()
-	result := forkProcessHeld(parentRoot, childRoot, record, vfsHandle)
+	result := forkProcessHeld(parentRoot, childRoot, record, vfsHandle, owner)
+	tablesLock.Unlock()
+	return result
+}
+
+// SetFDOwner names the native process that pays for the descriptor table
+// of the Linux process at root. The launch path calls it once InstallProcess
+// succeeds, before the process runs and before its table can grow.
+func SetFDOwner(root uint64, owner *process.Process) bool {
+	tablesLock.Lock()
+	result := false
+	if state, found := findProcessHeld(root); found {
+		result = state.FDs.setOwnerHeld(owner)
+	}
 	tablesLock.Unlock()
 	return result
 }

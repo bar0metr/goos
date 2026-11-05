@@ -3,7 +3,8 @@
 ## Status
 
 Accepted. Implements the early backend of spec §27. Amended by ADR 0113:
-record timestamps are now UTC realtime rather than time since boot.
+record timestamps are now UTC realtime rather than time since boot. Amended
+by ADR 0211: the ring retains 2048 records.
 
 ## Context
 
@@ -24,8 +25,10 @@ message, 96 bytes of fields, printable ASCII only. Its text form is:
 [2026-09-26T15:44:31.205971Z] INFO  vfs[4]: mounted fs=fat32 path=/persist
 ```
 
-The kernel keeps the most recent 64 records in `kernel/klog`. Two native
-operations use it:
+The kernel keeps the most recent records in a fixed ring in `kernel/klog`.
+The first ring held 64; ADR 0211 sized it at 2048 so the persistent log
+service can fall behind a burst without losing records. Two native operations
+use it:
 
 - `LogWrite` (25) validates an encoded record and stamps it with the UTC
   realtime clock and the caller's process ID, so neither can be forged.
@@ -59,6 +62,7 @@ field parsing.
 A normal boot keeps its informational history out of the console, and `log`
 shows it. Warnings and errors are visible immediately, with time and process.
 
-The ring holds 64 records, so older events are lost on a busy system until a
-persistent log service exists. A component holding the console capability can
-flood the ring and the console. It is limited only by record size, not by rate.
+The ring is bounded, so a burst larger than it loses its oldest records unless
+the persistent log service (ADR 0073, ADR 0211) has read them first. A
+component holding the console capability can flood the ring and the console.
+It is limited only by record size, not by rate.

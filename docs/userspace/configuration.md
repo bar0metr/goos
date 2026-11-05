@@ -117,7 +117,7 @@ A setting is not configuration until something reads it:
 | Setting | Read by | When |
 | --- | --- | --- |
 | `system.shell.prompt` | the shell | at startup and after a successful write |
-| `system.log.persist` | the log service | on every drain pass |
+| `system.log.persist`, `system.log.segment-bytes`, `system.log.segments` | the log service | at startup and every five seconds (ADR 0211) |
 | `system.net.*` | the network service | at startup and on `net reload` |
 | `system.dns.*` | the resolver service | at startup and on `resolve reload` |
 

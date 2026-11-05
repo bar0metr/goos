@@ -12,6 +12,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/klog"
 	"goos/kernel/lock"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
@@ -206,6 +207,23 @@ func (writer diagWriter) hex(name string, value uint64) {
 	writer.console.WriteHex(value)
 }
 
+// tasks prints a task set as one hexadecimal number, slot 0 in the lowest
+// bit, however many words the set has: 0x1 is slot 0 and 0x1 followed by 16
+// zero digits is slot 64.
+func (writer diagWriter) tasks(name string, set sched.TaskSet) {
+	top := sched.TaskWords - 1
+	for top > 0 && set[top] == 0 {
+		top--
+	}
+	writer.hex(name, set[top])
+	const digits = "0123456789abcdef"
+	for word := top - 1; word >= 0; word-- {
+		for shift := 60; shift >= 0; shift -= 4 {
+			writer.console.WriteByte(digits[set[word]>>uint(shift)&0xf])
+		}
+	}
+}
+
 func (writer diagWriter) uint(name string, value uint64) {
 	writer.console.WriteString(" ")
 	writer.console.WriteString(name)
@@ -233,11 +251,11 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("requester", uint64(requester))
 	out.end()
 	out.text("DIAG sched")
-	out.hex("runnable", state.Runnable)
-	out.hex("dead", state.Dead)
+	out.tasks("runnable", state.Runnable)
+	out.tasks("dead", state.Dead)
 	out.uint("slots", state.Count)
 	out.uint("current", state.Current)
-	out.hex("running", state.Running)
+	out.tasks("running", state.Running)
 	out.hex("online", state.Online)
 	out.uint("switches", state.Stats.Switches)
 	out.uint("steals", state.Stats.Steals)
@@ -424,6 +442,16 @@ func dumpDiagnostics(requester process.ID) {
 		out.end()
 	}
 	dumpTiming(out)
+	// The log ring's counters: appended counts every record since boot, and
+	// overwritten counts those the ring dropped to make room. Persistence
+	// counters belong to the log service, which reports them in the log.
+	logOldest, logTotal := systemLog.Bounds()
+	out.text("DIAG log")
+	out.uint("capacity", klog.Capacity)
+	out.uint("appended", logTotal)
+	out.uint("retained", logTotal-logOldest)
+	out.uint("overwritten", logOldest)
+	out.end()
 	out.text("DIAG events")
 	out.uint("total", diagRing.Total())
 	out.end()
@@ -456,9 +484,9 @@ func dumpProcess(out diagWriter, owner *process.Process, state amd64.SchedulerSt
 		taskState := "invalid"
 		if valid {
 			switch {
-			case state.Dead&(1<<slot) != 0:
+			case state.Dead.Has(int(slot)):
 				taskState = "dead"
-			case state.Runnable&(1<<slot) != 0:
+			case state.Runnable.Has(int(slot)):
 				taskState = "runnable"
 			default:
 				taskState = "blocked"

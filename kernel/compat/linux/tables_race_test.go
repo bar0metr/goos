@@ -134,7 +134,7 @@ func TestForkAndExecWithConcurrentFileIO(t *testing.T) {
 		var released Released
 		for round := 0; round < 300; round++ {
 			record, registered := registerChildForTest(process.ID(90+round%8), parent.PID)
-			if !registered || !ForkProcess(0x3000, 0x8000, record, 9) {
+			if !registered || !ForkProcess(0x3000, 0x8000, record, 9, nil) {
 				fail(failures, "fork failed")
 				return
 			}
@@ -146,6 +146,7 @@ func TestForkAndExecWithConcurrentFileIO(t *testing.T) {
 				fail(failures, "the child was not removed")
 				return
 			}
+			released.Reset()
 		}
 	}()
 	go func() {
@@ -162,6 +163,8 @@ func TestForkAndExecWithConcurrentFileIO(t *testing.T) {
 			if released.Len() != 1 || released.At(0).Object != 0x6000+uint64(round) {
 				fail(failures, "exec closed the wrong descriptors")
 			}
+			// The caller frees the parked slot once it has released it.
+			released.Reset()
 		}
 	}()
 	close(start)

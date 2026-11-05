@@ -42,11 +42,12 @@ func printLog(invocation shellcmd.Invocation) uint64 {
 
 func readLogSnapshot(cursor uint64, snapshot bool) (sys.LogBatch, bool) {
 	if snapshot {
-		oldest, _, status := sys.LogBounds(logHandle)
+		oldest, total, status := sys.LogBounds(logHandle)
 		if status != kcall.StatusOK {
 			return sys.LogBatch{}, false
 		}
-		cursor = oldest
+		// The ring retains more than one batch; a snapshot shows the newest.
+		cursor = total - min(total-oldest, kcall.LogReadMax)
 	}
 	batch, status := sys.LogReadSequence(logHandle, cursor, &logSnapshot)
 	return batch, status == kcall.StatusOK

@@ -29,7 +29,7 @@ type Thread struct {
 // threadReservation owns one compatibility thread slot and TID until the
 // scheduler task is ready to publish.
 type threadReservation struct {
-	slot uint8
+	slot uint16
 	tid  int32
 	root uint64
 }
@@ -95,7 +95,7 @@ func reserveThread(root uint64) (threadReservation, bool) {
 		}
 		tid := allocateTIDHeld()
 		threads[index] = Thread{Root: root, TID: tid, reserved: true}
-		return threadReservation{slot: uint8(index + 1), tid: tid, root: root}, true
+		return threadReservation{slot: uint16(index + 1), tid: tid, root: root}, true
 	}
 	return threadReservation{}, false
 }

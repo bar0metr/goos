@@ -305,7 +305,8 @@ log -f --component remoted
 
 Levels `debug`, `info`, `warn` and `error` match exactly. Component names also
 match exactly. `-n N` selects the newest N matching retained records and prints
-them in chronological order. The ring retains at most 64 records.
+them in chronological order. The ring retains 2048 records; `log` reads the
+newest 64 of them, one batch.
 
 Follow prints its selected backlog, then blocks on cursor-aware log readiness
 in the same wait as terminal cancellation. New records wake readers without

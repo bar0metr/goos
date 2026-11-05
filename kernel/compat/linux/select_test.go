@@ -16,15 +16,18 @@ func TestSelectCount(t *testing.T) {
 		{0, 0, 0},
 		{1, 1, 0},
 		{64, 64, 0},
-		{65, LinuxMaxFD, 0},
-		{1024, LinuxMaxFD, 0},
-		{0x7fffffff, LinuxMaxFD, 0},
+		{65, 65, 0},
+		{1024, 1024, 0},
+		{1025, 1025, 0},
+		{2000, 1088, 0},
+		{0x7fffffff, 1088, 0},
 		{^uint64(0), 0, abi.EINVAL},
 		{0x80000000, 0, abi.EINVAL},
 		// Only the low 32 bits are the C int Linux reads.
 		{0x1_0000_0003, 3, 0},
 	} {
-		got, errno := SelectCount(test.argument)
+		// 1088 is the capacity of a table that grew one page.
+		got, errno := SelectCount(test.argument, 1088)
 		if got != test.want || errno != test.errno {
 			t.Fatalf("SelectCount(%#x) = %d, %d; want %d, %d", test.argument, got, errno, test.want, test.errno)
 		}
@@ -37,36 +40,39 @@ func TestFDSetBytes(t *testing.T) {
 			t.Fatalf("FDSetBytes(%d) = %d, want %d", count, got, want)
 		}
 	}
-	if FDSetBytes(LinuxMaxFD) > FDSetSize {
-		t.Fatalf("a full table needs %d bytes, more than %d", FDSetBytes(LinuxMaxFD), FDSetSize)
+	if FDSetBytes(FDSetWindow) != FDSetSize {
+		t.Fatalf("a window needs %d bytes, not %d", FDSetBytes(FDSetWindow), FDSetSize)
 	}
 }
 
 func TestFDSetRoundTrip(t *testing.T) {
 	var wire [FDSetSize]byte
 	binary.LittleEndian.PutUint64(wire[:], 1<<0|1<<3|1<<9|1<<63)
-	set := DecodeFDSet(wire[:], 10)
+	var set FDSet
+	DecodeFDSet(wire[:], 10, &set)
 	if !set.Has(0) || !set.Has(3) || !set.Has(9) || set.Has(63) || set.Has(1) {
 		t.Fatalf("decoded set %#x", set)
 	}
-	if set.Has(-1) || set.Has(LinuxMaxFD) {
+	if set.Has(-1) || set.Has(FDSetWindow) {
 		t.Fatal("out-of-range descriptors are members")
 	}
-	full := DecodeFDSet(wire[:], 64)
+	var full FDSet
+	DecodeFDSet(wire[:], 64, &full)
 	if !full.Has(63) {
 		t.Fatal("descriptor 63 lost at count 64")
 	}
-	if empty := DecodeFDSet(wire[:], 0); empty != (FDSet{}) {
-		t.Fatalf("count 0 decoded %#x", empty)
+	if DecodeFDSet(wire[:], 0, &full); full != (FDSet{}) {
+		t.Fatalf("count 0 decoded %#x", full)
 	}
-	if short := DecodeFDSet(nil, 64); short != (FDSet{}) {
-		t.Fatalf("empty wire decoded %#x", short)
+	DecodeFDSet(wire[:], 64, &full)
+	if DecodeFDSet(nil, 64, &full); full != (FDSet{}) {
+		t.Fatalf("empty wire decoded %#x", full)
 	}
 
 	var result FDSet
 	result.Add(3)
 	result.Add(-1)
-	result.Add(LinuxMaxFD)
+	result.Add(FDSetWindow)
 	for index := range wire {
 		wire[index] = 0xff
 	}
@@ -153,11 +159,57 @@ func TestDecodeSelectArguments(t *testing.T) {
 func FuzzDecodeFDSet(f *testing.F) {
 	f.Add([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, 17)
 	f.Fuzz(func(t *testing.T, wire []byte, count int) {
-		set := DecodeFDSet(wire, count)
-		for fd := 0; fd < LinuxMaxFD; fd++ {
+		var set FDSet
+		DecodeFDSet(wire, count, &set)
+		for fd := 0; fd < FDSetWindow; fd++ {
 			if set.Has(fd) && (fd >= count || fd/8 >= len(wire) || wire[fd/8]&(1<<(fd%8)) == 0) {
 				t.Fatalf("descriptor %d is a member of %#x from %x at count %d", fd, set, wire, count)
 			}
 		}
 	})
+}
+
+// TestSelectWindowsCoverLargeSets walks a 1024-descriptor fd_set the way the
+// kernel's select does, one window at a time, and checks that descriptors in
+// the second window and the last one below nfds take part.
+func TestSelectWindowsCoverLargeSets(t *testing.T) {
+	const nfds = 1024
+	user := make([]byte, FDSetBytes(nfds))
+	for _, fd := range []int{0, 511, 512, 1000, 1023} {
+		user[fd/8] |= 1 << (fd % 8)
+	}
+	count, errno := SelectCount(nfds, 64+FDChunkEntries)
+	if errno != 0 || count != nfds {
+		t.Fatalf("SelectCount = %d errno=%d", count, errno)
+	}
+	var in, out FDSet
+	var seen []int
+	for base := 0; base < count; base += FDSetWindow {
+		size := FDSetBytes(min(FDSetWindow, count-base))
+		wire := user[base/8 : base/8+size]
+		DecodeFDSet(wire, count-base, &in)
+		out = FDSet{}
+		for bit := 0; bit < FDSetWindow && base+bit < count; bit++ {
+			if in.Has(bit) {
+				seen = append(seen, base+bit)
+				if (base+bit)%2 == 0 {
+					out.Add(bit)
+				}
+			}
+		}
+		EncodeFDSet(wire, &out)
+	}
+	if len(seen) != 5 || seen[2] != 512 || seen[3] != 1000 || seen[4] != 1023 {
+		t.Fatalf("select saw %v", seen)
+	}
+	for fd := 0; fd < nfds; fd++ {
+		member := user[fd/8]&(1<<(fd%8)) != 0
+		if want := fd == 0 || fd == 512 || fd == 1000; member != want {
+			t.Fatalf("result bit %d = %v", fd, member)
+		}
+	}
+	// nfds past the table's capacity is cut to it.
+	if count, _ := SelectCount(4097, 64); count != 64 {
+		t.Fatalf("count cut to %d", count)
+	}
 }
