@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted. Builds on ADR 0191, ADR 0192, ADR 0193 and ADR 0195.
+Accepted. Builds on ADR 0191, ADR 0192, ADR 0193 and ADR 0195. ADR 0213
+replaces the fixed storage described under Transport state and the
+TIME_WAIT recycling below: endpoints, rings, reassembly and tombstones are
+now allocated per connection, under quotas and memory budgets. The text
+below records the original limits.
 
 ## Context
 
