@@ -55,6 +55,34 @@ func waitIdle(interests *[MaxObjects]Interest, count int, timeout uint64) (uint6
 	return sys.WaitAny(interests, count, timeout)
 }
 
+// CursorInterest is an Interest that can name a log cursor.
+type CursorInterest = sys.CursorInterest
+
+// AnyCursor is Any over cursor interests: a log interest is ready once the
+// log holds a record at or after its cursor. It collects garbage when idle
+// as Any does.
+func AnyCursor(interests *[MaxObjects]CursorInterest, count int, timeout uint64) (Result, kcall.Status) {
+	if timeout == 0 {
+		mask, status := sys.WaitAnyCursor(interests, count, timeout)
+		return Result{ReadyMask: mask}, status
+	}
+	arena.IdleEnter()
+	if timeout > idleTicks && arena.IdlePending() {
+		mask, status := sys.WaitAnyCursor(interests, count, idleTicks)
+		if status != kcall.StatusTimeout {
+			arena.IdleLeave()
+			return Result{ReadyMask: mask}, status
+		}
+		arena.CollectIdle()
+		if timeout != kcall.WaitAnyInfiniteTimeout {
+			timeout -= idleTicks
+		}
+	}
+	mask, status := sys.WaitAnyCursor(interests, count, timeout)
+	arena.IdleLeave()
+	return Result{ReadyMask: mask}, status
+}
+
 // Sleep blocks the caller for timeout ticks. It is Any with no interests, so
 // the kernel needs no separate sleep operation.
 func Sleep(timeout uint64) kcall.Status {
