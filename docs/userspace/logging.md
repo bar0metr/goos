@@ -6,7 +6,9 @@ printable ASCII. The kernel assigns the UTC `REALTIME` timestamp and the
 process ID when it accepts a record. Ordering and deadlines continue to use
 the independent `MONOTONIC` clock.
 
-`kernel/klog` retains the most recent 64 records. Native operation 25,
+`kernel/klog` retains the most recent 2048 records, 416 KiB of kernel BSS
+(ADR 0211). Each record gets an absolute sequence number; the ring's oldest
+retained sequence counts the records it overwrote. Native operation 25,
 `LogWrite(console, record, length)`, appends a record and needs the console
 device handle with write rights. Operation 26,
 `LogRead(console, index, buffer)`, returns the index-th retained record as a
@@ -16,7 +18,7 @@ and above are echoed to the console as they are accepted.
 `userspace/log` provides `Init(console, component)` and
 `Info`/`Warn`/`Error(message, fields...)` with `Str`, `Bytes`, and `Uint`
 fields. Services call `Init` once with their startup console handle. The
-shell's `log` builtin prints the ring, oldest record first:
+shell's `log` builtin prints the newest 64 retained records, oldest first:
 
 ```text
 [2026-09-26T15:44:31.152328Z] INFO  kernel[0]: kernel initialized free-pages=93568
@@ -25,36 +27,78 @@ shell's `log` builtin prints the ring, oldest record first:
 ```
 
 Operation 33, `LogBounds(console, buffer)`, writes the sequence number of the
-oldest retained record and one past the newest. It takes the same read rights
-`LogRead` does, because it describes the same records.
+oldest retained record and one past the newest. Operation 58,
+`LogReadSequence(log, cursor, buffer)`, copies up to 64 structured records
+starting at a cursor, with the ring's oldest and end sequences at that moment
+and a gap flag when the cursor fell below the oldest. A reader continues at
+`First + count` until it reaches the end. Both take the same read rights
+`LogRead` does, because they describe the same records. A `WaitAnyCursor`
+interest on the log handle with a cursor is ready once the ring holds a record
+at or past that cursor.
+
+The kernel's diagnostic dump prints one `DIAG log` line: `capacity`,
+`appended` (every record since boot), `retained`, and `overwritten`.
 
 ## Persistence
 
-`log` (`/system/services/log`) is a supervised userspace service that drains the ring onto the
-persistent volume (ADR 0073). The ring stays the ordering point: every component
-still writes to it with `LogWrite`, and this service is a consumer rather than a
-path records travel through, so a component's diagnostics do not depend on
-another process being alive.
+`log` (`/system/services/log`) is a supervised userspace service that writes
+the ring to the persistent volume (ADR 0073, ADR 0211). The ring stays the
+ordering point: every component still writes to it with `LogWrite`, and this
+service is a consumer rather than a path records travel through, so a
+component's diagnostics do not depend on another process being alive.
 
-The service holds the console capability that authorises reading the ring and a
-VFS session for its own file, and nothing else. It keeps a cursor inside the
-window `LogBounds` reports and appends whatever is new:
+The service holds the log capability that authorises reading the ring, console
+write for its own records, a VFS session for its files, and a read-only
+configuration session for `system.log.`. It keeps an absolute cursor, the
+sequence of the next record to write, and blocks in `WaitAnyCursor` on the log
+handle with that cursor, on PID 1's control channel, and on the VFS session's
+peer-closed event. A new record wakes it. It reads `LogReadSequence` batches,
+appends them in 2 KiB writes, and stops when the cursor reaches the ring's end.
+The wait's five-second timeout runs maintenance: rereading settings, retrying
+storage after a failure, and reporting counters. The cursor advances only after
+a write succeeds.
 
 | Path | Contents |
 | --- | --- |
-| `/state/system.log` | the live file |
-| `/state/system.log.1` | the previous one, kept by a single rotation |
+| `/state/system.log` | the live segment |
+| `/state/system.log.1` to `.3` | older segments, newest first |
 
-A cursor below the oldest retained sequence means records were overwritten
-before the service reached them. It writes `[lost N records]` and continues, so
-a hole in the persisted log reads as a hole. The live file is bounded; crossing
-the bound removes the old rotation, renames the live file over it, and starts a
-fresh one. The validation build uses a smaller bound so a boot test session
-exercises the same rotation a release build performs.
+Every line ends with ` #N`, the record's kernel sequence. A cursor below the
+oldest retained sequence means the ring overwrote records before the service
+read them; the service writes `[lost N records] #M`, M the sequence before the
+next record, and continues, so a hole in the persisted log reads as a hole.
 
-The service drains on a timer, once a second, because there is no event source
-for "a record was written". PID 1 asks VFS for its session through the control
-endpoint after the filesystem is healthy and before the shell starts, which is
-the only service whose endpoint is created that way rather than handed over at
-boot. A failure to start it warns and continues: the ring is the system log and
-keeps working without it.
+At startup the service cuts a final line that has no newline, the remains of a
+write a crash interrupted. A service PID 1 restarts within the boot resumes
+after the sequence on the file's last line, once the ring's record at that
+sequence renders to the same line, so it writes nothing twice. After a reboot
+it starts at sequence zero: whatever the ring dropped before the service ran
+becomes a gap marker.
+
+Rotation keeps 4 segments of 16 MiB, the live one included: 64 MiB of history.
+Before a line would carry the live segment past its bound, the service moves
+`.2` onto `.3`, `.1` onto `.2`, and the live file onto `.1`, each with
+`Replace`, then starts a new live file. A refused step ends the rotation
+before the live file moves, so the newest previous segment survives, and the
+live segment grows past its bound until a later pass rotates.
+
+| Setting | Default | Bounds |
+| --- | --- | --- |
+| `system.log.persist` | `true` | |
+| `system.log.segment-bytes` | 16777216 (1536 in a validation build) | 1024 to 1073741824 |
+| `system.log.segments` | 4 | 2 to 9 |
+
+The service refuses an out-of-bounds rotation setting with an error record and
+keeps the bounds it had. Turning persistence off moves the cursor with the
+ring, so turning it on again starts from the present.
+
+The service writes a `counters` and a `rotation counters` record: the ring's `appended` and
+`overwritten` counts at its last read, and its own `persisted`, `lost`,
+`failed`, `rotations`, `refused`, `repaired` and `cut-bytes`. It writes them
+when a loss or failure count changes, and once an hour otherwise.
+
+PID 1 asks VFS for the service's session through the control endpoint after
+the filesystem is healthy and before the shell starts, which is the only
+service whose endpoint is created that way rather than handed over at boot. A
+failure to start it warns and continues: the ring is the system log and keeps
+working without it.
