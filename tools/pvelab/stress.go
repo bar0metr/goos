@@ -49,7 +49,7 @@ func (linuxStreamStressScenario) Run(ctx context.Context, s *Session) (Result, e
 			return "", fail(ClassScenario, "long-stream", err)
 		}
 		for mark := 256; mark <= o.StressLongMiB; mark += 256 {
-			if err := stressStep(ctx, s, fmt.Sprintf("long MiB=%d\n", mark), "long failed", mark); err != nil {
+			if err := stressStep(ctx, s, fmt.Sprintf("long MiB=%d\r", mark), "long failed", mark); err != nil {
 				return "", err
 			}
 		}
