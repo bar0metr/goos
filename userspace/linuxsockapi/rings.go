@@ -269,3 +269,111 @@ func LoadServiceCounters(page []byte) ServiceCounters {
 	}
 	return ServiceCounters{values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8], values[9]}
 }
+
+// The service's state snapshot follows the counters in the ring page, for
+// the kernel's diagnostics: one FamilySnapshot, then one SocketSnapshot per
+// family socket index. The service rewrites a socket's whenever it
+// publishes or moves the socket's data plane; the kernel only reads it.
+const (
+	FamilySnapshotOffset = ServiceCountersOffset + 8*ServiceCounterCount
+	familySnapshotSize   = 16
+	SocketSnapshotOffset = FamilySnapshotOffset + familySnapshotSize
+	socketSnapshotSize   = 40
+	SnapshotEnd          = SocketSnapshotOffset + MaxSockets*socketSnapshotSize
+)
+
+// FamilySnapshot is the service's view of a family's slots and requests,
+// and of its native TCP link.
+type FamilySnapshot struct {
+	TXHeld, RXUsed, RXPublished uint8
+	Inflight, Parked, Replies   uint8
+	LinkTXLent, LinkReleases    uint8
+	LinkBlocked                 bool
+}
+
+// SocketSnapshot is the service's state of one socket.
+type SocketSnapshot struct {
+	Socket     uint64
+	Endpoint   uint32
+	State      uint8
+	TXQueue    uint8
+	WritesOut  uint8
+	ReadsOut   uint8
+	Flags      uint32
+	TXAccepted uint32
+	TXSent     uint32
+	TXStream   uint32
+	Mask       uint32
+	Readable   uint32
+}
+
+// Socket snapshot flags.
+const (
+	SnapTXBlocked uint32 = 1 << iota
+	SnapTXStall
+	SnapTXDropped
+	SnapWantTX
+	SnapWantRX
+	SnapWaiting
+	SnapNeedWait
+	SnapNeedRefresh
+	SnapRefreshing
+	SnapEOF
+	SnapClosing
+	SnapDead
+	SnapReadShut
+	SnapWriteShut
+	SnapShutQueued
+	SnapPending
+)
+
+// StoreFamilySnapshot and StoreSocketSnapshot write the snapshot; the
+// Load functions read it back.
+func StoreFamilySnapshot(page []byte, f *FamilySnapshot) {
+	p := page[FamilySnapshotOffset : FamilySnapshotOffset+familySnapshotSize]
+	p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7] = f.TXHeld, f.RXUsed, f.RXPublished, f.Inflight, f.Parked, f.Replies, f.LinkTXLent, f.LinkReleases
+	p[8] = 0
+	if f.LinkBlocked {
+		p[8] = 1
+	}
+}
+
+func LoadFamilySnapshot(page []byte) FamilySnapshot {
+	p := page[FamilySnapshotOffset : FamilySnapshotOffset+familySnapshotSize]
+	return FamilySnapshot{TXHeld: p[0], RXUsed: p[1], RXPublished: p[2], Inflight: p[3], Parked: p[4], Replies: p[5],
+		LinkTXLent: p[6], LinkReleases: p[7], LinkBlocked: p[8] != 0}
+}
+
+func StoreSocketSnapshot(page []byte, index int, s *SocketSnapshot) {
+	if index < 0 || index >= MaxSockets {
+		return
+	}
+	p := page[SocketSnapshotOffset+index*socketSnapshotSize:][:socketSnapshotSize]
+	binary.LittleEndian.PutUint64(p[0:], s.Socket)
+	binary.LittleEndian.PutUint32(p[8:], s.Endpoint)
+	p[12], p[13], p[14], p[15] = s.State, s.TXQueue, s.WritesOut, s.ReadsOut
+	binary.LittleEndian.PutUint32(p[16:], s.Flags)
+	binary.LittleEndian.PutUint32(p[20:], s.TXAccepted)
+	binary.LittleEndian.PutUint32(p[24:], s.TXSent)
+	binary.LittleEndian.PutUint32(p[28:], s.TXStream)
+	binary.LittleEndian.PutUint32(p[32:], s.Mask)
+	binary.LittleEndian.PutUint32(p[36:], s.Readable)
+}
+
+func LoadSocketSnapshot(page []byte, index int) SocketSnapshot {
+	p := page[SocketSnapshotOffset+index*socketSnapshotSize:][:socketSnapshotSize]
+	return SocketSnapshot{Socket: binary.LittleEndian.Uint64(p[0:]), Endpoint: binary.LittleEndian.Uint32(p[8:]),
+		State: p[12], TXQueue: p[13], WritesOut: p[14], ReadsOut: p[15], Flags: binary.LittleEndian.Uint32(p[16:]),
+		TXAccepted: binary.LittleEndian.Uint32(p[20:]), TXSent: binary.LittleEndian.Uint32(p[24:]),
+		TXStream: binary.LittleEndian.Uint32(p[28:]), Mask: binary.LittleEndian.Uint32(p[32:]), Readable: binary.LittleEndian.Uint32(p[36:])}
+}
+
+// RingPositions reads the four ring indices and the doorbell token.
+func RingPositions(page []byte) (submitHead, submitTail, completeHead, completeTail, doorbell uint32) {
+	return atomic.LoadUint32(word(page, offSubmitHead)), atomic.LoadUint32(word(page, offSubmitTail)),
+		atomic.LoadUint32(word(page, offCompleteHead)), atomic.LoadUint32(word(page, offCompleteTail)),
+		atomic.LoadUint32(word(page, offDoorbell))
+}
+
+// Token reads the readiness page's notification token.
+func Token(page []byte) uint32 { return atomic.LoadUint32(word(page, offToken)) }

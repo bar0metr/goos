@@ -223,6 +223,7 @@ func (s *Service) kick(global int) {
 		s.releaseSocket(global, false)
 		return
 	}
+	s.snapshot(global)
 	s.notify(int(sock.family))
 }
 

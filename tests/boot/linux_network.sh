@@ -459,6 +459,35 @@ if wants faults; then
 	expect "^fetch status=200 bytes=300000 sha256=$big_sum\$" 'a new launch downloads after the faults'
 fi
 
+# The stream stress (make stress-linux-stream): the loopback stream again
+# and again with a watchdog on every transfer. A transfer that stops takes a
+# snapshot first: the kernel's diag dump (rings, slots and linuxsockd's
+# socket states on a DIAG build) and netd's endpoints.
+if wants stress; then
+	count=${STRESS_COUNT:-200}
+	[ -n "$count" ] || count=200
+	stress_timeout=${STRESS_TIMEOUT:-300}
+	background "$probe stress-stream 32 $count &"
+	iteration=1
+	while [ "$iteration" -le "$count" ]; do
+		elapsed=0
+		until serial | tail -n "+$((start + 1))" | grep -q "^stress $iteration ok\$"; do
+			if serial | tail -n "+$((start + 1))" | grep -q "^stress $iteration failed\$\|$fatal" || [ "$elapsed" -ge $((stress_timeout * 10)) ]; then
+				run diag
+				cp "$work/output" build/logs/linux-stream-stress-diag.log
+				run 'net endpoints'
+				sleep 2
+				fail "stream stress stopped at transfer $iteration of $count; snapshot in build/logs/linux-stream-stress-diag.log and $log"
+			fi
+			sleep 0.1
+			elapsed=$((elapsed + 1))
+		done
+		iteration=$((iteration + 1))
+	done
+	checks=$((checks + count))
+	printf 'stream stress: %s transfers\n' "$count"
+fi
+
 send poweroff
 elapsed=0
 until serial | grep -q '^Powering off\.\.\.$' || [ "$elapsed" -ge 300 ]; do

@@ -50,6 +50,11 @@ type BenchOptions struct {
 	// Peer is the node's address on the lab bridge; empty means the SSH host.
 	Peer   string
 	Branch string
+	// The stream stress: transfers in a row, each with its own watchdog,
+	// then one long transfer (zero skips it).
+	StressCount   int
+	StressLongMiB int
+	StressTimeout time.Duration
 }
 
 // variantName encodes the build settings a report depends on.

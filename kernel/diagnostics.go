@@ -623,5 +623,60 @@ func dumpSocketServices(out diagWriter) {
 		out.uint("tx-bytes-copied", counters.TXBytesCopied)
 		out.uint("rx-bytes-copied", counters.RXBytesCopied)
 		out.end()
+		dumpSocketPlane(out, families[index], endpoints[index], rings)
+	}
+}
+
+// dumpSocketPlane prints a family's data plane as both sides see it: the
+// ring positions and tokens, the kernel's slots, and the snapshot linuxsockd
+// keeps of the family and each of its sockets.
+func dumpSocketPlane(out diagWriter, familyID uint64, endpoint linuxcompat.NetEndpoint, rings []byte) {
+	submitHead, submitTail, completeHead, completeTail, doorbell := linuxsockapi.RingPositions(rings)
+	token := uint32(0)
+	if page, found := socketPoolPage(endpoint, linuxsockapi.ReadinessPage); found {
+		token = linuxsockapi.Token(page)
+	}
+	filling, committed, held := linuxcompat.DataPlaneState(familyID)
+	family := linuxsockapi.LoadFamilySnapshot(rings)
+	out.text("DIAG linux-net-plane")
+	out.uint("family", familyID)
+	out.uint("submit-head", uint64(submitHead))
+	out.uint("submit-tail", uint64(submitTail))
+	out.uint("complete-head", uint64(completeHead))
+	out.uint("complete-tail", uint64(completeTail))
+	out.uint("doorbell", uint64(doorbell))
+	out.uint("token", uint64(token))
+	out.hex("kernel-tx-filling", uint64(filling))
+	out.hex("kernel-tx-committed", uint64(committed))
+	out.hex("kernel-rx-held", uint64(held))
+	out.hex("service-tx-held", uint64(family.TXHeld))
+	out.hex("service-rx-used", uint64(family.RXUsed))
+	out.hex("service-rx-published", uint64(family.RXPublished))
+	out.uint("inflight", uint64(family.Inflight))
+	out.uint("parked", uint64(family.Parked))
+	out.uint("replies", uint64(family.Replies))
+	out.hex("link-tx-lent", uint64(family.LinkTXLent))
+	out.hex("link-releases", uint64(family.LinkReleases))
+	out.uint("link-blocked", boolDiag(family.LinkBlocked))
+	out.end()
+	for index := 0; index < linuxsockapi.MaxSockets; index++ {
+		socket := linuxsockapi.LoadSocketSnapshot(rings, index)
+		if socket.Socket == 0 {
+			continue
+		}
+		out.text("DIAG linux-net-socket")
+		out.hex("id", socket.Socket)
+		out.uint("endpoint", uint64(socket.Endpoint))
+		out.uint("state", uint64(socket.State))
+		out.uint("txq", uint64(socket.TXQueue))
+		out.uint("writes", uint64(socket.WritesOut))
+		out.uint("reads", uint64(socket.ReadsOut))
+		out.hex("flags", uint64(socket.Flags))
+		out.uint("tx-accepted", uint64(socket.TXAccepted))
+		out.uint("tx-sent", uint64(socket.TXSent))
+		out.uint("tx-stream", uint64(socket.TXStream))
+		out.hex("mask", uint64(socket.Mask))
+		out.uint("readable", uint64(socket.Readable))
+		out.end()
 	}
 }

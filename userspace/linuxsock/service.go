@@ -284,6 +284,7 @@ type Service struct {
 	ops       [MaxOps]op
 	backends  [UDP + 1]backendState
 	warm      [UDP + 1]warmPool
+	linkView  LinkView
 	closes    [closeSlots]pendingClose
 	serial    uint32
 	// Work the pump retries; zero skips the scan.
@@ -559,6 +560,9 @@ func (s *Service) releaseSocket(global int, publish bool) {
 	}
 	if publish && !sock.opening && !sock.closing {
 		linuxsockapi.Publish(f.pool, int(sock.index), linuxsockapi.Readiness{})
+	}
+	if f.rings != nil {
+		linuxsockapi.StoreSocketSnapshot(f.rings, int(sock.index), &linuxsockapi.SocketSnapshot{})
 	}
 	f.slots[sock.index] = 0
 	f.count--

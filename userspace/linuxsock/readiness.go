@@ -92,6 +92,7 @@ func (s *Service) publish(global int) {
 	if !sock.used || sock.opening || sock.closing {
 		return
 	}
+	s.snapshot(global)
 	state := s.readiness(sock)
 	if state == sock.published {
 		return
@@ -111,6 +112,7 @@ func (s *Service) notify(index int) {
 	f := &s.families[index]
 	if f.rings != nil {
 		linuxsockapi.StoreServiceCounters(f.rings, &f.stats)
+		s.snapshotFamily(index)
 	}
 	if !f.notify {
 		return
@@ -221,4 +223,56 @@ func (s *Service) failSocket(global int, result NativeResult) {
 	}
 	s.dropTX(global)
 	s.publish(global)
+}
+
+// LinkView reports a native link's state for the family snapshots.
+type LinkView interface {
+	Snapshot() (txLent uint8, releases uint8, blocked bool)
+}
+
+// SetLinkView names the TCP link the family snapshots describe.
+func (s *Service) SetLinkView(view LinkView) { s.linkView = view }
+
+// snapshot writes a socket's state where the kernel's diagnostics read it.
+func (s *Service) snapshot(global int) {
+	sock := &s.sockets[global]
+	if !sock.used || sock.opening {
+		return
+	}
+	f := &s.families[sock.family]
+	if f.rings == nil {
+		return
+	}
+	var flags uint32
+	for _, bit := range [...]struct {
+		on   bool
+		flag uint32
+	}{
+		{sock.txBlocked, linuxsockapi.SnapTXBlocked}, {sock.txStall, linuxsockapi.SnapTXStall},
+		{sock.txDropped, linuxsockapi.SnapTXDropped}, {sock.wantTX, linuxsockapi.SnapWantTX},
+		{sock.wantRX, linuxsockapi.SnapWantRX}, {sock.waiting, linuxsockapi.SnapWaiting},
+		{sock.needWait, linuxsockapi.SnapNeedWait}, {sock.needRefresh, linuxsockapi.SnapNeedRefresh},
+		{sock.refreshing, linuxsockapi.SnapRefreshing}, {sock.eof, linuxsockapi.SnapEOF},
+		{sock.closing, linuxsockapi.SnapClosing}, {sock.dead, linuxsockapi.SnapDead},
+		{sock.readShut, linuxsockapi.SnapReadShut}, {sock.writeShut, linuxsockapi.SnapWriteShut},
+		{sock.shutQueued, linuxsockapi.SnapShutQueued}, {sock.pending != linuxsockapi.ResultOK, linuxsockapi.SnapPending},
+	} {
+		if bit.on {
+			flags |= bit.flag
+		}
+	}
+	linuxsockapi.StoreSocketSnapshot(f.rings, int(sock.index), &linuxsockapi.SocketSnapshot{Socket: sock.id, Endpoint: sock.endpoint,
+		State: uint8(sock.state), TXQueue: sock.txqLen, WritesOut: sock.writesOut, ReadsOut: sock.readsOut, Flags: flags,
+		TXAccepted: sock.txAccepted, TXSent: sock.txSent, TXStream: sock.txStream, Mask: uint32(sock.mask), Readable: sock.readable})
+}
+
+// snapshotFamily writes a family's slot and request state.
+func (s *Service) snapshotFamily(index int) {
+	f := &s.families[index]
+	snap := linuxsockapi.FamilySnapshot{TXHeld: f.txHeld, RXUsed: f.rxUsed, RXPublished: f.rxPub,
+		Inflight: uint8(f.inflight), Parked: uint8(f.parked), Replies: uint8(f.replies)}
+	if s.linkView != nil {
+		snap.LinkTXLent, snap.LinkReleases, snap.LinkBlocked = s.linkView.Snapshot()
+	}
+	linuxsockapi.StoreFamilySnapshot(f.rings, &snap)
 }

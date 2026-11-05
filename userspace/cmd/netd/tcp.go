@@ -226,3 +226,38 @@ func deliverTCP(now uint64) {
 		}
 	}
 }
+
+// dumpTCP logs every TCP endpoint's transport state and every session's
+// held replies and parked requests, for a stuck connection's diagnosis.
+func dumpTCP() {
+	for index := 0; index < stack.TCPEndpointCount(); index++ {
+		e, live := stack.TCPEndpointAt(index)
+		if !live {
+			continue
+		}
+		syslog.Info("tcp endpoint", syslog.Uint("id", uint64(e.ID)), syslog.Uint("owner", uint64(e.Owner)),
+			syslog.Uint("state", uint64(e.State)), syslog.Uint("port", uint64(e.LocalPort)), syslog.Uint("peer-port", uint64(e.RemotePort)),
+			syslog.Uint("send-len", uint64(e.SendLen)), syslog.Uint("send-sent", uint64(e.SendSent)), syslog.Uint("send-head", uint64(e.SendHead)),
+			syslog.Uint("recv-len", uint64(e.RecvLen)), syslog.Uint("recv-head", uint64(e.RecvHead)),
+			syslog.Uint("snd-una", uint64(e.SndUna)), syslog.Uint("snd-nxt", uint64(e.SndNxt)), syslog.Uint("rcv-nxt", uint64(e.RcvNxt)),
+			syslog.Uint("peer-window", uint64(e.PeerWindow)), syslog.Uint("cwnd", uint64(e.CWnd)),
+			syslog.Uint("shut-write", boolValue(e.ShutdownWrite)), syslog.Uint("fin-sent", boolValue(e.FINSent)),
+			syslog.Uint("error", uint64(e.PendingError)))
+	}
+	for index := range tcpSessions {
+		current := &tcpSessions[index]
+		if current.channel == 0 {
+			continue
+		}
+		syslog.Info("tcp session", syslog.Uint("session", uint64(index)), syslog.Uint("version", uint64(current.state.Layout().Version)),
+			syslog.Uint("held-replies", uint64(current.heldCount)), syslog.Uint("parked", uint64(current.state.Waiting())),
+			syslog.Uint("rx-lent", uint64(current.state.RXLentBits())))
+	}
+}
+
+func boolValue(value bool) uint64 {
+	if value {
+		return 1
+	}
+	return 0
+}

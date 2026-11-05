@@ -206,7 +206,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware bench-pve-linux-network bench-pve-linux-network-hz
+.PHONY: stress-linux-stream FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware bench-pve-linux-network bench-pve-linux-network-hz
 
 all: iso
 
@@ -763,7 +763,8 @@ test-linux-network:
 	@test -n "$(CURL)" && test -f "$(CURL)" || { echo "CURL=/path/to/static/curl is required" >&2; exit 2; }
 	@tools/linuxfixture/check-static.sh "$(BUSYBOX)" "$(CURL)"
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX)):$(abspath $(CURL))
-	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) tests/boot/linux_network.sh $(ISO) $(OVMF_CODE) $(abspath $(BUSYBOX)) $(abspath $(CURL))
+	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) LINUX_NETWORK_SCENARIOS="$(LINUX_NETWORK_SCENARIOS)" STRESS_COUNT="$(STRESS_COUNT)" \
+		tests/boot/linux_network.sh $(ISO) $(OVMF_CODE) $(abspath $(BUSYBOX)) $(abspath $(CURL))
 
 # Crypto feasibility reports stay in ignored build scratch output. A failed dependency
 # does not prevent native execution of the independently built probes.
@@ -1229,6 +1230,24 @@ bench-pve-linux-network:
 ifeq ($(BENCH_DIAG),1)
 	@$(MAKE) --no-print-directory pve-artifacts OPT=$(BENCH_OPT) DIAG=1 VALIDATION=0
 	@$(PVELAB) run --scenario linux-network-diag $(BENCH_PVE_FLAGS) --bench-diag 1 $(PVE_RUN_FLAGS)
+endif
+
+# The Linux stream stress: netprobe's loopback stream again and again, each
+# transfer under a watchdog, then on KVM one 4 GiB transfer. A transfer that
+# stops leaves a snapshot of the rings, linuxsockd's sockets and netd's
+# endpoints. STRESS_MODE picks release KVM, DIAG KVM or DIAG TCG (QEMU
+# here, which needs BUSYBOX and CURL like test-linux-network).
+#   make stress-linux-stream STRESS_MODE=kvm|kvm-diag|tcg STRESS_COUNT=1000
+STRESS_MODE ?= kvm
+STRESS_COUNT ?= 1000
+STRESS_LONG_MIB ?= 4096
+stress-linux-stream:
+ifeq ($(STRESS_MODE),tcg)
+	@$(MAKE) --no-print-directory test-linux-network DIAG=1 LINUX_NETWORK_SCENARIOS=stress STRESS_COUNT=$(or $(filter-out 1000,$(STRESS_COUNT)),200)
+else
+	@$(MAKE) --no-print-directory pve-artifacts OPT=$(BENCH_OPT) DIAG=$(if $(filter kvm-diag,$(STRESS_MODE)),1,0) VALIDATION=0
+	@$(PVELAB) run --scenario linux-stream-stress $(BENCH_PVE_FLAGS) --bench-diag $(if $(filter kvm-diag,$(STRESS_MODE)),1,0) \
+		--stress-count $(STRESS_COUNT) --stress-long-mib $(STRESS_LONG_MIB) $(PVE_RUN_FLAGS)
 endif
 
 bench-pve-linux-network-hz:

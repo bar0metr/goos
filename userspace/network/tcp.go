@@ -663,3 +663,34 @@ func (stack *Stack) tcpPathMSS(route udpRouteResult) uint16 {
 	}
 	return uint16(mss)
 }
+
+// TCPEndpointState is one endpoint's transport state, for diagnostics.
+type TCPEndpointState struct {
+	ID                     TCPEndpointID
+	Owner                  uint8
+	State                  TCPState
+	LocalPort, RemotePort  uint16
+	SendLen, SendSent      uint16
+	SendHead, RecvLen      uint16
+	RecvHead               uint16
+	SndUna, SndNxt, RcvNxt uint32
+	PeerWindow, CWnd       uint32
+	ShutdownWrite, FINSent bool
+	PendingError           Result
+}
+
+// TCPEndpointAt reports the endpoint in table slot index, or false for a
+// free slot or an index past the table.
+func (stack *Stack) TCPEndpointAt(index int) (TCPEndpointState, bool) {
+	if index < 0 || index >= len(stack.tcp) || stack.tcp[index].state == TCPFree {
+		return TCPEndpointState{}, false
+	}
+	e := &stack.tcp[index]
+	return TCPEndpointState{ID: tcpID(e, index), Owner: e.owner, State: e.state, LocalPort: e.port, RemotePort: e.remotePort,
+		SendLen: e.sendLen, SendSent: e.sendSent, SendHead: e.sendHead, RecvLen: e.recvLen, RecvHead: e.recvHead,
+		SndUna: e.sndUna, SndNxt: e.sndNxt, RcvNxt: e.rcvNxt, PeerWindow: e.peerWindow, CWnd: e.cwnd,
+		ShutdownWrite: e.shutdownWrite, FINSent: e.finSent, PendingError: e.pendingError}, true
+}
+
+// TCPEndpointCount is the size of the endpoint table.
+func (stack *Stack) TCPEndpointCount() int { return len(stack.tcp) }

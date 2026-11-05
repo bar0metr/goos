@@ -552,3 +552,6 @@ func Result(result network.Result) tcpapi.Result {
 	}
 	return tcpapi.ResultInvalidArgument
 }
+
+// RXLentBits reports the RX slots the client holds, for diagnostics.
+func (s *Session) RXLentBits() uint8 { return s.rxSlots.Bits() }

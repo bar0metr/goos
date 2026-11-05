@@ -647,6 +647,14 @@ func handleRequest(index int, correlation uint64) {
 		}
 		current.echo, current.sequence = correlation, request.Sequence
 		transmitPending()
+	case netapi.OpTCPDump:
+		if current.rights != netapi.RightsAdminStatus {
+			respond(current, request.Opcode, netapi.ResultPermissionDenied, correlation)
+			return
+		}
+		dumpTCP()
+		answer = netapi.Reply{Opcode: netapi.OpTCPDump, Result: netapi.ResultOK}
+		send(current, correlation)
 	case netapi.OpReload:
 		if current.rights != netapi.RightsAdminStatus {
 			respond(current, request.Opcode, netapi.ResultPermissionDenied, correlation)

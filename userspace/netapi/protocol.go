@@ -10,9 +10,9 @@ import (
 const (
 	ProtocolID = uint64(0x474e455441504931)
 	// Version 4 adds a separate bounded TCP diagnostics reply, version 5
-	// its GTCP message counters. A message of an older version is not this
-	// protocol and fails decoding.
-	Version          = uint16(5)
+	// its GTCP message counters, version 6 OpTCPDump. A message of an older
+	// version is not this protocol and fails decoding.
+	Version          = uint16(6)
 	RequestSize      = 24
 	ReplySize        = 248
 	MaxServers       = 4
@@ -102,7 +102,11 @@ const (
 	OpServers
 	// OpTCPStatus returns transport counters, state counts, and active limits.
 	OpTCPStatus
-	lastOpcode = OpTCPStatus
+	// OpTCPDump has the service write every TCP endpoint's transport state
+	// to its log, for a stuck connection's diagnosis. The reply carries
+	// only the result.
+	OpTCPDump
+	lastOpcode = OpTCPDump
 )
 
 type Result uint8
@@ -386,7 +390,7 @@ func requestEnvelope(in *ipc.Message) bool {
 
 func validRequest(r *Request) bool {
 	switch r.Opcode {
-	case OpStatus, OpReload, OpTCPStatus:
+	case OpStatus, OpReload, OpTCPStatus, OpTCPDump:
 		return r.Destination == [addressSize]byte{} && r.Sequence == 0 && r.TimeoutMS == 0 && r.Generation == 0
 	case OpEcho:
 		return r.Destination != [addressSize]byte{} && r.TimeoutMS >= MinEchoTimeoutMS && r.TimeoutMS <= MaxEchoTimeoutMS &&
@@ -642,6 +646,8 @@ func validReply(r *Reply) bool {
 		return r.Responder == noAddress && r.RTT == 0
 	case OpReload:
 		return snapshot && echo && (r.Result == ResultConfigInvalid || r.Field == FieldNone)
+	case OpTCPDump:
+		return snapshot && echo && r.Field == FieldNone
 	}
 	return false
 }

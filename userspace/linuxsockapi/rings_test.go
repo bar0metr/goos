@@ -106,3 +106,18 @@ func TestReadinessCarriesState(t *testing.T) {
 		t.Fatal("unknown state bit accepted")
 	}
 }
+
+func TestSnapshotsFitAndRoundTrip(t *testing.T) {
+	if SnapshotEnd > pageSize {
+		t.Fatalf("snapshot ends at %d", SnapshotEnd)
+	}
+	page := make([]byte, pageSize)
+	f := FamilySnapshot{1, 2, 3, 4, 5, 6, 7, 8, true}
+	StoreFamilySnapshot(page, &f)
+	s := SocketSnapshot{Socket: 9, Endpoint: 10, State: 1, TXQueue: 2, WritesOut: 3, ReadsOut: 4, Flags: SnapTXBlocked | SnapPending,
+		TXAccepted: 5, TXSent: 6, TXStream: 7, Mask: 8, Readable: 11}
+	StoreSocketSnapshot(page, MaxSockets-1, &s)
+	if LoadFamilySnapshot(page) != f || LoadSocketSnapshot(page, MaxSockets-1) != s {
+		t.Fatal("snapshot")
+	}
+}

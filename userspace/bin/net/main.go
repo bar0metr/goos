@@ -15,7 +15,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "net status|reload",
+	Usage:   "net status|reload|endpoints",
 	Summary: "network status/reload",
 	MinArgs: 1,
 	MaxArgs: 1,
@@ -36,6 +36,11 @@ func run(data startup.Data) {
 		status()
 	case utility.Equal(argument, "reload"):
 		reload()
+	case utility.Equal(argument, "endpoints"):
+		// The service writes the endpoints to its log.
+		if reply, ok := utility.CallNetwork(netapi.Request{Opcode: netapi.OpTCPDump}); !ok || reply.Result != netapi.ResultOK {
+			utility.Fail(nil, "network service unavailable")
+		}
 	default:
 		utility.Usage()
 	}

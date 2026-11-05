@@ -76,6 +76,7 @@ func userspaceMain() {
 	}
 	core.Init(backend{}, transport{})
 	core.SetWarm(linuxsock.MaxWarm)
+	core.SetLinkView(&links[linuxsock.TCP].state)
 	mark("LINUXSOCKD_STARTED_OK\n")
 	serve()
 }

@@ -52,6 +52,10 @@
  *                             and reply, connect and close, UDP, poll wake
  *   bench-stream MiB          the loopback stream alone
  *   bench-rr ROUNDS           the loopback request and reply alone
+ *   stress-stream MiB COUNT   the loopback stream COUNT times, one
+ *                             "stress N ok" line each, for a watchdog
+ *   long-stream MiB           one connection carrying MiB, every byte
+ *                             checked, a "long MiB=" line per 256 MiB
  *   remote ADDRESS PORT [MiB] streams both ways, request and reply, and UDP
  *                             against tools/pvelab/benchpeer.py
  *   remote-serve PORT COUNT   answer COUNT one-byte requests from a remote
@@ -2738,6 +2742,67 @@ static int bench_mode(int argc, char **argv)
 	return 0;
 }
 
+/* stress_stream runs the loopback stream count times on fresh connections
+ * and prints a line after each, so a watchdog sees which one stopped. */
+static int stress_stream(long total, long count)
+{
+	long i;
+
+	group = "stress";
+	for (i = 1; i <= count; i++) {
+		if (bench_stream(total) != 0) {
+			printf("stress %ld failed\n", i);
+			return 1;
+		}
+		printf("stress %ld ok\n", i);
+	}
+	printf("stress done\n");
+	return 0;
+}
+
+/* long_stream carries total bytes over one connection, past the 32-bit
+ * stream offsets of the native protocol and many times around every ring.
+ * The reader checks each byte against the stream position. */
+static int long_stream(long total)
+{
+	int client, server, status;
+	long moved, n, i, mark;
+	pid_t child;
+	char byte = 'x';
+
+	group = "long";
+	REQUIRE(tcp_pair(&client, &server) == 0, "pair");
+	child = spawn();
+	if (child == 0) {
+		for (moved = 0; moved < total; moved += n) {
+			if ((n = read(server, bench_chunk, sizeof(bench_chunk))) <= 0)
+				_exit(1);
+			for (i = 0; i < n; i++)
+				if (bench_chunk[i] != pattern_byte((size_t)(moved + i)))
+					_exit(2);
+		}
+		_exit(write(server, &byte, 1) == 1 ? 0 : 1);
+	}
+	REQUIRE(child > 0, "fork reader");
+	mark = 256L << 20;
+	for (moved = 0; moved < total; moved += n) {
+		n = total - moved < (long)sizeof(bench_chunk) ? total - moved : (long)sizeof(bench_chunk);
+		for (i = 0; i < n; i++)
+			bench_chunk[i] = pattern_byte((size_t)(moved + i));
+		REQUIRE(write_full(client, bench_chunk, (size_t)n) == 0, "long transfer");
+		if (moved + n >= mark) {
+			printf("long MiB=%ld\n", (moved + n) >> 20);
+			mark += 256L << 20;
+		}
+	}
+	REQUIRE(read(client, &byte, 1) == 1, "long end");
+	status = child_status(child);
+	REQUIRE(WIFEXITED(status) && WEXITSTATUS(status) == 0, "reader saw every byte");
+	close_pair(client, server);
+	printf("long ok bytes=%ld\n", total);
+	return 0;
+}
+
 /* --- remote bench ------------------------------------------------------- */
 
 /* The remote peer (tools/pvelab/benchpeer.py) reads a nine-byte command on
@@ -2935,6 +3000,10 @@ int main(int argc, char **argv)
 		return inherit_mode(argc, argv);
 	if (argc > 1 && !strcmp(argv[1], "serve"))
 		return serve_mode(argc, argv);
+	if (argc == 4 && !strcmp(argv[1], "stress-stream"))
+		return stress_stream(mebibytes(argv[2]), atol(argv[3]));
+	if (argc == 3 && !strcmp(argv[1], "long-stream"))
+		return long_stream(mebibytes(argv[2]));
 	if ((argc == 2 || argc == 3) && (!strcmp(argv[1], "bench") || !strcmp(argv[1], "bench-stream") || !strcmp(argv[1], "bench-rr")))
 		return bench_mode(argc, argv);
 	if (argc > 1 && !strcmp(argv[1], "remote"))

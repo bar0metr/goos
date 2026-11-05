@@ -528,3 +528,9 @@ func (l *NativeLink) completeUDP() (uint64, bool) {
 	}
 	return correlation, true
 }
+
+// Snapshot reports the TX slots netd holds, the releases a full queue held
+// back and whether the link waits for room, for diagnostics.
+func (l *NativeLink) Snapshot() (txLent uint8, releases uint8, blocked bool) {
+	return l.txLent.Bits(), l.releases, l.writeBlocked
+}

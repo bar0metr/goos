@@ -390,3 +390,28 @@ func LiveSessions(families *[MaxNetFamilies]uint64, endpoints *[MaxNetFamilies]N
 	}
 	return count
 }
+
+// DataPlaneState reports a family's slots on the kernel's side, for the
+// diagnostics: TX slots being filled and committed, RX slots held.
+func DataPlaneState(familyID uint64) (filling, committed, held uint8) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found {
+		return 0, 0, 0
+	}
+	for index := range context.data.tx {
+		switch context.data.tx[index].state {
+		case txFilling:
+			filling |= 1 << index
+		case txCommitted:
+			committed |= 1 << index
+		}
+	}
+	for index := range context.data.rx {
+		if context.data.rx[index].held {
+			held |= 1 << index
+		}
+	}
+	return filling, committed, held
+}

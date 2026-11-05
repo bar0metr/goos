@@ -104,6 +104,9 @@ func mainCode(args []string, stdout, stderr io.Writer) int {
 		fs.IntVar(&bench.StreamMiB, "bench-stream-mib", 32, "network benchmark: MiB per stream")
 		fs.IntVar(&bench.DiagRounds, "bench-diag-rounds", 2000, "network benchmark: request-reply rounds of the diagnostic pass")
 		fs.BoolVar(&bench.Gate, "bench-gate", false, "network benchmark: fail when the hard envelope is not met")
+		fs.IntVar(&bench.StressCount, "stress-count", 1000, "stream stress: transfers in a row")
+		fs.IntVar(&bench.StressLongMiB, "stress-long-mib", 4096, "stream stress: MiB of the long transfer, 0 for none")
+		fs.DurationVar(&bench.StressTimeout, "stress-timeout", 60*time.Second, "stream stress: time one transfer, or 256 MiB of the long one, may take")
 		fs.StringVar(&bench.Peer, "bench-peer", "", "network benchmark: the node's address on the lab bridge (default PVE_SSH_HOST)")
 		fs.StringVar(&benchReports, "bench-reports", "build/reports", "network benchmark: report directory")
 	case "resume":

@@ -205,6 +205,7 @@ var scenarios = map[string]Scenario{
 	"native-concurrency":  nativeConcurrencyScenario{},
 	"linux-network-bench": linuxNetworkBenchScenario{},
 	"linux-network-diag":  linuxNetworkDiagScenario{},
+	"linux-stream-stress": linuxStreamStressScenario{},
 }
 
 func scenarioNames() string {
