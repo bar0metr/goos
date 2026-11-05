@@ -568,6 +568,13 @@ func benchRound(ctx context.Context, s *Session, peerDir, guest string, index in
 			return run, fail(ClassScenario, step.check, err)
 		}
 		if err := g.Expect(step.check, out, step.done); err != nil {
+			// netd's endpoints and sessions say what a stuck request waited
+			// for; they reach the serial log through netd's log.
+			for _, command := range []string{"net endpoints", "sleep 2"} {
+				if _, dumpErr := g.Run(ctx, command, commandTimeout); dumpErr != nil {
+					break
+				}
+			}
 			return run, err
 		}
 		run.Lines = append(run.Lines, benchOutput(out)...)
