@@ -259,11 +259,8 @@ func ReleaseOrphans(familyID uint64, session uint32, rings []byte) (doorbell boo
 
 // socketKindHeld finds a socket of the live session by identity.
 func (context *NetContext) socketKindHeld(identity uint64) (datagram bool, found bool) {
-	for index := range context.sockets {
-		socket := &context.sockets[index]
-		if socket.used && socket.Identity == identity && socket.Session == context.endpoint.Session {
-			return socket.Datagram, true
-		}
+	if socket, found := context.liveSocketHeld(identity); found {
+		return socket.Datagram, true
 	}
 	return false, false
 }

@@ -219,7 +219,7 @@ type Transport interface {
 	Drop(family int)
 }
 
-// nativeResult maps a native outcome onto GLNXSOCK2.
+// nativeResult maps a native outcome onto GLNXSOCK3.
 func nativeResult(result NativeResult) linuxsockapi.Result {
 	switch result {
 	case NativeOK, NativeEOF:

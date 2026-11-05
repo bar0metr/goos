@@ -6,15 +6,17 @@ import (
 	"unsafe"
 )
 
-// The readiness page is the first page of a session's pool. The service
-// writes it and the kernel only reads it.
+// The readiness pages open a session's pool. The service writes them and
+// the kernel only reads them. The kernel maps the pool page by page, so an
+// entry never crosses a page: the header and the entries are multiples of
+// 32 bytes.
 //
-//	header, 64 bytes:
+//	header, 64 bytes, in the first readiness page:
 //	  0   magic, ReadinessMagic
 //	  4   session generation
 //	  8   token: 1 while a ReadyChanged notification is queued or being
 //	      sent; the kernel stores 0 before it reads the entries
-//	entry i at 64 + 32*i, for i < MaxSockets:
+//	entry i at byte 64 + 32*i of the readiness pages, for i < MaxSockets:
 //	  0   sequence, odd while the service rewrites the entry
 //	  8   socket identity, zero for a free entry
 //	  16  Ready mask
@@ -67,29 +69,36 @@ const (
 
 func entryOffset(index int) int { return headerSize + index*entrySize }
 
+// EntryPage is the pool page that holds entry index.
+func EntryPage(index int) uint32 { return uint32(ReadinessPage + entryOffset(index)/pageSize) }
+
+// Entries never straddle a page.
+var _ [pageSize%entrySize + headerSize%entrySize]struct{}
+
 func word(page []byte, offset int) *uint32 {
 	return (*uint32)(unsafe.Pointer(&page[offset]))
 }
 
-// InitReadiness clears a readiness page for a new session.
-func InitReadiness(page []byte, session uint32) {
-	clear(page[:ReadinessBytes])
-	binary.LittleEndian.PutUint32(page[offSession:], session)
-	atomic.StoreUint32(word(page, offMagic), ReadinessMagic)
+// InitReadiness clears the readiness pages of a pool for a new session.
+func InitReadiness(pool []byte, session uint32) {
+	clear(pool[:ReadinessBytes])
+	binary.LittleEndian.PutUint32(pool[offSession:], session)
+	atomic.StoreUint32(word(pool, offMagic), ReadinessMagic)
 }
 
-// Publish writes one entry. Only the service calls it.
-func Publish(page []byte, index int, state Readiness) {
+// Publish writes one entry into the readiness pages at the start of pool.
+// Only the service calls it.
+func Publish(pool []byte, index int, state Readiness) {
 	base := entryOffset(index)
-	sequence := word(page, base+offEntrySequence)
+	sequence := word(pool, base+offEntrySequence)
 	start := atomic.LoadUint32(sequence) | 1
 	atomic.StoreUint32(sequence, start)
-	atomic.StoreUint32(word(page, base+offEntrySocket), uint32(state.Socket))
-	atomic.StoreUint32(word(page, base+offEntrySocket+4), uint32(state.Socket>>32))
-	atomic.StoreUint32(word(page, base+offEntryReady), uint32(state.Ready&allReady))
-	atomic.StoreUint32(word(page, base+offEntryReadable), state.Readable)
-	atomic.StoreUint32(word(page, base+offEntryError), uint32(state.Error))
-	atomic.StoreUint32(word(page, base+offEntryState), uint32(state.State&allStates))
+	atomic.StoreUint32(word(pool, base+offEntrySocket), uint32(state.Socket))
+	atomic.StoreUint32(word(pool, base+offEntrySocket+4), uint32(state.Socket>>32))
+	atomic.StoreUint32(word(pool, base+offEntryReady), uint32(state.Ready&allReady))
+	atomic.StoreUint32(word(pool, base+offEntryReadable), state.Readable)
+	atomic.StoreUint32(word(pool, base+offEntryError), uint32(state.Error))
+	atomic.StoreUint32(word(pool, base+offEntryState), uint32(state.State&allStates))
 	atomic.StoreUint32(sequence, start+1)
 }
 
@@ -108,13 +117,13 @@ const (
 	EntryInvalid
 )
 
-// ReadEntry copies entry index by copying it between two loads of its
-// sequence, at most tries times.
+// ReadEntry copies entry index between two loads of its sequence, at most
+// tries times. page is the pool page EntryPage(index) names.
 func ReadEntry(page []byte, index int, tries int) (Readiness, EntryStatus) {
-	if index < 0 || index >= MaxSockets || len(page) < ReadinessBytes {
+	if index < 0 || index >= MaxSockets || len(page) < pageSize {
 		return Readiness{}, EntryInvalid
 	}
-	base := entryOffset(index)
+	base := entryOffset(index) % pageSize
 	sequence := word(page, base+offEntrySequence)
 	for attempt := 0; attempt < tries; attempt++ {
 		before := atomic.LoadUint32(sequence)
@@ -139,9 +148,13 @@ func ReadEntry(page []byte, index int, tries int) (Readiness, EntryStatus) {
 	return Readiness{}, EntryBusy
 }
 
-// Read is ReadEntry that reports only whether it got a settled state.
-func Read(page []byte, index int, tries int) (Readiness, bool) {
-	state, status := ReadEntry(page, index, tries)
+// Read is ReadEntry on a whole pool that reports only whether it got a
+// settled state.
+func Read(pool []byte, index int, tries int) (Readiness, bool) {
+	if index < 0 || index >= MaxSockets || len(pool) < ReadinessBytes {
+		return Readiness{}, false
+	}
+	state, status := ReadEntry(pool[EntryPage(index)*pageSize:], index, tries)
 	return state, status == EntrySettled
 }
 

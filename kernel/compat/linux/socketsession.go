@@ -9,7 +9,7 @@ import (
 )
 
 // The family network context (ADR 0210). One Linux family has at most one
-// GLNXSOCK2 session: a channel and a pool PID 1 granted its launch, or gave
+// GLNXSOCK3 session: a channel and a pool PID 1 granted its launch, or gave
 // it later with LinuxNetAttach. Their handles live in the handle table of
 // the process that received them, the launch root; every process and thread
 // of the family uses the session through this context, which caches the
@@ -26,7 +26,8 @@ const (
 	// MaxSocketRequests bounds the control requests one family has in
 	// flight.
 	MaxSocketRequests = 8
-	// MaxSockets bounds the sockets of one family.
+	// MaxSockets bounds the sockets of one family: the protocol's bound,
+	// which the service's family quota never exceeds.
 	MaxSockets = linuxsockapi.MaxSockets
 	// socketWaiterSlots bounds the tasks that wait for a request slot.
 	socketWaiterSlots = 16
@@ -107,9 +108,15 @@ type NetContext struct {
 	correlation  uint64
 	requests     [MaxSocketRequests]socketRequest
 	sockets      [MaxSockets]NetSocket
+	// freeSlots stacks the free slots of sockets, freeCount of them.
+	// byIndex maps the service's family index of a live session socket to
+	// its slot plus one, so a reply's identity resolves without a scan.
+	freeSlots    [MaxSockets]uint16
+	freeCount    uint16
+	byIndex      [MaxSockets]uint16
 	data         dataPlane
 	closes       [pendingCloseSlots]uint64
-	closeCount   uint8
+	closeCount   uint16
 	waiters      [socketWaiterSlots]sched.TaskID
 	waiterCount  uint8
 	nextSocketGn uint32
@@ -122,16 +129,19 @@ const MaxNetFamilies = 16
 var netContexts [MaxNetFamilies]NetContext
 
 // SocketObject is the Object of an FDSocket description: the context, the
-// socket's slot, and the slot's generation, so a reused slot never matches
-// an old description.
+// socket's slot in the low 12 bits, and the slot's generation, so a reused
+// slot never matches an old description.
 func socketObject(context int, slot int, generation uint32) uint64 {
-	return 1<<63 | uint64(generation&0xffffff)<<16 | uint64(context&0xff)<<8 | uint64(slot&0xff)
+	return 1<<63 | uint64(generation&0xffffff)<<20 | uint64(context&0xff)<<12 | uint64(slot&0xfff)
 }
 
 func splitSocketObject(object uint64) (context int, slot int, generation uint32, ok bool) {
-	context, slot, generation = int(object>>8&0xff), int(object&0xff), uint32(object>>16&0xffffff)
+	context, slot, generation = int(object>>12&0xff), int(object&0xfff), uint32(object>>20&0xffffff)
 	return context, slot, generation, object>>63 == 1 && context < len(netContexts) && slot < MaxSockets
 }
+
+// The object's slot field holds every slot.
+var _ [0x1000 - MaxSockets]byte
 
 func (context *NetContext) reset(familyID uint64) {
 	context.familyID = familyID
@@ -141,6 +151,11 @@ func (context *NetContext) reset(familyID uint64) {
 	context.correlation = firstSocketCorrelation - 1
 	clear(context.requests[:])
 	clear(context.sockets[:])
+	for slot := 0; slot < MaxSockets; slot++ {
+		context.freeSlots[slot] = uint16(MaxSockets - 1 - slot)
+	}
+	context.freeCount = MaxSockets
+	clear(context.byIndex[:])
 	context.data = dataPlane{}
 	clear(context.closes[:])
 	context.closeCount = 0
@@ -237,6 +252,9 @@ func AttachNet(familyID uint64, grant NetGrant, replaceLive bool) (old NetGrant,
 	context.channelGrant, context.poolGrant = grant.ChannelHandle, grant.PoolHandle
 	context.attached, context.failed = true, false
 	clear(context.requests[:])
+	// The new service numbers its sockets afresh; the old session's keep
+	// their slots until their descriptions close.
+	clear(context.byIndex[:])
 	context.data = dataPlane{}
 	clear(context.closes[:])
 	context.closeCount = 0
@@ -293,24 +311,22 @@ func NewSocket(familyID uint64, session uint32, identity uint64, datagram bool) 
 	tablesLock.Lock()
 	defer tablesLock.Unlock()
 	context, contextIndex, found := netContextHeld(familyID)
-	if !found || !context.attached || context.failed || context.endpoint.Session != session || identity == 0 {
+	index, valid := linuxsockapi.SocketIndex(identity)
+	if !found || !context.attached || context.failed || context.endpoint.Session != session || !valid || context.freeCount == 0 {
 		return 0, false
 	}
-	for slot := 0; slot < MaxSockets; slot++ {
-		socket := &context.sockets[slot]
-		if socket.used {
-			continue
-		}
-		generation := socket.generation + 1
-		if generation&0xffffff == 0 {
-			generation = 1
-		}
-		*socket = NetSocket{Identity: identity, Session: session, Datagram: datagram, generation: generation, used: true}
-		context.data.forgetAccepted(identity)
-		noteNetHeld(&netDiagnostics.Opens)
-		return socketObject(contextIndex, slot, generation), true
+	context.freeCount--
+	slot := int(context.freeSlots[context.freeCount])
+	socket := &context.sockets[slot]
+	generation := socket.generation + 1
+	if generation&0xffffff == 0 {
+		generation = 1
 	}
-	return 0, false
+	*socket = NetSocket{Identity: identity, Session: session, Datagram: datagram, generation: generation, used: true}
+	context.byIndex[index] = uint16(slot + 1)
+	context.data.forgetAccepted(identity)
+	noteNetHeld(&netDiagnostics.Opens)
+	return socketObject(contextIndex, slot, generation), true
 }
 
 // HasSocketRoom reports whether NewSocket would find a slot.
@@ -318,15 +334,21 @@ func HasSocketRoom(familyID uint64) bool {
 	tablesLock.Lock()
 	defer tablesLock.Unlock()
 	context, _, found := netContextHeld(familyID)
-	if !found {
-		return false
+	return found && context.freeCount != 0
+}
+
+// liveSocketHeld finds a socket of the live session by identity through
+// the service's family index it carries.
+func (context *NetContext) liveSocketHeld(identity uint64) (*NetSocket, bool) {
+	index, valid := linuxsockapi.SocketIndex(identity)
+	if !valid || context.byIndex[index] == 0 {
+		return nil, false
 	}
-	for slot := 0; slot < MaxSockets; slot++ {
-		if !context.sockets[slot].used {
-			return true
-		}
+	socket := &context.sockets[context.byIndex[index]-1]
+	if !socket.used || socket.Identity != identity || socket.Session != context.endpoint.Session {
+		return nil, false
 	}
-	return false
+	return socket, true
 }
 
 func socketHeld(object uint64) (*NetContext, *NetSocket, bool) {
@@ -382,8 +404,14 @@ func CloseSocket(object uint64) (identity uint64, familyID uint64, send bool) {
 	}
 	identity, familyID = entry.Identity, context.familyID
 	send = context.attached && !context.failed && entry.Session == context.endpoint.Session
+	_, slot, _, _ := splitSocketObject(object)
+	if index, valid := linuxsockapi.SocketIndex(identity); valid && int(context.byIndex[index]) == slot+1 {
+		context.byIndex[index] = 0
+	}
 	generation := entry.generation
 	*entry = NetSocket{generation: generation}
+	context.freeSlots[context.freeCount] = uint16(slot)
+	context.freeCount++
 	noteNetHeld(&netDiagnostics.Closes)
 	return identity, familyID, send
 }
@@ -582,12 +610,8 @@ func ClassifySocketMessage(familyID uint64, session uint32, message *ipc.Message
 }
 
 func (context *NetContext) knownIdentityHeld(identity uint64) bool {
-	for slot := 0; slot < MaxSockets; slot++ {
-		if context.sockets[slot].used && context.sockets[slot].Identity == identity && context.sockets[slot].Session == context.endpoint.Session {
-			return true
-		}
-	}
-	return false
+	_, found := context.liveSocketHeld(identity)
+	return found
 }
 
 // DeliverReply stores a classified reply for its owner, which takes it with

@@ -2,7 +2,7 @@
 
 package main
 
-// The kernel half of a family's GLNXSOCK2 session (ADR 0210): sending a
+// The kernel half of a family's GLNXSOCK3 session (ADR 0210): sending a
 // request and waiting for its reply, draining the session channel and the
 // complete ring, reading readiness from the pool, and sleeping on it.
 //
@@ -287,7 +287,7 @@ func socketPoolPage(endpoint linuxcompat.NetEndpoint, index uint32) ([]byte, boo
 	return page[:vm.PageSize], true
 }
 
-// socketReadiness reads a socket's entry in the readiness page. live false
+// socketReadiness reads a socket's entry in the readiness pages. live false
 // means the socket is gone: its session failed, or the service publishes
 // another socket in its entry.
 func socketReadiness(call *socketCall) (linuxsockapi.Readiness, bool) {
@@ -295,8 +295,12 @@ func socketReadiness(call *socketCall) (linuxsockapi.Readiness, bool) {
 		return linuxsockapi.Readiness{}, false
 	}
 	index, valid := linuxsockapi.SocketIndex(call.socket.Identity)
-	page, found := socketPoolPage(call.endpoint, linuxsockapi.ReadinessPage)
-	if !valid || !found || linuxsockapi.Magic(page) != linuxsockapi.ReadinessMagic {
+	header, found := socketPoolPage(call.endpoint, linuxsockapi.ReadinessPage)
+	if !valid || !found || linuxsockapi.Magic(header) != linuxsockapi.ReadinessMagic {
+		return linuxsockapi.Readiness{}, false
+	}
+	page, found := socketPoolPage(call.endpoint, linuxsockapi.EntryPage(index))
+	if !found {
 		return linuxsockapi.Readiness{}, false
 	}
 	state, status := linuxsockapi.ReadEntry(page, index, linuxSocketReadTries)

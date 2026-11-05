@@ -275,9 +275,9 @@ func (h *harness) waiting(endpoint uint32) bool {
 }
 
 func (h *harness) endpoint(id uint64) uint32 {
-	for index := range h.svc.sockets {
-		if h.svc.sockets[index].used && h.svc.sockets[index].id == id {
-			return h.svc.sockets[index].endpoint
+	for index := 0; index < h.svc.socketCap(); index++ {
+		if h.svc.sock(index).used && h.svc.sock(index).id == id {
+			return h.svc.sock(index).endpoint
 		}
 	}
 	h.t.Fatalf("no socket %x", id)

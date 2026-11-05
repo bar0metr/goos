@@ -222,9 +222,11 @@ A static Linux program that calls the socket ABI with hostile arguments.
 - A socket identity names a slot of its own family under the current session
   generation. An identity from another family, a closed slot, or an older
   session answers `Stale` and becomes an errno.
-- One family holds at most 32 sockets and eight requests in flight;
-  `linuxsockd` holds 16 families and 64 sockets, and `netd` gives it a quota
-  of 64 endpoints per protocol, apart from the 8 of each command session.
+- One family holds at most 512 sockets and eight requests in flight, and
+  `linuxsockd` holds 16 families and 1024 sockets. Each live family keeps 32
+  sockets that no other family can take, so one family that fills its quota
+  leaves room for the rest. `netd` gives `linuxsockd` a quota of 64
+  endpoints per protocol, apart from the 8 of each command session.
 - Ports below 1024 are `EACCES`, so a program cannot take the resolver's
   stub on `127.0.0.1:53`.
 

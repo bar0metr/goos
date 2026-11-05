@@ -85,7 +85,7 @@ func (s *Service) committed(index int, e *linuxsockapi.RingEntry) bool {
 		s.txDone(index, e.Slot)
 		return true
 	}
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if sock.stream && f.txDest[e.Slot] || !sock.stream && e.Length > linuxsockapi.MaxDatagram ||
 		int(sock.txqLen) >= len(sock.txq) {
 		return false
@@ -113,7 +113,7 @@ func (s *Service) handedBack(index int, e *linuxsockapi.RingEntry) bool {
 	owner, serial := int(f.rxOwner[e.Slot])-1, f.rxSerial[e.Slot]
 	s.freeRX(f, e.Slot)
 	f.stats.RingReleases++
-	if owner >= 0 && s.sockets[owner].used && s.sockets[owner].serial == serial {
+	if owner >= 0 && s.sock(owner).used && s.sock(owner).serial == serial {
 		s.kick(owner)
 		s.publish(owner)
 	}
@@ -143,7 +143,7 @@ func (s *Service) txDone(index int, slot uint8) {
 // dropTX hands back every slot of a socket's TX queue unsent, except the
 // slots under a write, which go back when their write answers.
 func (s *Service) dropTX(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if !sock.used || sock.txqLen == 0 {
 		return
 	}
@@ -167,9 +167,9 @@ func (s *Service) dropTX(global int) {
 // underWrite reports whether a native write of the socket carries bytes of
 // TX slot.
 func (s *Service) underWrite(global int, slot uint8) bool {
-	sock := &s.sockets[global]
-	for index := range s.ops {
-		o := &s.ops[index]
+	sock := s.sock(global)
+	for index := 0; index < s.opCap(); index++ {
+		o := s.op(index)
 		if o.state == opNative && o.kind == kindTX && int(o.socket) == global && o.socketSerial == sock.serial && o.slot == slot {
 			return true
 		}
@@ -179,7 +179,7 @@ func (s *Service) underWrite(global int, slot uint8) bool {
 
 // unqueue takes slot out of a socket's TX queue and hands it back.
 func (s *Service) unqueue(global int, slot uint8) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	for position := uint8(0); position < sock.txqLen; position++ {
 		if sock.txq[position] == slot {
 			copy(sock.txq[position:], sock.txq[position+1:sock.txqLen])
@@ -204,7 +204,7 @@ func (s *Service) want(sock *socket, tx bool) {
 
 // kick moves a socket's data plane forward: its TX queue and its reads.
 func (s *Service) kick(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if !sock.used || sock.opening {
 		return
 	}
@@ -229,7 +229,7 @@ func (s *Service) kick(global int) {
 
 // sendStream issues the writes a stream's queue allows.
 func (s *Service) sendStream(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	f := &s.families[sock.family]
 	if sock.dead || sock.endpoint == 0 || sock.txqLen == 0 || sock.txDropped {
 		return
@@ -277,7 +277,7 @@ func (s *Service) sendStream(global int) {
 
 // sendDatagrams issues a datagram socket's queued sends.
 func (s *Service) sendDatagrams(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	f := &s.families[sock.family]
 	if sock.dead || sock.endpoint == 0 || sock.txBlocked || sock.txDropped {
 		return
@@ -340,7 +340,7 @@ func receiving(sock *socket) bool {
 
 // readAhead parks reads in netd while the socket and its family have room.
 func (s *Service) readAhead(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	f := &s.families[sock.family]
 	if !receiving(sock) {
 		return
@@ -406,7 +406,7 @@ func (s *Service) doneTX(o *op, c *NativeCompletion) {
 }
 
 func (s *Service) doneStreamWrite(global int, length uint32, c *NativeCompletion) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	f := &s.families[sock.family]
 	sock.txSent -= min(sock.txSent, length)
 	switch c.Result {
@@ -449,7 +449,7 @@ func (s *Service) doneStreamWrite(global int, length uint32, c *NativeCompletion
 }
 
 func (s *Service) doneDatagram(global int, slot uint8, c *NativeCompletion) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	f := &s.families[sock.family]
 	f.txInFlight &^= 1 << slot
 	switch c.Result {
@@ -536,7 +536,7 @@ func (s *Service) doneRX(o *op, c *NativeCompletion) {
 // publishRX puts a filled RX slot on the complete ring for the kernel.
 func (s *Service) publishRX(index, global int, slot uint8, length uint32, c *NativeCompletion) bool {
 	f := &s.families[index]
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	f.rxGen[slot]++
 	entry := linuxsockapi.RingEntry{Kind: linuxsockapi.RingRXData, Slot: slot, Length: length, Socket: sock.id, Generation: f.rxGen[slot]}
 	if !sock.stream {
@@ -556,7 +556,7 @@ func (s *Service) publishRX(index, global int, slot uint8, length uint32, c *Nat
 
 // shutdownLater sends the half-close a SHUT_WR left behind its queue.
 func (s *Service) shutdownLater(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if sock.dead || sock.endpoint == 0 {
 		sock.shutQueued = false
 		return

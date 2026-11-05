@@ -7,16 +7,19 @@ import (
 	"goos/kernel/ipc"
 )
 
-// GLNXCTL1 is the control protocol between PID 1 and linuxsockd (ADR 0210).
+// GLNXCTL2 is the control protocol between PID 1 and linuxsockd (ADR 0210).
 // PID 1 holds the only client end. It hands the service its native TCP and
 // UDP sessions, adds and removes Linux family sessions, and reads the
-// service's counters. Every request is answered by one reply with its
-// correlation; replies carry no handles.
+// service's counters and socket quotas. Every request is answered by one
+// reply with its correlation; replies carry no handles.
 const (
-	ControlProtocolID  = uint64(0x474c4e5843544c31) // "GLNXCTL1"
-	ControlVersion     = uint16(1)
+	ControlProtocolID  = uint64(0x474c4e5843544c32) // "GLNXCTL2"
+	ControlVersion     = uint16(2)
 	ControlRequestSize = 32
-	ControlReplySize   = 24 + CounterCount*8
+	ControlReplySize   = ctlFamilySockets + 2*StatusFamilies
+
+	// StatusFamilies is the family table entries a Status reply reports.
+	StatusFamilies = 16
 
 	// AddFamilyHandles are the family channel end and the family pool.
 	AddFamilyHandles = 2
@@ -28,16 +31,23 @@ const (
 	// CounterCount is the number of counters in a Status reply.
 	CounterCount = 14
 
-	ctlOpcode     = 0
-	ctlSecond     = 1 // reply Result
-	ctlFamilies   = 2 // reply
-	ctlSockets    = 3 // reply
-	ctlBackends   = 4 // reply: bit 0 TCP up, bit 1 UDP up
-	ctlSession    = 4 // request
-	ctlToken      = 8
-	ctlGeneration = 16
-	ctlCounters   = 24 // reply
+	ctlOpcode        = 0
+	ctlSecond        = 1 // reply Result
+	ctlFamilies      = 2 // reply
+	ctlBackends      = 3 // reply: bit 0 TCP up, bit 1 UDP up
+	ctlSockets       = 4 // reply, 16 bits
+	ctlSocketLimit   = 6 // reply, 16 bits
+	ctlSession       = 4 // request
+	ctlToken         = 8
+	ctlGeneration    = 16
+	ctlCounters      = 24 // reply
+	ctlFamilyLimit   = ctlCounters + CounterCount*8
+	ctlFamilyReserve = ctlFamilyLimit + 2
+	ctlFamilySockets = ctlFamilyReserve + 2 // reply, 16 bits per family entry
 )
+
+// A Status reply fits one message.
+var _ [ipc.MaxPayload - ControlReplySize]byte
 
 type ControlOpcode uint8
 
@@ -115,17 +125,29 @@ type ControlRequest struct {
 }
 
 // ControlReply echoes the request's Token or Generation. A Status reply
-// carries the table use, the live backends and the counters; every other
-// reply leaves them zero.
+// carries the table use, the live backends, the counters and the socket
+// quotas; every other reply leaves them zero. Sockets and SocketLimit are
+// the service's use and quota across families. FamilyLimit is each
+// family's quota and FamilyReserve the sockets the service keeps back for
+// each family. FamilySockets holds each family table entry's use.
 type ControlReply struct {
-	Opcode     ControlOpcode
-	Result     ControlResult
-	Families   uint8
-	Sockets    uint8
-	Backends   uint8
-	Token      uint64
-	Generation uint64
-	Counters   Counters
+	Opcode        ControlOpcode
+	Result        ControlResult
+	Families      uint8
+	Backends      uint8
+	Sockets       uint16
+	SocketLimit   uint16
+	FamilyLimit   uint16
+	FamilyReserve uint16
+	FamilySockets [StatusFamilies]uint16
+	Token         uint64
+	Generation    uint64
+	Counters      Counters
+}
+
+func (r *ControlReply) quotasZero() bool {
+	return r.Sockets == 0 && r.SocketLimit == 0 && r.FamilyLimit == 0 && r.FamilyReserve == 0 &&
+		r.FamilySockets == [StatusFamilies]uint16{}
 }
 
 func controlHandles(op ControlOpcode) (int, bool) {
@@ -224,7 +246,7 @@ func validControlReply(r *ControlReply) bool {
 	}
 	status := r.Opcode == ControlStatus && r.Result == ControlOK
 	if !status {
-		if r.Families != 0 || r.Sockets != 0 || r.Backends != 0 || r.Counters != (Counters{}) {
+		if r.Families != 0 || r.Backends != 0 || !r.quotasZero() || r.Counters != (Counters{}) {
 			return false
 		}
 	}
@@ -243,12 +265,18 @@ func EncodeControlReply(r *ControlReply, correlation uint64, out *ipc.Message) b
 	}
 	prepareControl(out, ipc.KindReply, correlation, ControlReplySize)
 	p := out.Payload[:ControlReplySize]
-	p[ctlOpcode], p[ctlSecond], p[ctlFamilies], p[ctlSockets], p[ctlBackends] =
-		byte(r.Opcode), byte(r.Result), r.Families, r.Sockets, r.Backends
+	p[ctlOpcode], p[ctlSecond], p[ctlFamilies], p[ctlBackends] = byte(r.Opcode), byte(r.Result), r.Families, r.Backends
+	binary.LittleEndian.PutUint16(p[ctlSockets:], r.Sockets)
+	binary.LittleEndian.PutUint16(p[ctlSocketLimit:], r.SocketLimit)
 	binary.LittleEndian.PutUint64(p[ctlToken:], r.Token)
 	binary.LittleEndian.PutUint64(p[ctlGeneration:], r.Generation)
 	for index, counter := range r.Counters.fields() {
 		binary.LittleEndian.PutUint64(p[ctlCounters+8*index:], *counter)
+	}
+	binary.LittleEndian.PutUint16(p[ctlFamilyLimit:], r.FamilyLimit)
+	binary.LittleEndian.PutUint16(p[ctlFamilyReserve:], r.FamilyReserve)
+	for index := 0; index < StatusFamilies; index++ {
+		binary.LittleEndian.PutUint16(p[ctlFamilySockets+2*index:], r.FamilySockets[index])
 	}
 	return true
 }
@@ -260,14 +288,19 @@ func DecodeControlReply(in *ipc.Message, correlation uint64, opcode ControlOpcod
 		return false
 	}
 	p := in.Payload[:ControlReplySize]
-	if ControlOpcode(p[ctlOpcode]) != opcode || !zero(p[ctlBackends+1:ctlToken]) {
+	if ControlOpcode(p[ctlOpcode]) != opcode {
 		return false
 	}
 	r := ControlReply{Opcode: opcode, Result: ControlResult(p[ctlSecond]), Families: p[ctlFamilies],
-		Sockets: p[ctlSockets], Backends: p[ctlBackends], Token: binary.LittleEndian.Uint64(p[ctlToken:]),
-		Generation: binary.LittleEndian.Uint64(p[ctlGeneration:])}
+		Backends: p[ctlBackends], Sockets: binary.LittleEndian.Uint16(p[ctlSockets:]),
+		SocketLimit: binary.LittleEndian.Uint16(p[ctlSocketLimit:]), Token: binary.LittleEndian.Uint64(p[ctlToken:]),
+		Generation: binary.LittleEndian.Uint64(p[ctlGeneration:]), FamilyLimit: binary.LittleEndian.Uint16(p[ctlFamilyLimit:]),
+		FamilyReserve: binary.LittleEndian.Uint16(p[ctlFamilyReserve:])}
 	for index, counter := range r.Counters.fields() {
 		*counter = binary.LittleEndian.Uint64(p[ctlCounters+8*index:])
+	}
+	for index := 0; index < StatusFamilies; index++ {
+		r.FamilySockets[index] = binary.LittleEndian.Uint16(p[ctlFamilySockets+2*index:])
 	}
 	if !validControlReply(&r) {
 		return false

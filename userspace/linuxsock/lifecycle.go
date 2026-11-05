@@ -17,9 +17,9 @@ const (
 	MaxWarm = 8
 	// AcceptAhead bounds the children accepted ahead per listener.
 	AcceptAhead = 2
-	// warmOps and acceptOps bound their operations in flight.
-	warmOps   = 2 * MaxWarm
-	acceptOps = MaxSockets
+	// warmOps bounds the warm pools' operations in flight. Accepts ahead
+	// take at most one per socket (Limits.opLimit).
+	warmOps = 2 * MaxWarm
 )
 
 type warmPool struct {
@@ -99,15 +99,17 @@ func (s *Service) doneWarm(o *op, c *NativeCompletion) {
 // acceptAhead takes children netd has queued for a listener into sockets
 // held for it.
 func (s *Service) acceptAhead(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	f := &s.families[sock.family]
 	if !sock.stream || sock.state != stateListening || sock.readShut || sock.dead || sock.closing || sock.endpoint == 0 ||
 		sock.mask&MaskAcceptable == 0 {
 		return
 	}
 	limit := min(AcceptAhead, int(sock.backlog))
-	for int(sock.acceptLen)+int(sock.accepting) < limit && f.count < linuxsockapi.MaxSockets-1 {
-		child := s.allocSocket(int(sock.family), true)
+	// Accepts ahead leave the family one socket of its quota, so a socket()
+	// still finds room.
+	for int(sock.acceptLen)+int(sock.accepting) < limit && f.count < s.limits.Family-1 {
+		child, _ := s.allocSocket(int(sock.family), true)
 		if child < 0 {
 			return
 		}
@@ -117,7 +119,7 @@ func (s *Service) acceptAhead(global int) {
 			return
 		}
 		o.socket, o.socketSerial = int16(global), sock.serial
-		o.child, o.childSerial = int16(child), s.sockets[child].serial
+		o.child, o.childSerial = int16(child), s.sock(child).serial
 		s.native = NativeRequest{Op: NativeAccept, Flags: NativeNoWait, Endpoint: sock.endpoint}
 		if !s.submitData(o, TCP) {
 			s.want(sock, false)
@@ -133,7 +135,7 @@ func (s *Service) doneAcceptAhead(o *op, c *NativeCompletion) {
 	global, childIndex, childSerial, generation := int(o.socket), int(o.child), o.childSerial, o.generation
 	// The child stays with the operation's cleanup unless the queue takes
 	// it below.
-	child := &s.sockets[childIndex]
+	child := s.sock(childIndex)
 	ok := c.Result == NativeOK && c.Endpoint != 0
 	if listener != nil {
 		listener.accepting--
@@ -172,7 +174,7 @@ func (s *Service) takeAccepted(o *op, sock *socket) bool {
 		copy(sock.acceptq[:], sock.acceptq[1:sock.acceptLen])
 		copy(sock.acceptSerial[:], sock.acceptSerial[1:sock.acceptLen])
 		sock.acceptLen--
-		child := &s.sockets[index]
+		child := s.sock(index)
 		if !child.used || child.serial != serial {
 			continue
 		}
@@ -192,7 +194,7 @@ func (s *Service) takeAccepted(o *op, sock *socket) bool {
 func (s *Service) dropAccepted(sock *socket) {
 	for position := uint8(0); position < sock.acceptLen; position++ {
 		index := int(sock.acceptq[position]) - 1
-		if child := &s.sockets[index]; child.used && child.serial == sock.acceptSerial[position] {
+		if child := s.sock(index); child.used && child.serial == sock.acceptSerial[position] {
 			child.opening = false
 			s.releaseSocket(index, false)
 		}

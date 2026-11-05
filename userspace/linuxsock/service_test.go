@@ -172,14 +172,14 @@ func TestRemoveFamilyClosesEverything(t *testing.T) {
 	if closed := h.take(NativeClose); closed.request.Endpoint != 4242 {
 		t.Fatal("late endpoint leaked")
 	}
-	for index := range h.svc.sockets {
-		if h.svc.sockets[index].used {
+	for index := 0; index < h.svc.socketCap(); index++ {
+		if h.svc.sock(index).used {
 			t.Fatal("socket left")
 		}
 	}
-	for index := range h.svc.ops {
-		if h.svc.ops[index].state != opFree {
-			t.Fatalf("op left %+v", h.svc.ops[index])
+	for index := 0; index < h.svc.opCap(); index++ {
+		if h.svc.op(index).state != opFree {
+			t.Fatalf("op left %+v", h.svc.op(index))
 		}
 	}
 	// The table entry is reused by the next family.
@@ -190,16 +190,20 @@ func TestRemoveFamilyClosesEverything(t *testing.T) {
 
 func TestLimits(t *testing.T) {
 	h := newHarness(t)
+	limits := Limits{System: 96, Family: 64}
+	if !h.svc.SetLimits(limits) {
+		t.Fatal("limits")
+	}
 	a := h.family(1, 7)
 	b := h.family(2, 8)
 	c := h.family(3, 9)
-	for range linuxsockapi.MaxSockets {
+	for range limits.Family {
 		h.open(a, linuxsockapi.KindStream)
 	}
 	if reply := h.call(a, linuxsockapi.Request{Opcode: opOpen, Length: linuxsockapi.KindDatagram}); reply.Result != linuxsockapi.ResultFamilyLimit || reply.Socket != 0 {
 		t.Fatalf("family limit %+v", reply)
 	}
-	for range MaxSockets - linuxsockapi.MaxSockets {
+	for range limits.System - limits.Family {
 		h.open(b, linuxsockapi.KindDatagram)
 	}
 	if reply := h.call(c, linuxsockapi.Request{Opcode: opOpen, Length: linuxsockapi.KindStream}); reply.Result != linuxsockapi.ResultServiceLimit {
