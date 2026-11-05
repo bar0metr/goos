@@ -271,10 +271,13 @@ func FuzzUDPReceive(f *testing.F) {
 				binary.BigEndian.PutUint16(datagram[6:8], sum)
 			}
 		}
-		endpoints := h.stack.udp
+		endpoints := make([]udpEndpoint, len(h.stack.udp))
+		for index, entry := range h.stack.udp {
+			endpoints[index] = *entry
+		}
 		h.receive(ipv4Frame(hostMAC, peerMAC, peerIP, hostIP, protocolUDP, datagram))
 		for index := range endpoints {
-			before, after := endpoints[index], h.stack.udp[index]
+			before, after := endpoints[index], *h.stack.udp[index]
 			before.queue, before.head, before.count = after.queue, after.head, after.count
 			if before != after {
 				t.Fatalf("endpoint %d changed: %+v -> %+v", index, endpoints[index], h.stack.udp[index])

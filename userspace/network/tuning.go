@@ -45,8 +45,9 @@ type Tuning struct {
 }
 
 // UDPTuning holds the runtime limits of UDP, system.net.udp.*. Each is a
-// share of a compile-time capacity: no value resizes a table, a queue or a
-// buffer. A lowered limit never takes anything back. Endpoints already open
+// share of a compile-time capacity; the endpoint registry and the receive
+// pool grow as endpoints and datagrams need them, up to that capacity. A
+// lowered limit never takes anything back. Endpoints already open
 // stay open and keep their port and queued datagrams, and the new limit
 // refuses the next Open, the next queued datagram or the next payload that
 // exceeds it. Explicit binds may use any port; the ephemeral range only
@@ -56,7 +57,7 @@ type UDPTuning struct {
 	EphemeralMin     uint16
 	EphemeralMax     uint16
 	ReceiveQueue     uint8
-	MaxEndpoints     uint8
+	MaxEndpoints     uint16
 	SessionEndpoints uint8
 	MaxPayload       uint16
 }
@@ -112,7 +113,7 @@ func DefaultTuning() Tuning {
 			EphemeralMin:     49152,
 			EphemeralMax:     65535,
 			ReceiveQueue:     8,
-			MaxEndpoints:     MaxUDPEndpoints,
+			MaxEndpoints:     DefaultUDPEndpoints,
 			SessionEndpoints: MaxUDPSessionEndpoints,
 			MaxPayload:       UDPPayloadCapacity,
 		},
@@ -229,7 +230,7 @@ func tuningFrom(values *[TuningFields]uint64) Tuning {
 			EphemeralMin:     uint16(values[FieldUDPEphemeralMin-FieldTTL]),
 			EphemeralMax:     uint16(values[FieldUDPEphemeralMax-FieldTTL]),
 			ReceiveQueue:     uint8(values[FieldUDPReceiveQueue-FieldTTL]),
-			MaxEndpoints:     uint8(values[FieldUDPMaxEndpoints-FieldTTL]),
+			MaxEndpoints:     uint16(values[FieldUDPMaxEndpoints-FieldTTL]),
 			SessionEndpoints: uint8(values[FieldUDPSessionEndpoints-FieldTTL]),
 			MaxPayload:       uint16(values[FieldUDPMaxPayload-FieldTTL]),
 		},
@@ -321,7 +322,7 @@ func (udp UDPTuning) validate() Field {
 	if udp.EphemeralMax < udp.EphemeralMin {
 		return FieldUDPEphemeralMax
 	}
-	if udp.SessionEndpoints > udp.MaxEndpoints {
+	if uint16(udp.SessionEndpoints) > udp.MaxEndpoints {
 		return FieldUDPSessionEndpoints
 	}
 	return FieldNone

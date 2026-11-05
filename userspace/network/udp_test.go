@@ -132,7 +132,7 @@ func TestUDPEndpointExhaustionAndRelease(t *testing.T) {
 	if _, result := h.stack.UDPOpen(0); result != ResultBusy {
 		t.Fatalf("open past the session share: %d", result)
 	}
-	if stats := h.stack.UDPStats(); stats.Endpoints != MaxUDPEndpoints {
+	if stats := h.stack.UDPStats(); stats.Endpoints != udpTableLimit {
 		t.Fatalf("endpoints %d", stats.Endpoints)
 	}
 	bound := h.bind(0, ids[0], IPv4{}, 7000)
@@ -467,8 +467,11 @@ func TestUDPQueueOrderAndOverflow(t *testing.T) {
 func TestUDPSharedBuffersBoundAllQueues(t *testing.T) {
 	h := readyWithPeer(t)
 	var ports []uint16
-	for owner, quota := range fullTable(h.stack) {
-		for count := 0; count < quota; count++ {
+	// Six owners of 64 endpoints, two datagrams each: every owner stays
+	// under its share, and the pool runs out first.
+	for owner := range 6 {
+		h.stack.SetUDPQuota(owner, 64)
+		for range 64 {
 			ports = append(ports, h.bind(owner, h.open(owner), IPv4{}, 0))
 		}
 	}
@@ -484,7 +487,8 @@ func TestUDPSharedBuffersBoundAllQueues(t *testing.T) {
 func TestUDPSessionBufferShare(t *testing.T) {
 	h := readyWithPeer(t)
 	var ports []uint16
-	for count := 0; count < MaxUDPSessionEndpoints; count++ {
+	h.stack.SetUDPQuota(0, 64)
+	for range 64 {
 		ports = append(ports, h.bind(0, h.open(0), IPv4{}, 0))
 	}
 	other := h.open(1)
@@ -621,7 +625,7 @@ func TestUDPCloseOwner(t *testing.T) {
 	if result := h.stack.UDPClose(0, mine); result != ResultInvalidArgument {
 		t.Fatal("endpoint survived its owner")
 	}
-	for index := range h.stack.udpBuffers[:] {
+	for index := range h.stack.udpBuffers {
 		if h.stack.udpBuffers[index].used {
 			t.Fatal("queued buffer kept")
 		}
@@ -856,16 +860,19 @@ func TestUDPConnectFixesSourceOfUnboundEndpoint(t *testing.T) {
 	}
 }
 
-// fullTable grants owner 0 the largest quota and gives ordinary quotas to as
-// many owners as fill the rest of the table. It returns each owner's quota.
-// udpGrantedQuota is the explicit quota the table tests grant one owner:
-// UDPSessionBuffers, the most datagrams one owner may hold queued.
-const udpGrantedQuota = UDPSessionBuffers
+// fullTable lowers max-endpoints to udpTableLimit, grants owner 0
+// udpGrantedQuota and gives ordinary quotas to as many owners as fill the
+// rest. It returns each owner's quota.
+const (
+	udpTableLimit   = 96
+	udpGrantedQuota = 64
+)
 
 func fullTable(stack *Stack) []int {
+	stack.tuning.UDP.MaxEndpoints = udpTableLimit
 	stack.SetUDPQuota(0, udpGrantedQuota)
 	quotas := []int{udpGrantedQuota}
-	for left := MaxUDPEndpoints - udpGrantedQuota; left > 0; left -= MaxUDPSessionEndpoints {
+	for left := udpTableLimit - udpGrantedQuota; left > 0; left -= MaxUDPSessionEndpoints {
 		quotas = append(quotas, min(left, MaxUDPSessionEndpoints))
 	}
 	return quotas
