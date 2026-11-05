@@ -22,14 +22,14 @@ func installPipeHeld(root uint64, reader uint64, writer uint64, closeOnExec bool
 	if !found {
 		return -1, -1, abi.EBADF
 	}
-	readFD, ok := state.FDs.allocateHeld(FileDescription{Kind: FDStreamReader, Object: reader}, closeOnExec)
-	if !ok {
-		return -1, -1, abi.EMFILE
+	readFD, errno := state.FDs.allocateHeld(FileDescription{Kind: FDStreamReader, Object: reader}, closeOnExec)
+	if errno != 0 {
+		return -1, -1, errno
 	}
-	writeFD, ok := state.FDs.allocateHeld(FileDescription{Kind: FDStreamWriter, Object: writer}, closeOnExec)
-	if !ok {
+	writeFD, errno := state.FDs.allocateHeld(FileDescription{Kind: FDStreamWriter, Object: writer}, closeOnExec)
+	if errno != 0 {
 		state.FDs.closeHeld(readFD)
-		return -1, -1, abi.EMFILE
+		return -1, -1, errno
 	}
 	return readFD, writeFD, 0
 }

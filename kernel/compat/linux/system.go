@@ -145,25 +145,31 @@ func unameSet(target *[UnameSize]byte, index int, first string, second string, t
 	copy(field[written:], third)
 }
 
-// ResourceLimit reports the limits GoOS applies to a Linux process, as soft
-// and hard values that are always equal. Descriptors, the stack, and the
-// brk heap have fixed bounds; no core file is ever written. The other
-// resources have no limit expressed in Linux terms and report none.
-func ResourceLimit(resource uint64, stackBytes uint64) (uint64, abi.Errno) {
+// ResourceLimit reports the soft and hard limits GoOS applies to a Linux
+// process. Descriptors take the table's RLIMIT_NOFILE, given as openSoft and
+// openHard; the stack and the brk heap have fixed bounds, equal soft and
+// hard; no core file is ever written. The other resources have no limit
+// expressed in Linux terms and report none.
+func ResourceLimit(resource uint64, stackBytes uint64, openSoft uint64, openHard uint64) (uint64, uint64, abi.Errno) {
 	switch resource {
 	case abi.ResourceOpenFiles:
-		return LinuxMaxFD, 0
+		return openSoft, openHard, 0
 	case abi.ResourceStack:
-		return stackBytes, 0
+		return stackBytes, stackBytes, 0
 	case abi.ResourceData:
-		return BrkReserve, 0
+		return BrkReserve, BrkReserve, 0
 	case abi.ResourceCore:
-		return 0, 0
+		return 0, 0, 0
 	}
 	if resource >= abi.ResourceCount {
-		return 0, abi.EINVAL
+		return 0, 0, abi.EINVAL
 	}
-	return abi.ResourceInfinity, 0
+	return abi.ResourceInfinity, abi.ResourceInfinity, 0
+}
+
+// DecodeRlimit reads a struct rlimit64: the soft and the hard limit.
+func DecodeRlimit(wire *[RlimitSize]byte) (uint64, uint64) {
+	return binary.LittleEndian.Uint64(wire[0:]), binary.LittleEndian.Uint64(wire[8:])
 }
 
 // MaxRandomBytes bounds what one getrandom call returns. Linux promises

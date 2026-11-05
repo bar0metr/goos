@@ -56,50 +56,16 @@ func (handler *linuxCallHandler) Select(request linuxcompat.Request) linuxcompat
 			}
 		}
 	}
-	count, errno := linuxcompat.SelectCount(request.Arguments[0])
+	count, errno := linuxcompat.SelectCount(request.Arguments[0], state.FDs.Capacity())
 	if errno != 0 {
 		return handler.selectReturn(state, request, end, linuxErrno(errno))
 	}
-	size := linuxcompat.FDSetBytes(count)
-	sets := &local.linuxSelectSets
-	for index := 0; index < 3; index++ {
-		wire := local.linuxSelectWire[index*linuxcompat.FDSetSize : index*linuxcompat.FDSetSize+size]
-		sets[index] = linuxcompat.FDSet{}
-		if address := request.Arguments[1+index]; address != 0 && size != 0 {
-			if !vm.CopyIn(handler.root, address, wire) {
-				return handler.selectReturn(state, request, end, linuxErrno(linuxabi.EFAULT))
-			}
-			sets[index] = linuxcompat.DecodeFDSet(wire, count)
-		}
-		sets[3+index] = linuxcompat.FDSet{}
+	if _, _, errno := handler.selectScan(state, request, count, selectValidate); errno != 0 {
+		return handler.selectReturn(state, request, end, linuxErrno(errno))
 	}
-	for fd := 0; fd < count; fd++ {
-		if sets[0].Has(fd) || sets[1].Has(fd) || sets[2].Has(fd) {
-			if _, open := state.FDs.Lookup(fd); !open {
-				return handler.selectReturn(state, request, end, linuxErrno(linuxabi.EBADF))
-			}
-		}
-	}
-	ready, interests := uint64(0), 0
-	for fd := 0; fd < count; fd++ {
-		read, write, except := sets[0].Has(fd), sets[1].Has(fd), sets[2].Has(fd)
-		if !read && !write && !except {
-			continue
-		}
-		var revents uint16
-		revents, interests = pollReadiness(state, int32(fd), linuxcompat.SelectEvents(read, write), interests)
-		if read && revents&linuxcompat.SelectReadEvents != 0 {
-			sets[3].Add(fd)
-			ready++
-		}
-		if write && revents&linuxcompat.SelectWriteEvents != 0 {
-			sets[4].Add(fd)
-			ready++
-		}
-		if except && revents&linuxcompat.SelectExceptEvents != 0 {
-			sets[5].Add(fd)
-			ready++
-		}
+	ready, interests, errno := handler.selectScan(state, request, count, selectEvaluate)
+	if errno != 0 {
+		return handler.selectReturn(state, request, end, linuxErrno(errno))
 	}
 	// With nothing ready, a handled signal the mask lets through ends the
 	// call before the timeout is looked at, as on Linux, and so does one
@@ -109,16 +75,8 @@ func (handler *linuxCallHandler) Select(request linuxcompat.Request) linuxcompat
 	}
 	now := nowNanos()
 	if ready != 0 || finite && (end == 0 || now >= end) {
-		for index := 0; index < 3; index++ {
-			address := request.Arguments[1+index]
-			if address == 0 || size == 0 {
-				continue
-			}
-			wire := local.linuxSelectWire[index*linuxcompat.FDSetSize : index*linuxcompat.FDSetSize+size]
-			linuxcompat.EncodeFDSet(wire, &sets[3+index])
-			if !vm.CopyOut(handler.root, address, wire) {
-				return handler.selectReturn(state, request, end, linuxErrno(linuxabi.EFAULT))
-			}
+		if ready, _, errno = handler.selectScan(state, request, count, selectWrite); errno != 0 {
+			return handler.selectReturn(state, request, end, linuxErrno(errno))
 		}
 		return handler.selectReturn(state, request, end, linuxcompat.Result{Value: ready})
 	}
@@ -126,6 +84,7 @@ func (handler *linuxCallHandler) Select(request linuxcompat.Request) linuxcompat
 	if finite {
 		deadline = amd64.TimerTicks() + linuxcompat.RemainingTicks(end-now, clock.TicksPerSecond, linuxSleepTicks)
 	}
+	deadline = pollRescanDeadline(interests, deadline)
 	if !linuxcompat.SyscallContinuations.Begin(handler.task, request, nil) ||
 		!linuxcompat.SyscallContinuations.Annotate(handler.task, nil, end) ||
 		!linuxcompat.SyscallContinuations.Issue(handler.task, 1, linuxPollCorrelation) ||
@@ -137,6 +96,89 @@ func (handler *linuxCallHandler) Select(request linuxcompat.Request) linuxcompat
 	}
 	rearmSocketInterests(local.linuxPollEntries[:interests])
 	return linuxBlocked
+}
+
+// selectMode is what one pass of selectScan does with the descriptors the
+// sets name.
+type selectMode uint8
+
+const (
+	// selectValidate fails with EBADF on the first one that is not open.
+	selectValidate selectMode = iota
+	// selectEvaluate counts the ready ones and gathers native interests.
+	selectEvaluate
+	// selectWrite counts the ready ones and writes the result sets back.
+	selectWrite
+)
+
+// selectScan reads the three fd_sets of a select one window of
+// FDSetWindow descriptors at a time, so no buffer grows with nfds, and does
+// what mode asks with the descriptors they name.
+func (handler *linuxCallHandler) selectScan(state *linuxcompat.ProcessState, request linuxcompat.Request, count int, mode selectMode) (uint64, int, linuxabi.Errno) {
+	local := thisCPU()
+	sets := &local.linuxSelectSets
+	ready, interests := uint64(0), 0
+	for base := 0; base < count; base += linuxcompat.FDSetWindow {
+		window := count - base
+		if window > linuxcompat.FDSetWindow {
+			window = linuxcompat.FDSetWindow
+		}
+		size := linuxcompat.FDSetBytes(window)
+		offset := uint64(base / 8)
+		for index := 0; index < 3; index++ {
+			wire := local.linuxSelectWire[index*linuxcompat.FDSetSize : index*linuxcompat.FDSetSize+size]
+			sets[index] = linuxcompat.FDSet{}
+			sets[3+index] = linuxcompat.FDSet{}
+			if address := request.Arguments[1+index]; address != 0 {
+				if !vm.CopyIn(handler.root, address+offset, wire) {
+					return 0, 0, linuxabi.EFAULT
+				}
+				linuxcompat.DecodeFDSet(wire, window, &sets[index])
+			}
+		}
+		for bit := 0; bit < window; bit++ {
+			read, write, except := sets[0].Has(bit), sets[1].Has(bit), sets[2].Has(bit)
+			if !read && !write && !except {
+				continue
+			}
+			fd := base + bit
+			if mode == selectValidate {
+				if _, open := state.FDs.Lookup(fd); !open {
+					return 0, 0, linuxabi.EBADF
+				}
+				continue
+			}
+			var revents uint16
+			revents, interests = pollReadiness(state, int32(fd), linuxcompat.SelectEvents(read, write), interests)
+			if read && revents&linuxcompat.SelectReadEvents != 0 {
+				sets[3].Add(bit)
+				ready++
+			}
+			if write && revents&linuxcompat.SelectWriteEvents != 0 {
+				sets[4].Add(bit)
+				ready++
+			}
+			if except && revents&linuxcompat.SelectExceptEvents != 0 {
+				sets[5].Add(bit)
+				ready++
+			}
+		}
+		if mode != selectWrite {
+			continue
+		}
+		for index := 0; index < 3; index++ {
+			address := request.Arguments[1+index]
+			if address == 0 {
+				continue
+			}
+			wire := local.linuxSelectWire[index*linuxcompat.FDSetSize : index*linuxcompat.FDSetSize+size]
+			linuxcompat.EncodeFDSet(wire, &sets[3+index])
+			if !vm.CopyOut(handler.root, address+offset, wire) {
+				return 0, 0, linuxabi.EFAULT
+			}
+		}
+	}
+	return ready, interests, 0
 }
 
 // selectTimeout reads the timeout of select or pselect6 and installs the

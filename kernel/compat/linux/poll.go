@@ -21,9 +21,15 @@ const (
 // PollFDSize is the size of struct pollfd.
 const PollFDSize = 8
 
-// LinuxMaxPollFD bounds the descriptors one poll call may name, the size of
-// a descriptor table.
-const LinuxMaxPollFD = LinuxMaxFD
+// PollWindow is the number of struct pollfd poll reads and writes at a time,
+// so its scratch stays the same size whatever the descriptor limit.
+const PollWindow = 64
+
+// PollCount checks the nfds of poll against the caller's soft RLIMIT_NOFILE:
+// more is EINVAL, as on Linux.
+func PollCount(count uint64, soft int) bool {
+	return soft >= 0 && count <= uint64(soft)
+}
 
 // PollReadiness is what one descriptor can do now.
 type PollReadiness struct {

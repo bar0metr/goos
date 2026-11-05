@@ -13,6 +13,7 @@ import (
 	"goos/kernel/boot"
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/clock"
+	linuxcompat "goos/kernel/compat/linux"
 	kernelconsole "goos/kernel/console"
 	"goos/kernel/deadline"
 	"goos/kernel/device"
@@ -389,6 +390,7 @@ func main() {
 	streamRegistry.SetStorage(pageObjects[stream.Stream]{})
 	sharedObjects.SetStorage(pageObjects[shmem.Object]{})
 	executables.SetStorage(pageObjects[executable.Object]{})
+	linuxcompat.SetFDStorage(pageObjects[linuxcompat.FDChunk]{})
 	if !built {
 		console.WriteString("PANIC: page-table construction failed\n")
 		for {

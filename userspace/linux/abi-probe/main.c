@@ -1148,26 +1148,43 @@ static int hostile(void)
 	return failed;
 }
 
-/* GoOS only. The descriptor table holds 64 and the page quota a fixed
- * number of pages. Both must refuse the call that overruns them, and both
- * must work again once something is released. */
+/* GoOS only. RLIMIT_NOFILE starts at 1024 soft and 4096 hard. The probe
+ * lowers the soft limit to 64, fills the table to it, and raises it again;
+ * the page quota holds a fixed number of pages. Both must refuse the call
+ * that overruns them, and both must work again once something is
+ * released. */
 static int exhaust(void)
 {
 	enum { chunk = 1 << 20, most = 128 };
 	static char *mapped[most];
+	struct rlimit files, narrow, raised;
 	int count = 0, chunks = 0, fd;
 	char *small;
 
+	if (getrlimit(RLIMIT_NOFILE, &files) != 0 || files.rlim_cur != 1024 || files.rlim_max != 4096)
+		return report("descriptor limits", 0);
+	narrow = files;
+	narrow.rlim_cur = 64;
+	raised = files;
+	raised.rlim_max = files.rlim_max + 1;
+	if (!fails(syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, &raised, NULL), EPERM) ||
+	    syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, &narrow, NULL) != 0)
+		return report("descriptor limits", 0);
 	errno = 0;
 	while ((fd = open(IMAGE, O_RDONLY)) >= 0)
 		count++;
 	if (errno != EMFILE || count != 61 || !fails(dup(0), EMFILE) ||
-	    !fails(open("/tmp", O_RDONLY | O_DIRECTORY), EMFILE))
+	    !fails(open("/tmp", O_RDONLY | O_DIRECTORY), EMFILE) || !fails(dup2(0, 1000), EBADF))
 		return report("descriptor table", 0);
 	for (fd = 3; fd < 64; fd++)
 		if (close(fd) != 0)
 			return report("descriptor table", 0);
 	if (open(IMAGE, O_RDONLY) != 3 || close(3) != 0)
+		return report("descriptor table", 0);
+	/* Back at the default, a descriptor far past the first page works. */
+	if (syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, &files, NULL) != 0 ||
+	    dup2(0, 1000) != 1000 || fcntl(1000, F_DUPFD, 1000) != 1001 ||
+	    close(1001) != 0 || close(1000) != 0)
 		return report("descriptor table", 0);
 	puts("descriptor table ok");
 

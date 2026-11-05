@@ -461,7 +461,7 @@ func (handler *linuxCallHandler) Exit(request linuxcompat.Request, group bool) l
 }
 
 func (handler *linuxCallHandler) endpoint(fd int64, writer bool) (*stream.Stream, uint64, linuxabi.Errno) {
-	if fd < 0 || fd >= linuxcompat.LinuxMaxFD {
+	if fd < 0 || fd >= linuxcompat.LinuxFDCeiling {
 		return nil, 0, linuxabi.EBADF
 	}
 	description, found := linuxcompat.LookupFD(handler.root, int(fd))
