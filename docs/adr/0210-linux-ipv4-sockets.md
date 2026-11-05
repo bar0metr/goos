@@ -220,8 +220,8 @@ listeners and 128 UDP receive buffers, of which one session holds at most
 These numbers were the limits when this ADR was accepted. ADR 0213 replaced
 the TCP side: the control quota is 16 bits, PID 1 grants `linuxsockd` 512
 endpoints per protocol, TCP allocates endpoints and rings per connection up
-to a tuned 1024 endpoints, and the native backlog is 128. The UDP table
-stays at 96.
+to a tuned 1024 endpoints, and the native backlog is 128. Its revision
+grows the UDP registry the same way, 1024 endpoints by default.
 
 SO_REUSEADDR follows Linux. A TCP bind conflicts with an endpoint or
 TIME_WAIT four-tuple on the same port and an overlapping address, equal or
@@ -405,10 +405,8 @@ static libc resolves names with ordinary socket traffic.
   family's use; the family snapshot in the ring page carries the same for
   its family, and the kernel's `linux-net-plane` diagnostic prints them.
 
-  `netd` grants `linuxsockd` 512 endpoints per protocol (ADR 0213). TCP
-  sockets reach that grant. UDP stops at the 96 entries of the stack's UDP
-  table, so an Open past 96 UDP sockets fails in `netd`, not at the
-  service's quotas.
+  `netd` grants `linuxsockd` 512 endpoints per protocol (ADR 0213), and
+  TCP and UDP sockets both reach that grant.
 
 ## Validation
 

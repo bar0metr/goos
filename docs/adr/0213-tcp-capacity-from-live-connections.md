@@ -125,10 +125,9 @@ owner, which no session pays for.
 `somaxconn`, and `linuxsock.MaxBacklog` follows the default, 128. The send
 buffer, segment size and GTCP slot size are independent: a GTCP 3 slot stays
 16 KiB, the wire MSS follows the MTU, and the loopback MSS stays 16 KiB.
-The window field carries at most 65535 bytes; the stack sends no window
-scale option, so a buffer past 64 KiB holds data the reader has not taken
-rather than widening the window on the wire. GTCP 3's 32-bit stream offset
-wraps as before; no buffer comes near 2 GiB.
+The window field carries at most 65535 bytes. The first version of this
+decision sent no window scale option; the revision below adds it. GTCP 3's
+32-bit stream offset wraps as before; no buffer comes near 2 GiB.
 
 `netd` serves at most 46 TCP sessions: one `WaitAny` names 64 objects, and
 the driver, the control channel and the eight command and eight UDP
@@ -138,9 +137,8 @@ is now 16 bits (`netapi` control version 7), `netapi.MaxSessionQuota` is
 `tcpserve` or `udpserve` session sizes its endpoint table to its quota when
 it starts. GTCP 4 entries name a table index in eight bits, so a GTCP 4
 session refuses a quota above `tcpapi.Endpoints4` (64). UDP shares the
-512-endpoint grant ceiling but keeps its 96-endpoint table, which bounds a
-UDP session first. The status reply carries the wider TCP limits in
-`netapi` version 7.
+512-endpoint grant ceiling. The status reply carries the wider TCP limits
+and UDP's 16-bit `max-endpoints` in `netapi` version 7.
 
 ### Validation builds
 
@@ -160,9 +158,9 @@ the same check after every harness step.
 - **A timer wheel.** TCP deadlines span 100 ms to ten minutes; a heap of a
   few thousand entries costs about a dozen comparisons per change without a
   resolution or overflow policy.
-- **Window scaling.** It would make buffers past 64 KiB useful on the wire,
-  but it changes the SYN options both ends negotiate; it is left for a
-  later change.
+- **No window scaling.** The first version left it out because it changes
+  the SYN options both ends negotiate. A 256 KiB buffer then advertised
+  64 KiB at most, so the revision below adds it.
 
 ## Consequences
 
@@ -175,3 +173,34 @@ the same check after every harness step.
   raises them; nothing else has to change.
 - Allocation happens per connection and per ring growth, never per segment;
   the pending-ACK list reuses its two buffers.
+
+## Revision: window scaling and UDP capacity
+
+**Window scaling.** A SYN carries the RFC 7323 window scale option when
+`recv-buffer-bytes` exceeds 65535, with the least shift that fits the
+buffer, at most 14: 3 for the 256 KiB default, 7 for 4 MiB. A listener's
+SYN-ACK carries it only in answer to a SYN that did. The connection applies
+its own shift to the windows it sends and the peer's shift to the windows it
+receives only when both SYNs carried the option; otherwise both shifts are
+zero and the connection behaves as before. SYN and SYN-ACK windows are never
+scaled. The shift is fixed at the handshake, so a later tuning change only
+caps the window at 65535 units. Rounding a window down to the shift may move
+the advertised edge left by less than one unit, which RFC 7323 2.4 allows;
+the stack still accepts any byte its ring has room for. The edge each ACK
+records, the window-update threshold and the persist timer work in bytes
+after the shift, so the update suppression and zero-window probes keep
+their rules. The receive ring still starts at 4 KiB and doubles while the
+stream fills more than half of it, so the wire window widens as the ring
+grows.
+
+**UDP capacity.** The 96-endpoint UDP table capped `linuxsockd`'s 512
+grant. The UDP registry now grows like TCP's: generation-protected IDs with
+a 12-bit slot, the lowest free slot reused, 1024 endpoints by default and
+4096 at most. Bound endpoints sit in a seeded hash table by port, so a
+received datagram, a bind check and an ephemeral draw each read one bucket;
+`UDPStats.LookupProbes` and `MaxLookupProbes` count the work. The stack
+keeps per-owner counts of endpoints and queued buffers, so neither the quota
+nor the buffer share walks the registry. The receive pool allocates a
+4 KiB buffer when no free one is left and keeps it for reuse, up to 512
+buffers with 256 per owner; the old static pool held 128 with 64 per owner.
+An idle `netd` holds no UDP buffer memory.

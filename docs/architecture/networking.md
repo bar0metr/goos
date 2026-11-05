@@ -253,11 +253,14 @@ multicast, a subnet's network or broadcast address and port 0 are refused as
 destinations. A received datagram goes to the endpoint bound to its
 destination address and port, or else to the one bound to the wildcard on
 that port. Among endpoints that share a binding by `ReuseAddr`, the one bound
-last receives unicast, as on Linux. Queued payloads share 128 receive
-buffers of 4096 bytes, 512 KiB in all, and one session holds at most 64 of
-them, one for each endpoint of a session at the largest quota; a full queue
-or share drops the newcomer and keeps what is queued. No ICMP Port
-Unreachable is sent for an unbound port.
+last receives unicast, as on Linux. The stack files bound endpoints in a
+hash table by port, so delivery reads one bucket, and the endpoint registry
+grows as sessions open endpoints: 1024 by default, 4096 at most. Queued
+payloads share at most 512 receive buffers of 4096 bytes; the pool allocates
+a buffer when no free one is left and keeps it, so it holds 2 MiB at its
+peak. One session holds at most 256 of them. A full queue or share drops the
+newcomer and keeps what is queued. No ICMP Port Unreachable is sent for an
+unbound port.
 
 ## TCP
 
@@ -338,11 +341,17 @@ its old connections wait out TIME_WAIT.
 
 The stack supports bind, ephemeral ports, listen, deferred accept and connect,
 bounded byte-stream reads and writes, retransmission, receive and congestion
-windows, bounded out-of-order reassembly, zero-window probes, FIN half-close,
-RST and TIME_WAIT. The stack allocates a control block per endpoint, a
+windows, window scaling, bounded out-of-order reassembly, zero-window probes,
+FIN half-close, RST and TIME_WAIT. The stack allocates a control block per endpoint, a
 receive ring when a handshake starts and a send ring on the first write;
 rings start at 4 KiB (16 KiB on loopback) and double up to the tuned buffer,
-256 KiB by default. Out-of-order bytes wait in the receive ring. The
+256 KiB by default. A SYN offers the RFC 7323 window scale option when the
+tuned receive buffer exceeds 65535 bytes, with the least shift that fits it
+(3 for 256 KiB). A SYN-ACK offers one only in answer to a SYN that did. With
+both offered, every later segment's window carries the shift, so a grown
+ring widens the window on the wire past 64 KiB; with either missing,
+neither side scales. Loopback connections negotiate the same way.
+Out-of-order bytes wait in the receive ring. The
 endpoint limit is 1024 by default and 4096 at most, with at most 256
 listeners; ring memory is bounded to 16 MiB, 8 MiB per owner. Indexes find
 a segment's connection, a listener or a port's holders without walking the
@@ -356,8 +365,8 @@ it in bytes 4 and 5, 1 to 512). Commands and `resolved` get the ordinary
 quota of 8; `max-endpoints-per-session` can lower it. PID 1 asks for 512 for
 `linuxsockd`, and the tuning does not lower a grant above the ordinary
 quota. `netd` holds 46 TCP and 8 UDP sessions, and each session's table
-fits its own quota. A UDP session still holds at most the 96 endpoints of
-the UDP table. A connection its owner closed leaves TIME_WAIT as a
+fits its own quota, so `linuxsockd` can hold 512 UDP endpoints. A
+connection its owner closed leaves TIME_WAIT as a
 tombstone outside the quota, 2048 per owner and 8192 in all; with the
 budget full the connection stays an endpoint on the quota and the owner's
 next `Open` gets `Busy`. A passive child counts against its listener's
