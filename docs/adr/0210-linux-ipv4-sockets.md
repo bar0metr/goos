@@ -405,10 +405,10 @@ static libc resolves names with ordinary socket traffic.
   family's use; the family snapshot in the ring page carries the same for
   its family, and the kernel's `linux-net-plane` diagnostic prints them.
 
-  `netd` still grants `linuxsockd` 64 endpoints per protocol and holds 96
-  of each, so open native endpoints stop all families together at 64 TCP
-  and 64 UDP sockets until `netd`'s session quota and tables grow. An Open
-  past that quota fails in `netd`, not at the service's quotas.
+  `netd` grants `linuxsockd` 512 endpoints per protocol (ADR 0213). TCP
+  sockets reach that grant. UDP stops at the 96 entries of the stack's UDP
+  table, so an Open past 96 UDP sockets fails in `netd`, not at the
+  service's quotas.
 
 ## Validation
 
