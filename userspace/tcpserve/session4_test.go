@@ -231,6 +231,7 @@ func TestSession4RejectsOwnershipViolations(t *testing.T) {
 
 func TestSession4CloseIsAnOwnershipTransfer(t *testing.T) {
 	p := newPair4(t)
+	smallBuffers(t, p.stack)
 	client, server := p.connected(9102)
 	// Queue more than loopback buffers so slots are still held at Close.
 	var offset uint32
