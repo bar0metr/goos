@@ -10,7 +10,13 @@ import (
 	"goos/kernel/lock"
 )
 
-const Capacity = 64
+// Capacity is how many records the ring retains. It is the kernel's whole log
+// buffer: records reach the persistent file only after the log service has
+// read them, so a burst larger than Capacity between two of its passes, or
+// written while the service is down, loses the oldest. An entry is 208 bytes
+// on amd64, so the ring costs 2048 x 208 = 416 KiB of BSS. kcall.LogRingCapacity
+// publishes the same number to readers.
+const Capacity = 2048
 
 type entry struct {
 	time          timekeeping.Time
@@ -43,9 +49,11 @@ func (target *Copy) Record() logfmt.Record {
 		Component: slot.component[:slot.componentSize], Message: slot.message[:slot.messageSize], Fields: slot.fields[:slot.fieldsSize]}
 }
 
-// Read snapshots records starting at an absolute next-record cursor. First
-// advances to Oldest if records were overwritten. Bounds and copies come from
-// the same lock acquisition; appends cannot shift the snapshot's indices.
+// Read snapshots up to len(target) records starting at an absolute next-record
+// cursor. First advances to Oldest if records were overwritten. Total is the
+// ring's end at the snapshot, so first+count below total means more records
+// wait. Bounds and copies come from the same lock acquisition; appends cannot
+// shift the snapshot's indices. Callers format and copy out after Read returns.
 func (ring *Ring) Read(cursor uint64, target []Copy) (oldest, total, first uint64, count int) {
 	ring.take()
 	length := ring.length()

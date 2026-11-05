@@ -156,8 +156,8 @@ func findLogRecord(log handle.ID, cursor uint64, fields []byte) (uint64, uint64,
 			return 0, cursor, false, kcall.StatusCorruptData
 		}
 		if string(entry.Component) == logWaitComponent && string(entry.Message) == logWaitMessage && string(entry.Fields) == string(fields) {
-			return batch.First + uint64(index), batch.Total, true, kcall.StatusOK
+			return batch.First + uint64(index), batch.Next(), true, kcall.StatusOK
 		}
 	}
-	return 0, batch.Total, false, kcall.StatusOK
+	return 0, batch.Next(), false, kcall.StatusOK
 }

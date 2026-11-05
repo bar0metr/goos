@@ -588,10 +588,11 @@ test-unit:
 
 # The concurrency tests under the race detector (ADR 0187, ADR 0189): handle
 # tables, channels, and the Linux tables shared the way processors share
-# them, and the wait tables with the deadline index they keep.
+# them, the wait tables with the deadline index they keep, and the log ring
+# its writers append to at once.
 test-race:
 	$(BUILD_ENV) go test -race -run 'Race|Ways|Busy|Holder|TwoProcesses|ConcurrentFileIO' ./kernel/handle ./kernel/ipc ./kernel/compat/linux
-	$(BUILD_ENV) go test -race ./kernel/deadline ./kernel/sched ./kernel/wait ./kernel/process
+	$(BUILD_ENV) go test -race ./kernel/deadline ./kernel/sched ./kernel/wait ./kernel/process ./kernel/klog
 	$(BUILD_ENV) go test -race -short ./userspace/runtime/arena
 
 test-integration: kernel

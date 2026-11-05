@@ -119,6 +119,7 @@ func bindResolverNetwork() {
 		syslog.Warn("resolver refused its network sessions")
 		return
 	}
+	syslog.Info("resolver network sessions bound", syslog.Uint("generation", resolverNetworkGeneration))
 	bindResolverTCP()
 }
 
