@@ -448,6 +448,8 @@ func dumpDiagnostics(requester process.ID) {
 func dumpProcess(out diagWriter, owner *process.Process, state amd64.SchedulerState) {
 	out.text("DIAG process")
 	out.uint("pid", uint64(owner.ID()))
+	out.console.WriteString(" name=")
+	out.console.Write(owner.Name())
 	out.hex("root", owner.AddressSpace().Root)
 	for _, task := range owner.Tasks() {
 		slot, _, valid := task.Parts()
