@@ -734,7 +734,18 @@ type DiagPass struct {
 	Windows []DiagWindow `json:"windows"`
 }
 
+// diagDump takes netd's counters (net endpoints, which netd logs) and the
+// kernel's dump. netd's records reach the console through the log, so a
+// pause lets them land before the dump.
 func (s *Session) diagDump(ctx context.Context) (diagCounters, error) {
+	var netd string
+	for _, command := range []string{"net status", "net endpoints", "sleep 1"} {
+		out, err := s.Guest.Run(ctx, command, commandTimeout)
+		if err != nil {
+			return nil, fail(ClassScenario, "diag", err)
+		}
+		netd += out
+	}
 	out, err := s.Guest.Run(ctx, "diag", commandTimeout)
 	if err != nil {
 		return nil, fail(ClassScenario, "diag", err)
@@ -742,7 +753,37 @@ func (s *Session) diagDump(ctx context.Context) (diagCounters, error) {
 	if !strings.Contains(out, "DIAG ") {
 		return nil, failf(ClassConfig, "diag", "no DIAG lines; the diagnostic pass needs a DIAG=1 build:\n%s", out)
 	}
-	return parseDiagCounters(out), nil
+	return parseDiagCounters(out + "\n" + netdDiagLines(netd)), nil
+}
+
+// netdDiagLines turns net status's frame counts and netd's counter records
+// into DIAG lines: "netd
+// loop loops=..." becomes "DIAG netd-loop loops=...". The endpoint and
+// session records describe objects, not work, and stay out.
+func netdDiagLines(out string) string {
+	var b strings.Builder
+	for _, raw := range strings.Split(strings.ReplaceAll(out, "\r", ""), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(raw), "frames: "); ok {
+			// net status: "frames: rx 2 tx 7 drop 0 malformed 0".
+			words := strings.Fields(rest)
+			b.WriteString("DIAG frames")
+			for i := 0; i+1 < len(words); i += 2 {
+				b.WriteString(" " + words[i] + "=" + words[i+1])
+			}
+			b.WriteString("\n")
+			continue
+		}
+		_, record, found := strings.Cut(raw, "]: ")
+		if !found || !strings.Contains(raw, "netd[") {
+			continue
+		}
+		for _, name := range []string{"netd loop", "netd wait", "tcp counters", "tcp lookups"} {
+			if rest, ok := strings.CutPrefix(record, name+" "); ok {
+				b.WriteString("DIAG " + strings.ReplaceAll(name, " ", "-") + " " + rest + "\n")
+			}
+		}
+	}
+	return b.String()
 }
 
 func (linuxNetworkDiagScenario) Run(ctx context.Context, s *Session) (Result, error) {
@@ -818,7 +859,28 @@ func (p *DiagPass) Markdown() string {
 type diagCounters map[string]map[string]uint64
 
 // diagSkipped are DIAG lines that list objects rather than count work.
-var diagSkipped = map[string]bool{"event": true, "events": true, "waitany": true, "interest": true, "handle": true, "process": true, "channel": true, "end": true}
+var diagSkipped = map[string]bool{"event": true, "events": true, "waitany": true, "interest": true, "handle": true, "channel": true, "end": true}
+
+// addProcessTime adds the run-us fields of one DIAG process line to its
+// process name's total.
+func addProcessTime(total map[string]uint64, words []string) {
+	name := ""
+	var us uint64
+	for _, w := range words {
+		k, v, _ := strings.Cut(w, "=")
+		switch k {
+		case "name":
+			name = v
+		case "run-us":
+			if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+				us += n
+			}
+		}
+	}
+	if name != "" {
+		total[name] += us
+	}
+}
 
 // parseDiagCounters reads every "DIAG name key=value ..." line of the last
 // dump in text. It knows no field names: a counter the kernel adds later
@@ -835,6 +897,7 @@ func parseDiagCounters(text string) diagCounters {
 	}
 	var lines []parsed
 	count := map[string]int{}
+	processTime := map[string]uint64{}
 	for _, raw := range strings.Split(text, "\n") {
 		raw = strings.TrimSpace(raw)
 		rest, ok := strings.CutPrefix(raw, "DIAG ")
@@ -850,6 +913,13 @@ func parseDiagCounters(text string) diagCounters {
 			p.name, words = words[0], words[1:]
 		}
 		if diagSkipped[p.name] {
+			continue
+		}
+		if p.name == "process" {
+			// A process line names its tasks' CPU time; the time of every
+			// process of one name adds up, so a workload shows where its
+			// time went.
+			addProcessTime(processTime, words)
 			continue
 		}
 		for _, w := range words {
@@ -876,6 +946,9 @@ func parseDiagCounters(text string) diagCounters {
 				values[f[0]] = n
 			}
 		}
+	}
+	for name, us := range processTime {
+		out["process name="+name] = map[string]uint64{"run-us": us}
 	}
 	return out
 }
