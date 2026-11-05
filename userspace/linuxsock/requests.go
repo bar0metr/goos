@@ -220,12 +220,14 @@ func (s *Service) stepOpen(o *op) {
 		o.socket, o.socketSerial = int16(global), s.sockets[global].serial
 	}
 	if endpoint, ok := s.takeWarm(proto); ok {
+		s.families[o.family].stats.WarmHits++
 		s.counters.Opens++
 		s.adopt(int(o.socket), endpoint, s.backends[proto].generation)
 		o.reply.Socket = s.sockets[o.socket].id
 		s.finish(o, linuxsockapi.ResultOK)
 		return
 	}
+	s.families[o.family].stats.WarmMisses++
 	s.native = NativeRequest{Op: NativeOpen}
 	s.submit(o, proto)
 }
@@ -356,6 +358,7 @@ func (s *Service) stepAccept(o *op, sock *socket) {
 		return
 	}
 	if o.child < 0 && s.takeAccepted(o, sock) {
+		s.families[o.family].stats.AcceptHits++
 		return
 	}
 	if o.child < 0 && sock.accepting != 0 {
@@ -380,6 +383,7 @@ func (s *Service) stepAccept(o *op, sock *socket) {
 		}
 		o.child, o.childSerial = int16(child), s.sockets[child].serial
 	}
+	s.families[o.family].stats.AcceptMisses++
 	s.native = NativeRequest{Op: NativeAccept, Flags: NativeNoWait, Endpoint: sock.endpoint}
 	s.submit(o, TCP)
 }

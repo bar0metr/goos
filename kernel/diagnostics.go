@@ -622,6 +622,10 @@ func dumpSocketServices(out diagWriter) {
 		out.uint("native-reads", counters.NativeReads)
 		out.uint("tx-bytes-copied", counters.TXBytesCopied)
 		out.uint("rx-bytes-copied", counters.RXBytesCopied)
+		out.uint("warm-hits", counters.WarmHits)
+		out.uint("warm-misses", counters.WarmMisses)
+		out.uint("accept-hits", counters.AcceptHits)
+		out.uint("accept-misses", counters.AcceptMisses)
 		out.end()
 		dumpSocketPlane(out, families[index], endpoints[index], rings)
 	}

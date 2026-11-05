@@ -243,19 +243,23 @@ type ServiceCounters struct {
 	NativeReads   uint64 // native reads ahead issued
 	TXBytesCopied uint64 // bytes copied from TX slots to the native session
 	RXBytesCopied uint64 // bytes copied from the native session to RX slots
+	WarmHits      uint64 // opens answered from the endpoints opened ahead
+	WarmMisses    uint64 // opens that went to netd
+	AcceptHits    uint64 // accepts answered from children accepted ahead
+	AcceptMisses  uint64 // accepts that went to netd
 }
 
 // ServiceCounterCount is the fields of ServiceCounters, at
 // ServiceCountersOffset of the ring page.
 const (
-	ServiceCounterCount   = 10
+	ServiceCounterCount   = 14
 	ServiceCountersOffset = 2560
 )
 
 // StoreServiceCounters writes a family's counters into its ring page.
 func StoreServiceCounters(page []byte, c *ServiceCounters) {
 	values := [ServiceCounterCount]uint64{c.Requests, c.Doorbells, c.RingTX, c.RingReleases, c.RingTXDone, c.RingRXData,
-		c.NativeWrites, c.NativeReads, c.TXBytesCopied, c.RXBytesCopied}
+		c.NativeWrites, c.NativeReads, c.TXBytesCopied, c.RXBytesCopied, c.WarmHits, c.WarmMisses, c.AcceptHits, c.AcceptMisses}
 	for index := 0; index < ServiceCounterCount; index++ {
 		atomic.StoreUint64((*uint64)(unsafe.Pointer(&page[ServiceCountersOffset+8*index])), values[index])
 	}
@@ -267,7 +271,8 @@ func LoadServiceCounters(page []byte) ServiceCounters {
 	for index := 0; index < ServiceCounterCount; index++ {
 		values[index] = atomic.LoadUint64((*uint64)(unsafe.Pointer(&page[ServiceCountersOffset+8*index])))
 	}
-	return ServiceCounters{values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8], values[9]}
+	return ServiceCounters{values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8], values[9],
+		values[10], values[11], values[12], values[13]}
 }
 
 // The service's state snapshot follows the counters in the ring page, for
