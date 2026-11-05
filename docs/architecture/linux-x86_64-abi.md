@@ -505,7 +505,7 @@ process with `SIGSEGV`.
 ## Polling
 
 `poll` takes at most as many entries as the soft `RLIMIT_NOFILE`, read and
-written 64 at a time (ADR 0211). A stream read end is ready with bytes in it
+written 64 at a time (ADR 0212). A stream read end is ready with bytes in it
 and reports `POLLHUP` when its writers are gone and it is empty; a write end
 is ready while 4096 bytes fit and reports `POLLERR` when its readers are gone.
 Files, directories, and devices are always ready. A closed descriptor reports
@@ -664,7 +664,7 @@ an open descriptor closes it first. A process starts with `RLIMIT_NOFILE` at
 one. A new descriptor at the soft limit is `EMFILE`, a `dup2` target at it is
 `EBADF`, and an `F_DUPFD` minimum at it is `EINVAL`. The table keeps 64
 descriptors inline and grows by pages of 1024 charged to the process's page
-quota; a page it cannot get is `ENOMEM` (ADR 0211).
+quota; a page it cannot get is `ENOMEM` (ADR 0212).
 
 `fcntl(F_GETFL)` reports the access mode, `O_APPEND`, `O_NONBLOCK`, and
 `O_LARGEFILE` for a file, adds `O_DIRECTORY` for a directory, and reports the

@@ -187,7 +187,7 @@ the process's explicit VFS authority (ADR 0135).
 The table keeps 64 entries inline and takes a page of 1024 more from the page
 allocator each time a descriptor lands past them, charged to the owning
 process's page quota, up to 4096. `RLIMIT_NOFILE` starts at 1024 soft and 4096
-hard (ADR 0211). Its entries point to bounded, family-owned open-file
+hard (ADR 0212). Its entries point to bounded, family-owned open-file
 descriptions carrying kind, status flags, offset, object reference, and
 reference count. Inheritance and `dup` retain the same description, so file
 position, `O_APPEND`, stream endpoint, directory cursor, and device state stay

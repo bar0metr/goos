@@ -1,4 +1,4 @@
-# ADR 0211: Linux descriptor tables grow in pages
+# ADR 0212: Linux descriptor tables grow in pages
 
 ## Status
 

@@ -3,7 +3,7 @@
 ## Status
 
 Accepted. Amended by ADR 0153: a sleep ends by the monotonic clock, and a
-tick deadline that passes early waits again. Amended by ADR 0211:
+tick deadline that passes early waits again. Amended by ADR 0212:
 `RLIMIT_NOFILE` is 1024 soft and 4096 hard, and a process may change it
 within the hard limit.
 
@@ -60,7 +60,7 @@ limits that are equal:
 
 | Resource | Limit |
 | --- | --- |
-| `RLIMIT_NOFILE` | 64, the descriptor table (1024 soft, 4096 hard since ADR 0211) |
+| `RLIMIT_NOFILE` | 64, the descriptor table (1024 soft, 4096 hard since ADR 0212) |
 | `RLIMIT_STACK` | 8 MiB, the stack reservation |
 | `RLIMIT_DATA` | 64 MiB, the `brk` heap |
 | `RLIMIT_CORE` | 0; no core file is written |
