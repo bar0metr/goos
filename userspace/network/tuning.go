@@ -1,8 +1,9 @@
 package network
 
 // Tuning is the timer and rate policy of the stack. Times are in nanoseconds.
-// It sizes nothing: tables, sessions and the transmit ring stay fixed arrays,
-// so no setting can grow the memory a stack holds.
+// Outside TCP it sizes nothing: tables, sessions and the transmit ring stay
+// fixed arrays. TCP allocates per connection, and its memory budgets, not
+// the tuning, bound what that can take; see TCPTuning.
 //
 // A new tuning applies at each value's next point of use, never retroactively:
 //   - TTL and EchoReplyRate apply to the next packet built or reply counted;
@@ -19,7 +20,8 @@ package network
 //     conflict.
 //   - DHCP retry values apply at the client's next scheduling point. A lease,
 //     its T1, T2 and expiry stay as the server set them.
-//   - The UDP limits apply to the next acquisition; see UDPTuning.
+//   - The UDP limits apply to the next acquisition; see UDPTuning, and the
+//     TCP limits likewise; see TCPTuning.
 type Tuning struct {
 	TTL               uint8
 	ProbeCount        uint8
@@ -59,14 +61,19 @@ type UDPTuning struct {
 	MaxPayload       uint16
 }
 
+// TCPTuning holds the runtime limits of TCP, system.net.tcp.*. The stack
+// allocates endpoints and rings as connections need them, so a limit costs
+// nothing until connections use it; the memory budgets bound the rings
+// whatever the buffer sizes allow. A lowered limit takes nothing back: it
+// refuses the next open, listen child or ring growth past it.
 type TCPTuning struct {
 	EphemeralMin     uint16
 	EphemeralMax     uint16
-	MaxEndpoints     uint8
+	MaxEndpoints     uint16
 	SessionEndpoints uint8
-	ListenBacklog    uint8
-	SendBuffer       uint16
-	ReceiveBuffer    uint16
+	ListenBacklog    uint16
+	SendBuffer       uint32
+	ReceiveBuffer    uint32
 	ConnectTimeout   uint64
 	RTOMin           uint64
 	RTOMax           uint64
@@ -112,11 +119,11 @@ func DefaultTuning() Tuning {
 		TCP: TCPTuning{
 			EphemeralMin:     49152,
 			EphemeralMax:     65535,
-			MaxEndpoints:     MaxTCPEndpoints,
+			MaxEndpoints:     DefaultTCPEndpoints,
 			SessionEndpoints: MaxTCPEndpointsPerSession,
-			ListenBacklog:    MaxTCPBacklog,
-			SendBuffer:       TCPSendCapacity,
-			ReceiveBuffer:    TCPReceiveCapacity,
+			ListenBacklog:    DefaultTCPBacklog,
+			SendBuffer:       DefaultTCPSendBuffer,
+			ReceiveBuffer:    DefaultTCPReceiveBuffer,
 			ConnectTimeout:   30 * second,
 			RTOMin:           second,
 			RTOMax:           60 * second,
@@ -161,8 +168,8 @@ var tuningRange = [TuningFields]struct {
 	{1, MaxTCPEndpoints, false},                // FieldTCPMaxEndpoints
 	{1, MaxTCPEndpointsPerSession, false},      // FieldTCPSessionEndpoints
 	{1, MaxTCPBacklog, false},                  // FieldTCPListenBacklog
-	{1, TCPSendCapacity, false},                // FieldTCPSendBuffer
-	{1, TCPReceiveCapacity, false},             // FieldTCPReceiveBuffer
+	{1, MaxTCPBuffer, false},                   // FieldTCPSendBuffer
+	{1, MaxTCPBuffer, false},                   // FieldTCPReceiveBuffer
 	{1000, 300_000, true},                      // FieldTCPConnectTimeout
 	{100, 60_000, true},                        // FieldTCPRTOMin
 	{1000, 300_000, true},                      // FieldTCPRTOMax
@@ -229,11 +236,11 @@ func tuningFrom(values *[TuningFields]uint64) Tuning {
 		TCP: TCPTuning{
 			EphemeralMin:     uint16(values[FieldTCPEphemeralMin-FieldTTL]),
 			EphemeralMax:     uint16(values[FieldTCPEphemeralMax-FieldTTL]),
-			MaxEndpoints:     uint8(values[FieldTCPMaxEndpoints-FieldTTL]),
+			MaxEndpoints:     uint16(values[FieldTCPMaxEndpoints-FieldTTL]),
 			SessionEndpoints: uint8(values[FieldTCPSessionEndpoints-FieldTTL]),
-			ListenBacklog:    uint8(values[FieldTCPListenBacklog-FieldTTL]),
-			SendBuffer:       uint16(values[FieldTCPSendBuffer-FieldTTL]),
-			ReceiveBuffer:    uint16(values[FieldTCPReceiveBuffer-FieldTTL]),
+			ListenBacklog:    uint16(values[FieldTCPListenBacklog-FieldTTL]),
+			SendBuffer:       uint32(values[FieldTCPSendBuffer-FieldTTL]),
+			ReceiveBuffer:    uint32(values[FieldTCPReceiveBuffer-FieldTTL]),
 			ConnectTimeout:   values[FieldTCPConnectTimeout-FieldTTL],
 			RTOMin:           values[FieldTCPRTOMin-FieldTTL],
 			RTOMax:           values[FieldTCPRTOMax-FieldTTL],
@@ -324,7 +331,7 @@ func (tcp TCPTuning) validate() Field {
 	if tcp.EphemeralMax < tcp.EphemeralMin {
 		return FieldTCPEphemeralMax
 	}
-	if tcp.SessionEndpoints > tcp.MaxEndpoints {
+	if uint16(tcp.SessionEndpoints) > tcp.MaxEndpoints {
 		return FieldTCPSessionEndpoints
 	}
 	if tcp.ConnectTimeout < tcp.RTOMin {

@@ -106,7 +106,10 @@ type txSlot4 struct {
 func (s *Session4) Start(stack *network.Stack, owner, quota int, tx, rx []byte, now uint64) bool {
 	stack.TCPCloseOwner(owner, now)
 	control, ok := tcpapi.ControlOf(tx, rx)
-	if !ok || uint64(len(tx)) < tcpapi.Layout4.TXPool() || uint64(len(rx)) < tcpapi.Layout4.RXPool() || !stack.SetTCPQuota(owner, quota) {
+	// The ring entries name a table index in eight bits, so the table and
+	// the quota stop at tcpapi.Endpoints4 whatever the stack grants.
+	if !ok || uint64(len(tx)) < tcpapi.Layout4.TXPool() || uint64(len(rx)) < tcpapi.Layout4.RXPool() ||
+		quota > tcpapi.Endpoints4 || !stack.SetTCPQuota(owner, quota) {
 		stack.SetTCPQuota(owner, 0)
 		return false
 	}

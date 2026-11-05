@@ -217,6 +217,12 @@ not lower a grant above 8. `netd` holds 96 TCP and 96 UDP endpoints, 16 TCP
 listeners and 128 UDP receive buffers, of which one session holds at most
 64.
 
+These numbers were the limits when this ADR was accepted. ADR 0213 replaced
+the TCP side: the control quota is 16 bits, PID 1 grants `linuxsockd` 512
+endpoints per protocol, TCP allocates endpoints and rings per connection up
+to a tuned 1024 endpoints, and the native backlog is 128. The UDP table
+stays at 96.
+
 SO_REUSEADDR follows Linux. A TCP bind conflicts with an endpoint or
 TIME_WAIT four-tuple on the same port and an overlapping address, equal or
 either one the wildcard, unless both carry the flag and the existing one is

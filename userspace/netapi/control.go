@@ -10,22 +10,23 @@ const (
 	ControlProtocolID = uint64(0x474e455443544c31)
 	// Version 3 adds capability-bound TCP sessions, version 4 the resolver's
 	// TCP session, version 5 the endpoint quota of a TCP or UDP session,
-	// version 6 the GTCP version of a TCP session.
-	ControlVersion = uint16(6)
+	// version 6 the GTCP version of a TCP session, version 7 a 16-bit quota.
+	ControlVersion = uint16(7)
 	ControlSize    = 16
 
 	controlOpcode     = 0
 	controlClass      = 1
-	controlQuota      = 2
+	controlReserved1  = 2
 	controlTCPVersion = 3
-	controlReserved   = 4
+	controlQuota      = 4
+	controlReserved   = 6
 	controlGeneration = 8
 
 	// OrdinarySessionQuota is the endpoint quota of a command's or the
 	// resolver's session. MaxSessionQuota is the largest a session can be
 	// granted; netd sizes its per-session tables to it.
 	OrdinarySessionQuota = 8
-	MaxSessionQuota      = 64
+	MaxSessionQuota      = 512
 
 	// AddSessionHandles counts the attached client channel endpoint.
 	AddSessionHandles = 1
@@ -97,7 +98,7 @@ const (
 type ControlRequest struct {
 	Opcode     ControlOpcode
 	Rights     RightsClass
-	Quota      uint8
+	Quota      uint16
 	TCPVersion uint8
 	Generation uint64
 }
@@ -163,7 +164,7 @@ func EncodeControlRequest(r *ControlRequest, attachments []handle.ID, correlatio
 	copy(out.Handles[:], attachments)
 	out.Payload[controlOpcode] = byte(r.Opcode)
 	out.Payload[controlClass] = byte(r.Rights)
-	out.Payload[controlQuota] = r.Quota
+	binary.LittleEndian.PutUint16(out.Payload[controlQuota:], r.Quota)
 	out.Payload[controlTCPVersion] = r.TCPVersion
 	binary.LittleEndian.PutUint64(out.Payload[controlGeneration:], r.Generation)
 	return true
@@ -179,12 +180,12 @@ func DecodeControlRequest(in *ipc.Message, out *ControlRequest) (correlation uin
 	r := ControlRequest{
 		Opcode:     ControlOpcode(payload[controlOpcode]),
 		Rights:     RightsClass(payload[controlClass]),
-		Quota:      payload[controlQuota],
+		Quota:      binary.LittleEndian.Uint16(payload[controlQuota:]),
 		TCPVersion: payload[controlTCPVersion],
 		Generation: binary.LittleEndian.Uint64(payload[controlGeneration:]),
 	}
 	count, known := controlHandles(r.Opcode)
-	if !known || int(in.HandleCount) != count || !zero(payload[controlReserved:controlGeneration]) || !validControlRequest(&r) {
+	if !known || int(in.HandleCount) != count || payload[controlReserved1] != 0 || !zero(payload[controlReserved:controlGeneration]) || !validControlRequest(&r) {
 		return 0, false
 	}
 	for _, attachment := range in.Handles[:count] {
@@ -235,7 +236,7 @@ func DecodeControlReply(in *ipc.Message, correlation uint64, opcode ControlOpcod
 	payload := in.Payload[:ControlSize]
 	result := ControlResult(payload[controlClass])
 	if ControlOpcode(payload[controlOpcode]) != opcode || result > lastControlResult ||
-		!zero(payload[controlQuota:controlGeneration]) {
+		!zero(payload[controlReserved1:controlGeneration]) {
 		return false
 	}
 	if _, known := controlHandles(opcode); !known {

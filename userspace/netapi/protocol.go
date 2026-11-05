@@ -10,9 +10,10 @@ import (
 const (
 	ProtocolID = uint64(0x474e455441504931)
 	// Version 4 adds a separate bounded TCP diagnostics reply, version 5
-	// its GTCP message counters, version 6 OpTCPDump. A message of an older
-	// version is not this protocol and fails decoding.
-	Version          = uint16(6)
+	// its GTCP message counters, version 6 OpTCPDump, version 7 wider TCP
+	// limits: endpoints and backlog in 16 bits, buffers in 32. A message of
+	// an older version is not this protocol and fails decoding.
+	Version          = uint16(7)
 	RequestSize      = 24
 	ReplySize        = 248
 	MaxServers       = 4
@@ -71,8 +72,11 @@ const (
 	replyTCPListeners   = 82
 	replyTCPConnections = 84
 	replyTCPStates      = 88
-	replyTCPLimits      = 120
-	replyTCPMessages    = 152
+	// replyTCPSessionEP follows the state counts; the limits block holds
+	// the wider limits.
+	replyTCPSessionEP = 116
+	replyTCPLimits    = 120
+	replyTCPMessages  = 152
 
 	// flagRateLimited is the only flag: the next address claim waits for
 	// the conflict rate limit.
@@ -289,8 +293,9 @@ type Reply struct {
 	TCPEndpoints, TCPListeners, TCPConnections                     uint16
 	TCPStates                                                      [tcpStateCount]uint16
 	TCPEphemeralMin, TCPEphemeralMax                               uint16
-	TCPMaxEndpoints, TCPSessionEndpoints, TCPListenBacklog         uint8
-	TCPSendBuffer, TCPReceiveBuffer                                uint16
+	TCPMaxEndpoints, TCPListenBacklog                              uint16
+	TCPSessionEndpoints                                            uint8
+	TCPSendBuffer, TCPReceiveBuffer                                uint32
 	TCPConnectTimeoutMS, TCPRTOMinMS, TCPRTOMaxMS, TCPTimeWaitMS   uint32
 	// GTCP2Requests and the rest count the client messages netd decoded and
 	// the replies it sent, per GTCP version, over every session.
@@ -424,13 +429,15 @@ func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
 		}
 		binary.LittleEndian.PutUint16(payload[replyTCPLimits:], r.TCPEphemeralMin)
 		binary.LittleEndian.PutUint16(payload[replyTCPLimits+2:], r.TCPEphemeralMax)
-		payload[replyTCPLimits+4], payload[replyTCPLimits+5], payload[replyTCPLimits+6] = r.TCPMaxEndpoints, r.TCPSessionEndpoints, r.TCPListenBacklog
-		binary.LittleEndian.PutUint16(payload[replyTCPLimits+8:], r.TCPSendBuffer)
-		binary.LittleEndian.PutUint16(payload[replyTCPLimits+10:], r.TCPReceiveBuffer)
-		binary.LittleEndian.PutUint32(payload[replyTCPLimits+12:], r.TCPConnectTimeoutMS)
-		binary.LittleEndian.PutUint32(payload[replyTCPLimits+16:], r.TCPRTOMinMS)
-		binary.LittleEndian.PutUint32(payload[replyTCPLimits+20:], r.TCPRTOMaxMS)
-		binary.LittleEndian.PutUint32(payload[replyTCPLimits+24:], r.TCPTimeWaitMS)
+		binary.LittleEndian.PutUint16(payload[replyTCPLimits+4:], r.TCPMaxEndpoints)
+		binary.LittleEndian.PutUint16(payload[replyTCPLimits+6:], r.TCPListenBacklog)
+		payload[replyTCPSessionEP] = r.TCPSessionEndpoints
+		binary.LittleEndian.PutUint32(payload[replyTCPLimits+8:], r.TCPSendBuffer)
+		binary.LittleEndian.PutUint32(payload[replyTCPLimits+12:], r.TCPReceiveBuffer)
+		binary.LittleEndian.PutUint32(payload[replyTCPLimits+16:], r.TCPConnectTimeoutMS)
+		binary.LittleEndian.PutUint32(payload[replyTCPLimits+20:], r.TCPRTOMinMS)
+		binary.LittleEndian.PutUint32(payload[replyTCPLimits+24:], r.TCPRTOMaxMS)
+		binary.LittleEndian.PutUint32(payload[replyTCPLimits+28:], r.TCPTimeWaitMS)
 		for index, counter := range r.gtcpCounters() {
 			binary.LittleEndian.PutUint64(payload[replyTCPMessages+8*index:], *counter)
 		}
@@ -489,8 +496,8 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 	payload := in.Payload[:ReplySize]
 	if Opcode(payload[replyOpcode]) == OpTCPStatus {
 		if opcode != OpTCPStatus || !zero(payload[2:replyTCPCounters]) || !zero(payload[replyTCPConnections+2:replyTCPStates]) ||
-			!zero(payload[replyTCPStates+2*tcpStateCount:replyTCPLimits]) || payload[replyTCPLimits+7] != 0 ||
-			!zero(payload[replyTCPLimits+28:replyTCPMessages]) || !zero(payload[replyTCPMessages+8*gtcpCounterCount:ReplySize]) {
+			!zero(payload[replyTCPStates+2*tcpStateCount:replyTCPSessionEP]) || !zero(payload[replyTCPSessionEP+1:replyTCPLimits]) ||
+			!zero(payload[replyTCPMessages+8*gtcpCounterCount:ReplySize]) {
 			return false
 		}
 		r := Reply{Opcode: OpTCPStatus, Result: Result(payload[replyResult]),
@@ -499,10 +506,11 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 			TCPConnections:  binary.LittleEndian.Uint16(payload[replyTCPConnections:]),
 			TCPEphemeralMin: binary.LittleEndian.Uint16(payload[replyTCPLimits:]),
 			TCPEphemeralMax: binary.LittleEndian.Uint16(payload[replyTCPLimits+2:]),
-			TCPMaxEndpoints: payload[replyTCPLimits+4], TCPSessionEndpoints: payload[replyTCPLimits+5], TCPListenBacklog: payload[replyTCPLimits+6],
-			TCPSendBuffer: binary.LittleEndian.Uint16(payload[replyTCPLimits+8:]), TCPReceiveBuffer: binary.LittleEndian.Uint16(payload[replyTCPLimits+10:]),
-			TCPConnectTimeoutMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+12:]), TCPRTOMinMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+16:]),
-			TCPRTOMaxMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+20:]), TCPTimeWaitMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+24:])}
+			TCPMaxEndpoints: binary.LittleEndian.Uint16(payload[replyTCPLimits+4:]), TCPSessionEndpoints: payload[replyTCPSessionEP],
+			TCPListenBacklog: binary.LittleEndian.Uint16(payload[replyTCPLimits+6:]),
+			TCPSendBuffer:    binary.LittleEndian.Uint32(payload[replyTCPLimits+8:]), TCPReceiveBuffer: binary.LittleEndian.Uint32(payload[replyTCPLimits+12:]),
+			TCPConnectTimeoutMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+16:]), TCPRTOMinMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+20:]),
+			TCPRTOMaxMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+24:]), TCPTimeWaitMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+28:])}
 		for index, counter := range r.tcpCounters() {
 			*counter = binary.LittleEndian.Uint64(payload[replyTCPCounters+8*index:])
 		}
@@ -598,7 +606,7 @@ func validReply(r *Reply) bool {
 			return *r == base
 		}
 		return r.TCPListeners <= r.TCPEndpoints && r.TCPConnections <= r.TCPEndpoints &&
-			r.TCPSessionEndpoints <= r.TCPMaxEndpoints && r.TCPListenBacklog != 0
+			uint16(r.TCPSessionEndpoints) <= r.TCPMaxEndpoints && r.TCPListenBacklog != 0
 	}
 	noAddress := [addressSize]byte{}
 	snapshot := r.State == StateDown && r.Mode == ModeDHCP && r.Local == noAddress && r.Gateway == noAddress &&

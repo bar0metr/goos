@@ -205,11 +205,11 @@ Its TCP settings (ADR 0196), all `uint`:
 | --- | ---: | ---: | --- |
 | `system.net.tcp.ephemeral-port-min` | 49152 | 1024..65535 | lowest automatic local port |
 | `system.net.tcp.ephemeral-port-max` | 65535 | 1024..65535 | highest automatic local port; at least the minimum |
-| `system.net.tcp.max-endpoints` | 96 | 1..96 | endpoints across all TCP sessions |
+| `system.net.tcp.max-endpoints` | 1024 | 1..4096 | endpoints across all TCP sessions; each is allocated when opened |
 | `system.net.tcp.max-endpoints-per-session` | 8 | 1..8 | endpoints in one ordinary session; at most the global limit. A session PID 1 grants a larger quota keeps it |
-| `system.net.tcp.listen-backlog` | 8 | 1..8 | children retained by one listener |
-| `system.net.tcp.send-buffer-bytes` | 16384 | 1..16384 | send bytes accepted per connection |
-| `system.net.tcp.recv-buffer-bytes` | 16384 | 1..16384 | contiguous receive bytes retained per connection |
+| `system.net.tcp.listen-backlog` | 128 | 1..4096 | children retained by one listener; a larger listen gets this value |
+| `system.net.tcp.send-buffer-bytes` | 262144 | 1..4194304 | send bytes accepted per connection; the ring grows to it while the memory budget allows |
+| `system.net.tcp.recv-buffer-bytes` | 262144 | 1..4194304 | receive bytes retained per connection, out-of-order bytes included; the ring grows to it while the memory budget allows |
 | `system.net.tcp.connect-timeout-ms` | 30000 | 1000..300000 | active and embryonic handshake deadline |
 | `system.net.tcp.rto-min-ms` | 1000 | 100..60000 | minimum retransmission timeout |
 | `system.net.tcp.rto-max-ms` | 60000 | 1000..300000 | maximum retransmission timeout; at least the minimum |
