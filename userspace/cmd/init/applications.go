@@ -159,6 +159,8 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	useUDP := udpSession[0] != 0
 	var tcpSession [3]handle.ID
 	switch {
+	case grantable && grantsRequested&commands.GrantTCPRing != 0:
+		tcpSession, _ = openTCPSessionQuota(netapi.OrdinarySessionQuota, tcpapi.Layout4)
 	case grantable && grantsRequested&commands.GrantTCPBulk != 0:
 		tcpSession, _ = openTCPSessionQuota(netapi.OrdinarySessionQuota, tcpapi.Layout3)
 	case grantable && grantsRequested&commands.GrantTCP != 0:
