@@ -589,7 +589,7 @@ func (handler *linuxCallHandler) gatherWrite(request linuxcompat.Request, vector
 		}
 		readable := handler.accessible(base, length, false)
 		if readable == 0 || !handler.ioTransfer(object, total, base, readable, false) {
-			if total == 0 {
+			if total == 0 || readable == 0 && executablePageWanted(handler.task) {
 				return 0, linuxabi.EFAULT
 			}
 			break

@@ -146,8 +146,9 @@ func (handler *linuxCallHandler) readLimit(request linuxcompat.Request, vector b
 		writable := handler.accessible(base, length, true)
 		total += writable
 		if writable < length {
-			// The read ends where the destination does.
-			if total == 0 {
+			// The read ends where the destination does, unless an image page
+			// stopped it.
+			if total == 0 || writable == 0 && executablePageWanted(handler.task) {
 				return 0, nil, linuxabi.EFAULT
 			}
 			break
@@ -188,6 +189,15 @@ func (handler *linuxCallHandler) accessible(address uint64, length uint64, write
 			break
 		}
 		reached += chunk
+	}
+	if reached < length && executablePageWanted(handler.task) {
+		// The range stopped at a page of the program's image that an
+		// executable object holds. That page is not the end of the buffer:
+		// the call fails before any effect, and the dispatcher brings the
+		// page in and runs it again. A short count instead would leave the
+		// page out, and every later call through the same buffer would stop
+		// there too.
+		return 0
 	}
 	return reached
 }
