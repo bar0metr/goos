@@ -572,6 +572,16 @@ func benchRound(ctx context.Context, s *Session, peerDir, guest string, index in
 		}
 		run.Lines = append(run.Lines, benchOutput(out)...)
 	}
+	// The node logs the sender's TCP_INFO once the guest closed the
+	// stream; it may still be finishing.
+	for attempt := 0; attempt < 20; attempt++ {
+		out, err := s.Node.Shell(ctx, fmt.Sprintf("grep tcpinfo %s/peer.log | tail -n 1", shellQuote(peerDir)))
+		if err == nil && len(out) != 0 {
+			run.Lines = append(run.Lines, "host "+strings.TrimSpace(string(out)))
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 	served, err := benchAcceptClose(ctx, s, peerDir, guest)
 	if err != nil {
 		return run, err

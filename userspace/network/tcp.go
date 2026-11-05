@@ -125,6 +125,11 @@ type tcpEndpoint struct {
 	// because the next hop's link address was unknown. Neighbour resolution
 	// either resends it or ends the connection.
 	l2Pending bool
+	// ackPending marks a pure ACK or window update that found the transmit
+	// queue full. The first Advance with a free frame sends it; a frame
+	// frees only when the driver hands one back, which wakes netd. Without
+	// it a peer that saw a zero window waits for its persist timer.
+	ackPending bool
 
 	rto         uint64
 	rtoDeadline uint64

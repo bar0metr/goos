@@ -473,3 +473,35 @@ func TestLocalSegmentCarriesWholeSlot(t *testing.T) {
 		got += m
 	}
 }
+
+func TestWindowUpdateWaitsForAFreeFrame(t *testing.T) {
+	h := readyWithPeer(t)
+	id, entry := establishedWithPeer(t, h, 50105)
+	// Twelve segments without a drain: the ACKs after the eighth find the
+	// transmit queue full.
+	for index := 0; index < 12; index++ {
+		h.tcpFromPeer(entry, peerData(entry, 0, pattern(index*1360, 1360), 0))
+	}
+	if !entry.ackPending {
+		t.Fatal("lost ACK not marked")
+	}
+	buffer := make([]byte, TCPReceiveCapacity)
+	if n, result := h.stack.TCPRead(0, id, buffer, h.now); result != ResultOK || n != 12*1360 {
+		t.Fatalf("read %d %d", n, result)
+	}
+	if sent := h.tcpSent(); len(sent) != TxQueueFrames {
+		t.Fatalf("queued %d", len(sent))
+	}
+	h.stack.Advance(h.now)
+	sent := h.tcpSent()
+	if len(sent) != 1 || int(sent[0].window) != TCPReceiveCapacity || sent[0].acknowledgment != entry.rcvNxt {
+		t.Fatalf("after a free frame: %v", sent)
+	}
+	if entry.ackPending {
+		t.Fatal("ACK still pending")
+	}
+	h.stack.Advance(h.now)
+	if sent := h.tcpSent(); len(sent) != 0 {
+		t.Fatalf("second pass sent %d", len(sent))
+	}
+}

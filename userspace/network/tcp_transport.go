@@ -675,6 +675,9 @@ func (stack *Stack) sendTCPParts(entry *tcpEndpoint, flags uint8, sequence, ackn
 	}
 	frame := stack.frameBuffer()
 	if frame == nil {
+		if len(payload)+len(tail) == 0 && flags == tcpFlagACK {
+			entry.ackPending = true
+		}
 		return false
 	}
 	const tcpAt = HeaderSize + ipv4HeaderSize
@@ -727,6 +730,9 @@ func (stack *Stack) advanceTCP(now uint64) {
 			}
 			stack.closeTCP(entry, ResultTimeout)
 			continue
+		}
+		if entry.ackPending && entry.state >= TCPEstablished && stack.txCount < TxQueueFrames {
+			stack.sendTCP(entry, tcpFlagACK, entry.sndNxt, entry.rcvNxt, nil, now)
 		}
 		if entry.rtoDeadline != 0 && entry.rtoDeadline <= now {
 			if entry.sndUna == entry.sndNxt && entry.sendLen == 0 {
@@ -852,5 +858,6 @@ func (stack *Stack) tcpVia(entry *tcpEndpoint, nextHop IPv4) bool {
 func (entry *tcpEndpoint) advertised(flags uint8, acknowledgment uint32, window uint16) {
 	if flags&tcpFlagACK != 0 {
 		entry.rcvEdge, entry.rcvEdgeKnown = acknowledgment+uint32(window), true
+		entry.ackPending = false
 	}
 }

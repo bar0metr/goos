@@ -59,12 +59,35 @@ def handle(conn):
             conn.shutdown(socket.SHUT_WR)
             while conn.recv(CHUNK):
                 pass
+            report_tcp_info(conn, "G")
         elif opcode == b"E":
             for _ in range(count):
                 byte = conn.recv(1)
                 if not byte:
                     return
                 conn.sendall(byte)
+
+
+def report_tcp_info(conn, what):
+    """Log the sender's view of a finished stream: Linux struct tcp_info
+    fields, among them the microseconds the guest's window limited it."""
+    try:
+        raw = conn.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 192)
+    except OSError:
+        return
+    if len(raw) < 192:
+        return
+    u32 = struct.unpack_from("<24I", raw, 8)
+    rto, snd_mss, unacked, lost, retrans = u32[0], u32[2], u32[4], u32[6], u32[7]
+    rtt, snd_cwnd, total_retrans = u32[15], u32[18], u32[23]
+    segs_out, segs_in = struct.unpack_from("<2I", raw, 136)
+    busy, rwnd_limited, sndbuf_limited = struct.unpack_from("<3Q", raw, 168)
+    sys.stderr.write(
+        "tcpinfo %s rto=%d mss=%d unacked=%d lost=%d retrans=%d total-retrans=%d rtt=%d cwnd=%d "
+        "segs-out=%d segs-in=%d busy-us=%d rwnd-limited-us=%d sndbuf-limited-us=%d\n"
+        % (what, rto, snd_mss, unacked, lost, retrans, total_retrans, rtt, snd_cwnd,
+           segs_out, segs_in, busy, rwnd_limited, sndbuf_limited))
+    sys.stderr.flush()
 
 
 def tcp_loop(listener):
