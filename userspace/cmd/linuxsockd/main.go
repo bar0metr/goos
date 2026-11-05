@@ -332,7 +332,6 @@ func setBackend(proto linuxsock.Proto, generation uint64) linuxsockapi.ControlRe
 		dropLink(proto)
 		return result
 	}
-	syslog.Info("native session bound", syslog.Uint("protocol", uint64(proto)), syslog.Uint("generation", generation))
 	return linuxsockapi.ControlOK
 }
 
