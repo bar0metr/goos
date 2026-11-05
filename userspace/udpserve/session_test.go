@@ -155,11 +155,11 @@ func TestDeferredRecvFromCompletesItsOwnRequest(t *testing.T) {
 	if replies := listener.out.take(); len(replies) != 0 || listener.session.Waiting() != 1 {
 		t.Fatalf("RecvFrom with nothing queued answered at once: %+v", replies)
 	}
-	if fault := listener.session.Deliver(stack, &listener.out); fault != FaultNone || len(listener.out.take()) != 0 {
+	if fault, _ := listener.session.Deliver(stack, &listener.out); fault != FaultNone || len(listener.out.take()) != 0 {
 		t.Fatal("Deliver answered without a datagram")
 	}
 	sender.sendTo(from, 7000, "late")
-	if fault := listener.session.Deliver(stack, &listener.out); fault != FaultNone {
+	if fault, _ := listener.session.Deliver(stack, &listener.out); fault != FaultNone {
 		t.Fatal(fault)
 	}
 	replies := listener.out.take()
@@ -170,7 +170,7 @@ func TestDeferredRecvFromCompletesItsOwnRequest(t *testing.T) {
 	if listener.session.Waiting() != 0 || !listener.session.RXLent(replies[0].reply.Slot) {
 		t.Fatal("completed receive still held, or its slot not lent")
 	}
-	if fault := listener.session.Deliver(stack, &listener.out); fault != FaultNone || len(listener.out.take()) != 0 {
+	if fault, _ := listener.session.Deliver(stack, &listener.out); fault != FaultNone || len(listener.out.take()) != 0 {
 		t.Fatal("one datagram answered twice")
 	}
 	listener.send(udpapi.Request{Opcode: udpapi.OpRelease, Slot: replies[0].reply.Slot})
@@ -216,7 +216,7 @@ func TestCloseAnswersTheWaitingReceiveFirst(t *testing.T) {
 		t.Fatal("closed endpoint still waits")
 	}
 	sender.sendTo(from, 7003, "too late")
-	if fault := listener.session.Deliver(stack, &listener.out); fault != FaultNone || len(listener.out.take()) != 0 {
+	if fault, _ := listener.session.Deliver(stack, &listener.out); fault != FaultNone || len(listener.out.take()) != 0 {
 		t.Fatal("datagram after Close reached the client")
 	}
 	if stats := stack.UDPStats(); stats.DropNoEndpoint != 1 || stats.Endpoints != 1 {
@@ -315,7 +315,7 @@ func TestUnreachableClientFaults(t *testing.T) {
 	listener.send(udpapi.Request{Opcode: udpapi.OpRecvFrom, Endpoint: bound})
 	sender.sendTo(from, 7009, "x")
 	listener.out.broken = true
-	if fault := listener.session.Deliver(stack, &listener.out); fault != FaultUnreachable {
+	if fault, _ := listener.session.Deliver(stack, &listener.out); fault != FaultUnreachable {
 		t.Fatalf("fault %q", fault)
 	}
 }

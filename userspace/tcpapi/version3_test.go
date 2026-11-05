@@ -16,7 +16,7 @@ func TestLayouts(t *testing.T) {
 	if Layout3.TXSlots > 8 || Layout3.RXSlots > 8 || PipelinedWrites3*SlotSize3 < 64<<10 {
 		t.Fatal("GTCP 3 slots")
 	}
-	for version, want := range map[uint16]bool{1: false, Version: true, Version3: true, 4: false} {
+	for version, want := range map[uint16]bool{1: false, Version: true, Version3: true, Version4: true, 5: false} {
 		if _, ok := LayoutFor(version); ok != want {
 			t.Fatalf("LayoutFor(%d) %v", version, ok)
 		}

@@ -205,15 +205,23 @@ func TestEncodeUname(t *testing.T) {
 func TestResourceLimit(t *testing.T) {
 	const stack = 8 << 20
 	for resource, want := range map[uint64]uint64{
-		abi.ResourceOpenFiles: LinuxMaxFD, abi.ResourceStack: stack, abi.ResourceData: BrkReserve,
+		abi.ResourceStack: stack, abi.ResourceData: BrkReserve,
 		abi.ResourceCore: 0, abi.ResourceCPU: abi.ResourceInfinity, abi.ResourceFileSize: abi.ResourceInfinity, 15: abi.ResourceInfinity,
 	} {
-		if got, errno := ResourceLimit(resource, stack); got != want || errno != 0 {
-			t.Errorf("resource %d = %d errno=%d", resource, got, errno)
+		if soft, hard, errno := ResourceLimit(resource, stack, 1, 2); soft != want || hard != want || errno != 0 {
+			t.Errorf("resource %d = %d/%d errno=%d", resource, soft, hard, errno)
 		}
 	}
-	if _, errno := ResourceLimit(16, stack); errno != abi.EINVAL {
+	if soft, hard, errno := ResourceLimit(abi.ResourceOpenFiles, stack, DefaultFDSoftLimit, DefaultFDHardLimit); soft != DefaultFDSoftLimit || hard != DefaultFDHardLimit || errno != 0 {
+		t.Errorf("RLIMIT_NOFILE = %d/%d errno=%d", soft, hard, errno)
+	}
+	if _, _, errno := ResourceLimit(16, stack, 1, 2); errno != abi.EINVAL {
 		t.Fatalf("resource 16: errno=%d", errno)
+	}
+	var wire [RlimitSize]byte
+	wire[0], wire[8] = 0x10, 0x20
+	if soft, hard := DecodeRlimit(&wire); soft != 0x10 || hard != 0x20 {
+		t.Fatalf("DecodeRlimit = %d/%d", soft, hard)
 	}
 }
 

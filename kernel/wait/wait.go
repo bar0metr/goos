@@ -2,9 +2,12 @@
 package wait
 
 import (
+	"math/bits"
+
 	"goos/internal/logfmt"
 	"goos/kernel/deadline"
 	"goos/kernel/lock"
+	"goos/kernel/objects"
 	"goos/kernel/sched"
 )
 
@@ -75,7 +78,9 @@ type Completion struct {
 	TimedOut   bool
 }
 
-type operation struct {
+// Operation is one task slot's wait. A Table takes a slot's Operation from
+// its storage the first time the slot waits and keeps it (ADR 0111).
+type Operation struct {
 	task        sched.TaskID
 	deadline    uint64
 	entries     [MaxObjects]Entry
@@ -95,12 +100,21 @@ type operation struct {
 // index until the operation completes or is cancelled.
 type Table struct {
 	lock       lock.Spin
-	operations [sched.MaxTasks]operation
+	operations [sched.MaxTasks]*Operation
+	storage    objects.Storage[Operation]
+	// inUse holds the slots whose operation is active or complete, so a
+	// publication visits only them.
+	inUse      sched.TaskSet
 	active     int
 	registered int
 	deadlines  *deadline.Index
 	source     deadline.Source
 }
+
+// SetStorage installs where operations are allocated. The kernel installs
+// page storage at boot; without it, operations come from the Go heap on a
+// host.
+func (table *Table) SetStorage(storage objects.Storage[Operation]) { table.storage = storage }
 
 // UseDeadlines keeps the table's deadlines in index under source.
 func (table *Table) UseDeadlines(index *deadline.Index, source deadline.Source) {
@@ -108,7 +122,7 @@ func (table *Table) UseDeadlines(index *deadline.Index, source deadline.Source) 
 }
 
 // deactivate ends an active operation's wait and drops its deadline.
-func (table *Table) deactivate(op *operation) {
+func (table *Table) deactivate(op *Operation) {
 	op.active = false
 	table.active--
 	table.registered -= int(op.count)
@@ -128,7 +142,14 @@ func (table *Table) beginHeld(task sched.TaskID, entries []Entry, deadline uint6
 		return false
 	}
 
-	op := &table.operations[slot]
+	op := table.operations[slot]
+	if op == nil {
+		record, ok := objects.Or(table.storage).New()
+		if !ok {
+			return false
+		}
+		table.operations[slot], op = record, record
+	}
 	if op.task == task && (op.active || op.complete) {
 		return false
 	}
@@ -141,6 +162,7 @@ func (table *Table) beginHeld(task sched.TaskID, entries []Entry, deadline uint6
 	op.active, op.complete, op.timedOut = true, false, false
 	clear(op.readyEvents[:])
 	copy(op.entries[:], entries)
+	table.inUse.Add(int(slot))
 	table.active++
 	table.registered += len(entries)
 	if table.deadlines != nil && deadline != 0 {
@@ -154,30 +176,41 @@ func (table *Table) publishHeld(key Key, event Event, total uint64, output []Com
 		return 0
 	}
 	completed := 0
-	for slot := range table.operations[:] {
-		op := &table.operations[slot]
-		if (!op.active && !op.complete) || op.timedOut {
-			continue
-		}
-		matched := false
-		for index := 0; index < int(op.count); index++ {
-			entry := op.entries[index]
-			ready := entry.Events & event
-			if entry.Key == key && ready != 0 && (key.Kind != KindLog || logfmt.SequenceBefore(entry.Cursor, total)) {
-				op.readyEvents[index] |= ready
-				matched = true
+	for word := 0; word < sched.TaskWords; word++ {
+		for pending := table.inUse[word]; pending != 0; pending &= pending - 1 {
+			if table.publishOneHeld(table.operations[word<<6+bits.TrailingZeros64(pending)], key, event, total, output, completed) {
+				completed++
 			}
-		}
-		if matched && op.active {
-			table.deactivate(op)
-			op.complete = true
-			if completed < len(output) {
-				output[completed] = completion(op)
-			}
-			completed++
 		}
 	}
 	return completed
+}
+
+// publishOneHeld applies a publication to one operation and reports whether
+// it completed the operation, whose result goes to output[completed] when
+// there is room.
+func (table *Table) publishOneHeld(op *Operation, key Key, event Event, total uint64, output []Completion, completed int) bool {
+	if (!op.active && !op.complete) || op.timedOut {
+		return false
+	}
+	matched := false
+	for index := 0; index < int(op.count); index++ {
+		entry := op.entries[index]
+		ready := entry.Events & event
+		if entry.Key == key && ready != 0 && (key.Kind != KindLog || logfmt.SequenceBefore(entry.Cursor, total)) {
+			op.readyEvents[index] |= ready
+			matched = true
+		}
+	}
+	if !matched || !op.active {
+		return false
+	}
+	table.deactivate(op)
+	op.complete = true
+	if completed < len(output) {
+		output[completed] = completion(op)
+	}
+	return true
 }
 
 // expireTaskHeld times out task's operation if its deadline has come. The
@@ -187,8 +220,8 @@ func (table *Table) expireTaskHeld(task sched.TaskID, now uint64) (Completion, b
 	if !valid {
 		return Completion{}, false
 	}
-	op := &table.operations[slot]
-	if op.task != task || !op.active || op.deadline == 0 || now < op.deadline {
+	op := table.operations[slot]
+	if op == nil || op.task != task || !op.active || op.deadline == 0 || now < op.deadline {
 		return Completion{}, false
 	}
 	op.active = false
@@ -204,14 +237,15 @@ func (table *Table) cancelHeld(task sched.TaskID) bool {
 	if !valid {
 		return false
 	}
-	op := &table.operations[slot]
-	if op.task != task || (!op.active && !op.complete) {
+	op := table.operations[slot]
+	if op == nil || op.task != task || (!op.active && !op.complete) {
 		return false
 	}
 	if op.active {
 		table.deactivate(op)
 	}
 	resetOperation(op)
+	table.inUse.Remove(int(slot))
 	return true
 }
 
@@ -220,16 +254,17 @@ func (table *Table) takeHeld(task sched.TaskID) (Completion, bool) {
 	if !valid {
 		return Completion{}, false
 	}
-	op := &table.operations[slot]
-	if op.task != task || !op.complete {
+	op := table.operations[slot]
+	if op == nil || op.task != task || !op.complete {
 		return Completion{}, false
 	}
 	result := completion(op)
 	resetOperation(op)
+	table.inUse.Remove(int(slot))
 	return result, true
 }
 
-func completion(op *operation) Completion {
+func completion(op *Operation) Completion {
 	result := Completion{Task: op.task, ReadyIndex: MaxObjects, TimedOut: op.timedOut}
 	for index := 0; index < int(op.count); index++ {
 		if op.readyEvents[index] == 0 {
@@ -260,8 +295,8 @@ func (table *Table) atHeld(slot int) (View, bool) {
 	if slot < 0 || slot >= len(table.operations) {
 		return View{}, false
 	}
-	op := &table.operations[slot]
-	if !op.active && !op.complete {
+	op := table.operations[slot]
+	if op == nil || !op.active && !op.complete {
 		return View{}, false
 	}
 	return View{Task: op.task, Deadline: op.deadline, Entries: op.entries, Ready: op.readyEvents, Count: int(op.count),
@@ -378,7 +413,7 @@ func (table *Table) PublishLog(object, total uint64, output []Completion) int {
 }
 
 // resetOperation clears in place rather than materializing a large literal.
-func resetOperation(op *operation) {
+func resetOperation(op *Operation) {
 	op.task, op.deadline, op.count = 0, 0, 0
 	op.active, op.complete, op.timedOut = false, false, false
 	clear(op.entries[:])
@@ -392,8 +427,8 @@ func (table *Table) Inspect(slot int, target *View) bool {
 		return false
 	}
 	table.take()
-	op := &table.operations[slot]
-	if !op.active && !op.complete {
+	op := table.operations[slot]
+	if op == nil || !op.active && !op.complete {
 		table.lock.Unlock()
 		return false
 	}

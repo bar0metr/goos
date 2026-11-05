@@ -226,7 +226,7 @@ func TestProcessRemovalReleasesDirectoriesAndOffsetsAreShared(t *testing.T) {
 	if shared, _ := DescriptionOf(0x5000, uint64(duplicate)); shared != description || shared.Offset != 4096 {
 		t.Fatal("duplicated descriptors do not share an offset")
 	}
-	if _, found := DescriptionOf(0x5000, LinuxMaxFD); found {
+	if _, found := DescriptionOf(0x5000, LinuxFDCeiling); found {
 		t.Fatal("out-of-range descriptor has a description")
 	}
 	if _, found := DescriptionOf(0x5000, uint64(directoryFD)+40); found {

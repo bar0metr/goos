@@ -79,7 +79,7 @@ func (p *pair3) park(s *Session, request tcpapi.Request) uint64 {
 func (p *pair3) deliver() {
 	p.t.Helper()
 	for _, s := range []*Session{&p.server, &p.client} {
-		if fault := s.Deliver(p.stack, p.now, p.out); fault != FaultNone {
+		if fault, _ := s.Deliver(p.stack, p.now, p.out); fault != FaultNone {
 			p.t.Fatalf("deliver fault %q", fault)
 		}
 	}

@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/binary"
+	"math/bits"
 	"sync/atomic"
 
 	"goos/internal/timekeeping"
@@ -39,6 +40,9 @@ const futexBucketCount = 32
 type futexBucket struct {
 	lock    lock.Spin
 	waiters [sched.MaxTasks]futexWaiter
+	// waiting holds the slots with a wait in waiters, so a wake or requeue
+	// visits only them, a word of slots at a time.
+	waiting sched.TaskSet
 }
 
 var (
@@ -186,11 +190,13 @@ func (handler *linuxCallHandler) futexSleep(request linuxcompat.Request, address
 		return linuxErrno(errno)
 	}
 	bucket.waiters[slot] = futexWaiter{task: handler.task, root: handler.root, address: address, bitset: call.Bitset}
+	bucket.waiting.Add(int(slot))
 	futexBucketOf[slot].Store(uint32(bucketIndex(bucket) + 1))
 	if !linuxcompat.SyscallContinuations.Issue(handler.task, 1, linuxFutexCorrelation) ||
 		deadline != 0 && !waitAnyTable.Begin(handler.task, nil, deadline) ||
 		!linuxcompat.SyscallContinuations.Block(handler.task, 1) {
 		bucket.waiters[slot] = futexWaiter{}
+		bucket.waiting.Remove(int(slot))
 		futexBucketOf[slot].Store(0)
 		waitAnyTable.Cancel(handler.task)
 		linuxcompat.SyscallContinuations.Cancel(handler.task)
@@ -252,19 +258,20 @@ func wakeFutex(root uint64, address uint64, bitset uint32, count uint32) uint32 
 // wakeFutexLocked is wakeFutex with the word's bucket held.
 func wakeFutexLocked(bucket *futexBucket, root uint64, address uint64, bitset uint32, count uint32) uint32 {
 	woken := uint32(0)
-	for index := range bucket.waiters {
-		if woken >= count {
-			break
-		}
-		waiter := bucket.waiters[index]
-		if waiter.task == 0 || waiter.root != root || waiter.address != address || waiter.bitset&bitset == 0 {
-			continue
-		}
-		bucket.waiters[index] = futexWaiter{}
-		futexBucketOf[index].Store(0)
-		waitAnyTable.Cancel(waiter.task)
-		if resumeLinuxSyscall(waiter.task, linuxFutexCorrelation, linuxcompat.WakeMessage) {
-			woken++
+	for word := 0; word < sched.TaskWords && woken < count; word++ {
+		for pending := bucket.waiting[word]; pending != 0 && woken < count; pending &= pending - 1 {
+			index := word<<6 + bits.TrailingZeros64(pending)
+			waiter := bucket.waiters[index]
+			if waiter.task == 0 || waiter.root != root || waiter.address != address || waiter.bitset&bitset == 0 {
+				continue
+			}
+			bucket.waiters[index] = futexWaiter{}
+			bucket.waiting.Remove(index)
+			futexBucketOf[index].Store(0)
+			waitAnyTable.Cancel(waiter.task)
+			if resumeLinuxSyscall(waiter.task, linuxFutexCorrelation, linuxcompat.WakeMessage) {
+				woken++
+			}
 		}
 	}
 	return woken
@@ -277,19 +284,21 @@ func wakeFutexLocked(bucket *futexBucket, root uint64, address uint64, bitset ui
 func requeueFutexLocked(bucket *futexBucket, targetBucket *futexBucket, root uint64, address uint64, target uint64, count uint32) uint32 {
 	moved := uint32(0)
 	destination := uint32(bucketIndex(targetBucket) + 1)
-	for index := range bucket.waiters {
-		if moved >= count {
-			break
+	for word := 0; word < sched.TaskWords && moved < count; word++ {
+		for pending := bucket.waiting[word]; pending != 0 && moved < count; pending &= pending - 1 {
+			index := word<<6 + bits.TrailingZeros64(pending)
+			waiter := bucket.waiters[index]
+			if waiter.task == 0 || waiter.root != root || waiter.address != address {
+				continue
+			}
+			waiter.address = target
+			bucket.waiters[index] = futexWaiter{}
+			bucket.waiting.Remove(index)
+			targetBucket.waiters[index] = waiter
+			targetBucket.waiting.Add(index)
+			futexBucketOf[index].Store(destination)
+			moved++
 		}
-		waiter := bucket.waiters[index]
-		if waiter.task == 0 || waiter.root != root || waiter.address != address {
-			continue
-		}
-		waiter.address = target
-		bucket.waiters[index] = futexWaiter{}
-		targetBucket.waiters[index] = waiter
-		futexBucketOf[index].Store(destination)
-		moved++
 	}
 	return moved
 }
@@ -316,6 +325,7 @@ func forgetFutexWaiter(task sched.TaskID) bool {
 		found := bucket.waiters[slot].task == task
 		if found {
 			bucket.waiters[slot] = futexWaiter{}
+			bucket.waiting.Remove(int(slot))
 			futexBucketOf[slot].Store(0)
 		}
 		bucket.lock.Unlock()

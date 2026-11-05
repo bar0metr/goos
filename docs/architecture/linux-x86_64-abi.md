@@ -30,8 +30,8 @@ an errno; nothing is accepted and ignored.
 | `open(2)` | implemented | `openat` from the working directory; musl's `open()` uses it |
 | `close(3)` | implemented | frees the descriptor, then releases the stream handle, the VFS file, or the directory record |
 | `stat(4)`, `fstat(5)`, `lstat(6)`, `newfstatat(262)` | implemented | synthetic mode, owner, and link count; `lstat` is `stat`; `newfstatat` takes `AT_EMPTY_PATH` |
-| `poll(7)`, `ppoll(271)` | implemented | at most 64 entries; streams sleep on native readiness; sockets read the session's readiness page and sleep on its channel, with `POLLRDHUP`; files and devices always ready; `POLLHUP`, `POLLERR`, `POLLNVAL`; a handled signal ends it with `EINTR` |
-| `select(23)`, `pselect6(270)` | implemented | the readiness of `poll` over three sets of descriptors below 64; a descriptor in a set that is not open is `EBADF`; the exceptional set stays empty; the time left is written back; a handled signal ends it with `EINTR` |
+| `poll(7)`, `ppoll(271)` | implemented | at most the soft `RLIMIT_NOFILE` entries, more is `EINVAL`; streams sleep on native readiness; sockets read the session's readiness page and sleep on its channel, with `POLLRDHUP`; files and devices always ready; `POLLHUP`, `POLLERR`, `POLLNVAL`; a handled signal ends it with `EINTR` |
+| `select(23)`, `pselect6(270)` | implemented | the readiness of `poll` over three sets of descriptors below the table's capacity; a descriptor in a set that is not open is `EBADF`; the exceptional set stays empty; the time left is written back; a handled signal ends it with `EINTR` |
 | `rt_sigpending(127)` | implemented | the signals pending while blocked; a set size over 8 bytes is `EINVAL` |
 | `eventfd(284)`, `eventfd2(290)` | implemented | a 64-bit counter with `EFD_SEMAPHORE`, `EFD_NONBLOCK` and `EFD_CLOEXEC`; `read` takes the value or one of it, `write` adds; an empty read or a full write waits, or is `EAGAIN` when nonblocking; `poll` and `select` see both directions; 64 counters for all families; vectored I/O is `EINVAL` |
 | `socket(41)` | implemented | `AF_INET` with `SOCK_STREAM` (TCP) or `SOCK_DGRAM` (UDP), protocol 0 or the matching one, `SOCK_NONBLOCK` and `SOCK_CLOEXEC`; other families `EAFNOSUPPORT`, raw and sequenced-packet sockets `ESOCKTNOSUPPORT`, a wrong protocol `EPROTONOSUPPORT`; a family without a network session `ENETDOWN`; served by `linuxsockd` over the family's GLNXSOCK3 session (ADR 0210); a socket past the family's 512 is `EMFILE`, past the service's 1024 `ENFILE` |
@@ -120,7 +120,9 @@ scalars. Pointer interpretation remains the responsibility of a syscall handler
 using checked copyin/copyout.
 
 A blocking handler may persist one continuation per generation-safe Task ID.
-Continuation storage is fixed at the 64 scheduler slots and rejects a second
+Continuation storage has one record per scheduler slot, 256 of them, taken
+from the page allocator on the slot's first blocking call and kept for the
+slot's later tasks. It rejects a second
 active call, stale task generations, correlation mismatches, repeated issue or
 advance, embedded NUL in copied path data, and paths above `PathMax`. Blocking
 clears the runnable bit and switches tasks; wake resumes the exact stage without
@@ -435,7 +437,7 @@ These calls answer from kernel state and ask no service (ADR 0145).
 | `uname` | `Linux`, `goos`, `6.0.0-goos`, `GoOS <release> Linux ABI`, `x86_64`, `(none)` |
 | `clock_gettime` | clocks 0 and 5 read realtime; 1, 4, 6, and 7 read monotonic; others `EINVAL` |
 | `nanosleep` | sleeps whole ticks, rounded up plus one, and again while the monotonic clock has not advanced by the request; returns 0; bad fields `EINVAL` |
-| `prlimit64` | `RLIMIT_NOFILE` 64, `RLIMIT_STACK` 8 MiB, `RLIMIT_DATA` 64 MiB, `RLIMIT_CORE` 0, others unlimited |
+| `prlimit64` | `RLIMIT_NOFILE` 1024 soft and 4096 hard, settable within the hard limit; `RLIMIT_STACK` 8 MiB, `RLIMIT_DATA` 64 MiB, `RLIMIT_CORE` 0, others unlimited |
 
 `prlimit64` refuses a new limit with `EPERM`, another PID with `ESRCH`, and a
 resource over 15 with `EINVAL`. A handled signal ends a sleep with `EINTR`.
@@ -504,7 +506,8 @@ process with `SIGSEGV`.
 
 ## Polling
 
-`poll` takes at most 64 entries. A stream read end is ready with bytes in it
+`poll` takes at most as many entries as the soft `RLIMIT_NOFILE`, read and
+written 64 at a time (ADR 0212). A stream read end is ready with bytes in it
 and reports `POLLHUP` when its writers are gone and it is empty; a write end
 is ready while 4096 bytes fit and reports `POLLERR` when its readers are gone.
 Files, directories, and devices are always ready. A closed descriptor reports
@@ -529,8 +532,8 @@ value counts set bits, so one descriptor can count twice.
 | Case | Result |
 | --- | --- |
 | `nfds` negative | `EINVAL` |
-| `nfds` above 64 | cut to 64, the descriptor table, as Linux cuts it to its table |
-| a set | only the 64-bit words `nfds` needs are copied in and back; a null set is skipped |
+| `nfds` above the table's capacity | cut to the capacity, 64 plus 1024 for each page the table holds, as Linux cuts it to `max_fds` |
+| a set | only the 64-bit words `nfds` needs are copied in and back, 512 descriptors at a time; a null set is skipped |
 | a descriptor below `nfds` in a set that is not open | `EBADF` for the call, the sets untouched |
 | timeval | `tv_usec` carries whole seconds into `tv_sec` first, as on Linux; then negative seconds or microseconds are `EINVAL` |
 | timespec | negative fields or `tv_nsec` of a second or more are `EINVAL` |
@@ -658,8 +661,12 @@ compatibility record. Linux user memory receives only the System V stack.
 `dup`, `dup2`, `dup3`, and the two `fcntl` duplication commands add a
 descriptor for an existing description (ADR 0146). Duplicates share the file
 position and status flags and keep separate close-on-exec flags. `dup2` onto
-an open descriptor closes it first. The table holds 64 descriptors; the next
-is `EMFILE`.
+an open descriptor closes it first. A process starts with `RLIMIT_NOFILE` at
+1024 soft and 4096 hard and may lower both or raise the soft limit to the hard
+one. A new descriptor at the soft limit is `EMFILE`, a `dup2` target at it is
+`EBADF`, and an `F_DUPFD` minimum at it is `EINVAL`. The table keeps 64
+descriptors inline and grows by pages of 1024 charged to the process's page
+quota; a page it cannot get is `ENOMEM` (ADR 0212).
 
 `fcntl(F_GETFL)` reports the access mode, `O_APPEND`, `O_NONBLOCK`, and
 `O_LARGEFILE` for a file, adds `O_DIRECTORY` for a directory, and reports the
@@ -738,7 +745,7 @@ Results a correct Linux program can observe to differ:
 | vectors | at most 16 elements | 1024 |
 | transfers | at most 64 KiB per call, then a short count | 2 GiB |
 | memory | no executable anonymous memory, no fixed or file-backed mappings | all three |
-| limits | 64 descriptors, 64 MiB of pages, fixed | adjustable |
+| limits | descriptors up to a 4096 hard limit, 64 MiB of pages, fixed | adjustable |
 | open flags | `O_DSYNC`, `O_DIRECT`, `O_PATH`, `O_TMPFILE`, and the others outside the accepted set are `EOPNOTSUPP` | accepted |
 | name length | 1024 bytes per component | 255 |
 
@@ -762,7 +769,8 @@ a terminal with termios, sessions, process groups, and job control
 | --- | ---: |
 | ELF program headers | 64 |
 | `PT_LOAD` segments | 16 |
-| descriptors per process | 64 |
+| descriptors per process | 1024 soft, 4096 hard |
+| open-file descriptions, all processes | 4096 |
 | directory descriptions, all processes | 32 |
 | path | 4096 bytes |
 | path component | 1024 bytes |
@@ -772,8 +780,8 @@ a terminal with termios, sessions, process groups, and job control
 | concurrent `execve` preparation | 4 system-wide |
 | Linux processes per family | 16, zombies included |
 | Linux processes, all families | 48, so 16 of 64 process slots stay native |
-| `poll` and `ppoll` entries | 64 |
-| `select` and `pselect6` descriptors | 64 |
+| `poll` and `ppoll` entries | the soft `RLIMIT_NOFILE` |
+| `select` and `pselect6` descriptors | the table's capacity, at most 4096 |
 | sockets per family, TCP and UDP together | 32 |
 | socket requests in flight per family | 8 |
 | pending signals | one per standard signal, 31 |
@@ -851,7 +859,7 @@ boot:
 | Linux program on each side of a native pipeline | the bytes arrive |
 | two `abi-probe pair` instances in one pipeline | both keep their own descriptors, working directory, TLS, heap, and files; different PIDs |
 | `abi-probe hostile` | `EFAULT` for bad pointers in every call, short transfers at a mapping's end, 100000-byte transfers, stale descriptors |
-| `abi-probe exhaust` | `EMFILE` at 64 descriptors, `ENOMEM` at the page quota, and recovery from both |
+| `abi-probe exhaust` | `RLIMIT_NOFILE` 1024/4096, `EPERM` past the hard limit, `EMFILE` at a soft limit lowered to 64, `dup2` to 1000 once raised, `ENOMEM` at the page quota, and recovery from both |
 | `abi-probe isolation` | the native call gate refuses all 128 call numbers; native handle values are `EBADF` |
 | `abi-probe random` | `random: available`: `getrandom` and `AT_RANDOM` both work |
 | `abi-probe stack-overflow` | recursion reaches the guard below the stack; the kernel logs `user fault: guard page`, the process ends, the shell continues |

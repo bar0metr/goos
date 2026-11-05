@@ -322,6 +322,18 @@ static libc resolves names with ordinary socket traffic.
   above). A host model of the service against the real native stack, with
   queues of two to four messages and 300 orders of events, reproduces the
   last one when the writable retry is taken out.
+- A fixed count of delivery passes left the same hole open for a chain of
+  answers longer than the count. `Deliver` keeps 16 passes as one call's
+  budget and reports whether its last pass still answered something; a
+  loopback read or write reaches another session's endpoint at once, so
+  `netd` also runs a second round over its TCP sessions when two or more
+  ran and one made progress. While either says work is left, the event
+  loop polls the driver and the sessions with a zero timeout and delivers
+  again instead of sleeping. Before a validation build sleeps it checks
+  that no parked request could finish now, and stops with
+  `NETD_DELIVERY_STALLED` naming the session, endpoint and request. Host
+  tests chain 40 endpoints so each answer wakes the one before it in the
+  table, and settle them with no clock advance or other event.
 - `netd` hands a TCP segment between two endpoints of its own stack to the
   receiving state machine as a logical segment, with no header, checksum or
   parse: the same lookup, sequence, window, congestion, FIN and TIME_WAIT

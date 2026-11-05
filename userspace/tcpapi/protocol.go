@@ -25,6 +25,9 @@
 // parked ones answers ResultWouldBlock. Version 2 keeps one parked Read and
 // no offset.
 //
+// Version 4 (Layout4) moves stream data through shared rings in the pools'
+// control pages; ring4.go describes it.
+//
 // PID 1 picks a session's version when it creates the session; netd decodes
 // that session's messages with its Layout and fails a message of another
 // version.
@@ -117,12 +120,14 @@ func LayoutFor(version uint16) (Layout, bool) {
 		return Layout2, true
 	case Version3:
 		return Layout3, true
+	case Version4:
+		return Layout4, true
 	}
 	return Layout{}, false
 }
 
-func (l Layout) TXPool() uint64           { return uint64(l.TXSlots) * uint64(l.SlotSize) }
-func (l Layout) RXPool() uint64           { return uint64(l.RXSlots) * uint64(l.SlotSize) }
+func (l Layout) TXPool() uint64           { return uint64(l.TXSlots)*uint64(l.SlotSize) + l.controlBytes() }
+func (l Layout) RXPool() uint64           { return uint64(l.RXSlots)*uint64(l.SlotSize) + l.controlBytes() }
 func (l Layout) TXPoolPages() uint64      { return l.TXPool() / pageSize }
 func (l Layout) RXPoolPages() uint64      { return l.RXPool() / pageSize }
 func (l Layout) Offset(slot uint8) uint64 { return uint64(slot) * uint64(l.SlotSize) }
@@ -267,6 +272,9 @@ func allowedFlags(opcode Opcode) uint8 {
 }
 
 func validRequest(l *Layout, r *Request) bool {
+	if l.Version == Version4 {
+		return validRequest4(r)
+	}
 	none := r.Address == noAddress && r.Port == 0
 	if r.Offset != 0 && (r.Opcode != OpWrite || !l.StreamOffsets()) {
 		return false
@@ -318,11 +326,11 @@ func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
 func DecodeReply(in *ipc.Message, out *Reply) (uint64, bool) { return Layout2.DecodeReply(in, out) }
 
 func (l Layout) EncodeRequest(r *Request, correlation uint64, out *ipc.Message) bool {
-	if !l.known() || !validRequest(&l, r) || (r.Opcode == OpRelease) != (correlation == 0) {
+	if !l.known() || !validRequest(&l, r) || notification(r.Opcode) != (correlation == 0) {
 		return false
 	}
 	kind := ipc.KindRequest
-	if r.Opcode == OpRelease {
+	if notification(r.Opcode) {
 		kind = ipc.KindNotification
 	}
 	prepare(out, l.Version, kind, correlation, l.RequestSize)
@@ -356,7 +364,7 @@ func (l Layout) DecodeRequest(in *ipc.Message, out *Request) (uint64, bool) {
 	if !validRequest(&l, &r) {
 		return 0, false
 	}
-	if r.Opcode == OpRelease {
+	if notification(r.Opcode) {
 		if in.Kind != ipc.KindNotification || in.Correlation != 0 {
 			return 0, false
 		}
@@ -370,6 +378,9 @@ func (l Layout) DecodeRequest(in *ipc.Message, out *Request) (uint64, bool) {
 // validReply requires the request's endpoint, except that a failed Open has
 // no endpoint to name.
 func validReply(l *Layout, r *Reply) bool {
+	if l.Version == Version4 {
+		return validReply4(r)
+	}
 	if r.Opcode < OpOpen || r.Opcode > lastOpcode || r.Opcode == OpRelease || r.Result > lastResult {
 		return false
 	}

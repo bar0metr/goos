@@ -426,24 +426,35 @@ func (w *world) pump() {
 
 func (w *world) deliver() {
 	w.t.Helper()
-	if fault := w.udpServe.Deliver(w.stack, udpBack{w.t, &w.fromUDP}); fault != udpserve.FaultNone {
-		w.t.Fatal(fault)
-	}
-	if fault := w.tcpServe.Deliver(w.stack, w.now, tcpBack{w.t, &w.fromTCP}); fault != tcpserve.FaultNone {
-		w.t.Fatal(fault)
-	}
-	for _, peer := range []*udpPeer{w.server, w.client} {
-		if peer != nil {
-			if fault := peer.session.Deliver(w.stack, udpBack{w.t, &peer.replies}); fault != udpserve.FaultNone {
+	// Netd calls each session's Deliver again while it reports more work.
+	udp := func(session *udpserve.Session, out udpBack) {
+		w.t.Helper()
+		for more := true; more; {
+			var fault udpserve.Fault
+			if fault, more = session.Deliver(w.stack, out); fault != udpserve.FaultNone {
 				w.t.Fatal(fault)
 			}
 		}
 	}
-	for _, peer := range []*tcpPeer{w.serverTCP, w.clientTCP} {
-		if peer != nil {
-			if fault := peer.session.Deliver(w.stack, w.now, tcpBack{w.t, &peer.replies}); fault != tcpserve.FaultNone {
+	tcp := func(session *tcpserve.Session, out tcpBack) {
+		w.t.Helper()
+		for more := true; more; {
+			var fault tcpserve.Fault
+			if fault, more = session.Deliver(w.stack, w.now, out); fault != tcpserve.FaultNone {
 				w.t.Fatal(fault)
 			}
+		}
+	}
+	udp(&w.udpServe, udpBack{w.t, &w.fromUDP})
+	tcp(&w.tcpServe, tcpBack{w.t, &w.fromTCP})
+	for _, peer := range []*udpPeer{w.server, w.client} {
+		if peer != nil {
+			udp(&peer.session, udpBack{w.t, &peer.replies})
+		}
+	}
+	for _, peer := range []*tcpPeer{w.serverTCP, w.clientTCP} {
+		if peer != nil {
+			tcp(&peer.session, tcpBack{w.t, &peer.replies})
 		}
 	}
 }

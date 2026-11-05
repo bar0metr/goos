@@ -2,6 +2,7 @@ package linuxsockapi
 
 import (
 	"encoding/binary"
+	"goos/userspace/shmring"
 	"sync/atomic"
 	"unsafe"
 )
@@ -86,7 +87,8 @@ type RingEntry struct {
 	Port       uint16
 }
 
-// RingStatus is the outcome of a ring operation.
+// RingStatus is the outcome of a ring operation; its values match
+// shmring.Status.
 type RingStatus uint8
 
 const (
@@ -121,27 +123,26 @@ func ValidEntry(e *RingEntry) bool {
 	return false
 }
 
+func ring(page []byte, headOffset, tailOffset, base int) shmring.Ring {
+	return shmring.New(word(page, headOffset), word(page, tailOffset), page[base:], RingEntries, RingEntrySize)
+}
+
 func push(page []byte, headOffset, tailOffset, base int, e *RingEntry) RingStatus {
 	if len(page) < RingBytes || !ValidEntry(e) {
 		return RingBroken
 	}
-	head := atomic.LoadUint32(word(page, headOffset))
-	tail := atomic.LoadUint32(word(page, tailOffset))
-	if tail-head > RingEntries {
-		return RingBroken
+	r := ring(page, headOffset, tailOffset, base)
+	p, status := r.Reserve()
+	if status != shmring.OK {
+		return RingStatus(status)
 	}
-	if tail-head == RingEntries {
-		return RingFull
-	}
-	p := page[base+int(tail%RingEntries)*RingEntrySize:][:RingEntrySize]
-	clear(p)
 	p[0], p[1], p[2] = byte(e.Kind), e.Slot, e.Flags
 	binary.LittleEndian.PutUint32(p[4:], e.Length)
 	binary.LittleEndian.PutUint64(p[8:], e.Socket)
 	binary.LittleEndian.PutUint32(p[16:], e.Generation)
 	copy(p[20:24], e.Address[:])
 	binary.LittleEndian.PutUint16(p[24:], e.Port)
-	atomic.StoreUint32(word(page, tailOffset), tail+1)
+	r.Publish()
 	return RingOK
 }
 
@@ -149,15 +150,11 @@ func pop(page []byte, headOffset, tailOffset, base int, out *RingEntry) RingStat
 	if len(page) < RingBytes {
 		return RingBroken
 	}
-	head := atomic.LoadUint32(word(page, headOffset))
-	tail := atomic.LoadUint32(word(page, tailOffset))
-	if tail-head > RingEntries {
-		return RingBroken
+	r := ring(page, headOffset, tailOffset, base)
+	p, status := r.Front()
+	if status != shmring.OK {
+		return RingStatus(status)
 	}
-	if tail == head {
-		return RingEmpty
-	}
-	p := page[base+int(head%RingEntries)*RingEntrySize:][:RingEntrySize]
 	e := RingEntry{Kind: RingKind(p[0]), Slot: p[1], Flags: p[2], Length: binary.LittleEndian.Uint32(p[4:]),
 		Socket: binary.LittleEndian.Uint64(p[8:]), Generation: binary.LittleEndian.Uint32(p[16:]),
 		Port: binary.LittleEndian.Uint16(p[24:])}
@@ -165,7 +162,7 @@ func pop(page []byte, headOffset, tailOffset, base int, out *RingEntry) RingStat
 	if p[3] != 0 || !zero(p[26:RingEntrySize]) || !ValidEntry(&e) {
 		return RingBroken
 	}
-	atomic.StoreUint32(word(page, headOffset), head+1)
+	r.Consume()
 	*out = e
 	return RingOK
 }
@@ -411,3 +408,15 @@ func RingPositions(page []byte) (submitHead, submitTail, completeHead, completeT
 
 // Token reads the readiness page's notification token.
 func Token(page []byte) uint32 { return atomic.LoadUint32(word(page, offToken)) }
+
+// The two status types share their values.
+var (
+	_ [RingStatus(shmring.OK) - RingOK]struct{}
+	_ [RingStatus(shmring.Empty) - RingEmpty]struct{}
+	_ [RingStatus(shmring.Full) - RingFull]struct{}
+	_ [RingStatus(shmring.Broken) - RingBroken]struct{}
+	_ [RingOK - RingStatus(shmring.OK)]struct{}
+	_ [RingEmpty - RingStatus(shmring.Empty)]struct{}
+	_ [RingFull - RingStatus(shmring.Full)]struct{}
+	_ [RingBroken - RingStatus(shmring.Broken)]struct{}
+)

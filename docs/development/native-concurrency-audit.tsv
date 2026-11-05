@@ -324,14 +324,14 @@ CA-0318	goos/userspace/cmd/logd	configWire	process	owned	none
 CA-0319	goos/userspace/cmd/logd	consoleHandle	process	owned	none
 CA-0320	goos/userspace/cmd/logd	controlHandle	process	owned	none
 CA-0321	goos/userspace/cmd/logd	correlation	process	owned	none
-CA-0322	goos/userspace/cmd/logd	cursor	process	owned	none
-CA-0323	goos/userspace/cmd/logd	descriptor	process	owned	none
+CA-0322	goos/userspace/cmd/logd	failing	process	owned	none
+CA-0323	goos/userspace/cmd/logd	files	process	owned	none
 CA-0324	goos/userspace/cmd/logd	logHandle	process	owned	none
-CA-0325	goos/userspace/cmd/logd	logLine	process	owned	none
-CA-0326	goos/userspace/cmd/logd	lostLine	process	owned	none
+CA-0325	goos/userspace/cmd/logd	interests	process	owned	none
+CA-0326	goos/userspace/cmd/logd	lastReport	process	owned	none
 CA-0327	goos/userspace/cmd/logd	persisting	process	owned	none
 CA-0328	goos/userspace/cmd/logd	reported	process	owned	none
-CA-0329	goos/userspace/cmd/logd	tail	process	owned	none
+CA-0329	goos/userspace/cmd/logd	persister	process	owned	none
 CA-0330	goos/userspace/cmd/logd	vfsHandle	process	owned	none
 CA-0331	goos/userspace/cmd/logd	wire	process	owned	none
 CA-0332	goos/userspace/cmd/netd	answer	process	owned	none
@@ -897,3 +897,7 @@ CA-1118	goos/userspace/cmd/netd	servedAt	process	owned	none
 CA-1119	goos/userspace/cmd/netd	stageNanos	process	owned	none
 CA-1120	goos/userspace/cmd/netd	stageLoops	process	owned	none
 CA-1121	goos/userspace/cmd/netd	stageLast	process	owned	none
+CA-1122	goos/userspace/cmd/logd	policyRefused	process	owned	none
+CA-1123	goos/userspace/cmd/logd	ring	process	owned	none
+CA-1124	goos/userspace/cmd/logd	rounds	process	owned	none
+CA-1125	goos/userspace/cmd/logd	vfsClosed	process	owned	none

@@ -91,7 +91,11 @@ func (handler *linuxCallHandler) socketCreate(request linuxcompat.Request) linux
 	if awaiting(pending, resumed) {
 		reply, errno, blocked = handler.socketAwait(call)
 	} else {
-		if !handler.state.FDs.HasFree() || !linuxcompat.HasSocketRoom(familyID) {
+		if errno := handler.state.FDs.Reserve(); errno != 0 {
+			handler.socketEnd()
+			return linuxErrno(errno)
+		}
+		if !linuxcompat.HasSocketRoom(familyID) {
 			handler.socketEnd()
 			return linuxErrno(linuxabi.EMFILE)
 		}
@@ -529,7 +533,11 @@ func (handler *linuxCallHandler) socketAccept(request linuxcompat.Request) linux
 					return result
 				}
 			}
-			if !handler.state.FDs.HasFree() || !linuxcompat.HasSocketRoom(call.familyID) {
+			if errno := handler.state.FDs.Reserve(); errno != 0 {
+				handler.socketEnd()
+				return linuxErrno(errno)
+			}
+			if !linuxcompat.HasSocketRoom(call.familyID) {
 				handler.socketEnd()
 				return linuxErrno(linuxabi.EMFILE)
 			}

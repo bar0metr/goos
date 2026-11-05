@@ -7,12 +7,15 @@ import (
 	"goos/kernel/compat/linux/abi"
 )
 
-// FDSetWords is the number of 64-bit words of an fd_set that can name a
-// descriptor of the table. select reads and writes no more of a set.
-const FDSetWords = (LinuxMaxFD + 63) / 64
-
-// FDSetSize is the largest part of one fd_set that select copies.
-const FDSetSize = FDSetWords * 8
+// select reads and writes the fd_sets of a call a window at a time, so its
+// scratch stays the same size whatever the descriptor limit. A window covers
+// FDSetWindow descriptors starting at a multiple of FDSetWindow.
+const (
+	FDSetWords  = 8
+	FDSetWindow = FDSetWords * 64
+	// FDSetSize is the bytes of one window of one fd_set.
+	FDSetSize = FDSetWords * 8
+)
 
 // SelectArgumentsSize is the size of the sixth pselect6 argument: a pointer
 // to the signal set and the size of that set.
@@ -27,31 +30,33 @@ const (
 	SelectExceptEvents = PollPriority
 )
 
-// FDSet holds the descriptors one fd_set names, bounded by the table.
+// FDSet holds one window of an fd_set. Bit n names the descriptor at the
+// window's base plus n.
 type FDSet [FDSetWords]uint64
 
-// Has reports whether fd is in the set.
-func (set FDSet) Has(fd int) bool {
-	return fd >= 0 && fd < LinuxMaxFD && set[fd/64]&(1<<(fd%64)) != 0
+// Has reports whether bit is in the set.
+func (set *FDSet) Has(bit int) bool {
+	return bit >= 0 && bit < FDSetWindow && set[bit/64]&(1<<(bit%64)) != 0
 }
 
-// Add puts fd in the set.
-func (set *FDSet) Add(fd int) {
-	if fd >= 0 && fd < LinuxMaxFD {
-		set[fd/64] |= 1 << (fd % 64)
+// Add puts bit in the set.
+func (set *FDSet) Add(bit int) {
+	if bit >= 0 && bit < FDSetWindow {
+		set[bit/64] |= 1 << (bit % 64)
 	}
 }
 
 // SelectCount bounds the nfds argument of select as Linux does: a negative
-// count fails with EINVAL, and a count above the descriptor table is cut to
-// the table, whose descriptors are all a set can name.
-func SelectCount(argument uint64) (int, abi.Errno) {
+// count fails with EINVAL, and a count above capacity, the descriptors the
+// table has entries for, is cut to it. No descriptor past capacity can be
+// open.
+func SelectCount(argument uint64, capacity int) (int, abi.Errno) {
 	count := int32(argument)
 	if count < 0 {
 		return 0, abi.EINVAL
 	}
-	if count > LinuxMaxFD {
-		count = LinuxMaxFD
+	if int(count) > capacity {
+		return capacity, 0
 	}
 	return int(count), 0
 }
@@ -62,22 +67,26 @@ func FDSetBytes(count int) int {
 	return (count + 63) / 64 * 8
 }
 
-// DecodeFDSet reads the first count descriptors of a copied fd_set. Bits at
-// or above count are not part of the set.
-func DecodeFDSet(wire []byte, count int) FDSet {
-	var set FDSet
-	for word := 0; word < FDSetWords && word*8+8 <= len(wire); word++ {
+// DecodeFDSet reads the first count descriptors of one copied window into
+// set. Bits at or above count are not part of the set.
+func DecodeFDSet(wire []byte, count int, set *FDSet) {
+	for word := 0; word < FDSetWords; word++ {
+		set[word] = 0
+		if word*8+8 > len(wire) {
+			continue
+		}
+		left := count - word*64
+		if left <= 0 {
+			continue
+		}
 		set[word] = binary.LittleEndian.Uint64(wire[word*8:])
-		if left := count - word*64; left <= 0 {
-			set[word] = 0
-		} else if left < 64 {
+		if left < 64 {
 			set[word] &= 1<<left - 1
 		}
 	}
-	return set
 }
 
-// EncodeFDSet writes set over a copied fd_set. Every byte select copied is
+// EncodeFDSet writes set over one copied window. Every byte select copied is
 // written, so bits above the count come back clear, as on Linux.
 func EncodeFDSet(wire []byte, set *FDSet) {
 	for word := 0; word < FDSetWords && word*8+8 <= len(wire); word++ {

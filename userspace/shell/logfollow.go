@@ -46,7 +46,7 @@ func RunLog(options LogOptions, hooks LogHooks, selected *[kcall.LogReadMax]uint
 	if !options.Follow {
 		return 0
 	}
-	cursor := batch.Total
+	cursor := batch.Next()
 	for {
 		if status, stopped := hooks.Check(); stopped {
 			return status
@@ -72,7 +72,7 @@ func RunLog(options LogOptions, hooks LogHooks, selected *[kcall.LogReadMax]uint
 				return 1
 			}
 		}
-		cursor = batch.Total
+		cursor = batch.Next()
 		if status, stopped := hooks.Check(); stopped {
 			return status
 		}

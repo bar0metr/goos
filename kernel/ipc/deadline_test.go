@@ -110,10 +110,10 @@ func TestManyDeadlinesExpire(t *testing.T) {
 	var set WaitSet
 	set.UseDeadlines(&index, deadline.SourceChannel)
 	for slot := uint32(0); slot < MaxWaiters; slot++ {
-		set.Add(taskID(t, slot, 1), uint64(slot+1), 0, uint64(100-slot))
+		set.Add(taskID(t, slot, 1), uint64(slot+1), 0, uint64(MaxWaiters-slot))
 	}
 	expired := 0
-	for now := uint64(0); now <= 100; now++ {
+	for now := uint64(0); now <= MaxWaiters; now++ {
 		for _, task := range due(&index, now) {
 			if _, ok := set.ExpireTask(task, now); !ok {
 				t.Fatalf("task %v reported due at %d but did not expire", task, now)

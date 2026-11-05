@@ -1,8 +1,10 @@
 package main
 
 import (
+	"goos/internal/validation"
 	"goos/internal/version"
 	"goos/userspace/config"
+	"goos/userspace/logpersist"
 	"goos/userspace/remotepolicy"
 )
 
@@ -13,6 +15,7 @@ func declareSchema(target *config.Store) config.Status {
 	name, _ := config.Text([]byte(version.Name))
 	release, _ := config.Text([]byte(version.Release))
 	machine, _ := config.Text([]byte(version.Machine))
+	logRotation := logpersist.DefaultPolicy(validation.Enabled)
 	declarations := [...]struct {
 		key      string
 		value    config.Value
@@ -25,6 +28,12 @@ func declareSchema(target *config.Store) config.Status {
 		{"system.build.machine", machine, true},
 		{"system.hostname", mustText("goos"), false},
 		{"system.log.persist", config.Bool(true), false},
+		// The log service's rotation: bytes per segment and segments kept,
+		// the live file included. A validation build's default is small so
+		// one boot rotates. The service refuses values outside the bounds of
+		// logpersist.Policy and keeps the ones it had.
+		{"system.log.segment-bytes", config.Uint(logRotation.SegmentBytes), false},
+		{"system.log.segments", config.Uint(uint64(logRotation.Segments)), false},
 		// The network service's settings (ADR 0191) and timer policy (ADR 0192).
 		// The service validates them as a whole when it loads them; the store
 		// only checks their types. Times are in milliseconds.

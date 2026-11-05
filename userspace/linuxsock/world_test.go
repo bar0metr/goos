@@ -104,13 +104,21 @@ func (w *world) netd() bool {
 		moved = true
 	}
 	w.stack.Advance(w.now)
-	if fault := w.session.Deliver(&w.stack, w.now, worldReplier{w}); fault != tcpserve.FaultNone {
-		w.t.Fatalf("netd deliver fault %q", fault)
+	// Netd calls Deliver again while it reports more work, then sleeps
+	// until its next event. Nothing may be runnable then, and a further
+	// call must find nothing to answer, or an answer waits for an
+	// unrelated event.
+	for more := true; more; {
+		var fault tcpserve.Fault
+		if fault, more = w.session.Deliver(&w.stack, w.now, worldReplier{w}); fault != tcpserve.FaultNone {
+			w.t.Fatalf("netd deliver fault %q", fault)
+		}
 	}
-	// After a pass netd sleeps until its next event. A second pass must
-	// find nothing more to answer, or an answer waits for an unrelated event.
+	if endpoint, op, found := w.session.Runnable(&w.stack); found {
+		w.t.Fatalf("netd would sleep with a runnable %s on endpoint %d", op, endpoint)
+	}
 	before := len(w.replies) + len(w.held)
-	if fault := w.session.Deliver(&w.stack, w.now, worldReplier{w}); fault != tcpserve.FaultNone {
+	if fault, _ := w.session.Deliver(&w.stack, w.now, worldReplier{w}); fault != tcpserve.FaultNone {
 		w.t.Fatalf("netd deliver fault %q", fault)
 	}
 	if after := len(w.replies) + len(w.held); after != before {

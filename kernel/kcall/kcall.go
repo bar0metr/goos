@@ -766,7 +766,11 @@ const (
 // LogReadSequence returns a fixed snapshot: oldest, total, first (uint64),
 // count (uint32), gap flag (uint32), then count length-prefixed full records.
 // Gap marks First advanced to Oldest using wrapping sequence comparison.
+// Total is the ring's end when the snapshot was taken; a batch holds at most
+// LogReadMax records, so a reader continues at First+count until it reaches
+// Total. LogRingCapacity bounds Total-Oldest.
 const (
+	LogRingCapacity   = 2048
 	LogReadMax        = 64
 	LogReadHeader     = 32
 	LogReadRecordSize = 208
