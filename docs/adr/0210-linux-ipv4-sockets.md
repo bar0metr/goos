@@ -100,6 +100,27 @@ submit ring; the service drains the ring before every message it takes, so a
 Doorbell lost to a full queue loses nothing. The complete ring shares the
 readiness token and its ReadyChanged notification.
 
+### Progress under backpressure
+
+Every piece of work `linuxsockd` defers has an event that resumes it. A
+reply from `netd` resumes what waited for a native TX slot. A send that
+finds the queue to `netd` full sets the link's write-blocked mark, and the
+event loop then waits for that channel to turn writable as well as
+readable: a queue full of requests that park in `netd`, such as reads and
+readiness waits, empties without a single reply, so a reply cannot be the
+signal. When the channel turns writable the link sends the RX slot releases
+it held back, then the core retries every submission that found the queue
+full. A readiness refresh, which a stream needs after a write that took only
+a prefix, never disappears: one asked while another is out goes again once
+that one answers, and one that finds no free operation stays owed for the
+pump. A validation build checks after every event that each stream waiting
+for room in `netd`'s send buffer has a held wait, a refresh or a resend
+registered.
+
+`netd` keeps the same rule toward its clients: a reply that finds a
+client's queue full waits in the session, at most 128 of them, and goes
+when the channel turns writable.
+
 ### GLNXSOCK2
 
 Requests are fixed 48-byte bodies with a nonzero correlation; replies echo
@@ -282,6 +303,24 @@ static libc resolves names with ordinary socket traffic.
   the connections bound to it. Linux sockets follow that state: such a
   connection fails with a network error and new ones work once the driver
   is back.
+- A stream stopped for good once, in a diagnostic run under KVM, with
+  nothing printed and no snapshot taken. A host model of the service and
+  the native stack with small queues produced a stall of the same kind:
+  `linuxsockd` deferred an RX slot release and a write because the queue
+  to `netd` was full of parked reads, `netd` drained the queue without a
+  reply, and nothing woke `linuxsockd` to send them again. The write-blocked
+  mark and the writable wait above remove it; the model passes 300
+  interleavings with them and stalls without them.
+- `netd` hands a TCP segment between two endpoints of its own stack to the
+  receiving state machine as a logical segment, with no header, checksum or
+  parse: the same lookup, sequence, window, congestion, FIN and TIME_WAIT
+  steps run as for a parsed one, and a test runs one connection both ways
+  and compares the endpoints field by field. Such a segment carries up to
+  16 KiB, the stream ring's size, instead of the 1460 bytes the reorder
+  slots bound a wire segment to, and stops at the end of the sender's ring
+  instead of wrapping.
+- `netd` takes at most eight requests of one session per pass of its event
+  loop and delivers what they made ready before the next batch.
 
 ## Validation
 

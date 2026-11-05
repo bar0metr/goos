@@ -236,35 +236,36 @@ func deliverTCP(now uint64) {
 }
 
 // dumpTCP logs every TCP endpoint's transport state and every session's
-// held replies and parked requests, for a stuck connection's diagnosis.
+// held replies and parked requests, for a stuck connection's diagnosis. It
+// logs at warning level, which reaches the console, in records short enough
+// for the log's field limit.
 func dumpTCP() {
 	stats := stack.TCPStats()
-	syslog.Info("tcp counters", syslog.Uint("rx", stats.RX), syslog.Uint("tx", stats.TX),
-		syslog.Uint("local-segments", stats.LocalSegments), syslog.Uint("split-segments", stats.SplitSegments),
-		syslog.Uint("match-probes", stats.MatchProbes), syslog.Uint("listener-probes", stats.ListenerProbes),
-		syslog.Uint("retransmits", stats.Retransmits), syslog.Uint("gtcp3-requests", gtcpMessages[1][0]),
-		syslog.Uint("gtcp3-replies", gtcpMessages[1][1]))
+	syslog.Warn("tcp counters", syslog.Uint("rx", stats.RX), syslog.Uint("tx", stats.TX),
+		syslog.Uint("local", stats.LocalSegments), syslog.Uint("split", stats.SplitSegments), syslog.Uint("rexmit", stats.Retransmits))
+	syslog.Warn("tcp lookups", syslog.Uint("match", stats.MatchProbes), syslog.Uint("listener", stats.ListenerProbes),
+		syslog.Uint("gtcp3-req", gtcpMessages[1][0]), syslog.Uint("gtcp3-rep", gtcpMessages[1][1]))
 	for index := 0; index < stack.TCPEndpointCount(); index++ {
 		e, live := stack.TCPEndpointAt(index)
 		if !live {
 			continue
 		}
-		syslog.Info("tcp endpoint", syslog.Uint("id", uint64(e.ID)), syslog.Uint("owner", uint64(e.Owner)),
-			syslog.Uint("state", uint64(e.State)), syslog.Uint("port", uint64(e.LocalPort)), syslog.Uint("peer-port", uint64(e.RemotePort)),
-			syslog.Uint("send-len", uint64(e.SendLen)), syslog.Uint("send-sent", uint64(e.SendSent)), syslog.Uint("send-head", uint64(e.SendHead)),
-			syslog.Uint("recv-len", uint64(e.RecvLen)), syslog.Uint("recv-head", uint64(e.RecvHead)),
-			syslog.Uint("snd-una", uint64(e.SndUna)), syslog.Uint("snd-nxt", uint64(e.SndNxt)), syslog.Uint("rcv-nxt", uint64(e.RcvNxt)),
-			syslog.Uint("peer-window", uint64(e.PeerWindow)), syslog.Uint("cwnd", uint64(e.CWnd)),
-			syslog.Uint("shut-write", boolValue(e.ShutdownWrite)), syslog.Uint("fin-sent", boolValue(e.FINSent)),
-			syslog.Uint("error", uint64(e.PendingError)))
+		id := syslog.Uint("id", uint64(e.ID))
+		syslog.Warn("tcp endpoint", id, syslog.Uint("owner", uint64(e.Owner)), syslog.Uint("state", uint64(e.State)),
+			syslog.Uint("port", uint64(e.LocalPort)), syslog.Uint("peer", uint64(e.RemotePort)), syslog.Uint("err", uint64(e.PendingError)))
+		syslog.Warn("tcp send", id, syslog.Uint("len", uint64(e.SendLen)), syslog.Uint("sent", uint64(e.SendSent)),
+			syslog.Uint("head", uint64(e.SendHead)), syslog.Uint("shut", boolValue(e.ShutdownWrite)), syslog.Uint("fin", boolValue(e.FINSent)))
+		syslog.Warn("tcp seq", id, syslog.Uint("una", uint64(e.SndUna)), syslog.Uint("nxt", uint64(e.SndNxt)),
+			syslog.Uint("rcv", uint64(e.RcvNxt)), syslog.Uint("wnd", uint64(e.PeerWindow)), syslog.Uint("cwnd", uint64(e.CWnd)))
+		syslog.Warn("tcp recv", id, syslog.Uint("len", uint64(e.RecvLen)), syslog.Uint("head", uint64(e.RecvHead)))
 	}
 	for index := range tcpSessions {
 		current := &tcpSessions[index]
 		if current.channel == 0 {
 			continue
 		}
-		syslog.Info("tcp session", syslog.Uint("session", uint64(index)), syslog.Uint("version", uint64(current.state.Layout().Version)),
-			syslog.Uint("held-replies", uint64(current.heldCount)), syslog.Uint("parked", uint64(current.state.Waiting())),
+		syslog.Warn("tcp session", syslog.Uint("session", uint64(index)), syslog.Uint("version", uint64(current.state.Layout().Version)),
+			syslog.Uint("held", uint64(current.heldCount)), syslog.Uint("parked", uint64(current.state.Waiting())),
 			syslog.Uint("rx-lent", uint64(current.state.RXLentBits())))
 	}
 }
