@@ -48,6 +48,7 @@ type Client struct {
 	control     tcpapi.Control
 	correlation uint64
 	out, in     ipc.Message
+	request     tcpapi.Request
 	txGen       [tcpapi.TXSlots4]uint32
 	// txLent: TX slots netd holds. rxHeld: RX slots the client holds.
 	txLent  uint32
@@ -110,7 +111,9 @@ func (c *Client) Call(request *tcpapi.Request, reply *tcpapi.Reply) bool {
 	}
 	c.correlation++
 	sent := c.correlation
-	if !tcpapi.Layout4.EncodeRequest(request, sent, &c.out) || !c.t.Send(&c.out) {
+	// The client's own copy keeps the caller's request on its stack.
+	c.request = *request
+	if !tcpapi.Layout4.EncodeRequest(&c.request, sent, &c.out) || !c.t.Send(&c.out) {
 		return c.fail()
 	}
 	c.Stats.Requests++
@@ -399,6 +402,9 @@ func (c *Client) Listen(address [4]byte, port uint16, backlog uint8) (*Conn, tcp
 		if reply.Result != tcpapi.ResultOK {
 			conn.Close()
 			return nil, reply.Result
+		}
+		if request.Opcode == tcpapi.OpBind {
+			conn.Local, conn.LocalPort = reply.Address, reply.Port
 		}
 	}
 	return conn, tcpapi.ResultOK

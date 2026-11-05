@@ -110,12 +110,28 @@ func (s *Session4) Start(stack *network.Stack, owner, quota int, tx, rx []byte, 
 		stack.SetTCPQuota(owner, 0)
 		return false
 	}
-	*s = Session4{owner: owner, tx: tx, rx: rx, control: control}
-	for index := range s.endpoints {
-		s.endpoints[index].txHead, s.endpoints[index].txTail = -1, -1
-	}
+	s.reset()
+	s.owner, s.tx, s.rx, s.control = owner, tx, rx, control
 	s.control.InitService()
 	return true
+}
+
+// reset clears the session in place; a literal of its size would go to
+// the heap under TinyGo.
+func (s *Session4) reset() {
+	for index := range s.endpoints {
+		s.endpoints[index] = endpoint4{txHead: -1, txTail: -1}
+	}
+	for slot := range s.txSlots {
+		s.txSlots[slot] = txSlot4{}
+	}
+	for slot := range s.rxGen {
+		s.rxGen[slot] = 0
+	}
+	s.tx, s.rx, s.control = nil, nil, tcpapi.Control{}
+	s.txDone, s.rxLent, s.rotor, s.worked = 0, 0, 0, 0
+	s.published, s.progressed = false, false
+	s.reply, s.Counters = tcpapi.Reply{}, Counters4{}
 }
 
 // End closes everything the session held. The client's slots return to it
@@ -123,7 +139,7 @@ func (s *Session4) Start(stack *network.Stack, owner, quota int, tx, rx []byte, 
 func (s *Session4) End(stack *network.Stack, now uint64) {
 	stack.TCPCloseOwner(s.owner, now)
 	stack.SetTCPQuota(s.owner, 0)
-	*s = Session4{owner: s.owner}
+	s.reset()
 }
 
 func (s *Session4) Layout() tcpapi.Layout { return tcpapi.Layout4 }

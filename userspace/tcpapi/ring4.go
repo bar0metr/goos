@@ -205,8 +205,11 @@ func validReply4(r *Reply) bool {
 
 // EncodeDoorbell4 builds the OpDoorbell notification either side sends.
 func EncodeDoorbell4(out *ipc.Message) bool {
-	return Layout4.EncodeRequest(&Request{Opcode: OpDoorbell}, 0, out)
+	return Layout4.EncodeRequest(&doorbell, 0, out)
 }
+
+// doorbell is the one OpDoorbell request; the encoder only reads it.
+var doorbell = Request{Opcode: OpDoorbell}
 
 // IsDoorbell4 reports whether in is a well-formed version 4 doorbell.
 func IsDoorbell4(in *ipc.Message) bool {
