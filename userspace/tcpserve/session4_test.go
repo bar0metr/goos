@@ -401,3 +401,18 @@ func TestSession4RunnableFindsDeliverWork(t *testing.T) {
 		t.Fatalf("after deliver %q", op)
 	}
 }
+
+// The stack grants larger quotas than a GTCP 4 table can index; such a
+// session does not start.
+func TestSession4QuotaStopsAtTheTable(t *testing.T) {
+	stack := new(network.Stack)
+	stack.Init(99)
+	tx, rx := make([]byte, tcpapi.Layout4.TXPool()), make([]byte, tcpapi.Layout4.RXPool())
+	var s Session4
+	if s.Start(stack, 0, tcpapi.Endpoints4+1, tx, rx, 1) {
+		t.Fatal("quota past the table accepted")
+	}
+	if !s.Start(stack, 0, tcpapi.Endpoints4, tx, rx, 1) {
+		t.Fatal("quota of the whole table refused")
+	}
+}

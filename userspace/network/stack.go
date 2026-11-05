@@ -86,7 +86,7 @@ type Stack struct {
 	udpPending    [UDPPendingSends]udpPending
 	udpGeneration uint32
 	udpStats      UDPStats
-	udpQuota      [MaxUDPSessions]uint8
+	udpQuota      [MaxUDPSessions]uint16
 	udpBinds      uint32
 
 	// tcp is the endpoint registry, nil in a free slot; it grows to the
@@ -104,7 +104,7 @@ type Stack struct {
 	// swaps in.
 	tcpAckPending, tcpAckSpare []*tcpEndpoint
 	tcpTombstones              tcpTombstones
-	tcpQuota                   [MaxTCPSessions]uint8
+	tcpQuota                   [MaxTCPSessions]uint16
 	tcpOwnerBytes              [tcpOwners]int
 	tcpBytes                   int
 	tcpBudget                  tcpBudget

@@ -45,7 +45,7 @@ type Session struct {
 	owner     int
 	tx, rx    []byte
 	rxSlots   udpapi.Slots
-	endpoints [network.MaxUDPSessionQuota]waiter
+	endpoints []waiter
 	reply     udpapi.Reply
 	// answered counts the answers of the Deliver pass under way.
 	answered int
@@ -68,6 +68,12 @@ func (s *Session) StartQuota(stack *network.Stack, owner, quota int, tx, rx []by
 	}
 	s.owner, s.tx, s.rx = owner, tx, rx
 	s.rxSlots.Reset(udpapi.RXSlots)
+	// The table fits the quota, and no more than the stack's endpoints.
+	size := min(max(quota, network.MaxUDPSessionEndpoints), network.MaxUDPEndpoints)
+	if cap(s.endpoints) < size {
+		s.endpoints = make([]waiter, size)
+	}
+	s.endpoints = s.endpoints[:size]
 	for index := range s.endpoints {
 		s.endpoints[index] = waiter{}
 	}

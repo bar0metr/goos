@@ -100,8 +100,9 @@ func TestTCPManyLoopbackConnections(t *testing.T) {
 // open once an endpoint closes, in the freed slot with a new generation.
 func TestTCPQuotaFillFailReleaseReuse(t *testing.T) {
 	h := newHarness(t)
-	h.stack.SetTCPQuota(1, MaxTCPSessionQuota)
-	ids := make([]TCPEndpointID, MaxTCPSessionQuota)
+	const granted = 64
+	h.stack.SetTCPQuota(1, granted)
+	ids := make([]TCPEndpointID, granted)
 	for index := range ids {
 		var result Result
 		if ids[index], result = h.stack.TCPOpen(1); result != ResultOK {
@@ -123,7 +124,7 @@ func TestTCPQuotaFillFailReleaseReuse(t *testing.T) {
 	h.stack.tuning.TCP.MaxEndpoints = 100
 	held := 0
 	for owner := 2; owner < 10; owner++ {
-		h.stack.SetTCPQuota(owner, MaxTCPSessionQuota)
+		h.stack.SetTCPQuota(owner, granted)
 		for {
 			if _, result := h.stack.TCPOpen(owner); result != ResultOK {
 				if result != ResultBusy {
@@ -134,7 +135,7 @@ func TestTCPQuotaFillFailReleaseReuse(t *testing.T) {
 			held++
 		}
 	}
-	if total := h.stack.TCPStats().Endpoints; total != 100 || held != 100-MaxTCPSessionQuota {
+	if total := h.stack.TCPStats().Endpoints; total != 100 || held != 100-granted {
 		t.Fatalf("endpoints %d, others held %d", total, held)
 	}
 	h.stack.TCPClose(1, ids[0], h.now)
@@ -142,7 +143,7 @@ func TestTCPQuotaFillFailReleaseReuse(t *testing.T) {
 		t.Fatalf("open after a release %d", result)
 	}
 	h.stack.TCPCloseOwner(1, h.now)
-	if total := h.stack.TCPStats().Endpoints; total != 100-MaxTCPSessionQuota+1 {
+	if total := h.stack.TCPStats().Endpoints; total != 100-granted+1 {
 		t.Fatalf("endpoints after the owner ended %d", total)
 	}
 	h.checkDeadline()

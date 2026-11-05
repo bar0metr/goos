@@ -858,10 +858,14 @@ func TestUDPConnectFixesSourceOfUnboundEndpoint(t *testing.T) {
 
 // fullTable grants owner 0 the largest quota and gives ordinary quotas to as
 // many owners as fill the rest of the table. It returns each owner's quota.
+// udpGrantedQuota is the explicit quota the table tests grant one owner:
+// UDPSessionBuffers, the most datagrams one owner may hold queued.
+const udpGrantedQuota = UDPSessionBuffers
+
 func fullTable(stack *Stack) []int {
-	stack.SetUDPQuota(0, MaxUDPSessionQuota)
-	quotas := []int{MaxUDPSessionQuota}
-	for left := MaxUDPEndpoints - MaxUDPSessionQuota; left > 0; left -= MaxUDPSessionEndpoints {
+	stack.SetUDPQuota(0, udpGrantedQuota)
+	quotas := []int{udpGrantedQuota}
+	for left := MaxUDPEndpoints - udpGrantedQuota; left > 0; left -= MaxUDPSessionEndpoints {
 		quotas = append(quotas, min(left, MaxUDPSessionEndpoints))
 	}
 	return quotas

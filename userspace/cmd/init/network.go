@@ -295,7 +295,7 @@ func openLinuxSocketSessions() (tcp, udp [3]handle.ID, ok bool) {
 // whose endpoints are bounded by quota, and returns the client's channel,
 // TX pool and RX pool, in that order. Each side's pool handles are narrowed
 // to what it writes: the client writes the TX pool, the service the RX pool.
-func openUDPSessionQuota(quota uint8) ([3]handle.ID, bool) {
+func openUDPSessionQuota(quota uint16) ([3]handle.ID, bool) {
 	var none [3]handle.ID
 	if netControl == 0 {
 		return none, false
@@ -348,7 +348,7 @@ func openUDPSessionQuota(quota uint8) ([3]handle.ID, bool) {
 // openTCPSessionQuota creates the channel and directionally restricted
 // stream pools for one GTCP client whose endpoints are bounded by quota and
 // which speaks layout's version over pools of layout's size.
-func openTCPSessionQuota(quota uint8, layout tcpapi.Layout) ([3]handle.ID, bool) {
+func openTCPSessionQuota(quota uint16, layout tcpapi.Layout) ([3]handle.ID, bool) {
 	var none [3]handle.ID
 	if netControl == 0 {
 		return none, false

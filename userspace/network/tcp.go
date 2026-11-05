@@ -18,7 +18,7 @@ const (
 	// largest quota a session can be granted explicitly; per-session tables
 	// in tcpserve size to it.
 	MaxTCPEndpointsPerSession = 8
-	MaxTCPSessionQuota        = 64
+	MaxTCPSessionQuota        = 512
 	MaxTCPListeners           = 256
 	// MaxTCPBacklog is the ceiling of listen-backlog and DefaultTCPBacklog
 	// its default. A listen asking for more gets the tuned value.
@@ -252,7 +252,7 @@ func (stack *Stack) resetTCP() {
 	stack.tcpAckPending = nil
 	stack.tcpAckSpare = nil
 	stack.tcpTombstones = tcpTombstones{}
-	stack.tcpQuota = [MaxTCPSessions]uint8{}
+	stack.tcpQuota = [MaxTCPSessions]uint16{}
 	stack.tcpOwnerBytes = [tcpOwners]int{}
 	stack.tcpBytes = 0
 	stack.tcpBudget = tcpBudget{}
@@ -302,7 +302,7 @@ func (stack *Stack) SetTCPQuota(owner, quota int) bool {
 	if owner < 0 || owner >= MaxTCPSessions || quota < 0 || quota > MaxTCPSessionQuota {
 		return false
 	}
-	stack.tcpQuota[owner] = uint8(quota)
+	stack.tcpQuota[owner] = uint16(quota)
 	return true
 }
 

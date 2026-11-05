@@ -24,11 +24,13 @@ const (
 	MaxUDPSessions = 8
 	// MaxUDPEndpoints and MaxUDPSessionEndpoints are the capacities behind
 	// the max-endpoints and max-endpoints-per-session settings; the second
-	// is the ordinary session quota. MaxUDPSessionQuota is the largest quota
-	// a session can be granted explicitly.
+	// is the ordinary session quota. MaxUDPSessionQuota is the largest
+	// quota a session can be granted explicitly, the same as TCP's so one
+	// control field serves both; max-endpoints still bounds what a session
+	// holds.
 	MaxUDPEndpoints        = 96
 	MaxUDPSessionEndpoints = 8
-	MaxUDPSessionQuota     = 64
+	MaxUDPSessionQuota     = 512
 	// UDPQueueCapacity is the capacity behind recv-queue-depth.
 	UDPQueueCapacity = 16
 	// UDPPayloadCapacity is the capacity behind max-payload and the size of
@@ -37,9 +39,9 @@ const (
 	// UDPReceiveBuffers holds the datagrams queued on all endpoints, and
 	// UDPSessionBuffers bounds one owner's share of them, so one session
 	// flooded with datagrams leaves half the pool to the others. The share
-	// is one datagram for each endpoint of a session at the largest quota:
-	// 128 buffers of 4 KiB are 512 KiB of static storage.
-	UDPReceiveBuffers = 2 * MaxUDPSessionQuota
+	// is 64 datagrams: 128 buffers of 4 KiB are 512 KiB of static storage.
+	// A buffer index fits the uint8 queue entries.
+	UDPReceiveBuffers = 128
 	UDPSessionBuffers = UDPReceiveBuffers / 2
 	// UDPPendingSends holds datagrams waiting for ARP to resolve their next
 	// hop.
@@ -141,7 +143,7 @@ func (stack *Stack) SetUDPQuota(owner, quota int) bool {
 	if owner < 0 || owner >= MaxUDPSessions || quota < 0 || quota > MaxUDPSessionQuota {
 		return false
 	}
-	stack.udpQuota[owner] = uint8(quota)
+	stack.udpQuota[owner] = uint16(quota)
 	return true
 }
 

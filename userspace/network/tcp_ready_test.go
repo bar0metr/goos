@@ -344,8 +344,8 @@ func TestUDPReadinessPeekAndMaxPayload(t *testing.T) {
 
 func TestUDPExplicitQuota(t *testing.T) {
 	h := newHarness(t)
-	h.stack.SetUDPQuota(0, MaxUDPSessionQuota)
-	for count := range MaxUDPSessionQuota {
+	h.stack.SetUDPQuota(0, udpGrantedQuota)
+	for count := range udpGrantedQuota {
 		if _, result := h.stack.UDPOpen(0); result != ResultOK {
 			t.Fatalf("open %d: %d", count, result)
 		}
