@@ -901,3 +901,12 @@ CA-1122	goos/userspace/cmd/logd	policyRefused	process	owned	none
 CA-1123	goos/userspace/cmd/logd	ring	process	owned	none
 CA-1124	goos/userspace/cmd/logd	rounds	process	owned	none
 CA-1125	goos/userspace/cmd/logd	vfsClosed	process	owned	none
+CA-1126	goos/userspace/bin/netbench4	manifest	process	immutable	none
+CA-1127	goos/userspace/cmd/netd	gtcpDoorbells	process	owned	none
+CA-1128	goos/userspace/tcpapi	Layout4	process	immutable	none
+CA-1129	goos/userspace/tcpapi	doorbell	process	immutable	none
+CA-1130	goos/userspace/tcpapi	txKinds	process	immutable	none
+CA-1131	goos/userspace/tcpapi	releaseKinds	process	immutable	none
+CA-1132	goos/userspace/tcpapi	txDoneKinds	process	immutable	none
+CA-1133	goos/userspace/tcpapi	rxKinds	process	immutable	none
+CA-1134	goos/userspace/utility	ringSession	session	owned	none

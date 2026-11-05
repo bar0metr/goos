@@ -128,6 +128,8 @@ func benchGroup(name string) string {
 	switch {
 	case strings.HasPrefix(name, "native-v2-"):
 		return "native GTCP 2"
+	case strings.HasPrefix(name, "native-v4-"):
+		return "native GTCP 4"
 	case strings.HasPrefix(name, "native-"):
 		return "native"
 	case strings.HasPrefix(name, "remote-"):
@@ -560,6 +562,7 @@ func benchRound(ctx context.Context, s *Session, peerDir, guest string, index in
 		{"netprobe-bench", "/system/linux/netprobe bench " + size, "bench ok"},
 		{"netbench", "netbench " + size, "bench native ok"},
 		{"netbench3", "netbench3 " + size, "bench native ok"},
+		{"netbench4", "netbench4 " + size, "bench native ok"},
 		{"netprobe-remote", fmt.Sprintf("/system/linux/netprobe remote %s %d %s", o.Peer, benchPeerPort, size), "bench remote ok"},
 	}
 	for _, step := range steps {

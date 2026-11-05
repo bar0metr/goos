@@ -502,6 +502,13 @@ name their stream offset, and four reads parked on the receiving end. Its
 lines start with `native-v3-`; those of `netbench` start with `native-v2-`,
 apart from the UDP line, which only `netbench` prints.
 
+`netbench4 [MiB]` runs the stream, a one-byte request-reply and a
+connect-accept-close loop on a GTCP 4 session (ADR 0214), where stream data
+moves through shared rings. The loop dials with one `OpOpenConnect`, takes
+children netd accepted ahead, and closes without waiting; it ends once netd
+reported every connection gone. Its lines start with `native-v4-` and add the
+channel messages and doorbells each step cost, times 100.
+
 The validation build's `fault net-driver` kills the network driver once;
 PID 1 starts a new one with a new binding, and storage and the shell carry on.
 
