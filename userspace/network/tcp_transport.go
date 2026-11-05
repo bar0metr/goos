@@ -240,6 +240,11 @@ func (stack *Stack) handleACK(entry *tcpEndpoint, segment tcpSegment, now uint64
 		if entry.peerWindow > oldWindow {
 			entry.rtoDeadline = 0
 			stack.pumpTCP(entry, now)
+			// A FIN the peer dropped at a closed window still waits for
+			// its ACK; without the timer nothing would resend it.
+			if entry.rtoDeadline == 0 && entry.sndUna != entry.sndNxt {
+				entry.rtoDeadline = addTime(now, entry.rto)
+			}
 		}
 		return true
 	}
