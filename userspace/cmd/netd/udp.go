@@ -196,7 +196,7 @@ func serviceUDP(index int) {
 			closeUDPSession(index, "request invalid")
 			return
 		}
-		if fault := current.state.Handle(&stack, &udpIn, correlation, clockNanos(), udpReplier{index}); fault != udpserve.FaultNone {
+		if fault := current.state.Handle(&stack, &udpIn, correlation, servedAt, udpReplier{index}); fault != udpserve.FaultNone {
 			closeUDPSession(index, string(fault))
 			return
 		}

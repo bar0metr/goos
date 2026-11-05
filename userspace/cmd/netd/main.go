@@ -12,6 +12,7 @@ import (
 	"goos/internal/capability"
 	"goos/internal/validation"
 	"goos/kernel/clock"
+	"goos/kernel/diag"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -144,14 +145,21 @@ func userspaceMain() {
 	serve()
 }
 
+// servedAt is the clock after the loop's wait. The requests and frames
+// served after it take it as their time: they run within microseconds of
+// it, and one read per loop costs a call where one per message cost many.
+var servedAt uint64
+
 func serve() {
 	for {
 		now := clockNanos()
 		stack.Advance(now)
+		stage(stageAdvance, now)
 		deliverCompletions()
 		deliverUDP()
 		deliverTCP(now)
 		deliverServers()
+		stage(stageDeliver, 0)
 		transmitPending()
 		announceState(now)
 		count := buildInterests()
@@ -166,8 +174,11 @@ func serve() {
 				}
 			}
 		}
+		stage(stagePrepare, 0)
 		result, status := userwait.Any(&interests, count, timeout)
 		ready := result.ReadyMask
+		servedAt = clockNanos()
+		stage(stageWait, 0)
 		if status == kcall.StatusTimeout {
 			continue
 		}
@@ -193,7 +204,44 @@ func serve() {
 				}
 			}
 		}
+		stage(stageService, 0)
 	}
+}
+
+// Loop stages, timed in a diagnostic build: the time from the previous
+// mark to each one adds to its total, so the totals split netd's loop into
+// timers, deliveries, the wait's preparation, the wait itself and the
+// requests served after it. A diagnostic build pays a clock read per mark.
+const (
+	stageAdvance = iota
+	stageDeliver
+	stagePrepare
+	stageWait
+	stageService
+	stageCount
+)
+
+var (
+	stageNanos [stageCount]uint64
+	stageLoops uint64
+	stageLast  uint64
+)
+
+// stage charges the time since the last mark to which. The top of the
+// loop passes the clock it read already and starts a new lap.
+func stage(which int, start uint64) {
+	if !diag.Enabled {
+		return
+	}
+	if which == stageAdvance {
+		stageLoops++
+		stageLast = start
+	}
+	now := clockNanos()
+	if now > stageLast {
+		stageNanos[which] += now - stageLast
+	}
+	stageLast = now
 }
 
 func buildInterests() int {
@@ -284,7 +332,7 @@ func serviceDriver() {
 			faultDriver(netdev.FaultGeneration, "driver generation mismatch")
 			return
 		}
-		now := clockNanos()
+		now := servedAt
 		switch frame.Opcode {
 		case netdev.OpReady:
 			device.ready = true

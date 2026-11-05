@@ -4,6 +4,7 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/kernel/diag"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -216,7 +217,7 @@ func serviceTCP(index int) {
 			return
 		}
 		gtcpCounters(current.state.Layout().Version)[0]++
-		if fault := current.state.Handle(&stack, &tcpIn, correlation, clockNanos(), tcpReplier{index}); fault != tcpserve.FaultNone {
+		if fault := current.state.Handle(&stack, &tcpIn, correlation, servedAt, tcpReplier{index}); fault != tcpserve.FaultNone {
 			closeTCPSession(index, string(fault))
 			return
 		}
@@ -245,6 +246,12 @@ func dumpTCP() {
 		syslog.Uint("local", stats.LocalSegments), syslog.Uint("split", stats.SplitSegments), syslog.Uint("rexmit", stats.Retransmits))
 	syslog.Warn("tcp lookups", syslog.Uint("match", stats.MatchProbes), syslog.Uint("listener", stats.ListenerProbes),
 		syslog.Uint("gtcp3-req", gtcpMessages[1][0]), syslog.Uint("gtcp3-rep", gtcpMessages[1][1]))
+	if diag.Enabled {
+		syslog.Warn("netd loop", syslog.Uint("loops", stageLoops), syslog.Uint("advance-us", stageNanos[stageAdvance]/1000),
+			syslog.Uint("deliver-us", stageNanos[stageDeliver]/1000))
+		syslog.Warn("netd wait", syslog.Uint("prepare-us", stageNanos[stagePrepare]/1000),
+			syslog.Uint("wait-us", stageNanos[stageWait]/1000), syslog.Uint("service-us", stageNanos[stageService]/1000))
+	}
 	for index := 0; index < stack.TCPEndpointCount(); index++ {
 		e, live := stack.TCPEndpointAt(index)
 		if !live {
