@@ -142,6 +142,14 @@ func (s *Session) Handle(stack *network.Stack, request *tcpapi.Request, correlat
 	noWait := request.Flags&tcpapi.FlagNoWait != 0
 	reply := &s.reply
 	*reply = tcpapi.Reply{Opcode: request.Opcode, Endpoint: request.Endpoint}
+	// The slots a request returns go back before it runs, so a read it
+	// posts can take one of them. The parked requests a free slot lets go
+	// wait for the event loop's Deliver.
+	for slot := uint8(0); request.Release>>slot != 0; slot++ {
+		if request.Release&(1<<slot) != 0 && !s.rxSlots.Return(slot) {
+			return FaultRelease
+		}
+	}
 	switch request.Opcode {
 	case tcpapi.OpOpen:
 		opened, result := stack.TCPOpen(s.owner)

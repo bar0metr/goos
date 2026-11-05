@@ -293,7 +293,7 @@ version 3 eight TX and eight RX slots of 16 KiB, 128 KiB a pool. `netd`
 checks that each mapped pool holds its layout, decodes every message of the
 session with that layout, and closes the session on a message of another
 version. The replies and every opcode keep version 2's layout and rules,
-except for two changes.
+except for three changes.
 
 - Requests grow to 28 bytes. Bytes 24..27 hold a `Write`'s stream offset:
   the bytes the endpoint had accepted from the client since it opened, mod
@@ -311,6 +311,11 @@ except for two changes.
   A `NoWait` read on an endpoint with parked reads answers `WouldBlock`,
   since arriving bytes belong to the parked ones. `Close` answers a held
   `WaitReady` first, then the parked reads in order, all with `Closed`.
+- Byte 2 of a request other than `Release` is a mask of RX slots the client
+  returns. `netd` takes them back before it handles the request, as one
+  `Release` each would. `linuxsockd` returns the slot of the read it just
+  copied on the read it posts next, so a request and reply round costs
+  `netd` one message less per direction.
 
 `netd` serves a session's channel until its queue is empty before it waits
 again, so it takes a batch of writes and reads of one endpoint in one

@@ -89,13 +89,14 @@ func TestVersion3RequestRejects(t *testing.T) {
 		t.Fatal("forged layout encoded")
 	}
 
+	var decodedRelease Request
 	valid := Request{Opcode: OpWrite, Endpoint: 1, Slot: 2, Length: 100, Offset: 77}
 	for name, mutate := range map[string]func(*ipc.Message){
 		"version 2":    func(m *ipc.Message) { m.Version = Version },
 		"version 4":    func(m *ipc.Message) { m.Version = 4 },
 		"short":        func(m *ipc.Message) { m.PayloadSize = RequestSize },
 		"long":         func(m *ipc.Message) { m.PayloadSize = RequestSize3 + 1 },
-		"reserved 2":   func(m *ipc.Message) { m.Payload[2] = 1 },
+		"reserved 3":   func(m *ipc.Message) { m.Payload[3] = 1 },
 		"reserved 23":  func(m *ipc.Message) { m.Payload[23] = 1 },
 		"slot":         func(m *ipc.Message) { m.Payload[1] = TXSlots3 },
 		"length":       func(m *ipc.Message) { m.Payload[14], m.Payload[15] = 0x01, 0x40 },
@@ -108,6 +109,28 @@ func TestVersion3RequestRejects(t *testing.T) {
 		if _, ok := Layout3.DecodeRequest(&message, &decoded); ok {
 			t.Fatalf("accepted %s", name)
 		}
+	}
+	// A request carries the RX slots it returns; a GTCP 2 one cannot, and
+	// a Release names its slot in Slot.
+	carrying := Request{Opcode: OpRead, Endpoint: 1, Length: 100, Release: 0x81}
+	var carried ipc.Message
+	if !Layout3.EncodeRequest(&carrying, 5, &carried) {
+		t.Fatal("a read returning slots refused")
+	}
+	if _, ok := Layout3.DecodeRequest(&carried, &decodedRelease); !ok || decodedRelease != carrying {
+		t.Fatalf("returned slots %+v", decodedRelease)
+	}
+	if Layout2.EncodeRequest(&Request{Opcode: OpRead, Endpoint: 1, Length: 1, Release: 1}, 5, &carried) {
+		t.Fatal("GTCP 2 encoded returned slots")
+	}
+	if Layout3.EncodeRequest(&Request{Opcode: OpRelease, Slot: 1, Release: 1}, 0, &carried) {
+		t.Fatal("a Release that returns more slots encoded")
+	}
+	var legacy ipc.Message
+	EncodeRequest(&Request{Opcode: OpRead, Endpoint: 1, Length: 1}, 5, &legacy)
+	legacy.Payload[2] = 1
+	if _, ok := DecodeRequest(&legacy, &Request{}); ok {
+		t.Fatal("GTCP 2 decoded returned slots")
 	}
 	// A GTCP 2 request fails a GTCP 3 decoder.
 	var message ipc.Message

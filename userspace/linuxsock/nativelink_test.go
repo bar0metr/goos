@@ -304,3 +304,48 @@ func (h *harness) answerUDP(b *linkBackend, reply udpapi.Reply) {
 	}
 	h.t.Fatalf("no queued %v", reply.Opcode)
 }
+
+func TestReadPostedWhileHandlingAReadReturnsItsSlot(t *testing.T) {
+	link, channel := &NativeLink{}, &boundedChannel{capacity: 4}
+	link.Reset(TCP, 1, tcpapi.Layout3, make([]byte, tcpapi.Layout3.TXPool()), make([]byte, tcpapi.Layout3.RXPool()))
+	reply := tcpapi.Reply{Opcode: tcpapi.OpRead, Endpoint: 5, Slot: 2, Length: 3}
+	var message ipc.Message
+	if !tcpapi.Layout3.EncodeReply(&reply, 9, &message) {
+		t.Fatal("encode")
+	}
+	_, completion, ok := link.Decode(&message)
+	if !ok || len(completion.Data) != 3 {
+		t.Fatal("decode")
+	}
+	// The core copied the bytes and posts the next read.
+	if link.Submit(channel, 10, &NativeRequest{Op: NativeRead, Endpoint: 5, Length: NativeSlotSize}) != SubmitAccepted {
+		t.Fatal("read refused")
+	}
+	if completion.Data != nil {
+		t.Fatal("the completion kept bytes of a returned slot")
+	}
+	if link.Done(channel) != SendOK || link.WantsWritable() {
+		t.Fatal("done after the slot went back")
+	}
+	sent := tcpRequests(t, channel.queue)
+	if len(sent) != 1 || sent[0].Opcode != tcpapi.OpRead || sent[0].Release != 1<<2 {
+		t.Fatalf("sent %+v", sent)
+	}
+	// A refused submission keeps the slot for the writable retry.
+	if _, _, ok := link.Decode(&message); !ok {
+		t.Fatal("slot not reusable")
+	}
+	for range 3 {
+		channel.Send(&message)
+	}
+	if link.Submit(channel, 11, &NativeRequest{Op: NativeRead, Endpoint: 5, Length: NativeSlotSize}) != SubmitBusy || !link.WantsWritable() {
+		t.Fatal("a refused read lost the slot it returned")
+	}
+	channel.drainParked()
+	if link.Writable(channel, newHarness(t).svc) != SendOK {
+		t.Fatal("writable")
+	}
+	if sent := tcpRequests(t, channel.queue); len(sent) != 1 || sent[0].Opcode != tcpapi.OpRelease || sent[0].Slot != 2 {
+		t.Fatalf("retry sent %+v", sent)
+	}
+}

@@ -231,6 +231,9 @@ type Request struct {
 	Option   uint8
 	// Offset is a version 3 Write's stream offset; zero otherwise.
 	Offset uint32
+	// Release, in version 3, names RX slots the client returns before
+	// netd handles the request, as one Release each would; zero otherwise.
+	Release uint8
 }
 
 type Reply struct {
@@ -266,6 +269,9 @@ func allowedFlags(opcode Opcode) uint8 {
 func validRequest(l *Layout, r *Request) bool {
 	none := r.Address == noAddress && r.Port == 0
 	if r.Offset != 0 && (r.Opcode != OpWrite || !l.StreamOffsets()) {
+		return false
+	}
+	if r.Release != 0 && (!l.StreamOffsets() || r.Opcode == OpRelease || uint32(r.Release)>>l.RXSlots != 0) {
 		return false
 	}
 	if r.Flags&^allowedFlags(r.Opcode) != 0 || (r.Mask != 0 && r.Opcode != OpWaitReady) || (r.Option != 0) != (r.Opcode == OpOption) {
@@ -320,7 +326,7 @@ func (l Layout) EncodeRequest(r *Request, correlation uint64, out *ipc.Message) 
 		kind = ipc.KindNotification
 	}
 	prepare(out, l.Version, kind, correlation, l.RequestSize)
-	out.Payload[0], out.Payload[1] = byte(r.Opcode), r.Slot
+	out.Payload[0], out.Payload[1], out.Payload[2] = byte(r.Opcode), r.Slot, r.Release
 	binary.LittleEndian.PutUint32(out.Payload[4:8], r.Endpoint)
 	copy(out.Payload[8:12], r.Address[:])
 	binary.LittleEndian.PutUint16(out.Payload[12:14], r.Port)
@@ -336,12 +342,13 @@ func (l Layout) EncodeRequest(r *Request, correlation uint64, out *ipc.Message) 
 
 func (l Layout) DecodeRequest(in *ipc.Message, out *Request) (uint64, bool) {
 	if !l.known() || in.ProtocolID != ProtocolID || in.Version != l.Version || in.PayloadSize != l.RequestSize || in.HandleCount != 0 ||
-		!zero(in.Payload[2:4]) || !zero(in.Payload[21:24]) {
+		!zero(in.Payload[3:4]) || !zero(in.Payload[21:24]) {
 		return 0, false
 	}
 	r := Request{Opcode: Opcode(in.Payload[0]), Slot: in.Payload[1], Endpoint: binary.LittleEndian.Uint32(in.Payload[4:8]),
 		Port: binary.LittleEndian.Uint16(in.Payload[12:14]), Length: binary.LittleEndian.Uint16(in.Payload[14:16]),
-		Backlog: in.Payload[16], Flags: in.Payload[17], Mask: binary.LittleEndian.Uint16(in.Payload[18:20]), Option: in.Payload[20]}
+		Backlog: in.Payload[16], Flags: in.Payload[17], Mask: binary.LittleEndian.Uint16(in.Payload[18:20]), Option: in.Payload[20],
+		Release: in.Payload[2]}
 	copy(r.Address[:], in.Payload[8:12])
 	if l.StreamOffsets() {
 		r.Offset = binary.LittleEndian.Uint32(in.Payload[24:28])

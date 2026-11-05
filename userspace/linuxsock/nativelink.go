@@ -41,8 +41,10 @@ type NativeLink struct {
 	// for the channel to turn writable then, since requests that park in
 	// netd draw no reply that would wake it.
 	writeBlocked bool
-	// lastSlot is the RX slot of the completion Decode returned.
+	// lastSlot is the RX slot of the completion Decode returned; holding
+	// says netd lent it and it has not gone back yet.
 	lastSlot   uint8
+	holding    bool
 	out        ipc.Message
 	nativeIn   ipc.Message
 	completion NativeCompletion
@@ -72,8 +74,19 @@ func (l *NativeLink) send(ch NativeChannel, message *ipc.Message) SendStatus {
 }
 
 // Submit encodes and sends one request; it is Backend.Submit for this link.
+//
+// A GTCP 3 request carries the RX slots this side returns, so a read posted
+// right after the last one answered does not cost netd a Release message
+// first. The core copies a read's bytes before it submits anything while it
+// handles the read, so a submission during that handling returns the slot
+// too, and the completion's Data goes with it.
 func (l *NativeLink) Submit(ch NativeChannel, tag uint64, request *NativeRequest) SubmitStatus {
-	if l.Flush(ch) == SendGone {
+	carry := l.Proto == TCP && l.layout.StreamOffsets()
+	if carry && l.holding {
+		l.holding, l.completion.Data = false, nil
+		l.releases |= 1 << l.lastSlot
+	}
+	if !carry && l.Flush(ch) == SendGone {
 		return SubmitDown
 	}
 	slot, lent := uint8(0), false
@@ -99,6 +112,9 @@ func (l *NativeLink) Submit(ch NativeChannel, tag uint64, request *NativeRequest
 		if status := l.encodeTCP(request, slot, len(data)); status != SubmitAccepted {
 			return status
 		}
+		if carry {
+			l.tcpRequest.Release = l.releases
+		}
 		encoded = l.layout.EncodeRequest(&l.tcpRequest, tag, &l.out)
 	} else {
 		if status := l.encodeUDP(request, slot); status != SubmitAccepted {
@@ -116,6 +132,9 @@ func (l *NativeLink) Submit(ch NativeChannel, tag uint64, request *NativeRequest
 	default:
 		return SubmitBusy
 	}
+	if carry {
+		l.releases = 0
+	}
 	if lent {
 		l.txLent.Lend(slot)
 	}
@@ -124,7 +143,7 @@ func (l *NativeLink) Submit(ch NativeChannel, tag uint64, request *NativeRequest
 
 // Decode turns a reply from netd into a completion for the core. ok false
 // means netd broke the protocol. The completion's Data stays valid until
-// Done.
+// Done, or until a GTCP 3 Submit returns its slot.
 func (l *NativeLink) Decode(in *ipc.Message) (correlation uint64, completion *NativeCompletion, ok bool) {
 	l.nativeIn = *in
 	if l.Proto == TCP {
@@ -134,16 +153,17 @@ func (l *NativeLink) Decode(in *ipc.Message) (correlation uint64, completion *Na
 		correlation, ok = l.completeUDP()
 		l.lastSlot = l.udpReply.Slot
 	}
+	l.holding = ok && l.completion.Data != nil
 	return correlation, &l.completion, ok
 }
 
 // Done returns the RX slot of the last decoded completion, once the core
 // copied its bytes, now or when the queue has room.
 func (l *NativeLink) Done(ch NativeChannel) SendStatus {
-	if l.completion.Data == nil {
+	if !l.holding {
 		return SendOK
 	}
-	l.completion.Data = nil
+	l.holding, l.completion.Data = false, nil
 	l.releases |= 1 << l.lastSlot
 	return l.Flush(ch)
 }
