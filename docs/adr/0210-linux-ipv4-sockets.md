@@ -415,3 +415,46 @@ is full; the kernel failed a session when the service was preempted in the
 middle of rewriting a readiness entry; and a server that clients close
 first ran out of TIME_WAIT tombstones after about 128 connections a minute.
 
+
+The same bench on the tree at 6c4afbf, a release build at HZ 100, 250 and
+1000, two warm-up rounds and nine measured ones each (runs
+20261105T133427Z and the two after it), against the targets this work set
+and the medians at 1ccd4b0 before the fixes above:
+
+| Measurement | Target | 1ccd4b0, HZ 100 | HZ 100 | HZ 250 | HZ 1000 |
+| --- | --- | --- | --- | --- | --- |
+| TCP stream, 32 MiB | 258 MiB/s | 45.3 | 148 | 150 | 142 |
+| TCP one-byte request and reply | 178 us | 218 | 203 | 200 | 204 |
+| TCP connect, accept and close | 245 us | 774 | 796 | 761 | 779 |
+| UDP 64-byte request and reply | 144 us | 257 | 201 | 197 | 205 |
+| write to a `poll` waiter's return | 248 us | 188 | 191 | 139 | 136 |
+| host to guest stream | no regression | 0.52 | 29.6 | 29.8 | 29.7 |
+| guest to host stream | no regression | 27.2 | 29.1 | 29.8 | 29.9 |
+| native GTCP 3 stream | | 165 | 179 | 180 | 178 |
+| native GTCP 3 request and reply | | 104 us | 99 | 100 | 101 |
+| native GTCP 3 connect and close | | 642 us | 632 | 630 | 654 |
+| native GUDP request and reply | | 90 us | 85 | 84 | 84 |
+
+Only `poll` meets its target. The Linux numbers sit on top of the native
+ones, which already miss two targets: a native connect and close takes
+630 us against 245, and a native stream moves 179 MiB/s against 258. The
+diagnostic build's loop stages show `netd` busy for most of a request and
+reply round, about 30 us a request, most of it entering the kernel: a
+clock read alone costs about 3 us. A Linux round costs `netd` six requests
+and four replies where a native one costs two of each, and two more
+processes take part. Meeting the targets needs fewer crossings per byte
+and per round, such as a data path from the kernel to `netd` without
+`linuxsockd` or a cheaper kernel entry, which this work does not change.
+
+Five metrics differ by more than 10% across HZ. `poll` measures from a
+writer that sleeps 2 ms first, so its clock starts at a tick, together with
+the tick's own work: 191 us at HZ 100, 136 at 1000. Native open, accept and
+close-server time 30 operations a round, and their medians move by 6 to
+20 us between runs at any one HZ as well; no other metric moves with HZ.
+At HZ 1000 a connect costs 2 to 4% more, which ten times the timer
+interrupts explain.
+
+A native accept once went unanswered, in round 3 at HZ 250 of an earlier
+run of the same tree, after the stream phase of `netbench`; the connect
+it waited for had finished. It did not recur in 66 later rounds or in 25
+runs under QEMU. The bench now takes `net endpoints` when a step fails.
