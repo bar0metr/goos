@@ -868,16 +868,10 @@ CA-1083	goos/userspace/cmd/linuxsockd	message	process	owned	none
 CA-1084	goos/userspace/cmd/linuxsockd	reply	process	owned	none
 CA-1085	goos/userspace/cmd/linuxsockd	control	process	owned	none
 CA-1086	goos/userspace/cmd/linuxsockd	controlReply	process	owned	none
-CA-1087	goos/userspace/cmd/linuxsockd	tcpBits	process	immutable	none
+CA-1087	goos/userspace/linuxsock	tcpBits	process	immutable	none
 CA-1088	goos/userspace/cmd/linuxsockd	links	process	owned	none
 CA-1089	goos/userspace/cmd/linuxsockd	nativeWire	process	owned	none
-CA-1090	goos/userspace/cmd/linuxsockd	nativeOut	process	owned	none
 CA-1091	goos/userspace/cmd/linuxsockd	nativeIn	process	owned	none
-CA-1092	goos/userspace/cmd/linuxsockd	completion	process	owned	none
-CA-1093	goos/userspace/cmd/linuxsockd	tcpRequest	process	owned	none
-CA-1094	goos/userspace/cmd/linuxsockd	tcpReply	process	owned	none
-CA-1095	goos/userspace/cmd/linuxsockd	udpRequest	process	owned	none
-CA-1096	goos/userspace/cmd/linuxsockd	udpReply	process	owned	none
 CA-1097	goos/userspace/cmd/resolved	stub	process	owned	none
 CA-1098	goos/userspace/dnsstub	Address	process	immutable	none
 CA-1099	goos/userspace/linux	netprobe	process	immutable	none

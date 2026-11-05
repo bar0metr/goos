@@ -74,6 +74,14 @@ func FuzzService(f *testing.F) {
 				h.transport.full[family] = !h.transport.full[family]
 			}
 			h.svc.Flush(family)
+			if !h.backend.busy && h.svc.ProgressHoles() != 0 {
+				for i := range h.svc.sockets {
+					if sk := &h.svc.sockets[i]; sk.used && sk.txBlocked {
+						t.Logf("socket %+v", *sk)
+					}
+				}
+				t.Fatal("a blocked stream lost every source of progress")
+			}
 		}
 		h.svc.RemoveFamily(family)
 		// netd answers whatever is still parked.

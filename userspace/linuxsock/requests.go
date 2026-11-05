@@ -793,17 +793,27 @@ func (s *Service) answerReady(o *op, sock *socket) {
 
 // refreshReadable asks netd for a stream's mask and readable count, after
 // reads used up the count or a write found the send buffer full.
+//
+// The request never disappears: one asked while another is out goes again
+// once that answers, since its answer may predate the reason, and one that
+// finds no free operation stays wanted for the pump.
 func (s *Service) refreshReadable(global int) {
 	sock := &s.sockets[global]
-	if sock.refreshing || sock.dead || sock.endpoint == 0 {
+	if !sock.used || sock.dead || sock.endpoint == 0 {
+		sock.needRefresh = false
+		return
+	}
+	sock.needRefresh = true
+	if sock.refreshing {
 		return
 	}
 	o := s.newOp(int(sock.family), kindRefresh)
 	if o == nil {
+		s.retryInternal = true
 		return
 	}
 	o.socket, o.socketSerial = int16(global), sock.serial
-	sock.refreshing = true
+	sock.refreshing, sock.needRefresh = true, false
 	s.step(o)
 }
 
@@ -821,24 +831,31 @@ func (s *Service) doneRefresh(o *op, c *NativeCompletion) {
 	sock := s.socketOf(o)
 	global := int(o.socket)
 	s.freeOp(o)
-	if sock == nil || c.Result != NativeOK {
+	if sock == nil {
 		return
 	}
-	s.observe(global, c.Mask, c.Readable)
+	if c.Result == NativeOK {
+		s.observe(global, c.Mask, c.Readable)
+	}
+	if sock.needRefresh {
+		s.refreshReadable(global)
+	}
 }
 
 // fetchError reads netd's pending error into the socket.
 func (s *Service) fetchError(global int) {
 	sock := &s.sockets[global]
 	if sock.fetching || sock.dead || sock.endpoint == 0 || !sock.stream {
+		sock.needFetch = false
 		return
 	}
 	o := s.newOp(int(sock.family), kindError)
 	if o == nil {
+		sock.needFetch, s.retryInternal = true, true
 		return
 	}
 	o.socket, o.socketSerial = int16(global), sock.serial
-	sock.fetching = true
+	sock.fetching, sock.needFetch = true, false
 	s.step(o)
 }
 

@@ -89,6 +89,10 @@ type socket struct {
 	// txDropped: an error dropped the queue while writes were in netd; the
 	// slots they carry go back as they answer.
 	txDropped bool
+	// needRefresh, needFetch: a readiness refresh or an error fetch is still
+	// owed and goes out once an operation is free or the one out answered.
+	needRefresh bool
+	needFetch   bool
 	// shutQueued: SHUT_WR waits for the TX queue to drain into netd.
 	shutQueued bool
 	// Children a listener accepted ahead, oldest first, and its accepts
@@ -140,13 +144,16 @@ type socket struct {
 	id         uint64
 	pending    linuxsockapi.Result
 	mask       NativeMask
-	readable   uint32
-	local      [4]byte
-	peer       [4]byte
-	localPort  uint16
-	peerPort   uint16
-	backlog    uint32
-	published  linuxsockapi.Readiness
+	// armedMask is the mask the held wait names; netd answers when the
+	// endpoint's differs from it.
+	armedMask NativeMask
+	readable  uint32
+	local     [4]byte
+	peer      [4]byte
+	localPort uint16
+	peerPort  uint16
+	backlog   uint32
+	published linuxsockapi.Readiness
 }
 
 type family struct {
@@ -281,10 +288,12 @@ type Service struct {
 	serial    uint32
 	// Work the pump retries; zero skips the scan.
 	submits, waits, closing, kicks int
-	counters                       linuxsockapi.Counters
-	message                        ipc.Message
-	request                        linuxsockapi.Request
-	native                         NativeRequest
+	// retryInternal: a refresh or an error fetch found no free operation.
+	retryInternal bool
+	counters      linuxsockapi.Counters
+	message       ipc.Message
+	request       linuxsockapi.Request
+	native        NativeRequest
 }
 
 func (s *Service) Init(backend Backend, transport Transport) {
@@ -963,6 +972,18 @@ func (s *Service) pump() {
 				}
 			}
 		}
+		if s.retryInternal {
+			s.retryInternal = false
+			for i := range s.sockets {
+				sock := &s.sockets[i]
+				if sock.needRefresh && !sock.refreshing {
+					s.refreshReadable(i)
+				}
+				if sock.needFetch && !sock.fetching {
+					s.fetchError(i)
+				}
+			}
+		}
 		kicked := false
 		if s.kicks != 0 {
 			before := s.kicks
@@ -986,6 +1007,38 @@ func (s *Service) pump() {
 		}
 		progress = progress || kicked
 	}
+}
+
+// BackendWritable tells the core that proto's queue to netd has room again:
+// everything that found it full goes now. A request that parks in netd
+// draws no reply, so this is the only event that retries what waited for
+// room behind such requests.
+func (s *Service) BackendWritable(proto Proto) {
+	if proto == TCP || proto == UDP {
+		s.pump()
+	}
+}
+
+// ProgressHoles counts live sockets that wait for netd's send buffer with
+// nothing registered that would tell them it has room: no held wait, no
+// wait to send again, no refresh out or owed. It is zero unless the core
+// lost track of a socket; validation builds check it after every event.
+func (s *Service) ProgressHoles() int {
+	holes := 0
+	for i := range s.sockets {
+		sock := &s.sockets[i]
+		if !sock.used || sock.opening || sock.dead || !sock.txBlocked || sock.txqLen == 0 {
+			continue
+		}
+		// A held wait that named Writable answers only when netd's mask
+		// loses it, so it does not count for a socket waiting to see it.
+		if sock.waiting && sock.armedMask&MaskWritable == 0 || sock.needWait || sock.noWait || sock.refreshing ||
+			sock.needRefresh || sock.txDropped {
+			continue
+		}
+		holes++
+	}
+	return holes
 }
 
 // Status fills a GLNXCTL1 Status reply.

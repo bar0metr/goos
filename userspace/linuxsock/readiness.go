@@ -140,7 +140,7 @@ func (s *Service) arm(global int) {
 	s.native = NativeRequest{Op: NativeWaitReady, Endpoint: sock.endpoint, Mask: sock.mask}
 	switch s.backend.Submit(sock.proto, makeTag(tagWait, global, sock.serial), &s.native) {
 	case SubmitAccepted:
-		sock.waiting = true
+		sock.waiting, sock.armedMask = true, sock.mask
 	case SubmitBusy:
 		sock.needWait = true
 		s.waits++
@@ -156,10 +156,18 @@ func (s *Service) waited(global int, serial uint32, c *NativeCompletion) {
 		return
 	}
 	sock.waiting = false
-	if c.Result != NativeOK {
-		if c.Result != NativeClosed {
-			s.counters.NativeFailures++
-		}
+	switch c.Result {
+	case NativeOK:
+	case NativeBusy:
+		// Another wait is held; hold this one again later.
+		sock.needWait = true
+		s.waits++
+		return
+	default:
+		// netd no longer knows the endpoint: without a wait the socket
+		// would never learn its readiness again, so it fails.
+		s.counters.NativeFailures++
+		s.failSocket(global, c.Result)
 		return
 	}
 	s.observe(global, c.Mask, c.Readable)
@@ -188,4 +196,29 @@ func (s *Service) observe(global int, mask NativeMask, readable uint32) {
 	}
 	s.publish(global)
 	s.kick(global)
+}
+
+// failSocket ends a socket whose native endpoint broke: its pending error
+// says why, readiness reports every condition, and the endpoint closes.
+func (s *Service) failSocket(global int, result NativeResult) {
+	sock := &s.sockets[global]
+	if !sock.used || sock.dead {
+		return
+	}
+	if sock.pending == linuxsockapi.ResultOK {
+		sock.pending = nativeResult(result)
+		if sock.pending == linuxsockapi.ResultOK {
+			sock.pending = linuxsockapi.ResultReset
+		}
+	}
+	if sock.endpoint != 0 {
+		s.queueClose(sock.proto, sock.generation, sock.endpoint)
+	}
+	sock.dead, sock.endpoint = true, 0
+	if sock.needWait {
+		sock.needWait = false
+		s.waits--
+	}
+	s.dropTX(global)
+	s.publish(global)
 }

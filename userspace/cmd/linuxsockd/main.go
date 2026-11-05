@@ -105,6 +105,9 @@ func serve() {
 				serviceFamily(owner)
 			}
 		}
+		if validation.Enabled && core.ProgressHoles() != 0 {
+			fatal("LINUXSOCKD_PROGRESS_HOLE\n")
+		}
 	}
 }
 
@@ -119,6 +122,9 @@ func buildInterests() int {
 	for _, proto := range [...]linuxsock.Proto{linuxsock.TCP, linuxsock.UDP} {
 		if links[proto].channel != 0 {
 			interests[count] = sys.Interest{Handle: links[proto].channel, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+			if links[proto].wantsWritable() {
+				interests[count].Events |= kcall.WaitWritable
+			}
 			interestOwner[count] = ownerTCP
 			if proto == linuxsock.UDP {
 				interestOwner[count] = ownerUDP
