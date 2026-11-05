@@ -332,6 +332,32 @@ static libc resolves names with ordinary socket traffic.
   instead of wrapping.
 - `netd` takes at most eight requests of one session per pass of its event
   loop and delivers what they made ready before the next batch.
+- A pure ACK or window update that finds `netd`'s eight-frame transmit
+  queue full is marked and goes on the next pass with a free frame. It was
+  dropped before: a host streaming to a guest program saw a zero window,
+  waited out its 204 ms retransmit timer 282 times in 32 MiB, and moved
+  0.52 MiB/s. It now moves 31 MiB/s with no retransmission.
+- A segment advertises a window whose right edge moves only by a segment or
+  half the receive buffer (RFC 1122 4.2.3.3); an ACK that offered each few
+  hundred bytes a reader freed let a sender cut the stream that small.
+- A Linux `read` whose buffer reached a page of the program's image not yet
+  loaded returned the bytes up to that page and left it out, so every later
+  read through the buffer stopped there too. The first stream of each new
+  program read 512 to 1023 bytes a call, 38,000 calls for 32 MiB, and ran at
+  a third of the rate of the streams after it. The call now fails before
+  any effect, the dispatcher loads the page, and the call runs again, as
+  `rangeLimit` already did for sockets.
+- A GTCP 3 or GUDP request names, in a byte that was reserved, the RX slots
+  its sender returns, and `netd` takes them back before it handles the
+  request. `linuxsockd` returns the slot of the read it just copied on the
+  read it posts next, which saves `netd` a `Release` message per direction
+  of a request and reply round. A GUDP `RecvFrom` reply carries the
+  endpoint's readiness after the datagram, so `linuxsockd` no longer asks
+  `Ready` for the next datagram's length after each one.
+- `netd` reads the clock once per pass of its loop, after the wait, and the
+  requests and frames of the pass share that time; it read the clock once
+  per message before. The stack's TCP scans walk a mark per slot in use: a
+  slot holds two 16 KiB rings, and the scans read the state of all 96.
 
 ## Validation
 
