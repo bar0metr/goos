@@ -471,8 +471,9 @@ if wants stress; then
 	iteration=1
 	while [ "$iteration" -le "$count" ]; do
 		elapsed=0
-		until serial | tail -n "+$((start + 1))" | grep -q "^stress $iteration ok\$"; do
-			if serial | tail -n "+$((start + 1))" | grep -q "^stress $iteration failed\$\|$fatal" || [ "$elapsed" -ge $((stress_timeout * 10)) ]; then
+		# A line may follow the prompt's escape sequence, so no ^ anchor.
+		until serial | tail -n "+$((start + 1))" | grep -q "stress $iteration ok\$"; do
+			if serial | tail -n "+$((start + 1))" | grep -q "stress $iteration failed\$\|$fatal" || [ "$elapsed" -ge $((stress_timeout * 10)) ]; then
 				run diag
 				cp "$work/output" build/logs/linux-stream-stress-diag.log
 				sleep 5
