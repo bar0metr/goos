@@ -90,27 +90,21 @@ func TestGTCP1OpenStackExhaustionRepliesBusy(t *testing.T) {
 	stack := new(network.Stack)
 	stack.Init(1234)
 	now := uint64(1_000_000_000)
-	// One session at the largest quota and ordinary ones fill the table;
-	// one more ordinary session finds it full.
-	ordinary := (network.MaxTCPEndpoints - network.MaxTCPSessionQuota) / network.MaxTCPEndpointsPerSession
-	sessions := make([]Session, 1+ordinary+1)
+	// Sessions at the largest quota fill the stack's endpoint limit; one
+	// more session finds it full.
+	limit := int(stack.Tuning().TCP.MaxEndpoints)
+	sessions := make([]Session, limit/network.MaxTCPSessionQuota+1)
 	out := new(codec)
 	for index := range sessions {
-		quota := 0
-		if index == 0 {
-			quota = network.MaxTCPSessionQuota
-		}
+		quota := network.MaxTCPSessionQuota
 		if !sessions[index].StartQuota(stack, index, quota, make([]byte, tcpapi.TXSlots*tcpapi.SlotSize), make([]byte, tcpapi.RXSlots*tcpapi.SlotSize), now) {
 			t.Fatalf("start %d", index)
 		}
 	}
 	correlation := uint64(0)
-	for index := range network.MaxTCPEndpoints {
+	for index := range limit {
 		correlation++
-		session := &sessions[0]
-		if index >= network.MaxTCPSessionQuota {
-			session = &sessions[1+(index-network.MaxTCPSessionQuota)/network.MaxTCPEndpointsPerSession]
-		}
+		session := &sessions[index/network.MaxTCPSessionQuota]
 		if reply := out.call(t, stack, session, tcpapi.Request{Opcode: tcpapi.OpOpen}, correlation, now, out); reply.Result != tcpapi.ResultOK {
 			t.Fatalf("open %d %+v", index, reply)
 		}

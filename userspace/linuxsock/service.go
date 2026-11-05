@@ -51,9 +51,10 @@ const (
 	// socket, a pending-error fetch and a readable-count refresh, and the
 	// data plane's.
 	MaxOps = MaxFamilies*FamilyOps + 2*MaxSockets + dataOps + warmOps + acceptOps
-	// MaxBacklog is the native listen backlog limit; Linux backlogs are
-	// clamped to it.
-	MaxBacklog = 8
+	// MaxBacklog is the native listen backlog limit, the stack's default
+	// listen-backlog; Linux backlogs are clamped to it, and the stack
+	// clamps again to the tuned value.
+	MaxBacklog = 128
 	// closeSlots holds native closes waiting for room on their session: at
 	// most every endpoint of both protocols.
 	closeSlots = 2 * MaxSockets

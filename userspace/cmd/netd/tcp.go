@@ -101,8 +101,14 @@ func flushTCPReplies(current *tcpSession) bool {
 	return true
 }
 
+// tcpSessionSlots is how many TCP sessions netd serves: the WaitAny room
+// the driver, the control channel and the command and UDP sessions leave,
+// at most the stack's owners. The stack has room for more owners than one
+// WaitAny can watch.
+const tcpSessionSlots = min(network.MaxTCPSessions, kcall.WaitAnyMaxObjects-2-network.MaxSessions-network.MaxUDPSessions)
+
 var (
-	tcpSessions [network.MaxTCPSessions]tcpSession
+	tcpSessions [tcpSessionSlots]tcpSession
 	tcpIn       tcpapi.Request
 	// gtcpMessages counts requests decoded and replies sent: GTCP 2, then 3.
 	gtcpMessages [2][2]uint64
