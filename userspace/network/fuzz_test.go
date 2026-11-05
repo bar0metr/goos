@@ -186,6 +186,12 @@ func FuzzParseTCP(f *testing.F) {
 	length := putTCP(seed[:], source, destination, tcpSegment{sourcePort: 1234, destinationPort: 80,
 		sequence: 7, flags: tcpFlagSYN, window: 4096, mss: 1200})
 	f.Add(seed[:length], true)
+	length = putTCP(seed[:], source, destination, tcpSegment{sourcePort: 1234, destinationPort: 80,
+		sequence: 7, flags: tcpFlagSYN, window: 4096, mss: 1200, wscaleOK: true, wscale: 9})
+	f.Add(seed[:length], true)
+	scaled := append([]byte(nil), seed[:length]...)
+	scaled[27] = 255
+	f.Add(scaled, true)
 	f.Add([]byte{0, 1, 0, 2}, false)
 	f.Fuzz(func(t *testing.T, data []byte, fixChecksum bool) {
 		if len(data) > MTU-ipv4HeaderSize {
@@ -205,6 +211,18 @@ func FuzzParseTCP(f *testing.F) {
 		if segment.sourcePort == 0 || segment.destinationPort == 0 || headerLength < tcpHeaderSize ||
 			headerLength > len(data) || len(segment.payload) != len(data)-headerLength {
 			t.Fatalf("invalid TCP segment accepted: %+v", segment)
+		}
+		if segment.wscale > tcpMaxWindowScale || (!segment.wscaleOK && segment.wscale != 0) {
+			t.Fatalf("window scale %v %d", segment.wscaleOK, segment.wscale)
+		}
+		if segment.flags&tcpFlagSYN != 0 && len(segment.payload) == 0 {
+			// The options putTCP writes parse back to the same values.
+			var out [64]byte
+			again, status := parseTCP(ipv4Packet{source: source, destination: destination, protocol: protocolTCP,
+				payload: out[:putTCP(out[:], source, destination, segment)]})
+			if status != tcpOK || again.mss != segment.mss || again.wscaleOK != segment.wscaleOK || again.wscale != segment.wscale {
+				t.Fatalf("round trip %+v -> %+v", segment, again)
+			}
 		}
 	})
 }
