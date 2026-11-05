@@ -104,12 +104,12 @@ type tcpEndpoint struct {
 	rcvEdge uint32
 	// rcvEdgeKnown: an ACK has advertised rcvEdge.
 	rcvEdgeKnown bool
-	sendLen  uint16
-	sendSent uint16
-	receive  [TCPReceiveCapacity]byte
-	recvHead uint16
-	recvLen  uint16
-	reorder  [MaxTCPOutOfOrderSegments]tcpReorder
+	sendLen      uint16
+	sendSent     uint16
+	receive      [TCPReceiveCapacity]byte
+	recvHead     uint16
+	recvLen      uint16
+	reorder      [MaxTCPOutOfOrderSegments]tcpReorder
 
 	shutdownWrite bool
 	orphan        bool
