@@ -352,8 +352,10 @@ func TestTCPLoopbackLongTransfer(t *testing.T) {
 		}
 		h.advance(second)
 	}
-	if h.stack.tcpStats.SplitSegments == 0 {
-		t.Fatal("no segment crossed the end of a send ring")
+	// A local peer takes each segment whole, so none is split: segments
+	// stop at the end of the ring and the rest follows in the next one.
+	if h.stack.tcpStats.SplitSegments != 0 || h.stack.tcpStats.LocalSegments == 0 {
+		t.Fatalf("split %d local %d", h.stack.tcpStats.SplitSegments, h.stack.tcpStats.LocalSegments)
 	}
 	for index := range sides {
 		if result := h.stack.TCPShutdownWrite(sides[index].owner, sides[index].id, h.now); result != ResultOK {
@@ -366,4 +368,101 @@ func TestTCPLoopbackLongTransfer(t *testing.T) {
 		}
 	}
 	t.Logf("split segments %d, retransmits %d", h.stack.tcpStats.SplitSegments, h.stack.tcpStats.Retransmits)
+}
+
+// localScenario runs one loopback connection through a handshake, streams
+// of odd sizes both ways that wrap both rings, a half close each way and
+// TIME_WAIT, and returns the stack's endpoint and tombstone tables.
+func localScenario(t *testing.T, wire bool) ([len(Stack{}.tcp)]tcpEndpoint, TCPStats) {
+	h := newHarness(t)
+	if wire {
+		h.stack.localWire = make([]byte, 1<<17)
+	}
+	listener, _ := h.stack.TCPOpen(0)
+	h.stack.TCPBind(0, listener, LoopbackAddress, 8091)
+	h.stack.TCPListen(0, listener, 1)
+	client, _ := h.stack.TCPOpen(1)
+	if _, result := h.stack.TCPConnect(1, client, LoopbackAddress, 8091, h.now); result != ResultOK {
+		t.Fatal(result)
+	}
+	server, _, result := h.stack.TCPAccept(0, listener)
+	if result != ResultOK {
+		t.Fatal(result)
+	}
+	source := pattern(0, 1<<20)
+	buffer := make([]byte, 20000)
+	sizes := []int{1, 16384, 333, 9001, 5000, 16000}
+	moved := 0
+	for round := 0; moved < 600000; round++ {
+		size := sizes[round%len(sizes)]
+		n, _ := h.stack.TCPWrite(1, client, source[moved:moved+size], h.now)
+		back, _ := h.stack.TCPWrite(0, server, source[:round%7+1], h.now)
+		h.stack.TCPRead(0, server, buffer[:sizes[(round+1)%len(sizes)]], h.now)
+		h.stack.TCPRead(1, client, buffer[:back+3], h.now)
+		moved += n
+		h.advance(1_000_000)
+	}
+	h.stack.TCPShutdownWrite(1, client, h.now)
+	h.stack.TCPShutdownWrite(0, server, h.now)
+	for range 4 {
+		h.stack.TCPRead(0, server, buffer, h.now)
+		h.stack.TCPRead(1, client, buffer, h.now)
+		h.advance(1_000_000)
+	}
+	h.stack.TCPClose(1, client, h.now)
+	h.stack.TCPClose(0, server, h.now)
+	return h.stack.tcp, h.stack.tcpStats
+}
+
+// TestLocalSegmentsMatchParsedOnes runs the same connection with local
+// segments handed over and with each one built as a packet and parsed: the
+// endpoints end in exactly the same state.
+func TestLocalSegmentsMatchParsedOnes(t *testing.T) {
+	logical, logicalStats := localScenario(t, false)
+	parsed, parsedStats := localScenario(t, true)
+	for index := range logical {
+		if logical[index] != parsed[index] {
+			t.Fatalf("endpoint %d differs:\nlogical %+v\nparsed  %+v", index, logical[index], parsed[index])
+		}
+	}
+	if logicalStats.LocalSegments == 0 || parsedStats.LocalSegments != 0 || logicalStats.TX != parsedStats.TX || logicalStats.RX != parsedStats.RX {
+		t.Fatalf("stats logical %+v parsed %+v", logicalStats, parsedStats)
+	}
+}
+
+// TestLocalSegmentCarriesWholeSlot sends one 16 KiB write to a loopback peer
+// as one segment.
+func TestLocalSegmentCarriesWholeSlot(t *testing.T) {
+	h := newHarness(t)
+	listener, _ := h.stack.TCPOpen(0)
+	h.stack.TCPBind(0, listener, LoopbackAddress, 8092)
+	h.stack.TCPListen(0, listener, 1)
+	client, _ := h.stack.TCPOpen(1)
+	h.stack.TCPConnect(1, client, LoopbackAddress, 8092, h.now)
+	server, _, _ := h.stack.TCPAccept(0, listener)
+	before := h.stack.tcpStats.LocalSegments
+	data := pattern(0, TCPSendCapacity)
+	if n, result := h.stack.TCPWrite(1, client, data, h.now); result != ResultOK || n != len(data) {
+		t.Fatalf("write %d %d", n, result)
+	}
+	// One data segment and one ACK.
+	if sent := h.stack.tcpStats.LocalSegments - before; sent != 2 {
+		t.Fatalf("%d local segments for one 16 KiB write", sent)
+	}
+	buffer := make([]byte, TCPReceiveCapacity)
+	if n, _ := h.stack.TCPRead(0, server, buffer, h.now); n != len(data) || !bytes.Equal(buffer[:n], data) {
+		t.Fatalf("read %d", n)
+	}
+	// More than a segment: still in order.
+	big := pattern(5, 3*TCPSendCapacity)
+	got := 0
+	for sent := 0; got < len(big); {
+		n, _ := h.stack.TCPWrite(1, client, big[sent:], h.now)
+		sent += n
+		m, _ := h.stack.TCPRead(0, server, buffer, h.now)
+		if !bytes.Equal(buffer[:m], big[got:got+m]) {
+			t.Fatalf("stream differs at %d", got)
+		}
+		got += m
+	}
 }

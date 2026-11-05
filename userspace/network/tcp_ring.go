@@ -50,11 +50,29 @@ func (entry *tcpEndpoint) sendSpan(offset, length int) ([]byte, []byte) {
 
 // sendTCPData sends the send-ring bytes from offset bytes after sendSeq. A
 // segment that wraps past the end of the ring leaves in two parts, and putTCP
-// joins them in the outgoing packet buffer.
+// joins them in the outgoing packet buffer. A local peer takes the segment
+// without a packet, so its senders stop each segment at the end of the ring
+// (sendContiguous) and a wrapped one never reaches it.
 func (stack *Stack) sendTCPData(entry *tcpEndpoint, flags uint8, sequence uint32, offset, length int, now uint64) bool {
 	first, second := entry.sendSpan(offset, length)
 	if len(second) != 0 {
 		increment(&stack.tcpStats.SplitSegments)
 	}
 	return stack.sendTCPParts(entry, flags, sequence, entry.rcvNxt, first, second, now)
+}
+
+// sendContiguous is how many stored bytes from offset bytes after sendSeq
+// lie before the end of the send ring.
+func (entry *tcpEndpoint) sendContiguous(offset int) int {
+	start := int(entry.sendHead) + offset
+	if start >= len(entry.send) {
+		start -= len(entry.send)
+	}
+	return len(entry.send) - start
+}
+
+// tcpLocal reports whether an endpoint's peer is in this stack.
+func (stack *Stack) tcpLocal(entry *tcpEndpoint) bool {
+	route, result := stack.udpRoute(entry.local, entry.remote)
+	return result == ResultOK && route.path == udpLocal
 }

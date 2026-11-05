@@ -176,7 +176,7 @@ func serviceUDP(index int) {
 		closeUDPSession(index, "")
 		return
 	}
-	for current.channel != 0 {
+	for budget := sessionBudget; current.channel != 0 && budget > 0; budget-- {
 		status := receiveOn(current.channel)
 		if status == kcall.StatusNotFound {
 			return

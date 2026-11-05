@@ -31,6 +31,10 @@ type tcpSession struct {
 	heldCount int
 }
 
+// sessionBudget bounds the requests of one TCP or UDP session a pass of the
+// event loop takes.
+const sessionBudget = 8
+
 // tcpHeldReplies bounds the replies one session may have waiting for room
 // in its queue: a client with every parked request of a full quota answered
 // at once, as a burst of readiness changes does.
@@ -186,7 +190,11 @@ func serviceTCP(index int) {
 		closeTCPSession(index, "")
 		return
 	}
-	for current.channel != 0 {
+	// A pass takes at most sessionBudget requests; the event loop then
+	// delivers what they made ready before the next batch, so a client that
+	// keeps its queue full cannot hold back the answers parked requests wait
+	// for.
+	for budget := sessionBudget; current.channel != 0 && budget > 0; budget-- {
 		status := receiveOn(current.channel)
 		if status == kcall.StatusNotFound {
 			return
@@ -230,6 +238,12 @@ func deliverTCP(now uint64) {
 // dumpTCP logs every TCP endpoint's transport state and every session's
 // held replies and parked requests, for a stuck connection's diagnosis.
 func dumpTCP() {
+	stats := stack.TCPStats()
+	syslog.Info("tcp counters", syslog.Uint("rx", stats.RX), syslog.Uint("tx", stats.TX),
+		syslog.Uint("local-segments", stats.LocalSegments), syslog.Uint("split-segments", stats.SplitSegments),
+		syslog.Uint("match-probes", stats.MatchProbes), syslog.Uint("listener-probes", stats.ListenerProbes),
+		syslog.Uint("retransmits", stats.Retransmits), syslog.Uint("gtcp3-requests", gtcpMessages[1][0]),
+		syslog.Uint("gtcp3-replies", gtcpMessages[1][1]))
 	for index := 0; index < stack.TCPEndpointCount(); index++ {
 		e, live := stack.TCPEndpointAt(index)
 		if !live {

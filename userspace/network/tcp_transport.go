@@ -10,6 +10,12 @@ func (stack *Stack) receiveTCP(packet ipv4Packet, now uint64) {
 		increment(&stack.tcpStats.DropChecksum)
 		return
 	}
+	stack.receiveSegment(packet, segment, now)
+}
+
+// receiveSegment runs one parsed segment, or one a local sender handed over
+// whole, through the state machine. packet carries the addresses only.
+func (stack *Stack) receiveSegment(packet ipv4Packet, segment tcpSegment, now uint64) {
 	increment(&stack.tcpStats.RX)
 	entry := stack.tcpMatch(packet.destination, segment.destinationPort, packet.source, segment.sourcePort)
 	if entry == nil {
@@ -34,13 +40,16 @@ func (stack *Stack) tcpMatch(local IPv4, localPort uint16, remote IPv4, remotePo
 		entry := &stack.tcp[index]
 		if entry.state >= TCPSynSent && entry.local == local && entry.port == localPort &&
 			entry.remote == remote && entry.remotePort == remotePort {
+			stack.tcpStats.MatchProbes += uint64(index + 1)
 			return entry
 		}
 	}
+	stack.tcpStats.MatchProbes += uint64(len(stack.tcp))
 	return nil
 }
 
 func (stack *Stack) tcpListener(local IPv4, port uint16) *tcpEndpoint {
+	stack.tcpStats.ListenerProbes += uint64(len(stack.tcp))
 	var wildcard *tcpEndpoint
 	for index := range stack.tcp[:] {
 		entry := &stack.tcp[index]
@@ -515,6 +524,7 @@ func (stack *Stack) pumpTCP(entry *tcpEndpoint, now uint64) {
 	if entry.state != TCPEstablished && entry.state != TCPCloseWait {
 		return
 	}
+	local := stack.tcpLocal(entry)
 	for entry.sendSent < entry.sendLen {
 		flight := entry.sndNxt - entry.sndUna
 		limit := min(entry.peerWindow, entry.cwnd)
@@ -522,6 +532,9 @@ func (stack *Stack) pumpTCP(entry *tcpEndpoint, now uint64) {
 			break
 		}
 		length := min(int(entry.sendLen-entry.sendSent), int(tcpSMSS(entry)), int(limit-flight))
+		if local {
+			length = min(length, entry.sendContiguous(int(entry.sendSent)))
+		}
 		if length <= 0 {
 			break
 		}
@@ -577,6 +590,9 @@ func (stack *Stack) retransmitTCP(entry *tcpEndpoint, now uint64) {
 	default:
 		if entry.sendSent != 0 {
 			length := min(int(entry.sendSent), int(tcpSMSS(entry)))
+			if stack.tcpLocal(entry) {
+				length = min(length, entry.sendContiguous(0))
+			}
 			sent = stack.sendTCPData(entry, tcpFlagACK|tcpFlagPSH, entry.sendSeq, 0, length, now)
 		} else if entry.finSent && entry.sndUna == entry.finSequence {
 			sent = stack.sendTCP(entry, tcpFlagFIN|tcpFlagACK, entry.finSequence, entry.rcvNxt, nil, now)
@@ -623,11 +639,27 @@ func (stack *Stack) sendTCPParts(entry *tcpEndpoint, flags uint8, sequence, ackn
 		acknowledgment: acknowledgment, flags: flags, window: uint16(min(stack.tcpAdvertisedWindow(entry), 65535)),
 		mss: entry.localMSS, payload: payload, tail: tail}
 	if route.path == udpLocal {
-		var bytes [MTU]byte
-		length := putTCP(bytes[:], entry.local, entry.remote, segment)
-		packet := ipv4Packet{source: entry.local, destination: entry.remote, protocol: protocolTCP, payload: bytes[:length]}
-		stack.receiveTCP(packet, now)
+		// No wire lies between the two ends: the segment goes to the same
+		// receive state machine as a parsed one, without a header or a
+		// checksum to build and check. A segment whose payload wraps the
+		// send ring never comes here; sendTCPData splits it.
+		if len(tail) != 0 {
+			return false
+		}
+		if stack.localWire != nil {
+			// Tests compare the logical path against the parsed one.
+			length := putTCP(stack.localWire, entry.local, entry.remote, segment)
+			stack.receiveTCP(ipv4Packet{source: entry.local, destination: entry.remote, protocol: protocolTCP, payload: stack.localWire[:length]}, now)
+			increment(&stack.tcpStats.TX)
+			return true
+		}
+		if flags&tcpFlagSYN == 0 {
+			segment.mss = tcpDefaultMSS
+		}
+		packet := ipv4Packet{source: entry.local, destination: entry.remote, protocol: protocolTCP}
 		increment(&stack.tcpStats.TX)
+		increment(&stack.tcpStats.LocalSegments)
+		stack.receiveSegment(packet, segment, now)
 		return true
 	}
 	mac, known := stack.lookupNeighbor(route.nextHop, now)

@@ -106,6 +106,9 @@ type Stack struct {
 	rateLimited   bool
 	counters      Conflicts
 	loopback      uint64
+	// localWire, set only by tests, sends local TCP segments as packets
+	// through this buffer and the parser instead of handing them over.
+	localWire []byte
 
 	frames  [TxQueueFrames][MaxFrame]byte
 	lengths [TxQueueFrames]uint16

@@ -151,7 +151,13 @@ type TCPStats struct {
 	DropMalformed                         uint64
 	// SplitSegments counts data segments sent from both ends of the send
 	// ring, which putTCP joins in the packet buffer.
-	SplitSegments                     uint64
+	SplitSegments uint64
+	// LocalSegments counts segments a local peer took without a packet.
+	LocalSegments uint64
+	// MatchProbes and ListenerProbes count the endpoint table entries the
+	// segment lookups looked at, for the lookup cost per segment.
+	MatchProbes                       uint64
+	ListenerProbes                    uint64
 	Endpoints, Listeners, Connections int
 	States                            [TCPClosed + 1]int
 }
@@ -658,10 +664,14 @@ func (stack *Stack) tcpPathMSS(route udpRouteResult) uint16 {
 		return 1
 	}
 	mss := mtu - ipv4HeaderSize - tcpHeaderSize
-	if mss > TCPReorderPayload {
-		mss = TCPReorderPayload
+	limit := TCPReorderPayload
+	if route.path == udpLocal {
+		// A local peer gets every segment in order, inside one call, so no
+		// segment waits in the reorder slots that bound a wire segment;
+		// the stream rings bound it instead.
+		limit = min(TCPSendCapacity, TCPReceiveCapacity)
 	}
-	return uint16(mss)
+	return uint16(min(mss, limit))
 }
 
 // TCPEndpointState is one endpoint's transport state, for diagnostics.
