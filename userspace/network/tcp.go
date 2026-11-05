@@ -1,38 +1,64 @@
 package network
 
-import (
-	"math/bits"
-	"unsafe"
-)
-
-// TCP uses fixed endpoint, stream and reassembly storage. Runtime tuning can
-// lower these limits but cannot resize them.
+// TCP allocates its state as connections need it: a small control block per
+// endpoint, a send ring on the first write, a receive ring when the handshake
+// starts and reassembly spans when a segment arrives out of order. The
+// constants below are ceilings and defaults, not table sizes; the tuning sets
+// the limits in force, and the memory budgets bound the rings.
 const (
-	MaxTCPSessions  = 8
-	MaxTCPEndpoints = 96
+	// MaxTCPSessions bounds the owners, one per client session.
+	MaxTCPSessions = 64
+	// MaxTCPEndpoints is the ceiling of max-endpoints and
+	// DefaultTCPEndpoints its default. Both ends of a loopback connection
+	// count.
+	MaxTCPEndpoints     = 4096
+	DefaultTCPEndpoints = 1024
 	// MaxTCPEndpointsPerSession is the ordinary session quota, the
-	// capacity behind max-endpoints-per-session. MaxTCPSessionQuota is the
+	// ceiling of max-endpoints-per-session. MaxTCPSessionQuota is the
 	// largest quota a session can be granted explicitly; per-session tables
-	// size to it.
+	// in tcpserve size to it.
 	MaxTCPEndpointsPerSession = 8
 	MaxTCPSessionQuota        = 64
-	MaxTCPListeners           = 16
-	MaxTCPBacklog             = 8
-	MaxTCPOutOfOrderSegments  = 8
-	TCPSendCapacity           = 16 * 1024
-	TCPReceiveCapacity        = 16 * 1024
-	TCPReorderPayload         = 1460
-	tcpSlotBits               = 8
-	tcpGenerations            = 1 << (32 - tcpSlotBits)
-	tcpInitialWindowBytes     = 14600
-	tcpInitialSSThresh        = 65535
+	MaxTCPListeners           = 256
+	// MaxTCPBacklog is the ceiling of listen-backlog and DefaultTCPBacklog
+	// its default. A listen asking for more gets the tuned value.
+	MaxTCPBacklog     = 4096
+	DefaultTCPBacklog = 128
+	// MaxTCPBuffer is the ceiling of the send-buffer-bytes and
+	// recv-buffer-bytes settings. A ring starts at tcpBufferFloor bytes and
+	// doubles as its stream needs room, up to the tuned size and while the
+	// memory budgets allow.
+	MaxTCPBuffer            = 4 << 20
+	DefaultTCPSendBuffer    = 256 << 10
+	DefaultTCPReceiveBuffer = 256 << 10
+	tcpBufferFloor          = 4 << 10
+	// TCPLoopbackMSS is the segment size between two endpoints of this
+	// stack. Such a segment never touches a frame.
+	TCPLoopbackMSS = 16 << 10
+	// DefaultTCPMemoryBudget bounds the ring bytes of all connections and
+	// DefaultTCPOwnerMemoryBudget those of one owner.
+	DefaultTCPMemoryBudget      = 16 << 20
+	DefaultTCPOwnerMemoryBudget = 8 << 20
+	// DefaultTCPTimeWaitBudget bounds the TIME_WAIT tombstones and
+	// DefaultTCPOwnerTimeWaitBudget the share of one owner.
+	DefaultTCPTimeWaitBudget      = 8192
+	DefaultTCPOwnerTimeWaitBudget = 2048
+	tcpSlotBits                   = 12
+	tcpGenerations                = 1 << (32 - tcpSlotBits)
+	tcpInitialWindowBytes         = 14600
+	tcpInitialSSThresh            = 65535
 	// tcpMaxRetransmits bounds consecutive RTO retransmissions of one
 	// synchronized connection. With the default RTO limits the connection
 	// gives up after about six minutes without progress.
 	tcpMaxRetransmits = 10
+	// tcpOwners covers every owner byte: the sessions and tcpRetiredOwner.
+	tcpOwners = 256
 )
 
-// TCPEndpointID contains a table slot and generation. A closed ID cannot
+// The slot field of an ID must address every endpoint the tuning allows.
+var _ [1<<tcpSlotBits - MaxTCPEndpoints]struct{}
+
+// TCPEndpointID contains a registry slot and generation. A closed ID cannot
 // address a later endpoint that reuses the slot.
 type TCPEndpointID uint32
 
@@ -67,30 +93,39 @@ type TCPTuple struct {
 	RemotePort uint16
 }
 
-type tcpReorder struct {
-	used bool
-	seq  uint32
-	len  uint16
-	data [TCPReorderPayload]byte
-}
-
+// tcpEndpoint is the control block. The rings and the reassembly spans hang
+// off it and exist only while the connection needs them.
 type tcpEndpoint struct {
 	state      TCPState
 	owner      uint8
 	generation uint32
+	// slot is the registry slot plus one. Zero marks a released endpoint
+	// or a temporary one that carries a reply, so neither can arm a timer
+	// or join an index.
+	slot       int32
 	local      IPv4
 	port       uint16
 	remote     IPv4
 	remotePort uint16
 	listener   TCPEndpointID
 	accepted   bool
-	backlog    uint8
+	backlog    uint16
 	// reuse is SO_REUSEADDR as given at bind; a passive child takes its
 	// listener's.
 	reuse bool
 	// synchronized records a completed three-way handshake. It survives
 	// later transitions so a deferred Connect still reports success.
 	synchronized bool
+
+	// members marks the indexes the endpoint is linked into, hashes holds
+	// the hash it was filed under in each, and links its neighbours.
+	members uint8
+	hashes  [tcpHashedIndexes]uint32
+	links   [tcpLinkKinds]tcpLink
+	// parent is the listener whose children list holds the endpoint, and
+	// children, on a listener, the children not yet accepted, oldest first.
+	parent   *tcpEndpoint
+	children tcpList
 
 	iss, irs       uint32
 	sndUna, sndNxt uint32
@@ -100,21 +135,25 @@ type tcpEndpoint struct {
 	peerMSS        uint16
 	localMSS       uint16
 
-	// send and receive are rings; tcp_ring.go describes the indexing.
-	send     [TCPSendCapacity]byte
+	// sendRing and recvRing are the stream rings; tcp_ring.go describes the
+	// indexing. charged is the ring bytes the owner's budget pays for.
+	sendRing []byte
 	sendSeq  uint32
-	sendHead uint16
+	sendHead uint32
+	sendLen  uint32
+	sendSent uint32
+	recvRing []byte
+	recvHead uint32
+	recvLen  uint32
+	charged  uint32
+	// reorder holds the out-of-order spans stored in recvRing past the
+	// contiguous bytes; nil while every byte arrived in order.
+	reorder *tcpReorder
 	// rcvEdge is the right edge of the receive window the last ACK sent
 	// advertised: the peer may send up to it.
 	rcvEdge uint32
 	// rcvEdgeKnown: an ACK has advertised rcvEdge.
 	rcvEdgeKnown bool
-	sendLen      uint16
-	sendSent     uint16
-	receive      [TCPReceiveCapacity]byte
-	recvHead     uint16
-	recvLen      uint16
-	reorder      [MaxTCPOutOfOrderSegments]tcpReorder
 
 	shutdownWrite bool
 	orphan        bool
@@ -131,12 +170,19 @@ type tcpEndpoint struct {
 	// either resends it or ends the connection.
 	l2Pending bool
 	// ackPending marks a pure ACK or window update that found the transmit
-	// queue full. The first Advance with a free frame sends it; a frame
-	// frees only when the driver hands one back, which wakes netd. Without
-	// it a peer that saw a zero window waits for its persist timer.
+	// queue full; the endpoint then sits on stack.tcpAckPending. The first
+	// Advance with a free frame sends it; a frame frees only when the driver
+	// hands one back, which wakes netd. Without it a peer that saw a zero
+	// window waits for its persist timer.
 	ackPending bool
+	// timeWaitHeld marks a TIME_WAIT connection the budget left an
+	// endpoint, counted once in TCPStats.TimeWaitHeld.
+	timeWaitHeld bool
 
-	rto         uint64
+	rto uint64
+	// rtoDeadline and deadline are the endpoint's two timers. Only
+	// setRTO and setDeadline change them, so the timer heap holds the
+	// earlier of the two.
 	rtoDeadline uint64
 	srtt        uint64
 	rttvar      uint64
@@ -164,32 +210,87 @@ type TCPStats struct {
 	RX, TX, Retransmits, RXReset, TXReset uint64
 	DropChecksum, DropNoTCB, DropWindow   uint64
 	DropMalformed                         uint64
+	// DropMemory counts handshakes refused and segments dropped because a
+	// memory budget had no room for their ring bytes.
+	DropMemory uint64
+	// DropBacklog counts SYNs a full listener dropped.
+	DropBacklog uint64
 	// SplitSegments counts data segments sent from both ends of the send
 	// ring, which putTCP joins in the packet buffer.
 	SplitSegments uint64
 	// LocalSegments counts segments a local peer took without a packet.
 	LocalSegments uint64
-	// MatchProbes and ListenerProbes count the endpoint table entries the
-	// segment lookups looked at, for the lookup cost per segment.
-	MatchProbes                       uint64
-	ListenerProbes                    uint64
+	// MatchProbes and ListenerProbes count the index entries the segment
+	// lookups looked at. LookupProbes counts every entry a received
+	// segment's lookups looked at, tombstones included, and
+	// MaxSegmentProbes is the most one segment needed.
+	MatchProbes      uint64
+	ListenerProbes   uint64
+	LookupProbes     uint64
+	MaxSegmentProbes uint64
+	// TimeWaitHeld counts TIME_WAIT connections that stayed endpoints
+	// because the TIME_WAIT budget had no room for their tombstone.
+	TimeWaitHeld uint64
+	// Endpoints, Listeners and Connections count live endpoints; States
+	// counts them by state. TimeWait counts tombstones, MemoryBytes the
+	// ring bytes charged to the budgets.
 	Endpoints, Listeners, Connections int
+	TimeWait                          int
+	MemoryBytes                       int
 	States                            [TCPClosed + 1]int
 }
 
 func (stack *Stack) resetTCP() {
-	for index := range stack.tcp[:] {
-		stack.tcp[index] = tcpEndpoint{}
-	}
-	clear(stack.tcpUsed[:])
-	for index := range stack.tcpTombstones[:] {
-		stack.tcpTombstones[index] = tcpTombstone{}
-	}
-	for index := range stack.tcpQuota[:] {
-		stack.tcpQuota[index] = 0
-	}
+	stack.tcp = nil
+	stack.tcpUsed = nil
+	stack.tcpLive = 0
+	stack.tcpTuples = tcpIndex{kind: tcpLinkTuple}
+	stack.tcpPorts = tcpIndex{kind: tcpLinkPort}
+	stack.tcpListeners = tcpIndex{kind: tcpLinkListen}
+	stack.tcpOwnerLists = [tcpOwners]tcpList{}
+	stack.tcpTimers = tcpTimers{}
+	stack.tcpAckPending = nil
+	stack.tcpAckSpare = nil
+	stack.tcpTombstones = tcpTombstones{}
+	stack.tcpQuota = [MaxTCPSessions]uint8{}
+	stack.tcpOwnerBytes = [tcpOwners]int{}
+	stack.tcpBytes = 0
+	stack.tcpBudget = tcpBudget{}
+	// The hash seed derives from the stack's random state without drawing
+	// from it, so the ISS and port sequences do not shift.
+	stack.tcpSeed = mix64(stack.random ^ 0x7cb3a1d5e0f29467)
 	stack.tcpGeneration = 0
 	stack.tcpStats = TCPStats{}
+}
+
+// tcpBudget holds the memory and TIME_WAIT budgets. Zero selects the
+// default.
+type tcpBudget struct {
+	memory, ownerMemory     int
+	timeWait, ownerTimeWait int
+}
+
+func budgetOr(value, fallback int) int {
+	if value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+// SetTCPMemoryBudget sets the ring bytes all connections, and one owner's,
+// may hold; zero restores a default. A lowered budget takes nothing back: it
+// refuses the next ring growth and handshake that would exceed it.
+func (stack *Stack) SetTCPMemoryBudget(total, owner int) {
+	stack.tcpBudget.memory, stack.tcpBudget.ownerMemory = total, owner
+}
+
+// SetTCPTimeWaitBudget sets the TIME_WAIT tombstones the stack, and one
+// owner, may hold; zero restores a default. A connection with no room for a
+// tombstone stays an endpoint in TIME_WAIT until its interval ends, so the
+// owner's quota refuses new endpoints instead of the stack forgetting the
+// four-tuple.
+func (stack *Stack) SetTCPTimeWaitBudget(total, owner int) {
+	stack.tcpBudget.timeWait, stack.tcpBudget.ownerTimeWait = total, owner
 }
 
 // SetTCPQuota sets how many endpoints owner may hold, 1 to
@@ -220,56 +321,37 @@ func (stack *Stack) tcpOwnerQuota(owner int) int {
 
 func (stack *Stack) tcpEndpoint(owner int, id TCPEndpointID) (*tcpEndpoint, int) {
 	slot := id.slot()
-	if owner < 0 || owner >= MaxTCPSessions || slot < 0 || slot >= MaxTCPEndpoints {
+	if owner < 0 || owner >= MaxTCPSessions || slot >= len(stack.tcp) {
 		return nil, -1
 	}
-	entry := &stack.tcp[slot]
-	if entry.state == TCPFree || entry.generation != id.generation() || int(entry.owner) != owner {
+	entry := stack.tcp[slot]
+	if entry == nil || entry.state == TCPFree || entry.generation != id.generation() || int(entry.owner) != owner {
 		return nil, -1
 	}
 	return entry, slot
 }
 
-func tcpID(entry *tcpEndpoint, slot int) TCPEndpointID {
-	return TCPEndpointID(entry.generation<<tcpSlotBits | uint32(slot))
+func tcpID(entry *tcpEndpoint) TCPEndpointID {
+	return TCPEndpointID(entry.generation<<tcpSlotBits | uint32(entry.slot-1))
 }
 
+// TCPOpen creates an endpoint. Busy means the global endpoint limit or the
+// owner's quota is reached; an owner at its quota first gets the slot of one
+// of its closed TIME_WAIT connections if a tombstone can take its four-tuple.
 func (stack *Stack) TCPOpen(owner int) (TCPEndpointID, Result) {
 	if owner < 0 || owner >= MaxTCPSessions {
 		return 0, ResultInvalidArgument
 	}
-	total, mine, free := 0, 0, -1
-	for word, marks := range stack.tcpUsed {
-		if index := word*64 + bits.TrailingZeros64(^marks); free < 0 && ^marks != 0 && index < len(stack.tcp) {
-			free = index
-		}
-	}
-	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
-		total++
-		if int(stack.tcp[index].owner) == owner {
-			mine++
-		}
-	}
-	if free < 0 || total >= int(stack.tuning.TCP.MaxEndpoints) || mine >= stack.tcpOwnerQuota(owner) {
-		// A connection the owner closed first waits out TIME_WAIT on the
-		// owner's count. Rather than refuse the owner for up to time-wait-ms,
-		// reuse the slot of the oldest such entry; its four-tuple stays
-		// protected in a tombstone until the interval ends.
-		reused := stack.recycleTimeWait(owner)
-		if reused < 0 {
+	if stack.tcpLive >= int(stack.tuning.TCP.MaxEndpoints) || stack.tcpOwnerLists[owner].count >= stack.tcpOwnerQuota(owner) {
+		if !stack.recycleTimeWait(owner) {
 			return 0, ResultBusy
 		}
-		free = reused
 	}
-	stack.tcpGeneration++
-	if stack.tcpGeneration == tcpGenerations {
-		stack.tcpGeneration = 1
+	entry := stack.allocateTCP(owner)
+	if entry == nil {
+		return 0, ResultBusy
 	}
-	entry := &stack.tcp[free]
-	*entry = tcpEndpoint{state: TCPOpen, owner: uint8(owner), generation: stack.tcpGeneration,
-		peerMSS: tcpDefaultMSS, ssthresh: tcpInitialSSThresh, rto: stack.tuning.TCP.RTOMin}
-	stack.tcpUsed[free/64] |= 1 << (free % 64)
-	return tcpID(entry, free), ResultOK
+	return tcpID(entry), ResultOK
 }
 
 func (stack *Stack) TCPBind(owner int, id TCPEndpointID, address IPv4, port uint16) (IPv4, uint16, Result) {
@@ -281,7 +363,7 @@ func (stack *Stack) TCPBind(owner int, id TCPEndpointID, address IPv4, port uint
 // overlaps, equal or either one the wildcard, unless both carry reuse and
 // the existing one is not listening. Port 0 picks a port nothing holds.
 func (stack *Stack) TCPBindReuse(owner int, id TCPEndpointID, address IPv4, port uint16, reuse bool) (IPv4, uint16, Result) {
-	entry, slot := stack.tcpEndpoint(owner, id)
+	entry, _ := stack.tcpEndpoint(owner, id)
 	if entry == nil || entry.state != TCPOpen {
 		return IPv4{}, 0, ResultInvalidArgument
 	}
@@ -289,54 +371,53 @@ func (stack *Stack) TCPBindReuse(owner int, id TCPEndpointID, address IPv4, port
 		return IPv4{}, 0, ResultNoAddress
 	}
 	if port == 0 {
-		port = stack.tcpEphemeralPort(address, IPv4{}, 0, slot)
+		port = stack.tcpEphemeralPort(address, IPv4{}, 0, entry)
 		if port == 0 {
 			return IPv4{}, 0, ResultBusy
 		}
-	} else if stack.tcpReuseConflict(slot, address, port, reuse) {
+	} else if stack.tcpReuseConflict(entry, address, port, reuse) {
 		return IPv4{}, 0, ResultAddressInUse
 	}
 	entry.local, entry.port, entry.state, entry.reuse = address, port, TCPBound, reuse
+	stack.tcpPorts.insert(entry, stack.portHash(port))
 	return address, port, ResultOK
 }
 
+// TCPListen makes a bound endpoint a listener that keeps up to backlog
+// children no application has accepted. A backlog above the tuned
+// listen-backlog gets the tuned value, as Linux clamps to somaxconn.
 func (stack *Stack) TCPListen(owner int, id TCPEndpointID, backlog int) Result {
 	entry, _ := stack.tcpEndpoint(owner, id)
-	if entry == nil || entry.state != TCPBound || backlog < 1 || backlog > int(stack.tuning.TCP.ListenBacklog) {
+	if entry == nil || entry.state != TCPBound || backlog < 1 {
 		return ResultInvalidArgument
 	}
-	listeners := 0
-	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
-		if stack.tcp[index].state == TCPListen {
-			listeners++
-		}
-	}
-	if listeners >= MaxTCPListeners {
+	if stack.tcpListeners.count >= MaxTCPListeners {
 		return ResultBusy
 	}
-	entry.state, entry.backlog = TCPListen, uint8(backlog)
+	entry.state, entry.backlog = TCPListen, uint16(min(backlog, int(stack.tuning.TCP.ListenBacklog)))
+	stack.tcpListeners.insert(entry, stack.portHash(entry.port))
 	return ResultOK
 }
 
-// TCPAccept returns one established child once. Busy means the deferred
-// accept remains pending.
+// TCPAccept returns one established child once, oldest first. Busy means
+// the deferred accept remains pending.
 func (stack *Stack) TCPAccept(owner int, listener TCPEndpointID) (TCPEndpointID, TCPTuple, Result) {
 	entry, _ := stack.tcpEndpoint(owner, listener)
 	if entry == nil || entry.state != TCPListen {
 		return 0, TCPTuple{}, ResultInvalidArgument
 	}
-	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
-		child := &stack.tcp[index]
-		if child.listener == listener && child.state >= TCPEstablished && child.state < TCPClosed && !child.accepted {
+	for child := entry.children.head; child != nil; child = child.links[tcpLinkChild].next {
+		if child.state >= TCPEstablished && child.state < TCPClosed {
+			stack.detachChild(child)
 			child.accepted = true
-			return tcpID(child, index), tcpTuple(child), ResultOK
+			return tcpID(child), tcpTuple(child), ResultOK
 		}
 	}
 	return 0, TCPTuple{}, ResultBusy
 }
 
 func (stack *Stack) TCPConnect(owner int, id TCPEndpointID, remote IPv4, port uint16, now uint64) (TCPTuple, Result) {
-	entry, slot := stack.tcpEndpoint(owner, id)
+	entry, _ := stack.tcpEndpoint(owner, id)
 	if entry == nil || (entry.state != TCPOpen && entry.state != TCPBound) || port == 0 {
 		return TCPTuple{}, ResultInvalidArgument
 	}
@@ -348,24 +429,32 @@ func (stack *Stack) TCPConnect(owner int, id TCPEndpointID, remote IPv4, port ui
 	if local == zeroIPv4 {
 		local = route.source
 	}
-	if entry.port == 0 {
-		entry.port = stack.tcpEphemeralPort(local, remote, port, slot)
-		if entry.port == 0 {
+	chosen := entry.port
+	if chosen == 0 {
+		chosen = stack.tcpEphemeralPort(local, remote, port, entry)
+		if chosen == 0 {
 			return TCPTuple{}, ResultBusy
 		}
 	}
-	if stack.tcpTupleConflict(slot, local, entry.port, remote, port) {
+	if stack.tcpTupleConflict(entry, local, chosen, remote, port) {
 		return TCPTuple{}, ResultAddressInUse
 	}
-	entry.local, entry.remote, entry.remotePort = local, remote, port
+	if !stack.allocateReceive(entry, route.path == udpLocal) {
+		return TCPTuple{}, ResultBusy
+	}
+	if entry.state == TCPBound {
+		stack.tcpPorts.remove(entry)
+	}
+	entry.local, entry.port, entry.remote, entry.remotePort = local, chosen, remote, port
 	entry.iss = uint32(stack.next())
 	entry.sndUna, entry.sndNxt = entry.iss, entry.iss+1
 	entry.localMSS = stack.tcpPathMSS(route)
 	entry.state = TCPSynSent
-	entry.deadline = addTime(now, stack.tuning.TCP.ConnectTimeout)
+	stack.indexConnection(entry)
+	stack.setDeadline(entry, addTime(now, stack.tuning.TCP.ConnectTimeout))
 	entry.rto = stack.tuning.TCP.RTOMin
 	if stack.sendTCP(entry, tcpFlagSYN, entry.iss, 0, nil, now) && entry.state == TCPSynSent {
-		entry.rtoDeadline = addTime(now, entry.rto)
+		stack.setRTO(entry, addTime(now, entry.rto))
 	}
 	return tcpTuple(entry), ResultOK
 }
@@ -376,7 +465,8 @@ func tcpTuple(entry *tcpEndpoint) TCPTuple {
 
 // TCPWrite copies bytes into transport-owned storage. It may accept a prefix.
 // A connection the transport ended reports why; Closed means the
-// application shut down writing or the close completed normally.
+// application shut down writing or the close completed normally. Busy means
+// the send buffer is full or the memory budgets leave it no room to grow.
 func (stack *Stack) TCPWrite(owner int, id TCPEndpointID, data []byte, now uint64) (int, Result) {
 	entry, _ := stack.tcpEndpoint(owner, id)
 	if entry != nil && entry.state == TCPClosed && entry.lastResult != ResultOK {
@@ -388,19 +478,16 @@ func (stack *Stack) TCPWrite(owner int, id TCPEndpointID, data []byte, now uint6
 	if len(data) == 0 {
 		return 0, ResultOK
 	}
-	limit := int(stack.tuning.TCP.SendBuffer)
-	if limit > TCPSendCapacity {
-		limit = TCPSendCapacity
-	}
-	free := limit - int(entry.sendLen)
-	if free <= 0 {
+	room := stack.tcpSendRoom(entry)
+	if room <= 0 {
 		return 0, ResultBusy
 	}
-	if len(data) > free {
-		data = data[:free]
+	if len(data) > room {
+		data = data[:room]
 	}
-	ringStore(entry.send[:], int(entry.sendHead), int(entry.sendLen), data)
-	entry.sendLen += uint16(len(data))
+	stack.growSend(entry, int(entry.sendLen)+len(data))
+	ringStore(entry.sendRing, int(entry.sendHead), int(entry.sendLen), data)
+	entry.sendLen += uint32(len(data))
 	stack.pumpTCP(entry, now)
 	return len(data), ResultOK
 }
@@ -422,18 +509,21 @@ func (stack *Stack) TCPRead(owner int, id TCPEndpointID, dst []byte, now uint64)
 		return 0, ResultBusy
 	}
 	length := min(len(dst), int(entry.recvLen))
-	ringLoad(dst, entry.receive[:], int(entry.recvHead), length)
-	entry.recvHead = ringAdvance(int(entry.recvHead), length, TCPReceiveCapacity)
-	entry.recvLen -= uint16(length)
-	if entry.recvLen == 0 {
+	ringLoad(dst, entry.recvRing, int(entry.recvHead), length)
+	entry.recvHead = ringAdvance(int(entry.recvHead), length, len(entry.recvRing))
+	entry.recvLen -= uint32(length)
+	if entry.recvLen == 0 && entry.reorder == nil {
 		entry.recvHead = 0
 	}
 	// A window update goes when the read moved the window's right edge by
 	// a segment or half the buffer, whichever is less (RFC 1122 4.2.3.3);
 	// smaller openings ride on the next ACK, so a reader that keeps up does
 	// not send one update per read.
+	if entry.state < TCPSynSent || entry.state >= TCPTimeWait {
+		return length, ResultOK
+	}
 	edge := entry.rcvNxt + uint32(stack.tcpAdvertisedWindow(entry))
-	step := min(tcpSMSS(entry), TCPReceiveCapacity/2)
+	step := min(tcpSMSS(entry), uint32(stack.tcpReceiveLimit(entry)/2))
 	if !entry.rcvEdgeKnown || int32(edge-entry.rcvEdge) >= int32(step) {
 		stack.sendTCP(entry, tcpFlagACK, entry.sndNxt, entry.rcvNxt, nil, now)
 	}
@@ -453,7 +543,8 @@ func (stack *Stack) TCPShutdownWrite(owner int, id TCPEndpointID, now uint64) Re
 // TCPClose starts graceful close for a synchronized connection and releases
 // an unconnected endpoint or listener at once. A closing connection becomes an
 // orphan: the stack releases it when the close completes, because its owner
-// no longer holds the ID.
+// no longer holds the ID. A connection in TIME_WAIT leaves its four-tuple in
+// a tombstone.
 func (stack *Stack) TCPClose(owner int, id TCPEndpointID, now uint64) Result {
 	entry, _ := stack.tcpEndpoint(owner, id)
 	if entry == nil {
@@ -463,13 +554,17 @@ func (stack *Stack) TCPClose(owner int, id TCPEndpointID, now uint64) Result {
 	case TCPEstablished, TCPCloseWait:
 		entry.orphan, entry.shutdownWrite = true, true
 		stack.pumpTCP(entry, now)
+		stack.settleTCP(entry)
 	case TCPFinWait1, TCPClosing, TCPLastAck:
 		entry.orphan = true
 	case TCPFinWait2:
 		entry.orphan = true
-		entry.deadline = addTime(now, stack.tuning.TCP.TimeWait)
+		stack.setDeadline(entry, addTime(now, stack.tuning.TCP.TimeWait))
+	case TCPTimeWait:
+		entry.orphan = true
+		stack.settleTCP(entry)
 	case TCPListen:
-		stack.abortChildren(id, now)
+		stack.abortChildren(entry, now)
 		stack.releaseTCP(entry)
 	default:
 		stack.releaseTCP(entry)
@@ -478,41 +573,49 @@ func (stack *Stack) TCPClose(owner int, id TCPEndpointID, now uint64) Result {
 }
 
 // TCPCloseOwner ends every endpoint of a session. A connection in TIME_WAIT
-// stays as an orphan until its interval ends, so its four-tuple stays
-// protected; a later session with the same owner may recycle it.
+// keeps its four-tuple protected, in a tombstone or, with the budget full,
+// as an endpoint of tcpRetiredOwner, so a later session with the same owner
+// number starts with its whole quota.
 func (stack *Stack) TCPCloseOwner(owner int, now uint64) {
-	// The owner's TIME_WAIT four-tuples stay protected, but no longer as
-	// the owner's: a session that later takes the same owner slot starts
-	// with its whole quota and tombstone share.
+	if owner < 0 || owner >= MaxTCPSessions {
+		return
+	}
 	stack.retireTombstones(owner)
-	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
-		entry := &stack.tcp[index]
-		if entry.state != TCPFree && int(entry.owner) == owner {
-			if entry.state == TCPTimeWait {
-				entry.orphan = true
-				stack.retireTimeWait(entry)
-				continue
-			}
+	list := &stack.tcpOwnerLists[owner]
+	for entry := list.head; entry != nil; {
+		next := entry.links[tcpLinkOwner].next
+		// A listener's release can release the children after it in the
+		// list; start over from the head when next went.
+		if entry.state == TCPTimeWait {
+			stack.retireTimeWait(entry)
+		} else {
 			if entry.state >= TCPSynSent && entry.state < TCPTimeWait {
 				stack.sendTCP(entry, tcpFlagRST|tcpFlagACK, entry.sndNxt, entry.rcvNxt, nil, now)
 			}
+			if entry.state == TCPListen {
+				stack.abortChildren(entry, now)
+			}
 			stack.releaseTCP(entry)
 		}
+		if next != nil && next.slot == 0 {
+			next = list.head
+		}
+		entry = next
 	}
 }
 
 // abortChildren resets and releases the children of a listener that no
 // application has accepted. Nobody else can ever reach them.
-func (stack *Stack) abortChildren(listener TCPEndpointID, now uint64) {
-	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
-		child := &stack.tcp[index]
-		if child.state == TCPFree || child.listener != listener || child.accepted {
-			continue
-		}
+func (stack *Stack) abortChildren(listener *tcpEndpoint, now uint64) {
+	for child := listener.children.head; child != nil; child = listener.children.head {
 		if child.state >= TCPSynReceived && child.state < TCPTimeWait {
 			stack.sendTCP(child, tcpFlagRST|tcpFlagACK, child.sndNxt, child.rcvNxt, nil, now)
 		}
-		stack.releaseTCP(child)
+		if child.slot != 0 {
+			stack.releaseTCP(child)
+		} else if child.parent == listener {
+			stack.detachChild(child)
+		}
 	}
 }
 
@@ -542,49 +645,6 @@ func (stack *Stack) TCPState(owner int, id TCPEndpointID) (TCPState, TCPTuple, R
 	return entry.state, tcpTuple(entry), entry.lastResult
 }
 
-func (stack *Stack) releaseTCP(entry *tcpEndpoint) {
-	generation := entry.generation
-	*entry = tcpEndpoint{generation: generation}
-	if slot := stack.tcpSlot(entry); slot >= 0 {
-		stack.tcpUsed[slot/64] &^= 1 << (slot % 64)
-	}
-}
-
-// tcpSlot is entry's index in stack.tcp, or -1 for an entry outside it.
-func (stack *Stack) tcpSlot(entry *tcpEndpoint) int {
-	offset := uintptr(unsafe.Pointer(entry)) - uintptr(unsafe.Pointer(&stack.tcp[0]))
-	size := unsafe.Sizeof(stack.tcp[0])
-	if offset%size != 0 || offset/size >= uintptr(len(stack.tcp)) {
-		return -1
-	}
-	return int(offset / size)
-}
-
-// nextTCP returns the first slot at or after from that is in use, or -1.
-// A scan that skips TCPFree slots walks them as
-//
-//	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1)
-//
-// which reads a mark per 64 slots instead of every slot.
-func (stack *Stack) nextTCP(from int) int {
-	if from < 0 {
-		from = 0
-	}
-	for word := from / 64; word < len(stack.tcpUsed); word++ {
-		marks := stack.tcpUsed[word]
-		if word == from/64 {
-			marks &^= 1<<(from%64) - 1
-		}
-		if marks != 0 {
-			if index := word*64 + bits.TrailingZeros64(marks); index < len(stack.tcp) {
-				return index
-			}
-			return -1
-		}
-	}
-	return -1
-}
-
 // closeTCP moves a connection to CLOSED with its final result and stops its
 // timers. No application can observe an orphan or a passive child that was
 // never accepted, so those are released instead, which also frees the
@@ -595,7 +655,9 @@ func (stack *Stack) closeTCP(entry *tcpEndpoint, result Result) {
 		return
 	}
 	entry.lastResult, entry.state = result, TCPClosed
-	entry.deadline, entry.rtoDeadline = 0, 0
+	stack.setDeadline(entry, 0)
+	stack.setRTO(entry, 0)
+	stack.freeSend(entry)
 	if result != ResultOK {
 		entry.pendingError = result
 	}
@@ -621,13 +683,12 @@ func tcpInitialWindow(entry *tcpEndpoint) uint32 {
 	return min(10*smss, max(2*smss, tcpInitialWindowBytes))
 }
 
+// TCPStats walks the live endpoints for the state counts; the transport
+// paths never call it.
 func (stack *Stack) TCPStats() TCPStats {
 	stats := stack.tcpStats
 	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		state := stack.tcp[index].state
-		if state == TCPFree {
-			continue
-		}
 		stats.Endpoints++
 		stats.States[state]++
 		if state == TCPListen {
@@ -636,6 +697,8 @@ func (stack *Stack) TCPStats() TCPStats {
 			stats.Connections++
 		}
 	}
+	stats.TimeWait = stack.tcpTombstones.count
+	stats.MemoryBytes = stack.tcpBytes
 	return stats
 }
 
@@ -643,65 +706,64 @@ func (stack *Stack) TCPStats() TCPStats {
 // takes a port nothing holds. A connect, as on Linux, may share a local port
 // with other connections and TIME_WAIT four-tuples, which the tuple check
 // keeps apart, but never with an endpoint bound or listening there.
-func (stack *Stack) tcpPortTaken(skip int, address IPv4, port uint16, connect bool) bool {
+func (stack *Stack) tcpPortTaken(skip *tcpEndpoint, address IPv4, port uint16, connect bool) bool {
 	if !connect {
 		return stack.tcpReuseConflict(skip, address, port, false)
 	}
-	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
-		entry := &stack.tcp[index]
-		if index == skip || entry.state < TCPBound || entry.state > TCPListen || entry.port != port {
+	taken := false
+	for entry := stack.tcpPorts.bucket(stack.portHash(port)); entry != nil; entry = entry.links[tcpLinkPort].next {
+		if entry == skip || entry.state < TCPBound || entry.state > TCPListen || entry.port != port {
 			continue
 		}
 		if address == zeroIPv4 || entry.local == zeroIPv4 || entry.local == address {
-			return true
+			taken = true
+			break
 		}
 	}
-	return false
+	if tcpCrossCheck && taken != stack.slowPortTaken(skip, address, port) {
+		panic("tcp: port index disagrees with the endpoints")
+	}
+	return taken
 }
 
 // tcpReuseConflict is the Linux bind rule: an endpoint other than skip, in
 // any state from bound on, or a tombstone, on port with an overlapping
 // address conflicts unless reuse and the holder's reuse are both set and the
 // holder is not listening.
-func (stack *Stack) tcpReuseConflict(skip int, address IPv4, port uint16, reuse bool) bool {
-	overlaps := func(local IPv4) bool {
-		return address == zeroIPv4 || local == zeroIPv4 || local == address
-	}
-	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
-		entry := &stack.tcp[index]
-		if index == skip || entry.state < TCPBound || entry.port != port || !overlaps(entry.local) {
+func (stack *Stack) tcpReuseConflict(skip *tcpEndpoint, address IPv4, port uint16, reuse bool) bool {
+	conflict := false
+	for entry := stack.tcpPorts.bucket(stack.portHash(port)); entry != nil; entry = entry.links[tcpLinkPort].next {
+		if entry == skip || entry.state < TCPBound || entry.port != port || !addressesOverlap(address, entry.local) {
 			continue
 		}
 		if !reuse || !entry.reuse || entry.state == TCPListen {
-			return true
+			conflict = true
+			break
 		}
 	}
-	for index := range stack.tcpTombstones[:] {
-		tombstone := &stack.tcpTombstones[index]
-		if tombstone.used && tombstone.port == port && overlaps(tombstone.local) && (!reuse || !tombstone.reuse) {
-			return true
-		}
+	if !conflict {
+		conflict = stack.tcpTombstones.portConflict(address, port, reuse, stack.portHash(port))
 	}
-	return false
+	if tcpCrossCheck && conflict != stack.slowReuseConflict(skip, address, port, reuse) {
+		panic("tcp: bind index disagrees with the endpoints")
+	}
+	return conflict
 }
+
+func addressesOverlap(a, b IPv4) bool { return a == zeroIPv4 || b == zeroIPv4 || a == b }
 
 // tcpTupleConflict reports a four-tuple in use by another connection or
 // still protected by a tombstone.
-func (stack *Stack) tcpTupleConflict(skip int, local IPv4, localPort uint16, remote IPv4, remotePort uint16) bool {
-	if stack.tcpTombstone(local, localPort, remote, remotePort) != nil {
+func (stack *Stack) tcpTupleConflict(skip *tcpEndpoint, local IPv4, localPort uint16, remote IPv4, remotePort uint16) bool {
+	if stack.tcpTombstone(local, localPort, remote, remotePort) >= 0 {
 		return true
 	}
-	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
-		entry := &stack.tcp[index]
-		if index != skip && entry.state >= TCPSynSent && entry.local == local && entry.port == localPort &&
-			entry.remote == remote && entry.remotePort == remotePort {
-			return true
-		}
-	}
-	return false
+	var probes uint64
+	entry := stack.lookupTuple(local, localPort, remote, remotePort, &probes)
+	return entry != nil && entry != skip
 }
 
-func (stack *Stack) tcpEphemeralPort(local, remote IPv4, remotePort uint16, skip int) uint16 {
+func (stack *Stack) tcpEphemeralPort(local, remote IPv4, remotePort uint16, skip *tcpEndpoint) uint16 {
 	first, last := uint32(stack.tuning.TCP.EphemeralMin), uint32(stack.tuning.TCP.EphemeralMax)
 	if first == 0 || last < first {
 		return 0
@@ -721,23 +783,18 @@ func (stack *Stack) tcpEphemeralPort(local, remote IPv4, remotePort uint16, skip
 	return 0
 }
 
+// tcpPathMSS is the MSS a SYN announces: the MTU less the headers on the
+// wire, TCPLoopbackMSS to a local peer. Reassembly stores segments in the
+// receive ring, so no slot size bounds it.
 func (stack *Stack) tcpPathMSS(route udpRouteResult) uint16 {
-	mtu := int(stack.mtu)
 	if route.path == udpLocal {
-		mtu = LoopbackMTU
+		return TCPLoopbackMSS
 	}
+	mtu := int(stack.mtu)
 	if mtu < ipv4HeaderSize+tcpHeaderSize+1 {
 		return 1
 	}
-	mss := mtu - ipv4HeaderSize - tcpHeaderSize
-	limit := TCPReorderPayload
-	if route.path == udpLocal {
-		// A local peer gets every segment in order, inside one call, so no
-		// segment waits in the reorder slots that bound a wire segment;
-		// the stream rings bound it instead.
-		limit = min(TCPSendCapacity, TCPReceiveCapacity)
-	}
-	return uint16(min(mss, limit))
+	return uint16(min(mtu-ipv4HeaderSize-tcpHeaderSize, 65535))
 }
 
 // TCPEndpointState is one endpoint's transport state, for diagnostics.
@@ -746,27 +803,30 @@ type TCPEndpointState struct {
 	Owner                  uint8
 	State                  TCPState
 	LocalPort, RemotePort  uint16
-	SendLen, SendSent      uint16
-	SendHead, RecvLen      uint16
-	RecvHead               uint16
+	SendLen, SendSent      uint32
+	SendHead, RecvLen      uint32
+	RecvHead               uint32
+	SendRing, RecvRing     uint32
 	SndUna, SndNxt, RcvNxt uint32
 	PeerWindow, CWnd       uint32
 	ShutdownWrite, FINSent bool
 	PendingError           Result
 }
 
-// TCPEndpointAt reports the endpoint in table slot index, or false for a
-// free slot or an index past the table.
+// TCPEndpointAt reports the endpoint in registry slot index, or false for a
+// free slot or an index past the registry.
 func (stack *Stack) TCPEndpointAt(index int) (TCPEndpointState, bool) {
-	if index < 0 || index >= len(stack.tcp) || stack.tcp[index].state == TCPFree {
+	if index < 0 || index >= len(stack.tcp) || stack.tcp[index] == nil {
 		return TCPEndpointState{}, false
 	}
-	e := &stack.tcp[index]
-	return TCPEndpointState{ID: tcpID(e, index), Owner: e.owner, State: e.state, LocalPort: e.port, RemotePort: e.remotePort,
+	e := stack.tcp[index]
+	return TCPEndpointState{ID: tcpID(e), Owner: e.owner, State: e.state, LocalPort: e.port, RemotePort: e.remotePort,
 		SendLen: e.sendLen, SendSent: e.sendSent, SendHead: e.sendHead, RecvLen: e.recvLen, RecvHead: e.recvHead,
+		SendRing: uint32(len(e.sendRing)), RecvRing: uint32(len(e.recvRing)),
 		SndUna: e.sndUna, SndNxt: e.sndNxt, RcvNxt: e.rcvNxt, PeerWindow: e.peerWindow, CWnd: e.cwnd,
 		ShutdownWrite: e.shutdownWrite, FINSent: e.finSent, PendingError: e.pendingError}, true
 }
 
-// TCPEndpointCount is the size of the endpoint table.
+// TCPEndpointCount is the size of the registry: one past the highest slot
+// ever used.
 func (stack *Stack) TCPEndpointCount() int { return len(stack.tcp) }

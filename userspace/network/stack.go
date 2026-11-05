@@ -89,14 +89,27 @@ type Stack struct {
 	udpQuota      [MaxUDPSessions]uint8
 	udpBinds      uint32
 
-	tcp [MaxTCPEndpoints]tcpEndpoint
-	// tcpUsed marks the slots of tcp that are not TCPFree. A slot is
-	// more than 32 KiB, so the scans walk the marks instead of the slots.
-	tcpUsed       [(MaxTCPEndpoints + 63) / 64]uint64
-	tcpTombstones [tcpTombstoneSlots]tcpTombstone
-	tcpQuota      [MaxTCPSessions]uint8
-	tcpGeneration uint32
-	tcpStats      TCPStats
+	// tcp is the endpoint registry, nil in a free slot; it grows to the
+	// highest slot in use, up to MaxTCPEndpoints. tcpUsed marks the slots in
+	// use, so the paths that walk every endpoint read a mark per 64 slots.
+	tcp                               []*tcpEndpoint
+	tcpUsed                           []uint64
+	tcpLive                           int
+	tcpSeed                           uint64
+	tcpTuples, tcpPorts, tcpListeners tcpIndex
+	tcpOwnerLists                     [tcpOwners]tcpList
+	tcpTimers                         tcpTimers
+	// tcpAckPending holds the endpoints with an ACK the full transmit
+	// queue held back; tcpAckSpare is the other buffer flushPendingACKs
+	// swaps in.
+	tcpAckPending, tcpAckSpare []*tcpEndpoint
+	tcpTombstones              tcpTombstones
+	tcpQuota                   [MaxTCPSessions]uint8
+	tcpOwnerBytes              [tcpOwners]int
+	tcpBytes                   int
+	tcpBudget                  tcpBudget
+	tcpGeneration              uint32
+	tcpStats                   TCPStats
 
 	// defended and defendedAt record the last defence of the live address.
 	defended   bool
@@ -240,6 +253,16 @@ func (stack *Stack) Apply(config Config, tuning Tuning, now uint64) Field {
 	}
 	stack.tuning = tuning
 	return stack.Configure(config, now)
+}
+
+// SetTuning validates a tuning and applies it alone, or returns the first
+// field out of range and changes nothing.
+func (stack *Stack) SetTuning(tuning Tuning) Field {
+	if field := tuning.Validate(); field != FieldNone {
+		return field
+	}
+	stack.tuning = tuning
+	return FieldNone
 }
 
 // Tuning returns the policy in use.
