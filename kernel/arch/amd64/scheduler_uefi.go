@@ -31,7 +31,7 @@ var taskFPU [slotCount][FPUAreaSize]byte
 // path restores it, so kernel code may use SSE registers in between.
 //
 //go:extern goos_linux_user_fpu
-var linuxUserFPU [64][FPUAreaSize]byte
+var linuxUserFPU [sched.MaxTasks][FPUAreaSize]byte
 
 // LinuxUserFPU returns the saved x87 and SSE state of the current task's
 // Linux system call, which the return path restores.

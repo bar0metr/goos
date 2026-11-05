@@ -48,12 +48,12 @@ for later processes; the table still costs only the slots ever used.
 | --- | --- | --- | --- |
 | IPC channels | 24, static | 256 | 3 pages, on creation |
 | streams | 64, static | 256 | 1 page (ring of 4080 bytes) |
-| processes | 32, static | 64 (`sched.MaxTasks`) | 4 pages, on first use of the slot |
+| processes | 32, static | 64 | 4 pages, on first use of the slot |
 | handles per process | 128 | 256 | in the process record |
 | shared-memory objects | 64, static | 256, 16 per process | 1 page |
 | executable objects | 16, static | 64 | 1 page |
 | `WaitAny` objects | 16 | 64 (64-bit ready mask) | per task slot |
-| wait registrations | 64 | `sched.MaxTasks` | per task slot |
+| wait registrations | 64 | `sched.MaxTasks` (256) | 1 page, on the slot's first wait |
 | exec slots (shell) | 4 | 8 | 64 KiB of the exec area |
 | VFS sessions | 12 | 63 (`WaitAny` − 1) | |
 | VFS open files | 64, 16 per session | 256, 64 per session | |
@@ -64,11 +64,36 @@ may hold every channel, since only it creates them, and 64 streams, four for
 each job slot and the terminal's. Every charge is still returned on release,
 and teardown releases a process's whole account.
 
-**Tasks stay at 64, deliberately.** The scheduler's run, dead, and
-exit-pending sets are single 64-bit masks the assembly scans with one
-instruction, and its per-slot tables are sized by them. Processes follow, since
-each needs a task. Raising it means multi-word masks in the scheduler, which
-the SMP scheduler will need anyway; it is recorded as that work's, not hidden.
+**Tasks stayed at 64 at first, deliberately.** The scheduler's run, dead,
+and exit-pending sets were single 64-bit masks scanned with one instruction,
+and its per-slot tables were sized by them. Processes followed, since each
+needs a task. Raising the bound meant multi-word masks in the scheduler, and
+this ADR left that to the SMP scheduler work.
+
+**Revision: 256 tasks in four-word task sets.** Threads share the task table
+with processes, so with 64 slots a process allowed 64 tasks (the new
+`MaxTasksPerProcess`) could take every slot, and a handful of threaded
+programs filled the table while the process table still had room.
+`sched.MaxTasks` is now 256, and every task set in `sched.Core` is a
+`sched.TaskSet`, four 64-bit words. A pick ANDs
+the queue's words and counts trailing zeros in the first nonzero one, so
+selection stays a handful of word operations. Processor sets stay one word
+(`sched.MaxCPUs` is 64). No native call or diagnostic carries a task set as
+one word: `diag` prints each set as one hexadecimal number of any length.
+
+The process bound stays at 64 and no longer follows tasks; the slots past it
+go to threads. Two per-slot tables grew too large to keep static at 256 slots,
+so they now take pages the way registries do: a Linux call's continuation
+record (over 8 KiB, three pages) and a `WaitAny` operation (one page) come
+from the page allocator on the slot's first use and stay with the slot. The
+futex buckets and the `WaitAny` table index waits by slot and walk a task set
+of the waiting slots, not the whole table. The assembly's per-slot tables
+(contexts, roots, FS bases, entry stack tops, exit codes, FPU areas) are
+sized by `GOOS_MAX_TASKS` and live in `.bss`, so the image does not carry
+their zeros.
+Task kernel stacks were already allocated per task. Measured on the default
+build, the kernel image's memory went from 3,624 KiB to 3,484 KiB and its file
+from 1,306 KiB to 1,209 KiB.
 
 ## Alternatives
 

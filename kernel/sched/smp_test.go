@@ -25,7 +25,7 @@ func newCore(t *testing.T, cpus int) *Core {
 func check(t *testing.T, core *Core) {
 	t.Helper()
 	if !core.Check() {
-		t.Fatalf("invariants broken: %+v", core.Snapshot())
+		t.Fatalf("invariants broken: %+v", snapshotOf(core))
 	}
 }
 
@@ -94,7 +94,7 @@ func TestTaskNeverRunsOnTwoProcessors(t *testing.T) {
 			t.Fatalf("processor %d picked a task still on processor %d", cpu, home)
 		}
 	}
-	if core.RunningOn(slot) != home && core.running&bit(slot) == 0 {
+	if core.RunningOn(slot) != home && !core.running.Has(slot) {
 		t.Fatal("task left the running set before Finish")
 	}
 	check(t, core)
@@ -163,12 +163,12 @@ func TestIdleProcessorStealsWork(t *testing.T) {
 	running := core.Current(1)
 	queued := first + second - running
 	// Housekeeping task 0 blocks, and the kernel tasks have nothing to do.
-	core.runnable &^= 0x7
+	core.runnable[0] &^= 0x7
 	next := switchTo(core, 0, Block)
 	if next != queued {
 		t.Fatalf("idle housekeeping processor picked %d, want stolen %d", next, queued)
 	}
-	if core.homeOf(queued) != 0 || core.Snapshot().Stats.Steals != 1 {
+	if core.homeOf(queued) != 0 || snapshotOf(core).Stats.Steals != 1 {
 		t.Fatal("steal not recorded")
 	}
 	check(t, core)
@@ -267,7 +267,7 @@ func TestExitWhileAnotherProcessorSelects(t *testing.T) {
 	running := core.Current(1)
 	core.Switch(1, Exit)
 	// Processor 0 selects while processor 1 is still on the exiting stack.
-	core.runnable &^= 0x7
+	core.runnable[0] &^= 0x7
 	stolen := core.Switch(0, Block)
 	if stolen == running {
 		t.Fatal("an exiting task was stolen")
@@ -309,7 +309,7 @@ func TestOfflineProcessorNeverReceivesWork(t *testing.T) {
 		}
 	}
 	for cpu := 2; cpu < MaxCPUs; cpu++ {
-		if core.home[cpu] != 0 {
+		if !core.home[cpu].Empty() {
 			t.Fatalf("offline processor %d has a queue", cpu)
 		}
 	}
@@ -342,7 +342,7 @@ func TestAbandonFreesUnstartedSlot(t *testing.T) {
 
 func TestEmptyQueuesIdleEveryProcessor(t *testing.T) {
 	core := newCore(t, 4)
-	core.runnable = 0
+	core.runnable = TaskSet{}
 	for cpu := 0; cpu < 4; cpu++ {
 		if next := switchTo(core, cpu, Block); next != Idle {
 			t.Fatalf("processor %d picked %d from empty queues", cpu, next)
@@ -377,7 +377,7 @@ func TestRandomInterleavings(t *testing.T) {
 				if next != Idle && !core.allows(next, cpu) {
 					t.Fatalf("processor %d picked task %d its affinity leaves out", cpu, next)
 				}
-				if previous != Idle && previous < 4 && core.dying&bit(previous) != 0 {
+				if previous != Idle && previous < 4 && core.dying.Has(previous) {
 					t.Fatal("a kernel task exited")
 				}
 				if next != previous {
@@ -411,7 +411,7 @@ func TestRandomInterleavings(t *testing.T) {
 				t.Fatal("kernel task ran away from the housekeeping processor")
 			}
 			for other, previous := range pending {
-				if previous != Idle && core.Current(other) != previous && core.running&bit(previous) == 0 {
+				if previous != Idle && core.Current(other) != previous && !core.running.Has(previous) {
 					t.Fatal("a task left the running set before its processor finished")
 				}
 			}

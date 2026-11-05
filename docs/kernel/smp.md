@@ -92,9 +92,9 @@ own APIC.
 
 `kernel/sched.Core` is the run state, a pure structure with host tests. The
 amd64 layer calls it under the scheduler lock. It keeps the global task table
-of 64 slots with generation-safe IDs, and, per processor, a run queue (the
-`home` mask) and the current slot. A live task belongs to exactly one queue.
-A task in the `running` mask is on a processor from the moment one picks it
+of 256 slots with generation-safe IDs, and, per processor, a run queue (the
+`home` set) and the current slot. A live task belongs to exactly one queue.
+A task in the `running` set is on a processor from the moment one picks it
 until that processor has left its stack, so no other processor can pick a
 task whose registers are still being saved.
 
@@ -213,7 +213,7 @@ and check the order and recursion of every acquisition.
 | Linux tables: process states and records, threads, open descriptions, directories, VFS sessions, PID and family allocation | linux tables lock, one table operation at a time |
 | Fields of a Linux family's states, descriptions, and VFS session; its signals | the family's lock |
 | Linux terminals: records, line discipline, termios, size, session and foreground group (ADR 0206) | linux tables lock, one table operation at a time; a terminal call also holds its family's lock and the stream lock, which the kernel loop takes the same way when it processes input no task read |
-| Job-control stops (the scheduler's `stopped` mask) | the scheduler lock |
+| Job-control stops (the scheduler's `stopped` set) | the scheduler lock |
 | A Linux process's pending-signal summary | an atomic word, read without a lock |
 | Per-task Linux caller cache (state, thread ID, family) | written by the task itself and by its exit |
 | Lifecycle queue | lifecycle lock |
@@ -273,8 +273,9 @@ switches to the task first.
 
 ## Diagnostics
 
-In a diagnostic build, `diag` prints the run state (running and online
-masks, switches, steals, migrations, kills), the most tasks of one address
+In a diagnostic build, `diag` prints the run state (the runnable, dead, and running
+task sets as one hexadecimal number each, slot 0 in bit 0, the online
+processor mask, switches, steals, migrations, kills), the most tasks of one address
 space that ran on distinct processors at once (`parallel-peak`), the most
 processors inside system calls or fault resolution at once
 (`kernel-parallel-peak`), the most tasks of one process inside them at once

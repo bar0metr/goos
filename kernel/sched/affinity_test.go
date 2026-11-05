@@ -180,8 +180,8 @@ func TestPerProcessorStats(t *testing.T) {
 	slot := startTask(t, core, 0)
 	home := core.homeOf(slot)
 	runOn(t, core, slot, home)
-	if core.CPUStats(home).Switches == 0 || core.Snapshot().Stats.Switches < core.CPUStats(home).Switches {
-		t.Fatalf("switch counts %+v %+v", core.CPUStats(home), core.Snapshot().Stats)
+	if core.CPUStats(home).Switches == 0 || snapshotOf(core).Stats.Switches < core.CPUStats(home).Switches {
+		t.Fatalf("switch counts %+v %+v", core.CPUStats(home), snapshotOf(core).Stats)
 	}
 	if core.CPUStats(-1) != (Stats{}) || core.CPUStats(MaxCPUs) != (Stats{}) {
 		t.Fatal("an out-of-range processor has counters")

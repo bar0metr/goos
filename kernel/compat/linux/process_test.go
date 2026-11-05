@@ -506,7 +506,9 @@ func TestLinuxTaskCreationKeepsTheNativeReserve(t *testing.T) {
 		LinuxTaskCreationAllowed(0) || LinuxTaskCreationAllowed(sched.MaxTasks+1) {
 		t.Fatal("the Linux task reserve boundary is wrong")
 	}
-	if sched.MaxTasks-NativeTaskReserve != LinuxGlobalMaxProcesses {
-		t.Fatal("task and process reserves diverged")
+	// Every native process the process reserve keeps needs a task of the
+	// task reserve.
+	if NativeTaskReserve < NativeProcessReserve || sched.MaxTasks-NativeTaskReserve < LinuxGlobalMaxProcesses {
+		t.Fatal("the task reserve does not cover the process reserve")
 	}
 }
