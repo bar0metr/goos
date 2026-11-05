@@ -219,8 +219,12 @@ Requests are 24 bytes and replies 32. A flags byte carries `NoWait` and
 `Peek` for `RecvFrom` and `ReuseAddr` for `Bind`. A `NoWait` receive with
 nothing queued answers `WouldBlock`; a `Peek` receive copies the datagram
 and leaves it queued. A receive reply's length is the whole datagram, up to
-4096 bytes, the slot size. `Ready` reports the readiness mask (readable,
-writable), the next datagram's length and the number queued. `WaitReady`
+4096 bytes, the slot size, and it carries the endpoint's readiness after the
+datagram left the queue, as `Ready` reports it. `Ready` reports the
+readiness mask (readable, writable), the next datagram's length and the
+number queued. Byte 18 of a request other than `Release` is a mask of RX
+slots the client returns; `netd` takes them back before it handles the
+request, as one `Release` each would. `WaitReady`
 names the mask the client saw; `netd` answers it once the endpoint's mask
 differs, at once if it already does. An endpoint holds one, and `Close`
 answers it with `Closed` first. `Option` reads the TTL or the largest

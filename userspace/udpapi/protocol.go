@@ -84,7 +84,8 @@ const (
 	requestPort     = 12
 	requestLength   = 14
 	requestMask     = 16
-	requestReserved = 18
+	requestRelease  = 18
+	requestReserved = 19
 
 	replyOpcode    = 0
 	replyResult    = 1
@@ -216,6 +217,9 @@ type Request struct {
 	Port     uint16
 	Length   uint16
 	Mask     uint16
+	// Release names RX slots the client returns before netd handles the
+	// request, as one Release each would.
+	Release uint8
 }
 
 // Reply is one decoded reply body:
@@ -257,7 +261,8 @@ func allowedFlags(opcode Opcode) uint8 {
 
 func validRequest(r *Request) bool {
 	none := r.Address == noAddress && r.Port == 0
-	if r.Flags&^allowedFlags(r.Opcode) != 0 || (r.Mask != 0 && r.Opcode != OpWaitReady) || (r.Option != 0) != (r.Opcode == OpOption) {
+	if r.Flags&^allowedFlags(r.Opcode) != 0 || (r.Mask != 0 && r.Opcode != OpWaitReady) || (r.Option != 0) != (r.Opcode == OpOption) ||
+		r.Release != 0 && r.Opcode == OpRelease {
 		return false
 	}
 	switch r.Opcode {
@@ -308,6 +313,7 @@ func EncodeRequest(r *Request, correlation uint64, out *ipc.Message) bool {
 	binary.LittleEndian.PutUint16(payload[requestPort:], r.Port)
 	binary.LittleEndian.PutUint16(payload[requestLength:], r.Length)
 	binary.LittleEndian.PutUint16(payload[requestMask:], r.Mask)
+	payload[requestRelease] = r.Release
 	return true
 }
 
@@ -330,6 +336,7 @@ func DecodeRequest(in *ipc.Message, out *Request) (uint64, bool) {
 		Endpoint: binary.LittleEndian.Uint32(payload[requestEndpoint:]),
 		Port:     binary.LittleEndian.Uint16(payload[requestPort:]),
 		Length:   binary.LittleEndian.Uint16(payload[requestLength:]),
+		Release:  payload[requestRelease],
 	}
 	copy(r.Address[:], payload[requestAddress:])
 	if !validRequest(&r) {
@@ -355,7 +362,7 @@ func validReply(r *Reply) bool {
 	readiness := r.Mask != 0 || r.Value != 0 || r.Count != 0
 	ok := r.Result == ResultOK
 	switch {
-	case readiness && (!ok || (r.Opcode != OpReady && r.Opcode != OpWaitReady && r.Opcode != OpOption)),
+	case readiness && (!ok || (r.Opcode != OpReady && r.Opcode != OpWaitReady && r.Opcode != OpOption && r.Opcode != OpRecvFrom)),
 		r.Result == ResultWouldBlock && r.Opcode != OpRecvFrom,
 		r.Result == ResultMessageSize && r.Opcode != OpSend && r.Opcode != OpSendTo:
 		return false
@@ -380,7 +387,9 @@ func validReply(r *Reply) bool {
 	case OpConnect:
 		return r.Slot == 0 && r.Address != noAddress && r.Port != 0 && r.Length == 0 && r.Local != noAddress && r.LocalPort != 0 && !readiness
 	case OpRecvFrom:
-		return r.Slot < RXSlots && r.Address != noAddress && r.Length <= MaxPayload && r.Local != noAddress && r.LocalPort == 0 && !readiness
+		// The readiness is the endpoint's after the datagram left its queue.
+		return r.Slot < RXSlots && r.Address != noAddress && r.Length <= MaxPayload && r.Local != noAddress && r.LocalPort == 0 &&
+			r.Mask&^ReadyAll == 0
 	}
 	return false
 }

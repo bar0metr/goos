@@ -499,10 +499,23 @@ func (s *Service) doneRX(o *op, c *NativeCompletion) {
 			sock.readable -= min(sock.readable, length)
 		} else {
 			s.counters.DatagramsIn++
-			// The next datagram's length is unknown until netd says.
-			sock.mask &^= MaskReadable
-			sock.readable = 0
-			s.refreshReadable(global)
+			if c.Ready {
+				// netd said how the endpoint stands after this datagram.
+				sock.mask, sock.readable = c.Mask, c.Readable
+				if c.Mask&MaskWritable != 0 {
+					sock.txBlocked = false
+				}
+				if sock.waiting && sock.armedMask != sock.mask {
+					// The held wait names another mask; asking makes netd
+					// look at it, as a refresh does.
+					s.refreshReadable(global)
+				}
+			} else {
+				// The next datagram's length is unknown until netd says.
+				sock.mask &^= MaskReadable
+				sock.readable = 0
+				s.refreshReadable(global)
+			}
 		}
 	case NativeEOF:
 		sock.eof, sock.rxBurst = true, false

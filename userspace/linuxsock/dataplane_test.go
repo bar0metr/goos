@@ -474,6 +474,28 @@ func TestDatagramsGoThroughSlots(t *testing.T) {
 	if !h.has(NativeRead) {
 		t.Fatal("no next read ahead")
 	}
+	// Without readiness on the answer the core asks for the next length;
+	// with it, it takes netd's word.
+	if !h.has(NativeReady) {
+		t.Fatal("a datagram without readiness drew no refresh")
+	}
+	// netd answers the held wait with the writable mask; the next one names it.
+	h.complete(h.take(NativeWaitReady), NativeCompletion{Mask: MaskWritable})
+	for h.has(NativeReady) {
+		h.complete(h.take(NativeReady), NativeCompletion{Mask: MaskWritable})
+	}
+	h.complete(h.readAhead(endpoint), NativeCompletion{Data: []byte("second"), Full: 6, Address: peerAddress, Port: 53,
+		Ready: true, Mask: MaskWritable})
+	if h.has(NativeReady) {
+		t.Fatal("a datagram that carried readiness drew a refresh")
+	}
+	// A mask other than the one the held wait names asks again, as a
+	// refresh that saw one does.
+	h.complete(h.readAhead(endpoint), NativeCompletion{Data: []byte("third"), Full: 5, Address: peerAddress, Port: 53,
+		Ready: true, Mask: MaskWritable | MaskReadable, Readable: 4})
+	if !h.has(NativeReady) {
+		t.Fatal("a mask the wait does not name drew no refresh")
+	}
 }
 
 func TestBackendLossHandsBackQueuedSlots(t *testing.T) {

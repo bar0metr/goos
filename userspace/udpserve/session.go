@@ -109,6 +109,13 @@ func (s *Session) Handle(stack *network.Stack, request *udpapi.Request, correlat
 	id := network.EndpointID(request.Endpoint)
 	reply := &s.reply
 	*reply = udpapi.Reply{Opcode: request.Opcode, Endpoint: request.Endpoint}
+	// The slots a request returns go back before it runs; the parked reads
+	// a free slot lets go wait for the event loop's Deliver.
+	for slot := uint8(0); request.Release>>slot != 0; slot++ {
+		if request.Release&(1<<slot) != 0 && !s.rxSlots.Return(slot) {
+			return FaultRelease
+		}
+	}
 	switch request.Opcode {
 	case udpapi.OpOpen:
 		opened, result := stack.UDPOpen(s.owner)
@@ -308,6 +315,11 @@ func (s *Session) deliver(stack *network.Stack, held *waiter, out Replier) Fault
 	s.rxSlots.Lend(slot)
 	reply := udpapi.Reply{Opcode: udpapi.OpRecvFrom, Endpoint: uint32(held.id), Slot: slot,
 		Address: received.Source, Port: received.SourcePort, Length: uint16(received.Length), Local: received.Destination}
+	// The endpoint's readiness after this datagram, so a client need not ask
+	// for the next one's length.
+	if ready, result := stack.UDPReadiness(s.owner, held.id); result == network.ResultOK {
+		reply.Mask, reply.Value, reply.Count = uint16(ready.Mask), ready.Next, ready.Queued
+	}
 	correlation := held.recv
 	held.recv, held.recvPeek = 0, false
 	if !s.answer(out, &reply, correlation) {

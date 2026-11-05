@@ -179,8 +179,11 @@ type NativeCompletion struct {
 	Full      uint32
 	Mask      NativeMask
 	Readable  uint32
-	Value     uint32
-	Data      []byte
+	// Ready: a datagram read carries Mask and Readable as the endpoint
+	// stands after it, so the core need not ask for them.
+	Ready bool
+	Value uint32
+	Data  []byte
 }
 
 // SubmitStatus is what a backend did with a request.

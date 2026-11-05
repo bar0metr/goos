@@ -75,13 +75,13 @@ func (l *NativeLink) send(ch NativeChannel, message *ipc.Message) SendStatus {
 
 // Submit encodes and sends one request; it is Backend.Submit for this link.
 //
-// A GTCP 3 request carries the RX slots this side returns, so a read posted
+// A GTCP 3 or GUDP request carries the RX slots this side returns, so a read posted
 // right after the last one answered does not cost netd a Release message
 // first. The core copies a read's bytes before it submits anything while it
 // handles the read, so a submission during that handling returns the slot
 // too, and the completion's Data goes with it.
 func (l *NativeLink) Submit(ch NativeChannel, tag uint64, request *NativeRequest) SubmitStatus {
-	carry := l.Proto == TCP && l.layout.StreamOffsets()
+	carry := l.Proto == UDP || l.layout.StreamOffsets()
 	if carry && l.holding {
 		l.holding, l.completion.Data = false, nil
 		l.releases |= 1 << l.lastSlot
@@ -120,6 +120,7 @@ func (l *NativeLink) Submit(ch NativeChannel, tag uint64, request *NativeRequest
 		if status := l.encodeUDP(request, slot); status != SubmitAccepted {
 			return status
 		}
+		l.udpRequest.Release = l.releases
 		encoded = udpapi.EncodeRequest(&l.udpRequest, tag, &l.out)
 	}
 	if !encoded {
@@ -143,7 +144,7 @@ func (l *NativeLink) Submit(ch NativeChannel, tag uint64, request *NativeRequest
 
 // Decode turns a reply from netd into a completion for the core. ok false
 // means netd broke the protocol. The completion's Data stays valid until
-// Done, or until a GTCP 3 Submit returns its slot.
+// Done, or until a Submit on a GTCP 3 or GUDP link returns its slot.
 func (l *NativeLink) Decode(in *ipc.Message) (correlation uint64, completion *NativeCompletion, ok bool) {
 	l.nativeIn = *in
 	if l.Proto == TCP {
@@ -533,6 +534,9 @@ func (l *NativeLink) completeUDP() (uint64, bool) {
 				return 0, false
 			}
 			l.completion.Address, l.completion.Port, l.completion.Full = r.Address, r.Port, uint32(r.Length)
+			if r.Mask != 0 {
+				l.completion.Ready, l.completion.Mask, l.completion.Readable = true, coreUDPMask(r.Mask), r.Value
+			}
 			l.completion.Data = l.rx[uint64(r.Slot)*udpapi.SlotSize : uint64(r.Slot)*udpapi.SlotSize+uint64(r.Length)]
 		}
 	case udpapi.OpClose:

@@ -149,6 +149,7 @@ func validReplies() []Reply {
 		{Opcode: OpSend, Endpoint: 0x101, Slot: 2},
 		{Opcode: OpSendTo, Endpoint: 0x101, Slot: 3, Result: ResultNoRoute},
 		{Opcode: OpRecvFrom, Endpoint: 0x101, Slot: 7, Address: peer, Port: 53, Length: 0, Local: local},
+		{Opcode: OpRecvFrom, Endpoint: 0x101, Slot: 6, Address: peer, Port: 53, Length: 9, Local: local, Mask: ReadyAll, Value: 12, Count: 2},
 		{Opcode: OpRecvFrom, Endpoint: 0x101, Result: ResultClosed},
 		{Opcode: OpClose, Endpoint: 0x101},
 		{Opcode: OpRecvFrom, Endpoint: 0x101, Result: ResultWouldBlock},
@@ -195,7 +196,8 @@ func TestReplyRefusesUnusedFields(t *testing.T) {
 		{Opcode: OpReady, Endpoint: 1, Mask: ReadyAll + 1},
 		{Opcode: OpReady, Endpoint: 1, Result: ResultBusy, Mask: 1},
 		{Opcode: OpOption, Endpoint: 1, Count: 1},
-		{Opcode: OpRecvFrom, Endpoint: 1, Address: peer, Local: peer, Value: 1},
+		{Opcode: OpRecvFrom, Endpoint: 1, Address: peer, Local: peer, Mask: ReadyAll + 1},
+		{Opcode: OpRecvFrom, Endpoint: 1, Result: ResultWouldBlock, Value: 1},
 		{Opcode: OpClose, Endpoint: 1, Mask: 1},
 		{Opcode: OpReady, Endpoint: 1, Address: peer},
 	} {
@@ -254,5 +256,24 @@ func TestPoolGeometry(t *testing.T) {
 	}
 	if Offset(RXSlots-1)+SlotSize != RXPoolPages*pageSize {
 		t.Fatal("last slot past the pool")
+	}
+}
+
+func TestRequestReturnsRXSlots(t *testing.T) {
+	request := Request{Opcode: OpRecvFrom, Endpoint: 3, Release: 0x05}
+	var message ipc.Message
+	if !EncodeRequest(&request, 7, &message) {
+		t.Fatal("a read returning slots refused")
+	}
+	var decoded Request
+	if _, ok := DecodeRequest(&message, &decoded); !ok || decoded != request {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	message.Payload[requestReserved] = 1
+	if _, ok := DecodeRequest(&message, &decoded); ok {
+		t.Fatal("a reserved byte decoded")
+	}
+	if EncodeRequest(&Request{Opcode: OpRelease, Slot: 1, Release: 1}, 0, &message) {
+		t.Fatal("a Release that returns more slots encoded")
 	}
 }
