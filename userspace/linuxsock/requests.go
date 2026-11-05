@@ -818,6 +818,7 @@ func (s *Service) refreshReadable(global int) {
 	}
 	o.socket, o.socketSerial = int16(global), sock.serial
 	sock.refreshing, sock.needRefresh = true, false
+	s.families[sock.family].stats.Refreshes++
 	s.step(o)
 }
 

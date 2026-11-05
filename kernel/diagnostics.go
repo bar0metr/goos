@@ -630,6 +630,10 @@ func dumpSocketServices(out diagWriter) {
 		out.uint("warm-misses", counters.WarmMisses)
 		out.uint("accept-hits", counters.AcceptHits)
 		out.uint("accept-misses", counters.AcceptMisses)
+		out.uint("refreshes", counters.Refreshes)
+		out.uint("waits-armed", counters.WaitsArmed)
+		out.uint("accepts-ahead", counters.AcceptsAhead)
+		out.uint("completions", counters.Completions)
 		out.end()
 		dumpSocketPlane(out, families[index], endpoints[index], rings)
 	}

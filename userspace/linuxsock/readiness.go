@@ -143,6 +143,7 @@ func (s *Service) arm(global int) {
 	switch s.backend.Submit(sock.proto, makeTag(tagWait, global, sock.serial), &s.native) {
 	case SubmitAccepted:
 		sock.waiting, sock.armedMask = true, sock.mask
+		s.families[sock.family].stats.WaitsArmed++
 	case SubmitBusy:
 		sock.needWait = true
 		s.waits++

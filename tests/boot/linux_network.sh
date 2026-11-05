@@ -475,6 +475,9 @@ if wants stress; then
 			if serial | tail -n "+$((start + 1))" | grep -q "^stress $iteration failed\$\|$fatal" || [ "$elapsed" -ge $((stress_timeout * 10)) ]; then
 				run diag
 				cp "$work/output" build/logs/linux-stream-stress-diag.log
+				sleep 5
+				run diag
+				cat "$work/output" >>build/logs/linux-stream-stress-diag.log
 				run 'net endpoints'
 				sleep 2
 				fail "stream stress stopped at transfer $iteration of $count; snapshot in build/logs/linux-stream-stress-diag.log and $log"

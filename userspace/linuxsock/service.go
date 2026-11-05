@@ -912,6 +912,9 @@ func (s *Service) Complete(proto Proto, generation uint64, tag uint64, c *Native
 		return
 	}
 	kind, index, serial := splitTag(tag)
+	if kind == tagOp && index < len(s.ops) && s.ops[index].family >= 0 && s.ops[index].state == opNative && !s.ops[index].orphan {
+		s.families[s.ops[index].family].stats.Completions++
+	}
 	switch kind {
 	case tagOp:
 		if index < len(s.ops) {

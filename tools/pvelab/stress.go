@@ -90,7 +90,7 @@ func stressStep(ctx context.Context, s *Session, want, failure string, step int)
 // while the stuck transfer still holds its state, and saves them.
 func stressSnapshot(ctx context.Context, s *Session) string {
 	var parts []string
-	for _, command := range []string{"diag", "net endpoints", "services"} {
+	for _, command := range []string{"diag", "net endpoints", "services", "sleep 5", "diag", "net endpoints"} {
 		out, err := s.Guest.Run(ctx, command, commandTimeout)
 		if err != nil {
 			out = fmt.Sprintf("%s: %v", command, err)

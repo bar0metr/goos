@@ -124,6 +124,7 @@ func (s *Service) acceptAhead(global int) {
 			return
 		}
 		sock.accepting++
+		f.stats.AcceptsAhead++
 	}
 }
 

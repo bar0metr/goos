@@ -86,7 +86,7 @@ func TestDoorbellToken(t *testing.T) {
 
 func TestServiceCountersRoundTrip(t *testing.T) {
 	page := make([]byte, pageSize)
-	in := ServiceCounters{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+	in := ServiceCounters{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}
 	StoreServiceCounters(page, &in)
 	if LoadServiceCounters(page) != in {
 		t.Fatal("counters")
