@@ -416,6 +416,22 @@ func (stack *Stack) tcpAdvertisedWindow(entry *tcpEndpoint) int {
 	return max(free, 0)
 }
 
+// tcpOfferedWindow is the window a segment advertises. The right edge moves
+// only by a segment or half the buffer, whichever is less (RFC 1122
+// 4.2.3.3): an ACK that offered each few hundred bytes a reader freed would
+// make the sender cut the stream into segments that small.
+func (stack *Stack) tcpOfferedWindow(entry *tcpEndpoint) int {
+	free := stack.tcpAdvertisedWindow(entry)
+	if !entry.rcvEdgeKnown || !seqGE(entry.rcvEdge, entry.rcvNxt) {
+		return free
+	}
+	step := min(tcpSMSS(entry), TCPReceiveCapacity/2)
+	if int32(entry.rcvNxt+uint32(free)-entry.rcvEdge) >= int32(step) {
+		return free
+	}
+	return min(int(entry.rcvEdge-entry.rcvNxt), free)
+}
+
 func (stack *Stack) tcpSegmentAcceptable(entry *tcpEndpoint, segment tcpSegment) bool {
 	length := uint32(len(segment.payload))
 	if segment.flags&tcpFlagSYN != 0 {
@@ -636,7 +652,7 @@ func (stack *Stack) sendTCPParts(entry *tcpEndpoint, flags uint8, sequence, ackn
 		return false
 	}
 	segment := tcpSegment{sourcePort: entry.port, destinationPort: entry.remotePort, sequence: sequence,
-		acknowledgment: acknowledgment, flags: flags, window: uint16(min(stack.tcpAdvertisedWindow(entry), 65535)),
+		acknowledgment: acknowledgment, flags: flags, window: uint16(min(stack.tcpOfferedWindow(entry), 65535)),
 		mss: entry.localMSS, payload: payload, tail: tail}
 
 	if route.path == udpLocal {

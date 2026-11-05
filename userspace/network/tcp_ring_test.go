@@ -505,3 +505,34 @@ func TestWindowUpdateWaitsForAFreeFrame(t *testing.T) {
 		t.Fatalf("second pass sent %d", len(sent))
 	}
 }
+
+func TestACKKeepsTheRightEdgeUntilItMovesASegment(t *testing.T) {
+	h := readyWithPeer(t)
+	id, entry := establishedWithPeer(t, h, 50106)
+	for index := 0; index < 6; index++ {
+		h.tcpFromPeer(entry, peerData(entry, 0, pattern(index*1360, 1360), 0))
+		h.tcpSent()
+	}
+	before := TCPReceiveCapacity - 6*1360
+	buffer := make([]byte, 500)
+	if n, result := h.stack.TCPRead(0, id, buffer, h.now); result != ResultOK || n != 500 {
+		t.Fatalf("read %d %d", n, result)
+	}
+	if sent := h.tcpSent(); len(sent) != 0 {
+		t.Fatalf("a read of 500 bytes sent %d updates", len(sent))
+	}
+	h.tcpFromPeer(entry, peerData(entry, 0, pattern(6*1360, 100), 0))
+	sent := h.tcpSent()
+	if len(sent) != 1 || int(sent[0].window) != before-100 {
+		t.Fatalf("ACK after a small read: %v, want window %d", sent, before-100)
+	}
+	// A read that frees a segment's worth moves the edge again.
+	big := make([]byte, 2000)
+	if n, result := h.stack.TCPRead(0, id, big, h.now); result != ResultOK || n != 2000 {
+		t.Fatalf("read %d %d", n, result)
+	}
+	sent = h.tcpSent()
+	if len(sent) != 1 || int(sent[0].window) != before-100+2500 {
+		t.Fatalf("update after a segment's worth: %v, want window %d", sent, before-100+2500)
+	}
+}
