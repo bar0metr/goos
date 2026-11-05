@@ -125,7 +125,7 @@ type cpuScratch struct {
 	logFields       [logfmt.MaxFields]byte
 	logGrant        [logfmt.MaxFields]byte
 	logCopy         klog.Copy
-	logReadCopies   [klog.Capacity]klog.Copy
+	logReadCopies   [kcall.LogReadMax]klog.Copy
 	logReadWire     [kcall.LogReadSize]byte
 	kernelCallData  [kcall.MaxConsoleWrite]byte
 	ipcWireData     [ipc.WireMaxSize]byte

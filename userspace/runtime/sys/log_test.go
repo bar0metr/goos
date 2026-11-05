@@ -23,8 +23,9 @@ func testLogWire(wire *[kcall.LogReadSize]byte, oldest, total, cursor uint64) {
 	if !logfmt.SequenceBefore(first, total) {
 		return
 	}
-	binary.LittleEndian.PutUint32(wire[24:28], uint32(total-first))
-	for index := 0; uint64(index) < total-first; index++ {
+	count := min(total-first, kcall.LogReadMax)
+	binary.LittleEndian.PutUint32(wire[24:28], uint32(count))
+	for index := 0; uint64(index) < count; index++ {
 		offset := kcall.LogReadHeader + index*kcall.LogReadRecordSize
 		size, _ := logfmt.EncodeRecord(logfmt.Record{Time: timekeeping.Time{Seconds: int64(first + uint64(index))}, Process: 42, Level: logfmt.Info, Component: []byte("test"), Message: []byte("message"), Fields: []byte("a=1")}, wire[offset+2:offset+kcall.LogReadRecordSize])
 		binary.LittleEndian.PutUint16(wire[offset:offset+2], uint16(size))
@@ -117,6 +118,26 @@ func TestLogAndCursorWrappersKeepExistingABI(t *testing.T) {
 	testLogWire(&wire, 0, 5, 0)
 	if allocations := testing.AllocsPerRun(100, func() { DecodeLogBatch(wire[:], 0) }); allocations != 0 {
 		t.Fatalf("batch allocations %v", allocations)
+	}
+}
+
+// A ring larger than one batch reports its whole window; the batch holds the
+// first LogReadMax records past the cursor and Next names the rest.
+func TestStructuredBatchFromRingLargerThanABatch(t *testing.T) {
+	var wire [kcall.LogReadSize]byte
+	oldest, total := uint64(100), uint64(100+kcall.LogRingCapacity)
+	testLogWire(&wire, oldest, total, 40)
+	batch, valid := DecodeLogBatch(wire[:], 40)
+	if !valid || batch.Count != kcall.LogReadMax || batch.First != oldest || batch.Next() != oldest+kcall.LogReadMax || batch.Lost(40) != 60 {
+		t.Fatalf("batch %+v valid %v", batch, valid)
+	}
+	testLogWire(&wire, oldest, total, total-3)
+	if batch, valid = DecodeLogBatch(wire[:], total-3); !valid || batch.Count != 3 || batch.Next() != total || batch.Lost(total-3) != 0 {
+		t.Fatalf("tail batch %+v valid %v", batch, valid)
+	}
+	testLogWire(&wire, oldest, total+1, oldest)
+	if _, valid = DecodeLogBatch(wire[:], oldest); valid {
+		t.Fatal("a window wider than the ring accepted")
 	}
 }
 

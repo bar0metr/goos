@@ -12,6 +12,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/klog"
 	"goos/kernel/lock"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
@@ -424,6 +425,16 @@ func dumpDiagnostics(requester process.ID) {
 		out.end()
 	}
 	dumpTiming(out)
+	// The log ring's counters: appended counts every record since boot, and
+	// overwritten counts those the ring dropped to make room. Persistence
+	// counters belong to the log service, which reports them in the log.
+	logOldest, logTotal := systemLog.Bounds()
+	out.text("DIAG log")
+	out.uint("capacity", klog.Capacity)
+	out.uint("appended", logTotal)
+	out.uint("retained", logTotal-logOldest)
+	out.uint("overwritten", logOldest)
+	out.end()
 	out.text("DIAG events")
 	out.uint("total", diagRing.Total())
 	out.end()

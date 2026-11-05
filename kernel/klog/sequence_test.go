@@ -99,14 +99,14 @@ func TestSequenceCounterWrapRetainsFullnessAndAbsolutePositions(t *testing.T) {
 			t.Fatal("wrapped cursor shifted")
 		}
 	}
-	for i := uint64(6); i < 70; i++ {
+	for i := uint64(6); i < Capacity+6; i++ {
 		appendSequence(&ring, i)
 	}
 	oldest, total, first, count = ring.Read(^uint64(0), copies[:])
-	if ring.Len() != Capacity || oldest != 3 || total != 67 || first != 3 || count != Capacity || first-^uint64(0) != 4 {
+	if ring.Len() != Capacity || oldest != 3 || total != Capacity+3 || first != 3 || count != Capacity || first-^uint64(0) != 4 {
 		t.Fatalf("wrapped full/gap window %d %d %d %d", oldest, total, first, count)
 	}
-	if copies[0].Record().Time.Seconds != 6 || copies[63].Record().Time.Seconds != 69 {
+	if copies[0].Record().Time.Seconds != 6 || copies[Capacity-1].Record().Time.Seconds != Capacity+5 {
 		t.Fatal("wrapped retained snapshot")
 	}
 	var textCopy Copy
