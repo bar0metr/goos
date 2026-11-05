@@ -5,7 +5,7 @@ and a kernel stack. A Process owns an address space, handles, metadata, and one
 or more Task identities. Userspace tasks record their owning process and CR3;
 kernel tasks use the kernel page-table root.
 
-`kernel/sched.Core` holds the run state of every task and processor: 64 task
+`kernel/sched.Core` holds the run state of every task and processor: 256 task
 slots with generation-safe IDs, a run queue and a current slot per
 processor, and the set of tasks on a processor. The amd64 layer calls it
 under the scheduler lock. Processors, placement, stealing, and the locks are
@@ -40,7 +40,9 @@ exited task's slot is reclaimed (ADR 0056). The switch points are:
 Selection is round-robin over the processor's queue from the slot after the
 current one. A processor with nothing queued steals one task from another
 queue, and with nothing to steal runs its idle loop, which has a slot of its
-own after the 64 task slots.
+own after the 256 task slots. The task sets are four-word bitsets
+(`sched.TaskSet`), so a pick ANDs four words and counts trailing zeros in
+the first nonzero one.
 
 New kernel tasks receive four contiguous stack pages, a synthetic interrupt
 frame, and two unmapped guard pages below them; the build bounds every kernel

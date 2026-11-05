@@ -120,7 +120,9 @@ scalars. Pointer interpretation remains the responsibility of a syscall handler
 using checked copyin/copyout.
 
 A blocking handler may persist one continuation per generation-safe Task ID.
-Continuation storage is fixed at the 64 scheduler slots and rejects a second
+Continuation storage has one record per scheduler slot, 256 of them, taken
+from the page allocator on the slot's first blocking call and kept for the
+slot's later tasks. It rejects a second
 active call, stale task generations, correlation mismatches, repeated issue or
 advance, embedded NUL in copied path data, and paths above `PathMax`. Blocking
 clears the runnable bit and switches tasks; wake resumes the exact stage without
