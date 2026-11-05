@@ -204,14 +204,34 @@ func serviceUDP(index int) {
 	}
 }
 
-// deliverUDP answers every waiting RecvFrom whose endpoint has a datagram.
-func deliverUDP() {
+// deliverUDP runs each session's Deliver once. It reports whether a
+// session spent its budget with work left, so the loop must not sleep.
+func deliverUDP() bool {
+	more := false
 	for index := range udpSessions {
 		if udpSessions[index].channel == 0 {
 			continue
 		}
-		if fault := udpSessions[index].state.Deliver(&stack, udpReplier{index}); fault != udpserve.FaultNone {
+		fault, left := udpSessions[index].state.Deliver(&stack, udpReplier{index})
+		if fault != udpserve.FaultNone {
 			closeUDPSession(index, string(fault))
+			continue
+		}
+		more = more || left
+	}
+	return more
+}
+
+// stalledUDP names a session, endpoint and parked request that Deliver
+// would answer now, for the validation build's check before netd sleeps.
+func stalledUDP() (session int, endpoint uint32, op string, found bool) {
+	for index := range udpSessions {
+		if udpSessions[index].channel == 0 {
+			continue
+		}
+		if endpoint, op, found := udpSessions[index].state.Runnable(&stack); found {
+			return index, endpoint, op, true
 		}
 	}
+	return 0, 0, "", false
 }
