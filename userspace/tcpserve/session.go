@@ -63,6 +63,8 @@ type Session struct {
 	rxSlots   tcpapi.Slots
 	endpoints [network.MaxTCPSessionQuota]waiter
 	reply     tcpapi.Reply
+	// delivered counts the answers of the Deliver pass under way.
+	delivered int
 }
 
 // Start begins a version 2 session with the ordinary endpoint quota.
@@ -324,7 +326,34 @@ func (s *Session) reported(stack *network.Stack, id network.TCPEndpointID, resul
 	stack.TCPTakeError(s.owner, id)
 }
 
+// Deliver answers every parked request that can finish now. One answer can
+// make another possible, as a read that empties a peer's receive buffer
+// gives the other end send room, and the service sleeps after Deliver until
+// its next event, so passes repeat until one answers nothing.
 func (s *Session) Deliver(stack *network.Stack, now uint64, out Replier) Fault {
+	for pass := 0; pass < maxDeliverPasses; pass++ {
+		s.delivered = 0
+		if fault := s.deliverPass(stack, now, out); fault != FaultNone {
+			return fault
+		}
+		if s.delivered == 0 {
+			break
+		}
+	}
+	return FaultNone
+}
+
+// maxDeliverPasses bounds Deliver's passes; every endpoint has at most a
+// few parked requests, so the passes settle long before it.
+const maxDeliverPasses = 16
+
+// deliver sends one answer of a Deliver pass and counts it.
+func (s *Session) deliver(out Replier, reply *tcpapi.Reply, correlation uint64) bool {
+	s.delivered++
+	return out.Reply(reply, correlation)
+}
+
+func (s *Session) deliverPass(stack *network.Stack, now uint64, out Replier) Fault {
 	for index := range s.endpoints {
 		held := &s.endpoints[index]
 		if fault := s.deliverConnect(stack, held, out); fault != FaultNone {
@@ -361,7 +390,7 @@ func (s *Session) deliverConnect(stack *network.Stack, held *waiter, out Replier
 	s.reported(stack, held.id, result)
 	correlation := held.connect
 	held.connect = 0
-	if !out.Reply(&reply, correlation) {
+	if !s.deliver(out, &reply, correlation) {
 		return FaultUnreachable
 	}
 	return FaultNone
@@ -388,7 +417,7 @@ func (s *Session) deliverAccept(stack *network.Stack, held *waiter, out Replier)
 	}
 	correlation := held.accept
 	held.accept = 0
-	if !out.Reply(&reply, correlation) {
+	if !s.deliver(out, &reply, correlation) {
 		return FaultUnreachable
 	}
 	return FaultNone
@@ -426,7 +455,7 @@ func (s *Session) deliverRead(stack *network.Stack, held *waiter, now uint64, ou
 		}
 		held.readCount--
 		held.reads[held.readCount] = parkedRead{}
-		if !out.Reply(&reply, head.correlation) {
+		if !s.deliver(out, &reply, head.correlation) {
 			return FaultUnreachable
 		}
 	}
@@ -453,7 +482,7 @@ func (s *Session) deliverWrite(stack *network.Stack, held *waiter, now uint64, o
 	reply := tcpapi.Reply{Opcode: tcpapi.OpWrite, Result: Result(result), Endpoint: uint32(held.id), Slot: held.writeSlot, Length: uint16(written)}
 	correlation := held.write
 	held.write, held.writeLength = 0, 0
-	if !out.Reply(&reply, correlation) {
+	if !s.deliver(out, &reply, correlation) {
 		return FaultUnreachable
 	}
 	return FaultNone
@@ -475,7 +504,7 @@ func (s *Session) deliverReady(stack *network.Stack, held *waiter, out Replier) 
 	}
 	correlation := held.ready
 	held.ready, held.readyMask = 0, 0
-	if !out.Reply(&reply, correlation) {
+	if !s.deliver(out, &reply, correlation) {
 		return FaultUnreachable
 	}
 	return FaultNone

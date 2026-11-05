@@ -837,6 +837,14 @@ func (s *Service) doneRefresh(o *op, c *NativeCompletion) {
 	if c.Result == NativeOK {
 		s.observe(global, c.Mask, c.Readable)
 	}
+	// netd answers the held wait only when the endpoint's mask differs from
+	// the one the wait names. A refresh that saw another mask may have seen
+	// a passing state: if the endpoint goes back to the named mask before
+	// netd looks, the wait never answers. Ask again until the two agree or
+	// the wait answers; each ask makes netd look at the wait too.
+	if sock.used && sock.waiting && sock.armedMask != sock.mask {
+		sock.needRefresh = true
+	}
 	if sock.needRefresh {
 		s.refreshReadable(global)
 	}

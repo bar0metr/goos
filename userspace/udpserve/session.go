@@ -47,6 +47,8 @@ type Session struct {
 	rxSlots   udpapi.Slots
 	endpoints [network.MaxUDPSessionQuota]waiter
 	reply     udpapi.Reply
+	// answered counts the answers of the Deliver pass under way.
+	answered int
 }
 
 // Start begins a session on owner's endpoints with the ordinary quota.
@@ -236,16 +238,31 @@ func (s *Session) Handle(stack *network.Stack, request *udpapi.Request, correlat
 // Deliver answers every waiting RecvFrom whose endpoint has a datagram,
 // while the client has an RX slot free for it, then every WaitReady whose
 // endpoint's mask changed.
+// Deliver answers every parked request that can finish now, in passes
+// until one answers nothing: an answer can make another possible, and the
+// service sleeps after Deliver until its next event.
 func (s *Session) Deliver(stack *network.Stack, out Replier) Fault {
-	for index := range s.endpoints {
-		if fault := s.deliver(stack, &s.endpoints[index], out); fault != FaultNone {
-			return fault
+	for pass := 0; pass < 16; pass++ {
+		s.answered = 0
+		for index := range s.endpoints {
+			if fault := s.deliver(stack, &s.endpoints[index], out); fault != FaultNone {
+				return fault
+			}
+			if fault := s.deliverReady(stack, &s.endpoints[index], out); fault != FaultNone {
+				return fault
+			}
 		}
-		if fault := s.deliverReady(stack, &s.endpoints[index], out); fault != FaultNone {
-			return fault
+		if s.answered == 0 {
+			break
 		}
 	}
 	return FaultNone
+}
+
+// answer sends one answer of a Deliver pass and counts it.
+func (s *Session) answer(out Replier, reply *udpapi.Reply, correlation uint64) bool {
+	s.answered++
+	return out.Reply(reply, correlation)
 }
 
 func (s *Session) deliverReady(stack *network.Stack, held *waiter, out Replier) Fault {
@@ -262,7 +279,7 @@ func (s *Session) deliverReady(stack *network.Stack, held *waiter, out Replier) 
 	}
 	correlation := held.ready
 	held.ready, held.readyMask = 0, 0
-	if !out.Reply(&reply, correlation) {
+	if !s.answer(out, &reply, correlation) {
 		return FaultUnreachable
 	}
 	return FaultNone
@@ -293,7 +310,7 @@ func (s *Session) deliver(stack *network.Stack, held *waiter, out Replier) Fault
 		Address: received.Source, Port: received.SourcePort, Length: uint16(received.Length), Local: received.Destination}
 	correlation := held.recv
 	held.recv, held.recvPeek = 0, false
-	if !out.Reply(&reply, correlation) {
+	if !s.answer(out, &reply, correlation) {
 		return FaultUnreachable
 	}
 	return FaultNone

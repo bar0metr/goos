@@ -28,7 +28,9 @@ type world struct {
 	replies []ipc.Message
 	held    []ipc.Message
 	queue   int
-	in      tcpapi.Request
+	// timers: simulated time moved, so netd's timers run once.
+	timers bool
+	in     tcpapi.Request
 	// The kernel's TX slots: committed or free, with their generations.
 	txBusy [linuxsockapi.TXSlots]bool
 	txGen  uint32
@@ -74,6 +76,15 @@ func newWorldQueue(t *testing.T, queue int) *world {
 // netd takes its queue, handles each request, then delivers what the
 // requests made ready, as its event loop does.
 func (w *world) netd() bool {
+	// netd wakes only on an event: a request, room for the replies it held,
+	// or a timer that came due. Without one it sleeps, whatever its own
+	// state would let it answer.
+	deadline, timed := w.stack.Deadline()
+	if len(w.b.channels[TCP].queue) == 0 && (len(w.held) == 0 || len(w.replies) >= w.queue) &&
+		(!timed || deadline > w.now) {
+		return false
+	}
+	w.timers = false
 	moved := false
 	for len(w.held) != 0 && len(w.replies) < w.queue {
 		w.replies = append(w.replies, w.held[0])
@@ -95,6 +106,15 @@ func (w *world) netd() bool {
 	w.stack.Advance(w.now)
 	if fault := w.session.Deliver(&w.stack, w.now, worldReplier{w}); fault != tcpserve.FaultNone {
 		w.t.Fatalf("netd deliver fault %q", fault)
+	}
+	// After a pass netd sleeps until its next event. A second pass must
+	// find nothing more to answer, or an answer waits for an unrelated event.
+	before := len(w.replies) + len(w.held)
+	if fault := w.session.Deliver(&w.stack, w.now, worldReplier{w}); fault != tcpserve.FaultNone {
+		w.t.Fatalf("netd deliver fault %q", fault)
+	}
+	if after := len(w.replies) + len(w.held); after != before {
+		w.t.Fatalf("a delivery pass left %d answers for the next event", after-before)
 	}
 	return moved
 }
@@ -144,6 +164,7 @@ func (w *world) call(request linuxsockapi.Request) linuxsockapi.Reply {
 		}
 		w.settle()
 		w.now += 1_000_000
+		w.timers = true
 	}
 	w.t.Fatalf("no reply to %+v", request)
 	return linuxsockapi.Reply{}
@@ -283,6 +304,7 @@ func (w *world) streamOrdered(client, server uint64, total int, seed uint64) {
 		// waits for them past a few simulated seconds is stuck.
 		if idle++; idle > 1 {
 			w.now += 10_000_000
+			w.timers = true
 		}
 		if idle > 500 {
 			w.dump(client, server)

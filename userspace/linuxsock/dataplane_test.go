@@ -513,3 +513,28 @@ func TestBusyNativeSessionRetriesWrites(t *testing.T) {
 		t.Fatal("slot not back")
 	}
 }
+
+// TestRefreshThatSawAPassingMaskAsksAgain covers a refresh that answers
+// "no room" while the held wait still names "room": netd answers that wait
+// only when the endpoint's mask differs from it, so if the room comes back
+// before netd looks, nothing would answer. The core asks again until the
+// two agree.
+func TestRefreshThatSawAPassingMaskAsksAgain(t *testing.T) {
+	h := newHarness(t)
+	f := h.family(1, 7)
+	id := h.connected(f)
+	endpoint := h.endpoint(id)
+	h.wake(endpoint, MaskConnected|MaskWritable, 0) // the wait now names room
+	h.commit(f, 0, id, pattern(100, 1), false, [4]byte{}, 0)
+	h.complete(h.take(NativeWrite), NativeCompletion{Length: 40})
+	h.complete(h.take(NativeReady), NativeCompletion{Mask: MaskConnected})
+	if h.svc.ProgressHoles() != 0 {
+		t.Fatal("a blocked stream lost every source of progress")
+	}
+	again := h.take(NativeReady)
+	h.complete(again, NativeCompletion{Mask: MaskConnected | MaskWritable})
+	resent := h.take(NativeWrite)
+	if resent.request.Offset != 40 || len(resent.data) != 60 {
+		t.Fatalf("resent offset %d length %d", resent.request.Offset, len(resent.data))
+	}
+}
