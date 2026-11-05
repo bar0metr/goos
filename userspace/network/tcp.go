@@ -99,6 +99,11 @@ type tcpEndpoint struct {
 	send     [TCPSendCapacity]byte
 	sendSeq  uint32
 	sendHead uint16
+	// rcvEdge is the right edge of the receive window the last ACK sent
+	// advertised: the peer may send up to it.
+	rcvEdge uint32
+	// rcvEdgeKnown: an ACK has advertised rcvEdge.
+	rcvEdgeKnown bool
 	sendLen  uint16
 	sendSent uint16
 	receive  [TCPReceiveCapacity]byte
@@ -413,7 +418,15 @@ func (stack *Stack) TCPRead(owner int, id TCPEndpointID, dst []byte, now uint64)
 	if entry.recvLen == 0 {
 		entry.recvHead = 0
 	}
-	stack.sendTCP(entry, tcpFlagACK, entry.sndNxt, entry.rcvNxt, nil, now)
+	// A window update goes when the read moved the window's right edge by
+	// a segment or half the buffer, whichever is less (RFC 1122 4.2.3.3);
+	// smaller openings ride on the next ACK, so a reader that keeps up does
+	// not send one update per read.
+	edge := entry.rcvNxt + uint32(stack.tcpAdvertisedWindow(entry))
+	step := min(tcpSMSS(entry), TCPReceiveCapacity/2)
+	if !entry.rcvEdgeKnown || int32(edge-entry.rcvEdge) >= int32(step) {
+		stack.sendTCP(entry, tcpFlagACK, entry.sndNxt, entry.rcvNxt, nil, now)
+	}
 	return length, ResultOK
 }
 

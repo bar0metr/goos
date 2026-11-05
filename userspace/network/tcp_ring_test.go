@@ -179,6 +179,7 @@ func TestTCPReceiveRingWrapReadAndWindow(t *testing.T) {
 	}
 
 	var got []byte
+	updates := 0
 	sizes := []int{7, 500, 4999, 1, 3333}
 	for _, size := range sizes {
 		buffer := make([]byte, size)
@@ -187,11 +188,17 @@ func TestTCPReceiveRingWrapReadAndWindow(t *testing.T) {
 			t.Fatalf("read %d %d", n, result)
 		}
 		got = append(got, buffer[:n]...)
+		// A read sends a window update only once the window opened by a
+		// segment or half the buffer; one that goes names the window exactly.
 		sent := h.tcpSent()
 		want := TCPReceiveCapacity - (len(stream) - len(got))
-		if len(sent) != 1 || int(sent[0].window) != want {
-			t.Fatalf("window after read %d want %d", sent[0].window, want)
+		if len(sent) > 1 || len(sent) == 1 && int(sent[0].window) != want {
+			t.Fatalf("after a read of %d: %d updates, window %v want %d", size, len(sent), sent, want)
 		}
+		updates += len(sent)
+	}
+	if updates == 0 {
+		t.Fatal("reads that opened the window sent no update")
 	}
 	if entry.recvHead != uint16(TCPReceiveCapacity-100+len(got)-TCPReceiveCapacity) {
 		t.Fatalf("head %d", entry.recvHead)

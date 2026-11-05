@@ -638,6 +638,7 @@ func (stack *Stack) sendTCPParts(entry *tcpEndpoint, flags uint8, sequence, ackn
 	segment := tcpSegment{sourcePort: entry.port, destinationPort: entry.remotePort, sequence: sequence,
 		acknowledgment: acknowledgment, flags: flags, window: uint16(min(stack.tcpAdvertisedWindow(entry), 65535)),
 		mss: entry.localMSS, payload: payload, tail: tail}
+
 	if route.path == udpLocal {
 		// No wire lies between the two ends: the segment goes to the same
 		// receive state machine as a parsed one, without a header or a
@@ -649,6 +650,7 @@ func (stack *Stack) sendTCPParts(entry *tcpEndpoint, flags uint8, sequence, ackn
 		if stack.localWire != nil {
 			// Tests compare the logical path against the parsed one.
 			length := putTCP(stack.localWire, entry.local, entry.remote, segment)
+			entry.advertised(flags, acknowledgment, segment.window)
 			stack.receiveTCP(ipv4Packet{source: entry.local, destination: entry.remote, protocol: protocolTCP, payload: stack.localWire[:length]}, now)
 			increment(&stack.tcpStats.TX)
 			return true
@@ -659,6 +661,7 @@ func (stack *Stack) sendTCPParts(entry *tcpEndpoint, flags uint8, sequence, ackn
 		packet := ipv4Packet{source: entry.local, destination: entry.remote, protocol: protocolTCP}
 		increment(&stack.tcpStats.TX)
 		increment(&stack.tcpStats.LocalSegments)
+		entry.advertised(flags, acknowledgment, segment.window)
 		stack.receiveSegment(packet, segment, now)
 		return true
 	}
@@ -681,6 +684,7 @@ func (stack *Stack) sendTCPParts(entry *tcpEndpoint, flags uint8, sequence, ackn
 	putEthernet(frame, mac, stack.mac, etherTypeIPv4)
 	stack.commitFrame(tcpAt + length)
 	increment(&stack.tcpStats.TX)
+	entry.advertised(flags, acknowledgment, segment.window)
 	return true
 }
 
@@ -842,4 +846,11 @@ func (stack *Stack) tcpVia(entry *tcpEndpoint, nextHop IPv4) bool {
 	}
 	route, result := stack.udpRoute(entry.local, entry.remote)
 	return result == ResultOK && route.path != udpLocal && route.nextHop == nextHop
+}
+
+// advertised records the window edge a sent ACK told the peer.
+func (entry *tcpEndpoint) advertised(flags uint8, acknowledgment uint32, window uint16) {
+	if flags&tcpFlagACK != 0 {
+		entry.rcvEdge, entry.rcvEdgeKnown = acknowledgment+uint32(window), true
+	}
 }

@@ -373,7 +373,9 @@ func TestVersion3PartialWriteSaysSo(t *testing.T) {
 			t.Fatalf("write %d %+v", index, reply)
 		}
 	}
-	read := p.call(&p.server, tcpapi.Request{Opcode: tcpapi.OpRead, Endpoint: server, Length: 100, Flags: tcpapi.FlagNoWait})
+	// A read that opens the window by half the buffer draws the window
+	// update a smaller one would not (receiver silly-window avoidance).
+	read := p.call(&p.server, tcpapi.Request{Opcode: tcpapi.OpRead, Endpoint: server, Length: 9000, Flags: tcpapi.FlagNoWait})
 	p.release(&p.server, read.Slot)
 	p.deliver()
 	const offset = 2 * tcpapi.SlotSize3
