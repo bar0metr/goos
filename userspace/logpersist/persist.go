@@ -6,8 +6,6 @@ import (
 	"goos/internal/logfmt"
 )
 
-var gapPrefix = []byte("[lost ")
-
 // Batch is one snapshot of the ring: records First..First+Count-1, the oldest
 // sequence the ring still held, and its end.
 type Batch struct {
@@ -415,7 +413,7 @@ func (persister *Persister) resume(batch Batch) {
 
 // matches reports whether the ring's record at sequence renders as line.
 func (persister *Persister) matches(sequence uint64, line []byte) bool {
-	if len(line) != 0 && line[0] != '[' || bytes.HasPrefix(line, gapPrefix) {
+	if len(line) != 0 && line[0] != '[' || isGapLine(line) {
 		return true
 	}
 	batch, ok := persister.source.Read(sequence)
@@ -453,6 +451,19 @@ func (persister *Persister) lastLine() (uint64, []byte, bool) {
 		}
 	}
 	return 0, nil, false
+}
+
+func isGapLine(line []byte) bool {
+	const prefix = "[lost "
+	if len(line) < len(prefix) {
+		return false
+	}
+	for index := 0; index < len(prefix); index++ {
+		if line[index] != prefix[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // SequenceOf parses the " #N" trailer of a line without its newline.
