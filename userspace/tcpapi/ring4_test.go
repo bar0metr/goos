@@ -9,7 +9,7 @@ import (
 )
 
 func TestLayout4Pools(t *testing.T) {
-	if Layout4.TXPool() != 16*16384+4096 || Layout4.RXPool() != 16*16384+4096 || Layout4.TXPoolPages() != 65 {
+	if Layout4.TXPool() != 16*16384+4096 || Layout4.RXPool() != 16*16384+ServicePages4*4096 || ServicePages4 != 4 || Layout4.TXPoolPages() != 65 {
 		t.Fatalf("GTCP 4 pools %d %d", Layout4.TXPool(), Layout4.RXPool())
 	}
 	if Layout3.TXPool() != 128<<10 || Layout2.RXPool() != RXSlots*SlotSize {
@@ -41,7 +41,7 @@ func TestVersion4Requests(t *testing.T) {
 	for _, request := range []Request{
 		{Opcode: OpWrite, Endpoint: 1, Length: 1}, {Opcode: OpRead, Endpoint: 1, Length: 1}, {Opcode: OpRelease},
 		{Opcode: OpOpen, Release: 1}, {Opcode: OpOpenConnect, Port: 80}, {Opcode: OpOpenConnect, Endpoint: 1, Address: [4]byte{1}, Port: 1},
-		{Opcode: OpAcceptAhead, Endpoint: 1, Backlog: Endpoints4 + 1}, {Opcode: OpDoorbell, Endpoint: 1},
+		{Opcode: OpDoorbell, Endpoint: 1},
 	} {
 		if Layout4.EncodeRequest(&request, 9, &message) || Layout4.EncodeRequest(&request, 0, &message) {
 			t.Fatalf("encoded %+v", request)
@@ -65,11 +65,11 @@ func TestVersion4Replies(t *testing.T) {
 	var message ipc.Message
 	tuple := Reply{Address: [4]byte{10, 0, 0, 2}, Port: 80, Local: [4]byte{10, 0, 0, 1}, LocalPort: 4000}
 	for _, reply := range []Reply{
-		{Opcode: OpOpen, Endpoint: 7, Slot: 63},
+		{Opcode: OpOpen, Endpoint: 7, Index: Endpoints4 - 1},
 		{Opcode: OpOpen, Result: ResultBusy},
-		{Opcode: OpOpenConnect, Result: ResultInProgress, Endpoint: 7, Slot: 2, Address: tuple.Address, Port: 80, Local: tuple.Local, LocalPort: 4000},
+		{Opcode: OpOpenConnect, Result: ResultInProgress, Endpoint: 7, Index: 300, Address: tuple.Address, Port: 80, Local: tuple.Local, LocalPort: 4000},
 		{Opcode: OpOpenConnect, Result: ResultConnectionRefused},
-		{Opcode: OpAccept, Endpoint: 8, Slot: 5, Address: tuple.Address, Port: 80, Local: tuple.Local, LocalPort: 4000},
+		{Opcode: OpAccept, Endpoint: 8, Index: 5, Address: tuple.Address, Port: 80, Local: tuple.Local, LocalPort: 4000},
 		{Opcode: OpAcceptAhead, Endpoint: 3},
 		{Opcode: OpClose, Endpoint: 3},
 	} {
@@ -82,10 +82,10 @@ func TestVersion4Replies(t *testing.T) {
 		}
 	}
 	for _, reply := range []Reply{
-		{Opcode: OpOpen, Endpoint: 7, Slot: Endpoints4},
-		{Opcode: OpClose, Endpoint: 3, Slot: 1},
+		{Opcode: OpOpen, Endpoint: 7, Index: Endpoints4}, {Opcode: OpOpen, Endpoint: 7, Slot: 1},
+		{Opcode: OpClose, Endpoint: 3, Index: 1},
 		{Opcode: OpOpenConnect, Result: ResultConnectionRefused, Endpoint: 7},
-		{Opcode: OpOpenConnect, Endpoint: 7, Slot: 1},
+		{Opcode: OpOpenConnect, Endpoint: 7, Index: 1},
 		{Opcode: OpWrite, Endpoint: 1},
 		{Opcode: OpAccept, Result: ResultBusy, Endpoint: 1, Slot: 2},
 	} {
@@ -93,7 +93,7 @@ func TestVersion4Replies(t *testing.T) {
 			t.Fatalf("encoded %+v", reply)
 		}
 	}
-	if Layout3.EncodeReply(&Reply{Opcode: OpOpen, Endpoint: 7, Slot: 3}, 4, &message) {
+	if Layout3.EncodeReply(&Reply{Opcode: OpOpen, Endpoint: 7, Index: 3}, 4, &message) {
 		t.Fatal("GTCP 3 reply with a table index")
 	}
 }
@@ -113,10 +113,10 @@ func TestControlRingsCarryTheirKinds(t *testing.T) {
 	if _, ok := ControlOf(make([]byte, Layout3.TXPool()), make([]byte, Layout4.RXPool())); ok {
 		t.Fatal("control of a short pool")
 	}
-	write := Entry{Kind: EntryWrite, Slot: 15, Index: 63, Endpoint: 9, Length: SlotSize4, Generation: 3, Offset: 0xfffffff0}
+	write := Entry{Kind: EntryWrite, Slot: 15, Index: Endpoints4 - 1, Endpoint: 9, Length: SlotSize4, Generation: 3, Offset: 0xfffffff0}
 	credit := Entry{Kind: EntryCredit, Index: 2, Endpoint: 9, Length: MaxCredit4}
-	done := Entry{Kind: EntryWriteDone, Slot: 15, Index: 63, Endpoint: 9, Length: 10, Generation: 3, Result: ResultReset}
-	accepted := Entry{Kind: EntryAccepted, Index: 4, Endpoint: 11, Slot: 1, Generation: 9, Address: [4]byte{1, 2, 3, 4}, Port: 5,
+	done := Entry{Kind: EntryWriteDone, Slot: 15, Index: 300, Endpoint: 9, Length: 10, Generation: 3, Result: ResultReset}
+	accepted := Entry{Kind: EntryAccepted, Index: 4, Endpoint: 11, Offset: 400, Generation: 9, Address: [4]byte{1, 2, 3, 4}, Port: 5,
 		Local: [4]byte{6, 7, 8, 9}, LocalPort: 10}
 	if c.PushTX(&write) != shmring.OK || c.PushRelease(&credit) != shmring.OK || c.PushTXDone(&done) != shmring.OK || c.PushRX(&accepted) != shmring.OK {
 		t.Fatal("push")
@@ -160,6 +160,26 @@ func TestControlRingsCarryTheirKinds(t *testing.T) {
 	}
 	if c.PushTX(&write) != shmring.Full {
 		t.Fatal("full TX ring")
+	}
+}
+
+func TestEntryIndexIsSixteenBits(t *testing.T) {
+	c := control(t)
+	write := Entry{Kind: EntryWrite, Slot: 1, Index: 0x1ff, Endpoint: 9, Length: 7, Generation: 1}
+	if c.PushTX(&write) != shmring.OK {
+		t.Fatal("push")
+	}
+	var e Entry
+	if c.PopTX(&e) != shmring.OK || e != write {
+		t.Fatalf("index %#x came back %#x", write.Index, e.Index)
+	}
+	// A set reserved byte breaks the entry.
+	if c.PushTX(&write) != shmring.OK {
+		t.Fatal("push")
+	}
+	c.client[firstRingBase+EntrySize4+7] = 1
+	if c.PopTX(&e) != shmring.Broken {
+		t.Fatal("reserved byte accepted")
 	}
 }
 

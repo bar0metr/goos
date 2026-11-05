@@ -177,6 +177,11 @@ func serve() {
 				}
 			}
 		}
+		// A GTCP 4 client that published after the last Deliver and saw
+		// netd's doorbell unarmed sent no doorbell: netd must look first.
+		if !pending && !armTCP() {
+			pending = true
+		}
 		if pending {
 			timeout = 0
 		} else if validation.Enabled {
@@ -297,7 +302,7 @@ func buildInterests() int {
 	for index := range tcpSessions {
 		if tcpSessions[index].channel != 0 {
 			add(tcpSessions[index].channel, tcpOwner+index)
-			if tcpSessions[index].heldCount != 0 {
+			if tcpSessions[index].heldCount != 0 || tcpSessions[index].doorbellHeld {
 				interests[count-1].Events |= kcall.WaitWritable
 			}
 		}

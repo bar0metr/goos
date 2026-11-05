@@ -51,9 +51,13 @@ const (
 	// pipelined writes and queued reads carry bulk streams, in place of
 	// GTCP 2. The authority is GrantTCP's; a command names one of the two.
 	GrantTCPBulk
+	// GrantTCPRing asks for the TCP session in GTCP 4, whose stream data
+	// moves through shared rings, for a command that speaks it through
+	// package tcpring. The authority is GrantTCP's.
+	GrantTCPRing
 
 	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal | GrantLaunch | GrantNetworkPing | GrantNetworkAdmin |
-		GrantResolve | GrantResolveAdmin | GrantUDP | GrantTCP | GrantRemote | GrantHostname | GrantTCPBulk
+		GrantResolve | GrantResolveAdmin | GrantUDP | GrantTCP | GrantRemote | GrantHostname | GrantTCPBulk | GrantTCPRing
 )
 
 // Unbounded is the MaxArgs of a command that takes any number of arguments.
@@ -91,8 +95,8 @@ const (
 	// IndexFormat names the line format below and the meaning of its grant
 	// bits. An installed system records it, so a system built for another
 	// format is refused (ADR 0175). Format 7 adds the exact-key hostname grant,
-	// format 8 the GTCP 3 session grant.
-	IndexFormat = 8
+	// format 8 the GTCP 3 session grant, format 9 the GTCP 4 one.
+	IndexFormat = 9
 )
 
 // Entry is one decoded index line. Its byte slices alias the index.

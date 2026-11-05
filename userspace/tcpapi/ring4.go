@@ -6,9 +6,9 @@ package tcpapi
 // carries OpDoorbell notifications both ways. OpWrite, OpRead and OpRelease
 // are not version 4 opcodes.
 //
-// Each pool ends in a control page. The client writes the page of the TX
-// pool and netd only reads it; netd writes the page of the RX pool and the
-// client only reads it. Every shared word has one writer, and the pool
+// Each pool ends in control pages. The client writes the page after the TX
+// slots and netd only reads it; netd writes the pages after the RX slots
+// and the client only reads them. Every shared word has one writer, and the pool
 // rights PID 1 grants already enforce it.
 //
 // Client page, at TXSlots4*SlotSize4 in the TX pool:
@@ -22,7 +22,7 @@ package tcpapi
 //	64  TX ring, TXEntries4 entries
 //	    Release ring, ReleaseEntries4 entries
 //
-// Service page, at RXSlots4*SlotSize4 in the RX pool:
+// Service pages, ServicePages4 of them at RXSlots4*SlotSize4 in the RX pool:
 //
 //	0   netd armed counter (netd consumes TX and Release)
 //	4   netd rung counter (netd answers the client's arm)
@@ -74,8 +74,9 @@ package tcpapi
 // entry only then, so a stale entry cannot reach a new endpoint.
 //
 // The replies to OpOpen, OpOpenConnect and OpAccept name the endpoint's
-// table index in Slot; it selects the endpoint's readiness entry and goes in
-// every ring entry about the endpoint.
+// table index in Index, which the reply carries where version 3 carries a
+// length; it selects the endpoint's readiness entry and goes in every ring
+// entry about the endpoint.
 
 import (
 	"encoding/binary"
@@ -91,8 +92,9 @@ const (
 	SlotSize4    = 16384
 	TXSlots4     = 16
 	RXSlots4     = 16
-	// Endpoints4 is the endpoint table of a version 4 session.
-	Endpoints4 = 64
+	// Endpoints4 is the endpoint table of a version 4 session: the largest
+	// session quota netd grants.
+	Endpoints4 = 512
 	// MaxCredit4 bounds the fills one endpoint has posted.
 	MaxCredit4 = RXSlots4
 
@@ -119,10 +121,12 @@ const (
 	readinessSize  = 24
 	clientPageEnd  = clientRelease + ReleaseEntries4*EntrySize4
 	servicePageEnd = readinessBase + Endpoints4*readinessSize
+
+	// ServicePages4 is the pages netd's control area takes.
+	ServicePages4 = (servicePageEnd + pageSize - 1) / pageSize
 )
 
 var _ [pageSize - clientPageEnd]byte
-var _ [pageSize - servicePageEnd]byte
 
 // The version 4 opcodes past version 3's.
 const (
@@ -138,12 +142,19 @@ const (
 )
 
 // Layout4 is version 4: sixteen TX and sixteen RX slots of 16 KiB, each
-// pool followed by its control page.
+// pool followed by its control pages.
 var Layout4 = Layout{Version: Version4, RequestSize: RequestSize4, SlotSize: SlotSize4, TXSlots: TXSlots4, RXSlots: RXSlots4}
 
-func (l Layout) controlBytes() uint64 {
+func (l Layout) txControlBytes() uint64 {
 	if l.Version == Version4 {
 		return pageSize
+	}
+	return 0
+}
+
+func (l Layout) rxControlBytes() uint64 {
+	if l.Version == Version4 {
+		return ServicePages4 * pageSize
 	}
 	return 0
 }
@@ -162,17 +173,18 @@ func validRequest4(r *Request) bool {
 	case OpOpenConnect:
 		return plain && r.Endpoint == 0 && r.Address != noAddress && r.Port != 0 && r.Backlog == 0 && r.Flags&^FlagNoWait == 0
 	case OpAcceptAhead:
-		return plain && r.Endpoint != 0 && none && r.Flags == 0 && r.Backlog <= Endpoints4
+		return plain && r.Endpoint != 0 && none && r.Flags == 0
 	case OpDoorbell:
 		return plain && r.Endpoint == 0 && none && r.Flags == 0 && r.Backlog == 0
 	}
 	return validRequest(&Layout3, r)
 }
 
-// validReply4 checks a version 4 reply. Slot carries the table index of an
-// endpoint that Open, OpenConnect or Accept made.
+// validReply4 checks a version 4 reply. Index carries the table index of
+// an endpoint that Open, OpenConnect or Accept made; Slot and Length are
+// always zero.
 func validReply4(r *Reply) bool {
-	if r.Slot >= Endpoints4 || r.Result > lastResult {
+	if r.Index >= Endpoints4 || r.Slot != 0 || r.Length != 0 || r.Result > lastResult {
 		return false
 	}
 	indexed := r.Result == ResultOK || r.Opcode == OpOpenConnect && r.Result == ResultInProgress
@@ -183,30 +195,33 @@ func validReply4(r *Reply) bool {
 	case OpOpenConnect:
 		readiness := r.Mask != 0 || r.Value != 0 || r.Room != 0 || r.Error != ResultOK || r.Length != 0
 		if !indexed {
-			return !readiness && r.Endpoint == 0 && r.Slot == 0 && r.Address == noAddress && r.Port == 0 && r.Local == noAddress && r.LocalPort == 0
+			return !readiness && r.Endpoint == 0 && r.Index == 0 && r.Address == noAddress && r.Port == 0 && r.Local == noAddress && r.LocalPort == 0
 		}
 		return !readiness && r.Endpoint != 0 && r.Address != noAddress && r.Port != 0 && r.Local != noAddress && r.LocalPort != 0
 	case OpAcceptAhead:
-		return r.Endpoint != 0 && r.Slot == 0 && r.Error == ResultOK && r.Length == 0 && r.Address == noAddress && r.Port == 0 &&
+		return r.Endpoint != 0 && r.Index == 0 && r.Error == ResultOK && r.Address == noAddress && r.Port == 0 &&
 			r.Local == noAddress && r.LocalPort == 0 && r.Mask == 0 && r.Value == 0 && r.Room == 0 && r.Result != ResultWouldBlock &&
 			r.Result != ResultInProgress && r.Result != ResultEOF
 	default:
-		if r.Slot != 0 {
+		if r.Index != 0 {
 			return false
 		}
 	}
-	if r.Slot != 0 && !indexed {
+	if r.Index != 0 && !indexed {
 		return false
 	}
 	plain := *r
-	plain.Slot = 0
+	plain.Index = 0
 	return validReply(&Layout3, &plain)
 }
 
 // EncodeDoorbell4 builds the OpDoorbell notification either side sends.
 func EncodeDoorbell4(out *ipc.Message) bool {
-	return Layout4.EncodeRequest(&Request{Opcode: OpDoorbell}, 0, out)
+	return Layout4.EncodeRequest(&doorbell, 0, out)
 }
+
+// doorbell is the one OpDoorbell request; the encoder only reads it.
+var doorbell = Request{Opcode: OpDoorbell}
 
 // IsDoorbell4 reports whether in is a well-formed version 4 doorbell.
 func IsDoorbell4(in *ipc.Message) bool {
@@ -239,7 +254,7 @@ const (
 	// peer's FIN.
 	EntryEnd
 	// EntryAccepted (RX ring): a child accepted ahead. Index and Endpoint
-	// name the child, Slot the listener's index and Generation the
+	// name the child, Offset the listener's index and Generation the
 	// listener's endpoint; the addresses are the child's tuple.
 	EntryAccepted
 	lastEntry = EntryAccepted
@@ -249,9 +264,10 @@ const (
 //
 //	0   kind
 //	1   slot
-//	2   index: the endpoint's table index
-//	3   result
-//	4   length
+//	2   index: the endpoint's table index, 16 bits
+//	4   length, 16 bits
+//	6   result
+//	7   reserved, zero
 //	8   endpoint
 //	12  generation
 //	16  offset
@@ -259,7 +275,7 @@ const (
 type Entry struct {
 	Kind       EntryKind
 	Slot       uint8
-	Index      uint8
+	Index      uint16
 	Result     Result
 	Length     uint32
 	Endpoint   uint32
@@ -294,15 +310,16 @@ func ValidEntry(e *Entry) bool {
 	case EntryEnd:
 		return named && e.Slot == 0 && e.Length == 0 && e.Generation == 0 && e.Offset == 0 && e.Result != ResultOK
 	case EntryAccepted:
-		return named && e.Slot < Endpoints4 && e.Generation != 0 && e.Length == 0 && e.Offset == 0 && e.Result == ResultOK &&
+		return named && e.Slot == 0 && e.Offset < Endpoints4 && e.Generation != 0 && e.Length == 0 && e.Result == ResultOK &&
 			e.Address != noAddress && e.Port != 0 && e.Local != noAddress && e.LocalPort != 0
 	}
 	return false
 }
 
 func putEntry(p []byte, e *Entry) {
-	p[0], p[1], p[2], p[3] = byte(e.Kind), e.Slot, e.Index, byte(e.Result)
-	binary.LittleEndian.PutUint32(p[4:], e.Length)
+	p[0], p[1], p[6] = byte(e.Kind), e.Slot, byte(e.Result)
+	binary.LittleEndian.PutUint16(p[2:], e.Index)
+	binary.LittleEndian.PutUint16(p[4:], uint16(e.Length))
 	binary.LittleEndian.PutUint32(p[8:], e.Endpoint)
 	binary.LittleEndian.PutUint32(p[12:], e.Generation)
 	binary.LittleEndian.PutUint32(p[16:], e.Offset)
@@ -312,8 +329,15 @@ func putEntry(p []byte, e *Entry) {
 	copy(p[28:32], e.Local[:])
 }
 
+// getEntry decodes p; ValidEntry then checks it. A set reserved byte reads
+// as an unknown kind.
 func getEntry(p []byte) Entry {
-	e := Entry{Kind: EntryKind(p[0]), Slot: p[1], Index: p[2], Result: Result(p[3]), Length: binary.LittleEndian.Uint32(p[4:]),
+	kind := EntryKind(p[0])
+	if p[7] != 0 {
+		kind = 0
+	}
+	e := Entry{Kind: kind, Slot: p[1], Index: binary.LittleEndian.Uint16(p[2:]), Result: Result(p[6]),
+		Length:   uint32(binary.LittleEndian.Uint16(p[4:])),
 		Endpoint: binary.LittleEndian.Uint32(p[8:]), Generation: binary.LittleEndian.Uint32(p[12:]),
 		Offset: binary.LittleEndian.Uint32(p[16:]), Port: binary.LittleEndian.Uint16(p[24:]), LocalPort: binary.LittleEndian.Uint16(p[26:])}
 	copy(e.Address[:], p[20:24])
@@ -331,10 +355,10 @@ type Control struct {
 // pools.
 func ControlOf(tx, rx []byte) (Control, bool) {
 	txAt, rxAt := Layout4.Offset(TXSlots4), Layout4.Offset(RXSlots4)
-	if uint64(len(tx)) < txAt+pageSize || uint64(len(rx)) < rxAt+pageSize {
+	if uint64(len(tx)) < txAt+Layout4.txControlBytes() || uint64(len(rx)) < rxAt+Layout4.rxControlBytes() {
 		return Control{}, false
 	}
-	return Control{client: tx[txAt : txAt+pageSize], service: rx[rxAt : rxAt+pageSize]}, true
+	return Control{client: tx[txAt : txAt+pageSize], service: rx[rxAt : rxAt+Layout4.rxControlBytes()]}, true
 }
 
 // InitService clears the service page and marks it, for a new session.

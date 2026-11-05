@@ -48,6 +48,7 @@ type Client struct {
 	control     tcpapi.Control
 	correlation uint64
 	out, in     ipc.Message
+	request     tcpapi.Request
 	txGen       [tcpapi.TXSlots4]uint32
 	// txLent: TX slots netd holds. rxHeld: RX slots the client holds.
 	txLent  uint32
@@ -64,7 +65,7 @@ type Client struct {
 // Conn is one endpoint of the session.
 type Conn struct {
 	c     *Client
-	index uint8
+	index uint16
 	id    uint32
 	// listener is the listening Conn of a child accepted ahead.
 	listener *Conn
@@ -110,7 +111,9 @@ func (c *Client) Call(request *tcpapi.Request, reply *tcpapi.Reply) bool {
 	}
 	c.correlation++
 	sent := c.correlation
-	if !tcpapi.Layout4.EncodeRequest(request, sent, &c.out) || !c.t.Send(&c.out) {
+	// The client's own copy keeps the caller's request on its stack.
+	c.request = *request
+	if !tcpapi.Layout4.EncodeRequest(&c.request, sent, &c.out) || !c.t.Send(&c.out) {
 		return c.fail()
 	}
 	c.Stats.Requests++
@@ -229,7 +232,7 @@ func (c *Client) poll() (moved, ok bool) {
 	return moved, true
 }
 
-func (c *Client) conn(index uint8, id uint32) *Conn {
+func (c *Client) conn(index uint16, id uint32) *Conn {
 	conn := c.conns[index]
 	if conn == nil || conn.id != id {
 		return nil
@@ -266,7 +269,7 @@ func (c *Client) txDone(e *tcpapi.Entry) bool {
 func (c *Client) received(e *tcpapi.Entry) bool {
 	switch e.Kind {
 	case tcpapi.EntryAccepted:
-		listener := c.conns[e.Slot]
+		listener := c.conns[e.Offset]
 		if listener == nil || listener.id != e.Generation || c.conns[e.Index] != nil {
 			return false
 		}
@@ -345,13 +348,13 @@ func (c *Client) flushForgets() bool {
 }
 
 func (c *Client) adopt(reply *tcpapi.Reply) *Conn {
-	conn := &Conn{c: c, index: reply.Slot, id: reply.Endpoint, Remote: reply.Address, RemotePort: reply.Port, Local: reply.Local,
+	conn := &Conn{c: c, index: reply.Index, id: reply.Endpoint, Remote: reply.Address, RemotePort: reply.Port, Local: reply.Local,
 		LocalPort: reply.LocalPort}
-	if c.conns[reply.Slot] != nil {
+	if c.conns[reply.Index] != nil {
 		c.fail()
 		return nil
 	}
-	c.conns[reply.Slot] = conn
+	c.conns[reply.Index] = conn
 	return conn
 }
 
@@ -399,6 +402,9 @@ func (c *Client) Listen(address [4]byte, port uint16, backlog uint8) (*Conn, tcp
 		if reply.Result != tcpapi.ResultOK {
 			conn.Close()
 			return nil, reply.Result
+		}
+		if request.Opcode == tcpapi.OpBind {
+			conn.Local, conn.LocalPort = reply.Address, reply.Port
 		}
 	}
 	return conn, tcpapi.ResultOK
