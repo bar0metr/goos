@@ -496,6 +496,12 @@ with each step timed, 64-byte UDP request-reply, and a WaitReady woken by a
 write. It prints `bench native-NAME key=value` lines and `bench native ok`.
 `make bench-pve-linux-network` sets them beside the Linux socket numbers.
 
+`netbench3 [MiB]` measures the same TCP steps on a GTCP 3 session, the
+protocol `linuxsockd` speaks: 16 KiB slots, four writes in flight that each
+name their stream offset, and four reads parked on the receiving end. Its
+lines start with `native-v3-`; those of `netbench` start with `native-v2-`,
+apart from the UDP line, which only `netbench` prints.
+
 The validation build's `fault net-driver` kills the network driver once;
 PID 1 starts a new one with a new binding, and storage and the shell carry on.
 

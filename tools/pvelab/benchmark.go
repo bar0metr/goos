@@ -126,6 +126,8 @@ func (l benchLine) value() (float64, string, bool) {
 
 func benchGroup(name string) string {
 	switch {
+	case strings.HasPrefix(name, "native-v2-"):
+		return "native GTCP 2"
 	case strings.HasPrefix(name, "native-"):
 		return "native"
 	case strings.HasPrefix(name, "remote-"):
@@ -232,18 +234,21 @@ var benchTargets = []struct {
 	{"poll-wake", false, 236, 248},
 }
 
-// benchPairs set each Linux loopback metric beside its native counterpart.
+// benchPairs set each Linux loopback metric beside the native one of the
+// same protocol: GTCP 3 for TCP, the protocol linuxsockd speaks, and GUDP 2
+// for UDP. The GTCP 2 lines of netbench stay in the report on their own, as
+// what an ordinary command's session costs.
 var benchPairs = [][2]string{
-	{"tcp-stream", "native-tcp-stream"},
-	{"tcp-request-reply", "native-tcp-request-reply"},
-	{"tcp-connect-close", "native-tcp-connect-close"},
-	{"tcp-socket", "native-tcp-open"},
-	{"tcp-connect", "native-tcp-connect"},
-	{"tcp-accept", "native-tcp-accept"},
-	{"tcp-close-client", "native-tcp-close-client"},
-	{"tcp-close-server", "native-tcp-close-server"},
+	{"tcp-stream", "native-v3-tcp-stream"},
+	{"tcp-request-reply", "native-v3-tcp-request-reply"},
+	{"tcp-connect-close", "native-v3-tcp-connect-close"},
+	{"tcp-socket", "native-v3-tcp-open"},
+	{"tcp-connect", "native-v3-tcp-connect"},
+	{"tcp-accept", "native-v3-tcp-accept"},
+	{"tcp-close-client", "native-v3-tcp-close-client"},
+	{"tcp-close-server", "native-v3-tcp-close-server"},
 	{"udp-request-reply", "native-udp-request-reply"},
-	{"poll-wake", "native-wait-wake"},
+	{"poll-wake", "native-v3-wait-wake"},
 }
 
 func median(values []float64) float64 {
@@ -554,6 +559,7 @@ func benchRound(ctx context.Context, s *Session, peerDir, guest string, index in
 	steps := []struct{ check, command, done string }{
 		{"netprobe-bench", "/system/linux/netprobe bench " + size, "bench ok"},
 		{"netbench", "netbench " + size, "bench native ok"},
+		{"netbench3", "netbench3 " + size, "bench native ok"},
 		{"netprobe-remote", fmt.Sprintf("/system/linux/netprobe remote %s %d %s", o.Peer, benchPeerPort, size), "bench remote ok"},
 	}
 	for _, step := range steps {

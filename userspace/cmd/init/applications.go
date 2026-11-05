@@ -23,6 +23,7 @@ import (
 	"goos/userspace/runtime/sys"
 	shellcmd "goos/userspace/shell"
 	"goos/userspace/startup"
+	"goos/userspace/tcpapi"
 	"goos/userspace/tty"
 	"goos/userspace/utility"
 )
@@ -157,7 +158,10 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	useUDP := udpSession[0] != 0
 	var tcpSession [3]handle.ID
-	if grantable && grantsRequested&commands.GrantTCP != 0 {
+	switch {
+	case grantable && grantsRequested&commands.GrantTCPBulk != 0:
+		tcpSession, _ = openTCPSessionQuota(netapi.OrdinarySessionQuota, tcpapi.Layout3)
+	case grantable && grantsRequested&commands.GrantTCP != 0:
 		tcpSession, _ = openTCPSession()
 	}
 	useTCP := tcpSession[0] != 0

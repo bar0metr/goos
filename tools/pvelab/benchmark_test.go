@@ -47,8 +47,8 @@ func TestSummarizeUsesMedianOfMeasuredRuns(t *testing.T) {
 		if i >= 2 {
 			rr = 100 + (i-2)*10
 		}
-		return fmt.Sprintf("bench tcp-request-reply rounds=2000 us-per-round=%d\nbench native-tcp-request-reply rounds=2000 us-per-round=%d\n"+
-			"bench tcp-stream bytes=1048576 us=1000 MiBps=1000\nbench native-tcp-stream bytes=1048576 us=500 MiBps=2000", rr, rr/2)
+		return fmt.Sprintf("bench tcp-request-reply rounds=2000 us-per-round=%d\nbench native-v3-tcp-request-reply rounds=2000 us-per-round=%d\nbench native-v2-tcp-request-reply rounds=2000 us-per-round=900\n"+
+			"bench tcp-stream bytes=1048576 us=1000 MiBps=1000\nbench native-v3-tcp-stream bytes=1048576 us=500 MiBps=2000\nbench native-v2-tcp-stream bytes=1048576 us=5000 MiBps=200", rr, rr/2)
 	})
 	r := summarize(BenchEnvironment{Variant: "hz100-opt2"}, runs)
 	var rr *BenchMetric
