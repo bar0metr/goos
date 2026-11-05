@@ -58,8 +58,8 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 	}
 	if !active {
 		path, trailing, errno := handler.resolvePath(state, dirfd, address, &local.linuxResolved)
-		if errno == 0 && !state.FDs.HasFree() {
-			errno = linuxabi.EMFILE
+		if errno == 0 {
+			errno = state.FDs.Reserve()
 		}
 		device := linuxcompat.DeviceNone
 		if errno == 0 {
@@ -197,7 +197,7 @@ func (handler *linuxCallHandler) Close(request linuxcompat.Request) linuxcompat.
 		return linuxErrno(errno)
 	}
 	if !active {
-		if request.Arguments[0] >= linuxcompat.LinuxMaxFD {
+		if request.Arguments[0] >= linuxcompat.LinuxFDCeiling {
 			return linuxErrno(linuxabi.EBADF)
 		}
 		released, last, errno := linuxcompat.CloseFD(handler.root, int(request.Arguments[0]))

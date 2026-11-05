@@ -62,7 +62,7 @@ func TestProcessFDExhaustionIsEMFILE(t *testing.T) {
 	if !InstallProcess(0x5000, 20, data, StandardStreams{Input: 1, Output: 2, Error: 3}, 0x600000, 0x4600000) {
 		t.Fatal("install failed")
 	}
-	for fd := 3; fd < LinuxMaxFD; fd++ {
+	for fd := 3; fd < DefaultFDSoftLimit; fd++ {
 		allocated, errno := AllocateFD(0x5000, FileDescription{Kind: FDVFSFile, Object: uint64(fd + 100)}, false)
 		if errno != 0 || allocated != fd {
 			t.Fatalf("fd %d = %d errno=%d", fd, allocated, errno)
@@ -86,7 +86,7 @@ func TestExecReplacementPreservesStateAndClosesMarkedDescriptors(t *testing.T) {
 	if errno != 0 || errno2 != 0 || !ReplaceRoot(0x9000, 0xa000, 0x800000, 0x4800000) {
 		t.Fatalf("fd=%d,%d errno=%d,%d", closed, kept, errno, errno2)
 	}
-	var handles [LinuxMaxFD]uint64
+	var handles [8]uint64
 	if count := state.CloseOnExecVFS(handles[:]); count != 1 || handles[0] != 71 {
 		t.Fatalf("close handles count=%d handles=%v", count, handles[:count])
 	}
@@ -163,8 +163,8 @@ func TestCloseFDReportsTheLastReference(t *testing.T) {
 	}
 	state, _ := FindProcess(0x6000)
 	fd, errno := AllocateFD(0x6000, FileDescription{Kind: FDVFSFile, Object: 77}, true)
-	duplicate, duplicated := state.FDs.Duplicate(fd, 0, false)
-	if errno != 0 || fd != 3 || !duplicated || duplicate != 4 || !state.FDs.HasFree() {
+	duplicate, duplicateErrno := state.FDs.Duplicate(fd, 0, false)
+	if errno != 0 || fd != 3 || duplicateErrno != 0 || duplicate != 4 || !state.FDs.HasFree() {
 		t.Fatalf("fd=%d errno=%d duplicate=%d", fd, errno, duplicate)
 	}
 	if _, last, errno := CloseFD(0x6000, fd); errno != 0 || last {
@@ -402,10 +402,10 @@ func TestForkProcessSharesDescriptionsAndCopiesState(t *testing.T) {
 		t.Fatalf("allocate errno = %d", errno)
 	}
 	record, registered := registerChildForTest(501, parent.PID)
-	if !registered || ForkProcess(0xa000, 0xb000, record, 0) || ForkProcess(0xa000, 0xa000, record, 9) {
+	if !registered || ForkProcess(0xa000, 0xb000, record, 0, nil) || ForkProcess(0xa000, 0xa000, record, 9, nil) {
 		t.Fatal("fork accepted an invalid child")
 	}
-	if !ForkProcess(0xa000, 0xb000, record, 9) || ForkProcess(0xa000, 0xb000, record, 9) {
+	if !ForkProcess(0xa000, 0xb000, record, 9, nil) || ForkProcess(0xa000, 0xb000, record, 9, nil) {
 		t.Fatal("fork did not install exactly one child")
 	}
 	child, _ := FindProcess(0xb000)

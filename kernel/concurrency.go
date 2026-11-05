@@ -60,11 +60,14 @@ type cpuScratch struct {
 	linuxFSBaseResult [8]byte
 	linuxTimes        [32]byte
 	linuxPipeWire     [8]byte
-	linuxPollWire     [linuxcompat.LinuxMaxPollFD * linuxcompat.PollFDSize]byte
-	linuxPollEntries  [linuxcompat.LinuxMaxPollFD]kernelwait.Entry
-	// linuxSelectWire holds the read, write, and exceptional fd_set words of
-	// one select, and linuxSelectSets the sets it asked about and then the
-	// sets it reports.
+	// linuxPollWire holds one window of a poll array, and linuxPollEntries
+	// the native waits a sleeping poll or select names, as many as one wait
+	// may.
+	linuxPollWire    [linuxcompat.PollWindow * linuxcompat.PollFDSize]byte
+	linuxPollEntries [kernelwait.MaxObjects]kernelwait.Entry
+	// linuxSelectWire holds one window of the read, write, and exceptional
+	// fd_sets of a select, and linuxSelectSets the window of the sets it
+	// asked about and then of the sets it reports.
 	linuxSelectWire      [3 * linuxcompat.FDSetSize]byte
 	linuxSelectSets      [6]linuxcompat.FDSet
 	linuxSelectArguments [linuxcompat.SelectArgumentsSize]byte
