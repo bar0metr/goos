@@ -65,7 +65,7 @@ type Client struct {
 // Conn is one endpoint of the session.
 type Conn struct {
 	c     *Client
-	index uint8
+	index uint16
 	id    uint32
 	// listener is the listening Conn of a child accepted ahead.
 	listener *Conn
@@ -232,7 +232,7 @@ func (c *Client) poll() (moved, ok bool) {
 	return moved, true
 }
 
-func (c *Client) conn(index uint8, id uint32) *Conn {
+func (c *Client) conn(index uint16, id uint32) *Conn {
 	conn := c.conns[index]
 	if conn == nil || conn.id != id {
 		return nil
@@ -269,7 +269,7 @@ func (c *Client) txDone(e *tcpapi.Entry) bool {
 func (c *Client) received(e *tcpapi.Entry) bool {
 	switch e.Kind {
 	case tcpapi.EntryAccepted:
-		listener := c.conns[e.Slot]
+		listener := c.conns[e.Offset]
 		if listener == nil || listener.id != e.Generation || c.conns[e.Index] != nil {
 			return false
 		}
@@ -348,13 +348,13 @@ func (c *Client) flushForgets() bool {
 }
 
 func (c *Client) adopt(reply *tcpapi.Reply) *Conn {
-	conn := &Conn{c: c, index: reply.Slot, id: reply.Endpoint, Remote: reply.Address, RemotePort: reply.Port, Local: reply.Local,
+	conn := &Conn{c: c, index: reply.Index, id: reply.Endpoint, Remote: reply.Address, RemotePort: reply.Port, Local: reply.Local,
 		LocalPort: reply.LocalPort}
-	if c.conns[reply.Slot] != nil {
+	if c.conns[reply.Index] != nil {
 		c.fail()
 		return nil
 	}
-	c.conns[reply.Slot] = conn
+	c.conns[reply.Index] = conn
 	return conn
 }
 

@@ -62,8 +62,11 @@ table entry only after that, so an entry naming the old endpoint comes back
 - The in-process comparison (`tcpring.TestStreamMessageCounts`) streams
   8 MiB over loopback: GTCP 3 costs 24 channel messages per 64 KiB, GTCP 4
   none, with every byte and every slot checked.
-- A session holds 64 endpoints (`Endpoints4`), the stack's largest quota
-  today. A larger quota needs a larger readiness area in netd's page.
+- A session's table holds 512 endpoints (`Endpoints4`), the largest quota
+  the stack grants, and a compile-time check keeps it there. Ring entries
+  and replies name a table index in 16 bits. The readiness area takes three
+  of netd's four control pages, and each GTCP 4 session costs netd about
+  40 KiB of table.
 - A FIN that the peer dropped at a closed window lost its retransmission
   timer when the peer's window update arrived. The ring tests exposed it;
   the stack now keeps the timer armed.
