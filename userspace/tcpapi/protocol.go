@@ -25,6 +25,9 @@
 // parked ones answers ResultWouldBlock. Version 2 keeps one parked Read and
 // no offset.
 //
+// Version 4 (Layout4) moves stream data through shared rings in the pools'
+// control pages; ring4.go describes it.
+//
 // PID 1 picks a session's version when it creates the session; netd decodes
 // that session's messages with its Layout and fails a message of another
 // version.
