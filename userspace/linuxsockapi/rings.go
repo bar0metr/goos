@@ -280,26 +280,37 @@ func LoadServiceCounters(page []byte) ServiceCounters {
 		values[10], values[11], values[12], values[13], values[14], values[15], values[16], values[17]}
 }
 
-// The service's state snapshot follows the counters in the ring page, for
-// the kernel's diagnostics: one FamilySnapshot, then one SocketSnapshot per
-// family socket index. The service rewrites a socket's whenever it
+// The service keeps a state snapshot for the kernel's diagnostics. One
+// FamilySnapshot follows the counters in the ring page. The snapshot pages
+// hold one SocketSnapshot per family socket index, SnapshotsPerPage to a
+// page so none crosses a page. The service rewrites a socket's whenever it
 // publishes or moves the socket's data plane; the kernel only reads it.
 const (
 	FamilySnapshotOffset = ServiceCountersOffset + 8*ServiceCounterCount
-	familySnapshotSize   = 16
-	SocketSnapshotOffset = FamilySnapshotOffset + familySnapshotSize
+	familySnapshotSize   = 32
+	SnapshotEnd          = FamilySnapshotOffset + familySnapshotSize
 	socketSnapshotSize   = 40
-	SnapshotEnd          = SocketSnapshotOffset + MaxSockets*socketSnapshotSize
+	SnapshotsPerPage     = pageSize / socketSnapshotSize
 )
 
 // FamilySnapshot is the service's view of a family's slots and requests,
-// and of its native TCP link.
+// of its native TCP link, and of the socket quotas. Sockets and
+// FamilyLimit are the family's own use and quota; Reserve counts the
+// sockets no other family may take from it. SystemSockets and SystemLimit
+// are the service's use and quota across families as of the family's last
+// change.
 type FamilySnapshot struct {
 	TXHeld, RXUsed, RXPublished uint8
 	Inflight, Parked, Replies   uint8
 	LinkTXLent, LinkReleases    uint8
 	LinkBlocked                 bool
+	Sockets, FamilyLimit        uint16
+	Reserve                     uint16
+	SystemSockets, SystemLimit  uint16
 }
+
+// SocketSnapshotPage is the pool page that holds socket index's snapshot.
+func SocketSnapshotPage(index int) uint32 { return uint32(SnapshotPage + index/SnapshotsPerPage) }
 
 // SocketSnapshot is the service's state of one socket.
 type SocketSnapshot struct {
@@ -346,19 +357,29 @@ func StoreFamilySnapshot(page []byte, f *FamilySnapshot) {
 	if f.LinkBlocked {
 		p[8] = 1
 	}
+	binary.LittleEndian.PutUint16(p[10:], f.Sockets)
+	binary.LittleEndian.PutUint16(p[12:], f.FamilyLimit)
+	binary.LittleEndian.PutUint16(p[14:], f.Reserve)
+	binary.LittleEndian.PutUint16(p[16:], f.SystemSockets)
+	binary.LittleEndian.PutUint16(p[18:], f.SystemLimit)
 }
 
 func LoadFamilySnapshot(page []byte) FamilySnapshot {
 	p := page[FamilySnapshotOffset : FamilySnapshotOffset+familySnapshotSize]
 	return FamilySnapshot{TXHeld: p[0], RXUsed: p[1], RXPublished: p[2], Inflight: p[3], Parked: p[4], Replies: p[5],
-		LinkTXLent: p[6], LinkReleases: p[7], LinkBlocked: p[8] != 0}
+		LinkTXLent: p[6], LinkReleases: p[7], LinkBlocked: p[8] != 0,
+		Sockets: binary.LittleEndian.Uint16(p[10:]), FamilyLimit: binary.LittleEndian.Uint16(p[12:]),
+		Reserve: binary.LittleEndian.Uint16(p[14:]), SystemSockets: binary.LittleEndian.Uint16(p[16:]),
+		SystemLimit: binary.LittleEndian.Uint16(p[18:])}
 }
 
+// StoreSocketSnapshot writes socket index's snapshot into page, the pool
+// page SocketSnapshotPage(index) names. LoadSocketSnapshot reads it back.
 func StoreSocketSnapshot(page []byte, index int, s *SocketSnapshot) {
-	if index < 0 || index >= MaxSockets {
+	if index < 0 || index >= MaxSockets || len(page) < pageSize {
 		return
 	}
-	p := page[SocketSnapshotOffset+index*socketSnapshotSize:][:socketSnapshotSize]
+	p := page[index%SnapshotsPerPage*socketSnapshotSize:][:socketSnapshotSize]
 	binary.LittleEndian.PutUint64(p[0:], s.Socket)
 	binary.LittleEndian.PutUint32(p[8:], s.Endpoint)
 	p[12], p[13], p[14], p[15] = s.State, s.TXQueue, s.WritesOut, s.ReadsOut
@@ -371,7 +392,10 @@ func StoreSocketSnapshot(page []byte, index int, s *SocketSnapshot) {
 }
 
 func LoadSocketSnapshot(page []byte, index int) SocketSnapshot {
-	p := page[SocketSnapshotOffset+index*socketSnapshotSize:][:socketSnapshotSize]
+	if index < 0 || index >= MaxSockets || len(page) < pageSize {
+		return SocketSnapshot{}
+	}
+	p := page[index%SnapshotsPerPage*socketSnapshotSize:][:socketSnapshotSize]
 	return SocketSnapshot{Socket: binary.LittleEndian.Uint64(p[0:]), Endpoint: binary.LittleEndian.Uint32(p[8:]),
 		State: p[12], TXQueue: p[13], WritesOut: p[14], ReadsOut: p[15], Flags: binary.LittleEndian.Uint32(p[16:]),
 		TXAccepted: binary.LittleEndian.Uint32(p[20:]), TXSent: binary.LittleEndian.Uint32(p[24:]),

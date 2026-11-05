@@ -133,7 +133,7 @@ const (
 	OperationThreadHoldWait
 	OperationThreadHoldStep
 	OperationThreadHoldCancel
-	// OperationLinuxNetAttach gives a Linux family a new GLNXSOCK2 session
+	// OperationLinuxNetAttach gives a Linux family a new GLNXSOCK3 session
 	// (ADR 0210): Arg0 is a process handle to the family's launch root,
 	// Arg1 and Arg2 the session's channel and pool, which move into that
 	// process's handle table.

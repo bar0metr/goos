@@ -672,9 +672,22 @@ func dumpSocketPlane(out diagWriter, familyID uint64, endpoint linuxcompat.NetEn
 	out.hex("link-tx-lent", uint64(family.LinkTXLent))
 	out.hex("link-releases", uint64(family.LinkReleases))
 	out.uint("link-blocked", boolDiag(family.LinkBlocked))
+	out.uint("sockets", uint64(family.Sockets))
+	out.uint("family-limit", uint64(family.FamilyLimit))
+	out.uint("family-reserve", uint64(family.Reserve))
+	out.uint("system-sockets", uint64(family.SystemSockets))
+	out.uint("system-limit", uint64(family.SystemLimit))
 	out.end()
+	var snapshots []byte
 	for index := 0; index < linuxsockapi.MaxSockets; index++ {
-		socket := linuxsockapi.LoadSocketSnapshot(rings, index)
+		if index%linuxsockapi.SnapshotsPerPage == 0 {
+			page, found := socketPoolPage(endpoint, linuxsockapi.SocketSnapshotPage(index))
+			if !found {
+				return
+			}
+			snapshots = page
+		}
+		socket := linuxsockapi.LoadSocketSnapshot(snapshots, index)
 		if socket.Socket == 0 {
 			continue
 		}

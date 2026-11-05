@@ -26,9 +26,9 @@ func FuzzService(f *testing.F) {
 			request := linuxsockapi.Request{Opcode: linuxsockapi.Opcode(step[0] % 20), Flags: step[1] & 7, Slot: step[2] % 9,
 				Length: uint32(step[3]) * 17, Address: [4]byte{step[4], 0, 0, 1}, Port: uint16(step[5]), Level: uint32(step[6] % 7),
 				Name: uint32(step[7] % 9), Value: uint64(step[6])}
-			if step[4]&1 == 0 && len(h.svc.sockets) > 0 {
-				for index := range h.svc.sockets {
-					if sock := &h.svc.sockets[index]; sock.used && !sock.opening && int(step[5])%3 == 0 {
+			if step[4]&1 == 0 && h.svc.socketCap() > 0 {
+				for index := 0; index < h.svc.socketCap(); index++ {
+					if sock := h.svc.sock(index); sock.used && !sock.opening && int(step[5])%3 == 0 {
 						request.Socket = sock.id
 						break
 					}
@@ -75,8 +75,8 @@ func FuzzService(f *testing.F) {
 			}
 			h.svc.Flush(family)
 			if !h.backend.busy && h.svc.ProgressHoles() != 0 {
-				for i := range h.svc.sockets {
-					if sk := &h.svc.sockets[i]; sk.used && sk.txBlocked {
+				for i := 0; i < h.svc.socketCap(); i++ {
+					if sk := h.svc.sock(i); sk.used && sk.txBlocked {
 						t.Logf("socket %+v", *sk)
 					}
 				}
@@ -92,14 +92,14 @@ func FuzzService(f *testing.F) {
 		}
 		h.svc.BackendDown(TCP, h.generation[TCP])
 		h.svc.BackendDown(UDP, h.generation[UDP])
-		for index := range h.svc.sockets {
-			if h.svc.sockets[index].used {
+		for index := 0; index < h.svc.socketCap(); index++ {
+			if h.svc.sock(index).used {
 				t.Fatal("socket left after removal")
 			}
 		}
-		for index := range h.svc.ops {
-			if h.svc.ops[index].state != opFree {
-				t.Fatalf("op left after removal: %+v", h.svc.ops[index])
+		for index := 0; index < h.svc.opCap(); index++ {
+			if h.svc.op(index).state != opFree {
+				t.Fatalf("op left after removal: %+v", h.svc.op(index))
 			}
 		}
 		if h.svc.submits != 0 || h.svc.waits != 0 {

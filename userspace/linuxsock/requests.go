@@ -208,22 +208,18 @@ func (s *Service) stepOpen(o *op) {
 			s.finish(o, linuxsockapi.ResultDown)
 			return
 		}
-		if s.families[o.family].count >= linuxsockapi.MaxSockets {
-			s.finish(o, linuxsockapi.ResultFamilyLimit)
-			return
-		}
-		global := s.allocSocket(int(o.family), stream)
+		global, result := s.allocSocket(int(o.family), stream)
 		if global < 0 {
-			s.finish(o, linuxsockapi.ResultServiceLimit)
+			s.finish(o, result)
 			return
 		}
-		o.socket, o.socketSerial = int16(global), s.sockets[global].serial
+		o.socket, o.socketSerial = int16(global), s.sock(global).serial
 	}
 	if endpoint, ok := s.takeWarm(proto); ok {
 		s.families[o.family].stats.WarmHits++
 		s.counters.Opens++
 		s.adopt(int(o.socket), endpoint, s.backends[proto].generation)
-		o.reply.Socket = s.sockets[o.socket].id
+		o.reply.Socket = s.sock(int(o.socket)).id
 		s.finish(o, linuxsockapi.ResultOK)
 		return
 	}
@@ -372,16 +368,12 @@ func (s *Service) stepAccept(o *op, sock *socket) {
 	}
 	s.unpark(o)
 	if o.child < 0 {
-		if s.families[o.family].count >= linuxsockapi.MaxSockets {
-			s.finish(o, linuxsockapi.ResultFamilyLimit)
-			return
-		}
-		child := s.allocSocket(int(o.family), true)
+		child, result := s.allocSocket(int(o.family), true)
 		if child < 0 {
-			s.finish(o, linuxsockapi.ResultServiceLimit)
+			s.finish(o, result)
 			return
 		}
-		o.child, o.childSerial = int16(child), s.sockets[child].serial
+		o.child, o.childSerial = int16(child), s.sock(child).serial
 	}
 	s.families[o.family].stats.AcceptMisses++
 	s.native = NativeRequest{Op: NativeAccept, Flags: NativeNoWait, Endpoint: sock.endpoint}
@@ -389,7 +381,7 @@ func (s *Service) stepAccept(o *op, sock *socket) {
 }
 
 func (s *Service) doneAccept(o *op, c *NativeCompletion) {
-	child := &s.sockets[o.child]
+	child := s.sock(int(o.child))
 	if c.Result != NativeOK || !child.used || child.serial != o.childSerial {
 		if c.Result == NativeOK && c.Endpoint != 0 {
 			s.queueClose(o.proto, o.generation, c.Endpoint)
@@ -802,7 +794,7 @@ func (s *Service) answerReady(o *op, sock *socket) {
 // once that answers, since its answer may predate the reason, and one that
 // finds no free operation stays wanted for the pump.
 func (s *Service) refreshReadable(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if !sock.used || sock.dead || sock.endpoint == 0 {
 		sock.needRefresh = false
 		return
@@ -857,7 +849,7 @@ func (s *Service) doneRefresh(o *op, c *NativeCompletion) {
 
 // fetchError reads netd's pending error into the socket.
 func (s *Service) fetchError(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if sock.fetching || sock.dead || sock.endpoint == 0 || !sock.stream {
 		sock.needFetch = false
 		return

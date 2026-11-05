@@ -4,7 +4,7 @@ package main
 
 // The Linux socket service (ADR 0210). PID 1 runs linuxsockd from the
 // installed system in normal mode, after netd, and holds the client end of
-// its GLNXCTL1 control channel. It gives the service a native TCP and a
+// its GLNXCTL2 control channel. It gives the service a native TCP and a
 // native UDP session at every start of either service, and a family session
 // for every Linux launch while the service runs: a channel and a 17-page
 // pool, one end of each granted to the launch as linux-net and

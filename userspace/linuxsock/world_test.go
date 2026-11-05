@@ -315,8 +315,8 @@ func (w *world) streamOrdered(client, server uint64, total int, seed uint64) {
 
 func (w *world) dump(ids ...uint64) {
 	for _, id := range ids {
-		for index := range w.h.svc.sockets {
-			if sock := &w.h.svc.sockets[index]; sock.used && sock.id == id {
+		for index := 0; index < w.h.svc.socketCap(); index++ {
+			if sock := w.h.svc.sock(index); sock.used && sock.id == id {
 				w.t.Logf("socket %x: %+v", id, *sock)
 			}
 		}
