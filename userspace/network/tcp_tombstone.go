@@ -43,7 +43,7 @@ type tcpTombstone struct {
 // tombstone share is full; protection is never dropped to make room.
 func (stack *Stack) recycleTimeWait(owner int) int {
 	oldest := -1
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		entry := &stack.tcp[index]
 		if entry.state != TCPTimeWait || !entry.orphan || int(entry.owner) != owner {
 			continue

@@ -148,7 +148,7 @@ func (stack *Stack) tcpSendRoom(entry *tcpEndpoint) int {
 }
 
 func (stack *Stack) tcpAcceptable(listener TCPEndpointID) bool {
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		child := &stack.tcp[index]
 		if child.listener == listener && child.state >= TCPEstablished && child.state < TCPClosed && !child.accepted {
 			return true

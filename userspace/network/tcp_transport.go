@@ -36,23 +36,22 @@ func (stack *Stack) receiveSegment(packet ipv4Packet, segment tcpSegment, now ui
 }
 
 func (stack *Stack) tcpMatch(local IPv4, localPort uint16, remote IPv4, remotePort uint16) *tcpEndpoint {
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		entry := &stack.tcp[index]
+		stack.tcpStats.MatchProbes++
 		if entry.state >= TCPSynSent && entry.local == local && entry.port == localPort &&
 			entry.remote == remote && entry.remotePort == remotePort {
-			stack.tcpStats.MatchProbes += uint64(index + 1)
 			return entry
 		}
 	}
-	stack.tcpStats.MatchProbes += uint64(len(stack.tcp))
 	return nil
 }
 
 func (stack *Stack) tcpListener(local IPv4, port uint16) *tcpEndpoint {
-	stack.tcpStats.ListenerProbes += uint64(len(stack.tcp))
 	var wildcard *tcpEndpoint
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		entry := &stack.tcp[index]
+		stack.tcpStats.ListenerProbes++
 		if entry.state != TCPListen || entry.port != port {
 			continue
 		}
@@ -68,7 +67,7 @@ func (stack *Stack) tcpListener(local IPv4, port uint16) *tcpEndpoint {
 
 func (stack *Stack) listenerChildren(listener TCPEndpointID) int {
 	count := 0
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		if stack.tcp[index].listener == listener && stack.tcp[index].state != TCPFree && !stack.tcp[index].accepted {
 			count++
 		}
@@ -78,7 +77,7 @@ func (stack *Stack) listenerChildren(listener TCPEndpointID) int {
 
 func (stack *Stack) passiveSYN(listener *tcpEndpoint, packet ipv4Packet, segment tcpSegment, now uint64) {
 	listenerSlot := -1
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		if listener == &stack.tcp[index] {
 			listenerSlot = index
 			break
@@ -730,7 +729,7 @@ func (stack *Stack) resetUnknown(packet ipv4Packet, segment tcpSegment, now uint
 
 func (stack *Stack) advanceTCP(now uint64) {
 	stack.advanceTombstones(now)
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		entry := &stack.tcp[index]
 		if entry.state == TCPFree || entry.state == TCPClosed {
 			continue
@@ -790,7 +789,7 @@ func (stack *Stack) advanceTCP(now uint64) {
 
 func (stack *Stack) tcpDeadline(earliest *timer) {
 	stack.tombstoneDeadline(earliest)
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		entry := &stack.tcp[index]
 		if entry.deadline != 0 {
 			earliest.consider(entry.deadline)
@@ -806,7 +805,7 @@ func (stack *Stack) reconfigureTCP(result Result) {
 		return
 	}
 	stack.dropTombstones()
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		entry := &stack.tcp[index]
 		if entry.state == TCPBound || entry.state == TCPListen {
 			if entry.local != zeroIPv4 && !entry.local.IsLoopback() {
@@ -823,7 +822,7 @@ func (stack *Stack) reconfigureTCP(result Result) {
 
 // sendPendingTCP resends what waited for nextHop to resolve.
 func (stack *Stack) sendPendingTCP(nextHop IPv4, now uint64) {
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		entry := &stack.tcp[index]
 		if !entry.l2Pending || !stack.tcpVia(entry, nextHop) {
 			continue
@@ -853,7 +852,7 @@ func (stack *Stack) sendPendingTCP(nextHop IPv4, now uint64) {
 // failPendingTCP ends the connections whose segments waited for nextHop when
 // its resolution failed. Connections that merely route through it stay.
 func (stack *Stack) failPendingTCP(nextHop IPv4, result Result) {
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		entry := &stack.tcp[index]
 		if entry.l2Pending && stack.tcpVia(entry, nextHop) {
 			entry.l2Pending = false

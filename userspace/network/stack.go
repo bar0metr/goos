@@ -89,7 +89,10 @@ type Stack struct {
 	udpQuota      [MaxUDPSessions]uint8
 	udpBinds      uint32
 
-	tcp           [MaxTCPEndpoints]tcpEndpoint
+	tcp [MaxTCPEndpoints]tcpEndpoint
+	// tcpUsed marks the slots of tcp that are not TCPFree. A slot is
+	// more than 32 KiB, so the scans walk the marks instead of the slots.
+	tcpUsed       [(MaxTCPEndpoints + 63) / 64]uint64
 	tcpTombstones [tcpTombstoneSlots]tcpTombstone
 	tcpQuota      [MaxTCPSessions]uint8
 	tcpGeneration uint32

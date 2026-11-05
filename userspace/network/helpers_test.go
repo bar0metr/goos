@@ -52,6 +52,7 @@ func (h *harness) advance(delay uint64) {
 
 func (h *harness) checkDeadline() {
 	h.t.Helper()
+	checkTCPMarks(h.t, h.stack)
 	if deadline, ok := h.stack.Deadline(); ok && deadline <= h.now {
 		h.t.Fatalf("deadline %d not after now %d", deadline, h.now)
 	}
@@ -253,5 +254,17 @@ func checkCounters(t testing.TB, stack *Stack, rx, drop, malformed uint64) {
 	if snapshot.RX != rx || snapshot.Drop != drop || snapshot.Malformed != malformed {
 		t.Fatalf("counters rx %d drop %d malformed %d, want %d %d %d",
 			snapshot.RX, snapshot.Drop, snapshot.Malformed, rx, drop, malformed)
+	}
+}
+
+// checkTCPMarks fails when a TCP slot in use lacks its mark: the scans that
+// walk the marks would miss it.
+func checkTCPMarks(t testing.TB, stack *Stack) {
+	t.Helper()
+	for index := range stack.tcp {
+		marked := stack.tcpUsed[index/64]&(1<<(index%64)) != 0
+		if stack.tcp[index].state != TCPFree && !marked {
+			t.Fatalf("TCP slot %d in state %d has no mark", index, stack.tcp[index].state)
+		}
 	}
 }

@@ -1,5 +1,10 @@
 package network
 
+import (
+	"math/bits"
+	"unsafe"
+)
+
 // TCP uses fixed endpoint, stream and reassembly storage. Runtime tuning can
 // lower these limits but cannot resize them.
 const (
@@ -176,6 +181,7 @@ func (stack *Stack) resetTCP() {
 	for index := range stack.tcp[:] {
 		stack.tcp[index] = tcpEndpoint{}
 	}
+	clear(stack.tcpUsed[:])
 	for index := range stack.tcpTombstones[:] {
 		stack.tcpTombstones[index] = tcpTombstone{}
 	}
@@ -233,16 +239,14 @@ func (stack *Stack) TCPOpen(owner int) (TCPEndpointID, Result) {
 		return 0, ResultInvalidArgument
 	}
 	total, mine, free := 0, 0, -1
-	for index := range stack.tcp[:] {
-		entry := &stack.tcp[index]
-		if entry.state == TCPFree {
-			if free < 0 {
-				free = index
-			}
-			continue
+	for word, marks := range stack.tcpUsed {
+		if index := word*64 + bits.TrailingZeros64(^marks); free < 0 && ^marks != 0 && index < len(stack.tcp) {
+			free = index
 		}
+	}
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		total++
-		if int(entry.owner) == owner {
+		if int(stack.tcp[index].owner) == owner {
 			mine++
 		}
 	}
@@ -264,6 +268,7 @@ func (stack *Stack) TCPOpen(owner int) (TCPEndpointID, Result) {
 	entry := &stack.tcp[free]
 	*entry = tcpEndpoint{state: TCPOpen, owner: uint8(owner), generation: stack.tcpGeneration,
 		peerMSS: tcpDefaultMSS, ssthresh: tcpInitialSSThresh, rto: stack.tuning.TCP.RTOMin}
+	stack.tcpUsed[free/64] |= 1 << (free % 64)
 	return tcpID(entry, free), ResultOK
 }
 
@@ -301,7 +306,7 @@ func (stack *Stack) TCPListen(owner int, id TCPEndpointID, backlog int) Result {
 		return ResultInvalidArgument
 	}
 	listeners := 0
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		if stack.tcp[index].state == TCPListen {
 			listeners++
 		}
@@ -320,7 +325,7 @@ func (stack *Stack) TCPAccept(owner int, listener TCPEndpointID) (TCPEndpointID,
 	if entry == nil || entry.state != TCPListen {
 		return 0, TCPTuple{}, ResultInvalidArgument
 	}
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		child := &stack.tcp[index]
 		if child.listener == listener && child.state >= TCPEstablished && child.state < TCPClosed && !child.accepted {
 			child.accepted = true
@@ -480,7 +485,7 @@ func (stack *Stack) TCPCloseOwner(owner int, now uint64) {
 	// the owner's: a session that later takes the same owner slot starts
 	// with its whole quota and tombstone share.
 	stack.retireTombstones(owner)
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		entry := &stack.tcp[index]
 		if entry.state != TCPFree && int(entry.owner) == owner {
 			if entry.state == TCPTimeWait {
@@ -499,7 +504,7 @@ func (stack *Stack) TCPCloseOwner(owner int, now uint64) {
 // abortChildren resets and releases the children of a listener that no
 // application has accepted. Nobody else can ever reach them.
 func (stack *Stack) abortChildren(listener TCPEndpointID, now uint64) {
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		child := &stack.tcp[index]
 		if child.state == TCPFree || child.listener != listener || child.accepted {
 			continue
@@ -540,6 +545,44 @@ func (stack *Stack) TCPState(owner int, id TCPEndpointID) (TCPState, TCPTuple, R
 func (stack *Stack) releaseTCP(entry *tcpEndpoint) {
 	generation := entry.generation
 	*entry = tcpEndpoint{generation: generation}
+	if slot := stack.tcpSlot(entry); slot >= 0 {
+		stack.tcpUsed[slot/64] &^= 1 << (slot % 64)
+	}
+}
+
+// tcpSlot is entry's index in stack.tcp, or -1 for an entry outside it.
+func (stack *Stack) tcpSlot(entry *tcpEndpoint) int {
+	offset := uintptr(unsafe.Pointer(entry)) - uintptr(unsafe.Pointer(&stack.tcp[0]))
+	size := unsafe.Sizeof(stack.tcp[0])
+	if offset%size != 0 || offset/size >= uintptr(len(stack.tcp)) {
+		return -1
+	}
+	return int(offset / size)
+}
+
+// nextTCP returns the first slot at or after from that is in use, or -1.
+// A scan that skips TCPFree slots walks them as
+//
+//	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1)
+//
+// which reads a mark per 64 slots instead of every slot.
+func (stack *Stack) nextTCP(from int) int {
+	if from < 0 {
+		from = 0
+	}
+	for word := from / 64; word < len(stack.tcpUsed); word++ {
+		marks := stack.tcpUsed[word]
+		if word == from/64 {
+			marks &^= 1<<(from%64) - 1
+		}
+		if marks != 0 {
+			if index := word*64 + bits.TrailingZeros64(marks); index < len(stack.tcp) {
+				return index
+			}
+			return -1
+		}
+	}
+	return -1
 }
 
 // closeTCP moves a connection to CLOSED with its final result and stops its
@@ -580,7 +623,7 @@ func tcpInitialWindow(entry *tcpEndpoint) uint32 {
 
 func (stack *Stack) TCPStats() TCPStats {
 	stats := stack.tcpStats
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		state := stack.tcp[index].state
 		if state == TCPFree {
 			continue
@@ -604,7 +647,7 @@ func (stack *Stack) tcpPortTaken(skip int, address IPv4, port uint16, connect bo
 	if !connect {
 		return stack.tcpReuseConflict(skip, address, port, false)
 	}
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		entry := &stack.tcp[index]
 		if index == skip || entry.state < TCPBound || entry.state > TCPListen || entry.port != port {
 			continue
@@ -624,7 +667,7 @@ func (stack *Stack) tcpReuseConflict(skip int, address IPv4, port uint16, reuse 
 	overlaps := func(local IPv4) bool {
 		return address == zeroIPv4 || local == zeroIPv4 || local == address
 	}
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		entry := &stack.tcp[index]
 		if index == skip || entry.state < TCPBound || entry.port != port || !overlaps(entry.local) {
 			continue
@@ -648,7 +691,7 @@ func (stack *Stack) tcpTupleConflict(skip int, local IPv4, localPort uint16, rem
 	if stack.tcpTombstone(local, localPort, remote, remotePort) != nil {
 		return true
 	}
-	for index := range stack.tcp[:] {
+	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
 		entry := &stack.tcp[index]
 		if index != skip && entry.state >= TCPSynSent && entry.local == local && entry.port == localPort &&
 			entry.remote == remote && entry.remotePort == remotePort {
