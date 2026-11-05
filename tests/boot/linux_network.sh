@@ -459,6 +459,15 @@ if wants faults; then
 	expect "^fetch status=200 bytes=300000 sha256=$big_sum\$" 'a new launch downloads after the faults'
 fi
 
+# The native benchmarks run to their end on both GTCP versions.
+if wants native; then
+	run 'netbench 4'
+	expect '^bench native ok$' 'netbench finishes on GTCP 2'
+	run 'netbench3 4'
+	expect '^bench native-v3-tcp-connect-close ' 'netbench3 connects and closes on GTCP 3'
+	expect '^bench native ok$' 'netbench3 finishes on GTCP 3'
+fi
+
 # The stream stress (make stress-linux-stream): the loopback stream again
 # and again with a watchdog on every transfer. A transfer that stops takes a
 # snapshot first: the kernel's diag dump (rings, slots and linuxsockd's

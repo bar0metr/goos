@@ -128,3 +128,34 @@ func (stack *Stack) dropTombstones() {
 		}
 	}
 }
+
+// tcpRetiredOwner holds the TIME_WAIT four-tuples of owners whose session
+// ended. No session has its number, so none is charged for them.
+const tcpRetiredOwner = 255
+
+// retireTombstones hands an ended owner's tombstones to tcpRetiredOwner.
+func (stack *Stack) retireTombstones(owner int) {
+	for index := range stack.tcpTombstones[:] {
+		if tombstone := &stack.tcpTombstones[index]; tombstone.used && int(tombstone.owner) == owner {
+			tombstone.owner = tcpRetiredOwner
+		}
+	}
+}
+
+// retireTimeWait moves the TIME_WAIT endpoint of an ended owner into a
+// retired tombstone, freeing its slot; with no tombstone free it stays an
+// endpoint, under tcpRetiredOwner, until its interval ends.
+func (stack *Stack) retireTimeWait(entry *tcpEndpoint) {
+	for index := range stack.tcpTombstones[:] {
+		tombstone := &stack.tcpTombstones[index]
+		if tombstone.used {
+			continue
+		}
+		*tombstone = tcpTombstone{used: true, owner: tcpRetiredOwner, local: entry.local, port: entry.port,
+			remote: entry.remote, remotePort: entry.remotePort, reuse: entry.reuse, sndNxt: entry.sndNxt, rcvNxt: entry.rcvNxt,
+			deadline: entry.deadline}
+		stack.releaseTCP(entry)
+		return
+	}
+	entry.owner = tcpRetiredOwner
+}

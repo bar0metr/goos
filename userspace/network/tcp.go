@@ -458,11 +458,16 @@ func (stack *Stack) TCPClose(owner int, id TCPEndpointID, now uint64) Result {
 // stays as an orphan until its interval ends, so its four-tuple stays
 // protected; a later session with the same owner may recycle it.
 func (stack *Stack) TCPCloseOwner(owner int, now uint64) {
+	// The owner's TIME_WAIT four-tuples stay protected, but no longer as
+	// the owner's: a session that later takes the same owner slot starts
+	// with its whole quota and tombstone share.
+	stack.retireTombstones(owner)
 	for index := range stack.tcp[:] {
 		entry := &stack.tcp[index]
 		if entry.state != TCPFree && int(entry.owner) == owner {
 			if entry.state == TCPTimeWait {
 				entry.orphan = true
+				stack.retireTimeWait(entry)
 				continue
 			}
 			if entry.state >= TCPSynSent && entry.state < TCPTimeWait {

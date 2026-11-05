@@ -37,6 +37,9 @@ var loopback = [4]byte{127, 0, 0, 1}
 // prefix names the protocol in every TCP line.
 var prefix string
 
+// waiting names the call whose reply await waits for, for its failure.
+var waiting = "reply"
+
 // offsets keeps each endpoint's stream offset: the bytes netd took from it.
 // GTCP 3 writes name it; GTCP 2 ignores it.
 var offsets [8]struct {
@@ -288,7 +291,7 @@ func await(correlation uint64) tcpapi.Reply {
 		var reply tcpapi.Reply
 		answered, ok := utility.TCPWait(wait, &reply)
 		if !ok {
-			utility.Fail(nil, "no TCP reply")
+			utility.Fail([]byte(waiting), "no TCP reply")
 		}
 		if answered == correlation {
 			return reply
@@ -302,6 +305,7 @@ func await(correlation uint64) tcpapi.Reply {
 }
 
 func call(request tcpapi.Request, what string) tcpapi.Reply {
+	waiting = what
 	reply := await(post(request))
 	check(what, reply.Result)
 	return reply

@@ -892,3 +892,4 @@ CA-1113	goos/userspace/netbench	noOffset	process	owned	none
 CA-1114	goos/userspace/netbench	offsets	process	owned	none
 CA-1115	goos/userspace/netbench	prefix	process	owned	none
 CA-1116	goos/userspace/utility	tcpLayout	session	immutable	none
+CA-1117	goos/userspace/netbench	waiting	process	owned	none

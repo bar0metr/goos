@@ -290,14 +290,18 @@ func TestTCPCloseOwnerKeepsTimeWait(t *testing.T) {
 	h := readyWithPeer(t)
 	_, old := h.peerTimeWait(1, 53)
 	h.stack.TCPCloseOwner(1, h.now)
-	if h.timeWaits(1) != 1 {
-		t.Fatal("session end released TIME_WAIT")
+	// The four-tuple stays protected, no longer on the ended owner's count.
+	if h.timeWaits(1) != 0 {
+		t.Fatal("an ended owner still holds TIME_WAIT")
 	}
 	if !h.stack.tcpTupleConflict(-1, old.Local, old.LocalPort, old.Remote, old.RemotePort) {
 		t.Fatal("tuple unprotected after the session ended")
 	}
+	if h.stack.tcpTombstone(old.Local, old.LocalPort, old.Remote, old.RemotePort) == nil {
+		t.Fatal("no tombstone for the ended owner's TIME_WAIT")
+	}
 	h.runUntil(h.now + h.stack.tuning.TCP.TimeWait)
-	if h.timeWaits(1) != 0 {
+	if h.stack.tcpTupleConflict(-1, old.Local, old.LocalPort, old.Remote, old.RemotePort) {
 		t.Fatal("TIME_WAIT outlived its interval")
 	}
 }
