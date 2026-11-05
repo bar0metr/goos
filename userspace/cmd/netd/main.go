@@ -156,8 +156,11 @@ func serve() {
 		stack.Advance(now)
 		stage(stageAdvance, now)
 		deliverCompletions()
-		deliverUDP()
-		deliverTCP(now)
+		// A session that spent its Deliver budget with work left gets
+		// another call next lap. Until then the wait only polls, so the
+		// driver and each session's requests still get their turn.
+		pending := deliverUDP()
+		pending = deliverTCP(now) || pending
 		deliverServers()
 		stage(stageDeliver, 0)
 		transmitPending()
@@ -173,6 +176,11 @@ func serve() {
 					timeout = 1
 				}
 			}
+		}
+		if pending {
+			timeout = 0
+		} else if validation.Enabled {
+			checkSettled()
 		}
 		stage(stagePrepare, 0)
 		result, status := userwait.Any(&interests, count, timeout)
@@ -206,6 +214,24 @@ func serve() {
 		}
 		stage(stageService, 0)
 	}
+}
+
+// checkSettled stops netd when a parked TCP or UDP request could finish
+// now while the loop is about to sleep: only an unrelated event or the
+// idle timeout would wake the loop for it.
+func checkSettled() {
+	proto := "tcp"
+	session, endpoint, op, found := stalledTCP()
+	if !found {
+		proto = "udp"
+		session, endpoint, op, found = stalledUDP()
+	}
+	if !found {
+		return
+	}
+	syslog.Error("parked request runnable before the wait", syslog.Str("proto", proto),
+		syslog.Uint("session", uint64(session)), syslog.Uint("endpoint", uint64(endpoint)), syslog.Str("op", op))
+	fatal("NETD_DELIVERY_STALLED\n")
 }
 
 // Loop stages, timed in a diagnostic build: the time from the previous

@@ -212,7 +212,10 @@ func (s *Session) Handle(stack *network.Stack, request *udpapi.Request, correlat
 		if !s.rxSlots.Return(request.Slot) {
 			return FaultRelease
 		}
-		return s.Deliver(stack, out)
+		// The event loop calls Deliver again before it sleeps, so work
+		// left over after this call's budget waits only for that call.
+		fault, _ := s.Deliver(stack, out)
+		return fault
 	case udpapi.OpClose:
 		held := s.find(id)
 		if id == 0 {
@@ -244,26 +247,52 @@ func (s *Session) Handle(stack *network.Stack, request *udpapi.Request, correlat
 
 // Deliver answers every waiting RecvFrom whose endpoint has a datagram,
 // while the client has an RX slot free for it, then every WaitReady whose
-// endpoint's mask changed.
-// Deliver answers every parked request that can finish now, in passes
-// until one answers nothing: an answer can make another possible, and the
-// service sleeps after Deliver until its next event.
-func (s *Session) Deliver(stack *network.Stack, out Replier) Fault {
-	for pass := 0; pass < 16; pass++ {
+// endpoint's mask changed. An answer can make another possible, so passes
+// repeat until one answers nothing. A call runs at most maxDeliverPasses
+// passes, so one session cannot hold netd's loop. More reports that the
+// last pass still answered something: requests may be runnable, and the
+// caller must call Deliver again before it sleeps.
+func (s *Session) Deliver(stack *network.Stack, out Replier) (fault Fault, more bool) {
+	for pass := 0; pass < maxDeliverPasses; pass++ {
 		s.answered = 0
 		for index := range s.endpoints {
 			if fault := s.deliver(stack, &s.endpoints[index], out); fault != FaultNone {
-				return fault
+				return fault, false
 			}
 			if fault := s.deliverReady(stack, &s.endpoints[index], out); fault != FaultNone {
-				return fault
+				return fault, false
 			}
 		}
 		if s.answered == 0 {
-			break
+			return FaultNone, false
 		}
 	}
-	return FaultNone
+	return FaultNone, true
+}
+
+// maxDeliverPasses is the work budget of one Deliver call, in passes over
+// the endpoint table.
+const maxDeliverPasses = 16
+
+// Runnable names a parked request a Deliver pass would answer now, with
+// the endpoint it waits on. It changes nothing, and it finds nothing after
+// a Deliver call that reported no more work.
+func (s *Session) Runnable(stack *network.Stack) (endpoint uint32, op string, found bool) {
+	_, free := s.rxSlots.Free()
+	for index := range s.endpoints {
+		held := &s.endpoints[index]
+		if held.recv == 0 && held.ready == 0 {
+			continue
+		}
+		ready, result := stack.UDPReadiness(s.owner, held.id)
+		if held.recv != 0 && free && result == network.ResultOK && ready.Mask&network.UDPReadyReadable != 0 {
+			return uint32(held.id), "recvfrom", true
+		}
+		if held.ready != 0 && (result != network.ResultOK || uint16(ready.Mask) != held.readyMask) {
+			return uint32(held.id), "wait-ready", true
+		}
+	}
+	return 0, "", false
 }
 
 // answer sends one answer of a Deliver pass and counts it.
