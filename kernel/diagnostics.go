@@ -604,6 +604,10 @@ func dumpSocketServices(out diagWriter) {
 	var families [linuxcompat.MaxNetFamilies]uint64
 	var endpoints [linuxcompat.MaxNetFamilies]linuxcompat.NetEndpoint
 	count := linuxcompat.LiveSessions(&families, &endpoints)
+	// The pool pages are shared memory, read under its lock as a socket
+	// call reads them; the tables lock nests inside it.
+	shmemLock.Lock()
+	defer shmemLock.Unlock()
 	for index := 0; index < count; index++ {
 		rings, found := socketPoolPage(endpoints[index], linuxsockapi.RingPage)
 		if !found {
