@@ -303,14 +303,25 @@ static libc resolves names with ordinary socket traffic.
   the connections bound to it. Linux sockets follow that state: such a
   connection fails with a network error and new ones work once the driver
   is back.
-- A stream stopped for good once, in a diagnostic run under KVM, with
-  nothing printed and no snapshot taken. A host model of the service and
-  the native stack with small queues produced a stall of the same kind:
-  `linuxsockd` deferred an RX slot release and a write because the queue
-  to `netd` was full of parked reads, `netd` drained the queue without a
-  reply, and nothing woke `linuxsockd` to send them again. The write-blocked
-  mark and the writable wait above remove it; the model passes 300
-  interleavings with them and stalls without them.
+- A stream stalled now and then, longest in the diagnostic build. The
+  stress target caught it with a snapshot: the writer's socket in
+  `linuxsockd` waited for send room with four slots queued and its wait
+  held in `netd`, while `netd`'s send buffer for it was empty. A write had
+  taken only a prefix; the refresh that followed saw the full buffer, but
+  the held wait still named the mask with room, and the buffer emptied
+  again before `netd` looked at the wait, so the wait never answered. The
+  stream went on only when `netd`'s 30-second idle wake came round. A
+  refresh that sees a mask other than the one the held wait names now asks
+  again until the two agree or the wait answers, and a validation build
+  checks after every event that a socket waiting for room has something
+  registered that will tell it. Two more holes of the same family went with
+  it: `netd` delivered a session's parked requests in one pass, so an
+  answer that made an earlier endpoint ready waited for the next event (it
+  now repeats passes until one answers nothing), and `linuxsockd` retried
+  work held back by a full native queue only on a reply (the writable rule
+  above). A host model of the service against the real native stack, with
+  queues of two to four messages and 300 orders of events, reproduces the
+  last one when the writable retry is taken out.
 - `netd` hands a TCP segment between two endpoints of its own stack to the
   receiving state machine as a logical segment, with no header, checksum or
   parse: the same lookup, sequence, window, congestion, FIN and TIME_WAIT
