@@ -228,9 +228,9 @@ test`.
 ## Build configuration
 
 `HZ` selects the timer rate for every target: `make HZ=250 run` or
-`make HZ=1000 test-boot`. The default is 100 Hz; 250 and 1000 are the supported
+`make HZ=1000 test-boot`. The default is 250 Hz; 100 and 1000 are the supported
 diagnostic rates, and any other value is rejected. The rate is a build tag
-(`goos_hz250`, `goos_hz1000`) that selects the `kernel/clock` constant, so the
+(`goos_hz100`, `goos_hz1000`) that selects the `kernel/clock` constant, so the
 kernel, the PIT reload value, and every userspace deadline change together
 without editing Go or assembly. The boot log prints the active rate as
 `Timer: <rate> Hz`.

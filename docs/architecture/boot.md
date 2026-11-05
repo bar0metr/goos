@@ -192,7 +192,7 @@ task (ADR 0024, 0031, 0062, 0093).
 
 | Variable | Values | Effect |
 | --- | --- | --- |
-| `HZ` | 100 (default), 250, 1000 | build tag `goos_hz<rate>`; selects the PIT divisor and every userspace deadline (ADR 0052) |
+| `HZ` | 100, 250 (default), 1000 | build tag `goos_hz<rate>`; selects the PIT divisor and every userspace deadline (ADR 0052) |
 | `DIAG` | 0 (default), 1 | build tag `goos_diag`; enables the kernel event ring, the `Diagnostics` operation, and launch-stage timing (ADR 0052) |
 | `VALIDATION` | 0 (default), 1 | build tag `goos_validation`; runs the kernel self-tests, processes 2 and 3, the supervision scenario, the storage probe, and the driver fault, and prints success markers (ADR 0058) |
 | `RECOVERY` | 0 (default), 1 | `run`, `run-gui`, `run-debug`: boot an ISO whose archive asks PID 1 for recovery mode (ADR 0175) |

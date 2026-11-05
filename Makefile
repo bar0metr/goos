@@ -117,7 +117,7 @@ QEMU_COMMON_FLAGS = -machine q35 -m $(MEMORY) -smp cpus=$(SMP),sockets=1,cores=$
 QEMU_FLAGS = $(QEMU_COMMON_FLAGS) -display none
 QEMU_GUI_FLAGS = $(QEMU_COMMON_FLAGS) -device VGA -display $(QEMU_DISPLAY)
 SOURCE_DATE_EPOCH ?= 0
-HZ ?= 100
+HZ ?= 250
 ifeq ($(filter $(HZ),100 250 1000),)
 $(error HZ must be 100, 250, or 1000)
 endif
@@ -582,6 +582,7 @@ release-check:
 test-unit:
 	$(BUILD_ENV) go test ./...
 	$(BUILD_ENV) go test -tags goos_diag ./kernel/diag
+	$(BUILD_ENV) go test -tags goos_hz100 ./kernel/clock
 	$(BUILD_ENV) go test -tags goos_hz1000 ./kernel/clock
 	$(BUILD_ENV) go test -tags goos_validation ./kernel/lock
 
@@ -1302,7 +1303,7 @@ help:
 	  '  QEMU_DISPLAY=x  GUI backend for run-gui (default cocoa; gtk/sdl on other hosts)' \
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
 	  '  test-console-gui validate framebuffer pixels and PS/2 input headlessly' \
-	  '  HZ=100|250|1000 timer rate for any build target (default 100)' \
+	  '  HZ=100|250|1000 timer rate for any build target (default 250)' \
 	  '  DIAG=0|1        normal build (default) or diagnostic build with diag dump' \
 	  '  OPT=2|1|s|z     TinyGo optimisation level (default 2, fastest; z smallest)' \
 	  '  MEMORY=512M     guest RAM for run and the QEMU tests, e.g. MEMORY=4G' \
