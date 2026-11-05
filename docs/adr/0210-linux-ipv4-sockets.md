@@ -400,9 +400,9 @@ static libc resolves names with ordinary socket traffic.
   its family, and the kernel's `linux-net-plane` diagnostic prints them.
 
   `netd` still grants `linuxsockd` 64 endpoints per protocol and holds 96
-  of each, and a Linux process holds 64 descriptors. Those bounds stop a
-  family short of its socket quota until `netd` and the descriptor table
-  grow.
+  of each, so open native endpoints stop all families together at 64 TCP
+  and 64 UDP sockets until `netd`'s session quota and tables grow. An Open
+  past that quota fails in `netd`, not at the service's quotas.
 
 ## Validation
 
