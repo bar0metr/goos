@@ -993,7 +993,9 @@ require_marker storage.file-cache FILE_CACHE_OK "$log"
 # given the whole disk (ADR 0115). A restarted filesystem service has the
 # volume chosen again from the table.
 require_min_count storage.whole-disk-volume '^BLOCK_VOLUME_WHOLE_OK$' 2 "$log" BLOCK_VOLUME_WHOLE_OK
-count_window storage.vfs-not-restarted '^VFS_SERVICE_OK$' 0 "$log" 'goos> fault fat32' 'goos> fault vfs'
+# The window ends at the echoed command, not at its prompt: VFS diagnostics
+# such as VFS_MEMORY may land between the prompt and the echo.
+count_window storage.vfs-not-restarted '^VFS_SERVICE_OK$' 0 "$log" 'goos> fault fat32' 'fault vfs'
 pass_group storage
 
 for marker in RAMFS_PROTOCOL_OK RAMFS_METADATA_OK RAMFS_IO_OK RAMFS_BOUNDS_OK VFS_NAMESPACE_OK VFS_MOUNT_OK VFS_PATH_OK VFS_CACHE_OK VFS_PROTOCOL_OK VFS_SERVICE_OK FAT32_MOUNT_OK; do
