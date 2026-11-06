@@ -731,17 +731,43 @@ type DiagWindow struct {
 	Output   []string    `json:"output"`
 }
 
+// DiagDelta is one field's change across a window. Baseline is the same
+// field's change across the baseline window, which costs a launch and the
+// dumps around it and does almost no work; Normalised is the change less
+// the baseline, per unit.
 type DiagDelta struct {
 	Line       string  `json:"line"`
 	Field      string  `json:"field"`
 	Before     uint64  `json:"before"`
 	After      uint64  `json:"after"`
 	Delta      int64   `json:"delta"`
+	Baseline   int64   `json:"baseline"`
 	Normalised float64 `json:"normalised"`
 }
 
 type DiagPass struct {
-	Windows []DiagWindow `json:"windows"`
+	Baseline string       `json:"baseline"`
+	Windows  []DiagWindow `json:"windows"`
+}
+
+// diagBaseline is the window whose deltas every other window subtracts:
+// one UDP round, a launch with next to no socket work.
+const diagBaseline = "/system/linux/netprobe bench-udp 1"
+
+// lessBaseline subtracts the baseline window's deltas from deltas and
+// normalises the rest per unit.
+func lessBaseline(deltas, baseline []DiagDelta, units float64) {
+	base := make(map[[2]string]int64, len(baseline))
+	for _, d := range baseline {
+		base[[2]string{d.Line, d.Field}] = d.Delta
+	}
+	for index := range deltas {
+		d := &deltas[index]
+		d.Baseline = base[[2]string{d.Line, d.Field}]
+		if units > 0 {
+			d.Normalised = float64(d.Delta-d.Baseline) / units
+		}
+	}
 }
 
 // diagDump takes netd's counters (net endpoints, which netd logs) and the
@@ -817,8 +843,13 @@ func (linuxNetworkDiagScenario) Run(ctx context.Context, s *Session) (Result, er
 		{"connect-close", "/system/linux/netprobe bench-connect 200", "connection", 200},
 		{"udp-request-reply", fmt.Sprintf("/system/linux/netprobe bench-udp %d", o.DiagRounds), "UDP request-reply round", float64(o.DiagRounds)},
 	}
-	pass := &DiagPass{}
+	pass := &DiagPass{Baseline: diagBaseline}
 	var lines []string
+	var baseline []DiagDelta
+	windows = append([]struct {
+		workload, command, per string
+		units                  float64
+	}{{"baseline", diagBaseline, "run", 1}}, windows...)
 	for _, w := range windows {
 		before, err := s.diagDump(ctx)
 		if err != nil {
@@ -835,10 +866,16 @@ func (linuxNetworkDiagScenario) Run(ctx context.Context, s *Session) (Result, er
 		if err != nil {
 			return "", err
 		}
+		deltas := diffDiagCounters(before, after, w.units)
+		if w.workload == "baseline" {
+			baseline = deltas
+			continue
+		}
+		lessBaseline(deltas, baseline, w.units)
 		measured := benchOutput(out)
 		lines = append(lines, measured...)
 		pass.Windows = append(pass.Windows, DiagWindow{Workload: w.workload, Command: w.command, Per: w.per, Units: w.units,
-			Deltas: diffDiagCounters(before, after, w.units), Output: measured})
+			Deltas: deltas, Output: measured})
 	}
 	report := summarize(env, []BenchRun{{Index: 0, Lines: lines}})
 	report.Targets, report.Comparisons = nil, nil
@@ -854,14 +891,17 @@ func (linuxNetworkDiagScenario) Run(ctx context.Context, s *Session) (Result, er
 func (p *DiagPass) Markdown() string {
 	var b strings.Builder
 	b.WriteString("\n## Counter deltas\n\nThe change of every decimal field on the DIAG lines across one workload, normalised per unit of work. Lines that repeat within a dump are told apart by their first field. Zero deltas are left out here and kept in the JSON.\n")
+	if p.Baseline != "" {
+		fmt.Fprintf(&b, "\nThe baseline column is the change across `%s`, a launch and the dumps around it with almost no socket work. The per-unit column is the delta less the baseline.\n", p.Baseline)
+	}
 	for _, w := range p.Windows {
 		fmt.Fprintf(&b, "\n### %s\n\n`%s`: %s units of one %s. %s\n\n", w.Workload, w.Command, benchNumber(w.Units), w.Per, strings.Join(w.Output, "; "))
-		fmt.Fprintf(&b, "| line | field | delta | per %s |\n|---|---|---:|---:|\n", w.Per)
+		fmt.Fprintf(&b, "| line | field | delta | baseline | per %s |\n|---|---|---:|---:|---:|\n", w.Per)
 		for _, d := range w.Deltas {
 			if d.Delta == 0 {
 				continue
 			}
-			fmt.Fprintf(&b, "| %s | %s | %d | %s |\n", d.Line, d.Field, d.Delta, benchNumber(d.Normalised))
+			fmt.Fprintf(&b, "| %s | %s | %d | %d | %s |\n", d.Line, d.Field, d.Delta, d.Baseline, benchNumber(d.Normalised))
 		}
 	}
 	return b.String()
