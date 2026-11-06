@@ -72,4 +72,8 @@ table entry only after that, so an entry naming the old endpoint comes back
   the stack now keeps the timer armed.
 - FlagPeek and per-read lengths have no GTCP 4 form. A client that needs
   them stays on GTCP 3.
-- linuxsockd still speaks GTCP 3 to netd; moving it is a separate change.
+- linuxsockd speaks GTCP 4 to netd through `linuxsock.RingLink`; ADR 0210
+  describes the mapping. A readiness change that comes without a ring entry
+  draws no doorbell, so the link holds an `OpWaitReady` in netd only while
+  a connect runs or while a stream has no credit posted and the kernel
+  holds none of its bytes.
