@@ -164,7 +164,22 @@ func executableSource(loader uint64, session uint64, descriptor unsafe.Pointer) 
 	return unsupported
 }
 
-func vmMap(descriptor unsafe.Pointer, protection uint64, flags uint64) uint64 { return unsupported }
+// HostVMMap stands in for the kernel's VMMap in host tests: it receives the
+// descriptor's address and length and returns the address it reserved and
+// the call's status. Nil leaves VMMap unsupported.
+var HostVMMap func(address, length, protection, flags uint64) (uint64, kcall.Status)
+
+func vmMap(descriptor unsafe.Pointer, protection uint64, flags uint64) uint64 {
+	if HostVMMap == nil {
+		return unsupported
+	}
+	words := (*[2]uint64)(descriptor)
+	address, result := HostVMMap(words[0], words[1], protection, flags)
+	if result == kcall.StatusOK {
+		words[0] = address
+	}
+	return uint64(result)
+}
 
 func vmUnmap(address uint64, length uint64) uint64 { return unsupported }
 

@@ -94,10 +94,6 @@ func stateOf(slot int) *threadState {
 // threadSpan is one past the highest slot a thread started in.
 func threadSpan() int { return max(int(threadHigh.Load()), 1) }
 
-// snapshotBytes is the room a collection gives ThreadSuspend: one record for
-// every slot but the collector's.
-const snapshotBytes = kcall.MaxThreadSnapshots * kcall.ThreadSnapshotSize
-
 // selfSlot returns the calling thread's slot.
 func selfSlot() int {
 	if !threaded.Load() {
@@ -119,12 +115,11 @@ func EnableThreads() bool {
 		return true
 	}
 	if snapshots == nil {
-		base, status := sys.VMReserve(uint64(snapshotBytes), kcall.VMRead|kcall.VMWrite)
-		if status != kcall.StatusOK || base == 0 {
+		room, ok := reserveSnapshots()
+		if !ok {
 			return false
 		}
-		// SAFETY: the reservation is snapshotBytes long and never unmapped.
-		snapshots = unsafe.Slice((*byte)(pointerAt(uintptr(base))), snapshotBytes)
+		snapshots = room
 	}
 	if !threadStates.Reserve(unsafe.Sizeof(mainThread)) {
 		return false

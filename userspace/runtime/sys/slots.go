@@ -31,8 +31,7 @@ func (records *SlotRecords) Reserve(size uintptr) bool {
 	if records.base.Load() != 0 {
 		return true
 	}
-	length := (uint64(recordStride(size))*(tls.Slots-1) + 4095) &^ 4095
-	reserved, result := VMReserve(length, kcall.VMRead|kcall.VMWrite)
+	reserved, length, result := VMReserveBytes(uint64(recordStride(size))*(tls.Slots-1), kcall.VMRead|kcall.VMWrite)
 	if result != kcall.StatusOK || reserved == 0 {
 		return false
 	}
