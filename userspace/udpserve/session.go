@@ -165,6 +165,14 @@ func (s *Session) Handle(stack *network.Stack, request *udpapi.Request, correlat
 			result = stack.UDPSendTo(s.owner, id, network.IPv4(request.Address), request.Port, payload, now)
 		}
 		reply.Result, reply.Slot = Result(result), request.Slot
+		if result == network.ResultOK {
+			// A loopback datagram is queued already. The receive parked on
+			// it is what the peer waits for, so its answer goes before this
+			// reply and the client takes both on one wake.
+			if fault, _ := s.Deliver(stack, out); fault != FaultNone {
+				return fault
+			}
+		}
 	case udpapi.OpRecvFrom:
 		_, result := stack.UDPQueued(s.owner, id)
 		held := s.find(id)

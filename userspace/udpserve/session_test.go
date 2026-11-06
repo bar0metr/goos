@@ -365,12 +365,12 @@ func TestTableWalksOnlyOpenedEntries(t *testing.T) {
 		t.Fatalf("reopened endpoint not in the lowest free entry: limit %d", c.session.limit)
 	}
 	waiting := c.send(udpapi.Request{Opcode: udpapi.OpRecvFrom, Endpoint: reopened})
-	c.sendTo(opened[0], 7100, "ping")
-	if fault, _ := c.session.Deliver(stack, &c.out); fault != FaultNone {
-		t.Fatalf("deliver %q", fault)
-	}
+	length := copy(c.tx, "ping")
+	sent := c.send(udpapi.Request{Opcode: udpapi.OpSendTo, Endpoint: opened[0], Address: loopback, Port: 7100, Length: uint16(length)})
+	// The parked receive answers before the send that filled it.
 	replies := c.out.take()
-	if len(replies) != 1 || replies[0].correlation != waiting || c.payload(replies[0].reply) != "ping" {
+	if len(replies) != 2 || replies[0].correlation != waiting || c.payload(replies[0].reply) != "ping" ||
+		replies[1].correlation != sent || replies[1].reply.Result != udpapi.ResultOK {
 		t.Fatalf("replies %+v", replies)
 	}
 }
