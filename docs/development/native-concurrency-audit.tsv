@@ -926,3 +926,4 @@ CA-1148	goos/userspace/cmd/logd	statusText	process	owned	none
 CA-1149	goos/userspace/cmd/shell	logStatus	process	owned	none
 CA-1151	goos/userspace/cmd/linuxsockd	udpRing	process	owned	none
 CA-1152	goos/userspace/cmd/netd	udpDoorbells	process	owned	none
+CA-1153	goos/userspace/runtime/sys	HostVMMap	process	owned	TestVMReserveBytesRoundsToPages
