@@ -75,6 +75,8 @@ func declareSchema(target *config.Store) config.Status {
 		{"system.net.tcp.rto-min-ms", config.Uint(1000), false},
 		{"system.net.tcp.rto-max-ms", config.Uint(60000), false},
 		{"system.net.tcp.time-wait-ms", config.Uint(60000), false},
+		{"system.net.tcp.memory-bytes", config.Uint(41943040), false},
+		{"system.net.tcp.memory-bytes-per-session", config.Uint(33554432), false},
 		// The resolver service's settings (ADR 0194). 0.0.0.0 marks an unused
 		// server slot.
 		{"system.dns.server1", mustText("0.0.0.0"), false},

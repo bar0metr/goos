@@ -36,9 +36,16 @@ const (
 	// stack. Such a segment never touches a frame.
 	TCPLoopbackMSS = 16 << 10
 	// DefaultTCPMemoryBudget bounds the ring bytes of all connections and
-	// DefaultTCPOwnerMemoryBudget those of one owner.
-	DefaultTCPMemoryBudget      = 16 << 20
-	DefaultTCPOwnerMemoryBudget = 8 << 20
+	// DefaultTCPOwnerMemoryBudget those of one owner. An admitted loopback
+	// connection costs 20 KiB at its starting rings and 8 KiB at the floor,
+	// so one owner holds 512 loopback pairs at their starting rings with
+	// 12 MiB left for growth. MaxTCPMemoryBudget keeps the rings, and the
+	// garbage their growth leaves for the collector, inside netd's 64 MiB
+	// page quota.
+	DefaultTCPMemoryBudget      = 40 << 20
+	DefaultTCPOwnerMemoryBudget = 32 << 20
+	MaxTCPMemoryBudget          = 48 << 20
+	minTCPMemoryBudget          = 64 << 10
 	// DefaultTCPTimeWaitBudget bounds the TIME_WAIT tombstones and
 	// DefaultTCPOwnerTimeWaitBudget the share of one owner.
 	DefaultTCPTimeWaitBudget      = 8192
@@ -141,16 +148,19 @@ type tcpEndpoint struct {
 	rcvScale, sndScale uint8
 
 	// sendRing and recvRing are the stream rings; tcp_ring.go describes the
-	// indexing. charged is the ring bytes the owner's budget pays for.
-	sendRing []byte
-	sendSeq  uint32
-	sendHead uint32
-	sendLen  uint32
-	sendSent uint32
-	recvRing []byte
-	recvHead uint32
-	recvLen  uint32
-	charged  uint32
+	// indexing. charged is the ring bytes the owner's budget pays for, and
+	// sendReserve the send floor charged from admission until the send side
+	// ends; sendCharge describes how the two meet.
+	sendRing    []byte
+	sendReserve uint16
+	sendSeq     uint32
+	sendHead    uint32
+	sendLen     uint32
+	sendSent    uint32
+	recvRing    []byte
+	recvHead    uint32
+	recvLen     uint32
+	charged     uint32
 	// reorder holds the out-of-order spans stored in recvRing past the
 	// contiguous bytes; nil while every byte arrived in order.
 	reorder *tcpReorder
@@ -218,6 +228,9 @@ type TCPStats struct {
 	// DropMemory counts handshakes refused and segments dropped because a
 	// memory budget had no room for their ring bytes.
 	DropMemory uint64
+	// MemoryCapped counts ring growths the memory budgets cut short. The
+	// connection keeps working at the smaller ring and window.
+	MemoryCapped uint64
 	// DropBacklog counts SYNs a full listener dropped.
 	DropBacklog uint64
 	// SplitSegments counts data segments sent from both ends of the send
@@ -283,10 +296,21 @@ func budgetOr(value, fallback int) int {
 }
 
 // SetTCPMemoryBudget sets the ring bytes all connections, and one owner's,
-// may hold; zero restores a default. A lowered budget takes nothing back: it
-// refuses the next ring growth and handshake that would exceed it.
+// may hold; zero restores the tuned value. A lowered budget takes nothing
+// back: it caps the next ring growth and refuses the next handshake whose
+// minimum would exceed it.
 func (stack *Stack) SetTCPMemoryBudget(total, owner int) {
 	stack.tcpBudget.memory, stack.tcpBudget.ownerMemory = total, owner
+}
+
+// TCPOwnerMemory reports the ring bytes charged to owner and the owner
+// budget in force, so a caller can attribute a refused handshake or a
+// capped ring to the owner that holds the memory.
+func (stack *Stack) TCPOwnerMemory(owner int) (int, int) {
+	if owner < 0 || owner >= tcpOwners {
+		return 0, 0
+	}
+	return stack.tcpOwnerBytes[owner], stack.tcpOwnerMemoryBudget()
 }
 
 // SetTCPTimeWaitBudget sets the TIME_WAIT tombstones the stack, and one
