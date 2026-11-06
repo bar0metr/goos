@@ -31,6 +31,9 @@ const (
 	// Spins is how many times a waiting client yields and polls its rings
 	// before it arms its doorbell and sleeps.
 	Spins = 8
+	// ReplySpins is how many times Call yields and polls the channel for
+	// netd's reply before it sleeps on it.
+	ReplySpins = 32
 	// ReadDepth is the credit a reading Conn keeps posted.
 	ReadDepth = 4
 )
@@ -122,10 +125,17 @@ func (c *Client) Call(request *tcpapi.Request, reply *tcpapi.Reply) bool {
 		return c.fail("request not sent")
 	}
 	c.Stats.Requests++
-	for {
-		got, alive := c.t.Receive(true, &c.in)
-		if !alive || !got {
+	// netd answers most requests within a few yields; polling first keeps
+	// the client off the sleep and wake path for them.
+	for spin := 0; ; spin++ {
+		wait := spin >= ReplySpins
+		got, alive := c.t.Receive(wait, &c.in)
+		if !alive || wait && !got {
 			return c.fail("no reply")
+		}
+		if !got {
+			c.t.Yield()
+			continue
 		}
 		if c.in.Kind == ipc.KindNotification {
 			if !tcpapi.IsDoorbell4(&c.in) {
