@@ -36,6 +36,8 @@ package main
 // after it blocked takes it back itself.
 
 import (
+	"sync/atomic"
+
 	"goos/internal/capability"
 	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
@@ -297,18 +299,82 @@ func (handler *linuxCallHandler) socketAwait(call *socketCall) (linuxsockapi.Rep
 	return linuxsockapi.Reply{}, 0, true
 }
 
-// socketPoolPage returns one page of a session's pool.
+// socketPoolPage returns one page of a session's pool, from linuxPools: a
+// socket call holds no shared memory lock.
 func socketPoolPage(endpoint linuxcompat.NetEndpoint, index uint32) ([]byte, bool) {
-	object, found := sharedObjects.Find(endpoint.PoolObject)
+	if endpoint.PoolObject == 0 || index >= linuxsockapi.PoolPages {
+		return nil, false
+	}
+	for slot := range linuxPools {
+		pool := &linuxPools[slot]
+		if pool.object.Load() == endpoint.PoolObject {
+			page := pool.pages[index]
+			return page, len(page) == int(vm.PageSize)
+		}
+	}
+	return nil, false
+}
+
+// linuxPool holds the pages of one session pool. The kernel fills it, and
+// retains the pool object, before the session goes live, so the pages stay
+// while any call can reach them through the session.
+type linuxPool struct {
+	object atomic.Uint64
+	pages  [linuxsockapi.PoolPages][]byte
+}
+
+// linuxPools caches the pools of the live sessions, and of a session
+// replaced since, until a later attach needs the entry. Attaches write it
+// under the shared memory lock; calls read it without a lock.
+var (
+	linuxPools    [2 * linuxcompat.MaxNetFamilies]linuxPool
+	linuxPoolNext int
+)
+
+// cacheLinuxPool puts a session pool in linuxPools before its session goes
+// live. The caller holds the shared memory lock. It evicts the oldest entry
+// no live session uses, which drops the reference the entry held.
+func cacheLinuxPool(objectID uint64) bool {
+	for slot := range linuxPools {
+		if linuxPools[slot].object.Load() == objectID {
+			return true
+		}
+	}
+	object, found := sharedObjects.Find(objectID)
 	if !found || object.PageCount() != linuxsockapi.PoolPages {
-		return nil, false
+		return false
 	}
-	frame, present := object.Frame(vm.PhysicalPage, index)
-	page, mapped := vm.PhysicalPage(frame)
-	if !present || !mapped || len(page) < int(vm.PageSize) {
-		return nil, false
+	var families [linuxcompat.MaxNetFamilies]uint64
+	var endpoints [linuxcompat.MaxNetFamilies]linuxcompat.NetEndpoint
+	live := linuxcompat.LiveSessions(&families, &endpoints)
+	for attempt := 0; attempt < len(linuxPools); attempt++ {
+		pool := &linuxPools[linuxPoolNext]
+		linuxPoolNext = (linuxPoolNext + 1) % len(linuxPools)
+		old := pool.object.Load()
+		inUse := false
+		for index := 0; index < live; index++ {
+			inUse = inUse || old != 0 && endpoints[index].PoolObject == old
+		}
+		if inUse {
+			continue
+		}
+		for index := range pool.pages {
+			frame, present := object.Frame(vm.PhysicalPage, uint32(index))
+			page, mapped := vm.PhysicalPage(frame)
+			if !present || !mapped || len(page) < int(vm.PageSize) {
+				return false
+			}
+			if index == 0 && old != 0 {
+				pool.object.Store(0)
+				dropShared(old)
+			}
+			pool.pages[index] = page[:vm.PageSize]
+		}
+		object.Retain()
+		pool.object.Store(objectID)
+		return true
 	}
-	return page[:vm.PageSize], true
+	return false
 }
 
 // socketReadiness reads a socket's entry in the readiness pages. live false
@@ -643,6 +709,9 @@ func attachLaunchNet(spawned *process.Process, root uint64, channelHandle handle
 	state, found := linuxcompat.FindProcess(root)
 	grant, valid := resolveLinuxNet(spawned, channelHandle, poolHandle)
 	if !found || !valid {
+		return false
+	}
+	if !cacheLinuxPool(grant.PoolObject) {
 		return false
 	}
 	_, _, attached := linuxcompat.AttachNet(state.FamilyID, grant, false)

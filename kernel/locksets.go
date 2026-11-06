@@ -310,6 +310,13 @@ const (
 	// linuxFiles is every other call: descriptors, files through the VFS,
 	// pipes, polls, signal state, and identity.
 	linuxFiles = registryRead | linuxState | handleWrite | streams | executableTable | sharedMemory | spaceRead
+	// linuxSockets is a socket call, and a read or write whose descriptor
+	// turns out to be a socket: the family's descriptors and the copies. It
+	// leaves out the stream registry, the handle table and the shared
+	// memory table, which the calls of every family share: a socket call
+	// reaches its session's pool through linuxPools. A read or write of
+	// anything else asks for linuxFiles and runs again (widenUnlessSocket).
+	linuxSockets = registryRead | linuxState | executableTable | spaceRead
 )
 
 // linuxCallLocks is the set a Linux call takes.
@@ -323,6 +330,11 @@ func linuxCallLocks(number linuxabi.Syscall) lockSet {
 		return linuxFast
 	case linuxabi.SysMmap, linuxabi.SysMunmap, linuxabi.SysMprotect, linuxabi.SysMadvise, linuxabi.SysBrk:
 		return linuxMemory
+	case linuxabi.SysSocket, linuxabi.SysConnect, linuxabi.SysAccept, linuxabi.SysAccept4, linuxabi.SysSendto,
+		linuxabi.SysRecvfrom, linuxabi.SysSendmsg, linuxabi.SysRecvmsg, linuxabi.SysShutdown, linuxabi.SysBind,
+		linuxabi.SysListen, linuxabi.SysGetsockname, linuxabi.SysGetpeername, linuxabi.SysSetsockopt,
+		linuxabi.SysGetsockopt, linuxabi.SysRead, linuxabi.SysWrite, linuxabi.SysReadv, linuxabi.SysWritev:
+		return linuxSockets
 	case linuxabi.SysExecve, linuxabi.SysFork, linuxabi.SysVfork, linuxabi.SysClone,
 		linuxabi.SysExit, linuxabi.SysExitGroup, linuxabi.SysWait4,
 		linuxabi.SysKill, linuxabi.SysTkill, linuxabi.SysTgkill:

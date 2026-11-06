@@ -101,8 +101,16 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 			// signal mask.
 			linuxcompat.SelectThreadSignals(caller.state, task)
 		}
-		local.peerWanted = 0
+		local.peerWanted, local.linuxWiden = 0, false
 		result = linuxcompat.Dispatch(frame, handler)
+		if local.linuxWiden && set == linuxSockets {
+			// A read or write of something other than a socket runs again
+			// under the whole file set; the retry does not count.
+			set = linuxFiles
+			held.drop()
+			attempt--
+			continue
+		}
 		if local.peerWanted == 0 {
 			break
 		}
