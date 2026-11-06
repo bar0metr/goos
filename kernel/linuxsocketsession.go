@@ -695,12 +695,14 @@ func releaseSocketDescription(object uint64) {
 // the family's other members must not wait on a channel nobody serves.
 func endLinuxNetHolder(exited *process.Process, familyID uint64) {
 	grant, found := linuxcompat.NetHolder(familyID)
-	if !found || grant.Holder != exited.ID() {
+	if found && grant.Holder != exited.ID() {
 		return
 	}
-	if endpoint, live, _ := linuxcompat.NetSession(familyID); live {
+	if endpoint, live, _ := linuxcompat.NetSession(familyID); found && live {
 		failSocketSession(familyID, endpoint, socketFailedHolder)
 	}
+	// The family's last exit forgets its context before this runs; its
+	// pools go then too.
 	releaseLinuxPools(familyID)
 }
 
