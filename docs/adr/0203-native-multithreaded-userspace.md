@@ -82,11 +82,12 @@ last thread to call `ThreadExit`.
 The kernel makes every thread stack, as it makes the main one. A process has
 64 thread slots (16 before the revision below). Slot 0 is the main task and
 its stack. Slot k from 1 to 63 owns a fixed stack of 512 KiB ending at
-`ThreadAreaTop - (k-1) * 576 KiB`, with a 64 KiB guard region below it, both
-pinned. `ThreadAreaTop` lies 65 MiB below `vm.UserStackTop`, past the
+`ThreadAreaTop - (k-1) * 576 KiB`, with a 64 KiB guard below it. One pinned
+region holds both: its lowest 64 KiB are the guard (`region.LowGuard`, see
+the revision below). `ThreadAreaTop` lies 65 MiB below `vm.UserStackTop`, past the
 largest main stack an image may ask for (`MaxStackReserve`, 64 MiB) and its
-guard. `ThreadCreate` inserts the two regions, `ThreadExit`'s teardown removes
-them and frees their pages once the task is off its processor. A slot whose
+guard. `ThreadCreate` inserts the region, `ThreadExit`'s teardown removes
+it and frees its pages once the task is off its processor. A slot whose
 range overlaps another region cannot be used, and creation fails cleanly.
 
 The entry must lie in a region that is readable and executable and not
@@ -335,6 +336,22 @@ the thread states hold slabs, not allocations. The collector's copy of the
 held threads is a global, not a 1 KiB stack array. What stays static per
 slot is small: the 64-byte control blocks (`goos_tcbs`, 4 KiB), the
 TinyGo static tasks (129 of 48 bytes) and the pending `thread.Start` table.
+
+The kernel takes only whole pages in a reservation. The snapshot room is 63
+records of 416 bytes, 26208 bytes, so `arena` asks `sys.VMReserveBytes` for
+seven pages; a reservation of the exact size made every `thread.Start` and
+every goroutine worker fail with `ResourceExhausted`.
+
+A thread's stack and guard take one region, not two. A guard region and a
+stack region per thread would hold 126 of the 128 entries a process's region
+table has (`region.MaxRegions`) at 63 threads, before the image, the main
+stack, the heap and the reservations above. With `region.LowGuard` the lowest
+64 KiB of the stack region are the guard: a demand fault there ends the
+process as a guard fault, `VMQuery` describes the guard and the stack as two
+parts, and the region goes whole or not at all and keeps its protection, as
+a goroutine stack batch does. The table stays at 128 entries, and 63
+threads leave room for everything else a large process maps
+(`nativethread.TestSixtyFourThreadsFitTheRegionTable`).
 
 ## Consequences
 

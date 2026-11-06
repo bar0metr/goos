@@ -536,6 +536,7 @@ func (handler nativeCallHandler) VMQuery(address uint64, record uint64) kcall.St
 	if !ok {
 		return kcall.StatusNotFound
 	}
+	entry = entry.PartAt(address)
 	clear(local.vmRecord[:])
 	putUint64(local.vmRecord[0:8], entry.Base)
 	putUint64(local.vmRecord[8:16], entry.Length)
