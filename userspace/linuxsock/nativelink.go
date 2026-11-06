@@ -256,7 +256,7 @@ func tcpRequest(r *NativeRequest, out *tcpapi.Request) SubmitStatus {
 			out.Flags = tcpapi.FlagReuseAddr
 		}
 	case NativeListen:
-		out.Opcode, out.Backlog = tcpapi.OpListen, uint8(min(r.Length, 255))
+		out.Opcode, out.Backlog = tcpapi.OpListen, uint8(min(r.Length, MaxBacklog))
 	case NativeAccept:
 		out.Opcode = tcpapi.OpAccept
 	case NativeConnect:
