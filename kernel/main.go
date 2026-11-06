@@ -343,7 +343,19 @@ func main() {
 	// where MapLoaderMemory keeps it reachable.
 	stack := amd64.StackPointer()
 	if !validImage || stack < 1024*1024 || (stack >= vm.IdentityMapLimit && !inLoaderMemory(stack)) {
-		console.WriteString("PANIC: unsafe virtual-memory bootstrap state\n")
+		console.WriteString("PANIC: unsafe virtual-memory bootstrap state: image-valid=")
+		if validImage {
+			console.WriteString("yes")
+		} else {
+			console.WriteString("no")
+		}
+		console.WriteString(" image-base=")
+		console.WriteHex(image.Base)
+		console.WriteString(" image-size=")
+		console.WriteHex(image.Size)
+		console.WriteString(" stack=")
+		console.WriteHex(stack)
+		console.WriteString("\n")
 		for {
 			amd64.Halt()
 		}

@@ -65,7 +65,7 @@ func traceAddress(out diagWriter, root, address uint64) {
 	out.uint("mapped", boolValue(mapped))
 	out.uint("pmm-allocated", boolValue(pageAllocator.IsAllocated(page)))
 	image, valid := vm.LoadedImage()
-	out.uint("in-kernel-image", boolValue(valid && page >= vm.KernelImageBase && page < vm.KernelImageBase+image.Size))
+	out.uint("in-kernel-image", boolValue(valid && page >= image.Base && page < image.Base+image.Size))
 	out.end()
 	if !mapped {
 		return
@@ -119,7 +119,7 @@ func auditAddressSpace(out diagWriter, root uint64) {
 		}
 		leaves++
 		allocated := pageAllocator.IsAllocated(physical)
-		inImage := physical >= vm.KernelImageBase && physical < vm.KernelImageBase+image.Size
+		inImage := physical >= image.Base && physical < image.Base+image.Size
 		sharedWith := uint64(0)
 		for other := 0; ; other++ {
 			candidate, exists := processRegistry.At(other)

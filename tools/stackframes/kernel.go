@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"goos/kernel/arch/amd64"
+	"goos/kernel/mm/vm"
 )
 
 // The kernel is built for x86_64-unknown-windows-gnu, where LLVM allocates
@@ -178,5 +179,20 @@ func checkKernel(path string) (report, error) {
 	}
 	result := checkKernelFrames(frames, symbols)
 	result.problems = append(problems, result.problems...)
+	result.problems = append(result.problems, checkKernelPlacement(header.ImageBase, uint64(header.SizeOfImage))...)
 	return result, nil
+}
+
+// checkKernelPlacement rejects a kernel image linked away from
+// vm.KernelLinkBase or larger than vm.KernelImageMaxSize, the most the kernel's
+// LoadedImage accepts at boot.
+func checkKernelPlacement(base, size uint64) []string {
+	var problems []string
+	if base != vm.KernelLinkBase {
+		problems = append(problems, fmt.Sprintf("image base %#x, but vm.KernelLinkBase is %#x", base, vm.KernelLinkBase))
+	}
+	if size > vm.KernelImageMaxSize {
+		problems = append(problems, fmt.Sprintf("SizeOfImage %#x exceeds vm.KernelImageMaxSize %#x by %d bytes", size, vm.KernelImageMaxSize, size-vm.KernelImageMaxSize))
+	}
+	return problems
 }

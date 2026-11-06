@@ -22,12 +22,12 @@ func TestDirectMapLayout(t *testing.T) {
 }
 
 func TestKernelAlias(t *testing.T) {
-	address, ok := KernelAlias(KernelImageBase)
-	if !ok || address != KernelLowBase+KernelImageBase {
+	address, ok := KernelAlias(KernelLinkBase)
+	if !ok || address != KernelLowBase+KernelLinkBase {
 		t.Fatalf("kernel image alias = %#x, %v", address, ok)
 	}
 	physical, ok := KernelPhysical(address)
-	if !ok || physical != KernelImageBase {
+	if !ok || physical != KernelLinkBase {
 		t.Fatalf("kernel image physical address = %#x, %v", physical, ok)
 	}
 	for _, invalid := range []uint64{0, identityMapStart - 1, IdentityMapLimit} {

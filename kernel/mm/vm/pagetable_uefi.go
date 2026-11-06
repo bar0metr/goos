@@ -26,30 +26,55 @@ func copyBytes(destination uintptr, source uintptr, length uint64)
 //export goos_zero_bytes
 func zeroBytes(destination uintptr, length uint64)
 
-// LoadedImage reads the fixed-address, non-relocatable PE image installed by
-// the TinyGo UEFI target. The function validates every header before the image
-// description is used to create executable mappings.
+// loadedImageBase caches the base LoadedImage found. main's first call
+// writes it before the kernel's page tables are loaded; later calls only read
+// it.
+var loadedImageBase uint64
+
+// LoadedImage describes the kernel PE image at the address it runs at. The
+// firmware loads the image at KernelLinkBase when that range is free and
+// otherwise places it elsewhere and applies its base relocations, so the base
+// is found at run time: the first page at or below one of the image's own
+// variables that holds a valid header whose image covers that variable. The
+// function validates every header before the image description is used to
+// create executable mappings.
 func LoadedImage() (Image, bool) {
-	// SAFETY: the linker fixes the image at KernelImageBase and UEFI has loaded
-	// at least the PE header page before entering main. Only this bounded header
-	// view is used to discover and validate SizeOfImage.
-	header := (*[PageSize]byte)(unsafe.Pointer(uintptr(KernelImageBase)))[:]
-	if len(header) < 0x100 || header[0] != 'M' || header[1] != 'Z' {
+	base := loadedImageBase
+	if base == 0 {
+		var found bool
+		if base, found = findLoadedBase(); !found {
+			return Image{}, false
+		}
+		loadedImageBase = base
+	}
+	// SAFETY: base holds a header that HeaderImageSize accepted, and UEFI
+	// loaded the whole image, SizeOfImage bytes capped at KernelImageMaxSize,
+	// from there.
+	header := (*[PageSize]byte)(unsafe.Pointer(uintptr(base)))[:]
+	size, ok := HeaderImageSize(header)
+	if !ok {
 		return Image{}, false
 	}
-	peOffset := uint64(header[0x3c]) | uint64(header[0x3d])<<8 | uint64(header[0x3e])<<16 | uint64(header[0x3f])<<24
-	if peOffset+24+60 > uint64(len(header)) {
-		return Image{}, false
+	data := (*[KernelImageMaxSize]byte)(unsafe.Pointer(uintptr(base)))[:size:size]
+	return ParsePE(data, base)
+}
+
+// findLoadedBase walks down from the page holding loadedImageBase, a
+// variable inside the image, to the image's header page. Every page it reads
+// lies between the header and that variable, so inside the loaded image.
+func findLoadedBase() (uint64, bool) {
+	anchor := uint64(uintptr(unsafe.Pointer(&loadedImageBase)))
+	page := anchor &^ (PageSize - 1)
+	for steps := uint64(0); steps < KernelImageMaxSize/PageSize && page >= 1024*1024; steps++ {
+		// SAFETY: page lies in [anchor-KernelImageMaxSize, anchor], which
+		// the loaded image covers down to its header.
+		header := (*[PageSize]byte)(unsafe.Pointer(uintptr(page)))[:]
+		if size, ok := HeaderImageSize(header); ok && page+size > anchor {
+			return page, true
+		}
+		page -= PageSize
 	}
-	optionalOffset := peOffset + 24
-	imageSize := uint64(header[optionalOffset+56]) | uint64(header[optionalOffset+57])<<8 | uint64(header[optionalOffset+58])<<16 | uint64(header[optionalOffset+59])<<24
-	if imageSize == 0 || imageSize > 16*1024*1024 {
-		return Image{}, false
-	}
-	// SAFETY: SizeOfImage was read from a bounded header and capped at 16 MiB.
-	// UEFI guarantees that the complete loaded image occupies this range.
-	data := (*[16 * 1024 * 1024]byte)(unsafe.Pointer(uintptr(KernelImageBase)))[:imageSize:imageSize]
-	return ParsePE(data, KernelImageBase)
+	return 0, false
 }
 
 // BuildIdentity creates supervisor-only 4 KiB mappings for the first GiB.
@@ -88,7 +113,7 @@ func BuildIdentity(allocator *pmm.Allocator, image Image) (uint64, bool) {
 		}
 	}
 
-	if !protectRange(root, KernelImageBase, image.Size, Permissions{}) {
+	if !protectRange(root, image.Base, image.Size, Permissions{}) {
 		return 0, false
 	}
 	for index := 0; index < image.SectionCount; index++ {
