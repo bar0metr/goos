@@ -83,13 +83,7 @@ func (handler nativeCallHandler) ThreadCreate(entry uint64, argument uint64, add
 	}
 	guard, top := threadStackRange(slot)
 	regions := owner.Regions()
-	if regions.Insert(region.Region{Base: guard, Length: kcall.ThreadGuardSize, Backing: region.Guard, Flags: region.Pinned}) != region.OK {
-		owner.CancelReservedTask()
-		group.Cancel(slot)
-		return kcall.StatusResourceExhausted
-	}
-	if regions.Insert(region.Region{Base: top - kcall.ThreadStackSize, Length: kcall.ThreadStackSize, Protection: region.Read | region.Write, Backing: region.Anonymous, Flags: region.Pinned}) != region.OK {
-		regions.Remove(guard, kcall.ThreadGuardSize, true)
+	if regions.Insert(nativethread.StackRegion(slot)) != region.OK {
 		owner.CancelReservedTask()
 		group.Cancel(slot)
 		return kcall.StatusResourceExhausted

@@ -83,6 +83,11 @@ const (
 	// StackBatch reserves repeated fixed stacks and their lower guards in
 	// one region (ADR 0204). Only whole-region removal is allowed.
 	StackBatch
+	// LowGuard makes the lowest StackGuardBytes of an anonymous read-write
+	// region a guard: a native thread's stack and its guard take one region
+	// (ADR 0203), so 64 threads fit the table. Only whole-region removal is
+	// allowed, and the protection cannot change.
+	LowGuard
 )
 
 const (
@@ -94,8 +99,26 @@ const (
 // GuardedAt reports whether address lies in a guard of this region.
 func (r Region) GuardedAt(address uint64) bool {
 	return r.Contains(address) && (r.Backing == Guard ||
-		r.Flags&StackBatch != 0 && (address-r.Base)%StackStride < StackGuardBytes)
+		r.Flags&StackBatch != 0 && (address-r.Base)%StackStride < StackGuardBytes ||
+		r.Flags&LowGuard != 0 && address-r.Base < StackGuardBytes)
 }
+
+// PartAt returns the part of the region around address that one
+// description fits: a LowGuard region's guard or the memory above it, and
+// any other region whole.
+func (r Region) PartAt(address uint64) Region {
+	if r.Flags&LowGuard == 0 || !r.Contains(address) {
+		return r
+	}
+	if address-r.Base < StackGuardBytes {
+		r.Length, r.Protection, r.Backing = StackGuardBytes, 0, Guard
+		return r
+	}
+	return tail(r, r.Base+StackGuardBytes)
+}
+
+// fixed reports whether the region goes only whole and keeps its protection.
+func (r Region) fixed() bool { return r.Flags&(StackBatch|LowGuard) != 0 }
 
 // Region is one contiguous range of a process's address space.
 type Region struct {
@@ -255,6 +278,10 @@ func (m *Map) Insert(region Region) Status {
 		region.Protection != Read|Write || region.Length%StackStride != 0) {
 		return InvalidArgument
 	}
+	if region.Flags&LowGuard != 0 && (region.Flags&StackBatch != 0 || region.Backing != Anonymous ||
+		region.Protection != Read|Write || region.Length <= StackGuardBytes) {
+		return InvalidArgument
+	}
 	if !m.Free(region.Base, region.Length) {
 		return Overlap
 	}
@@ -374,7 +401,7 @@ func (m *Map) Remove(base, length uint64, allowPinned bool) Status {
 		if !allowPinned && region.Flags&Pinned != 0 {
 			return PermissionDenied
 		}
-		if region.Flags&StackBatch != 0 && (base > region.Base || end < region.End()) {
+		if region.fixed() && (base > region.Base || end < region.End()) {
 			return PermissionDenied
 		}
 		if region.Base < base && region.End() > end {
@@ -439,7 +466,7 @@ func (m *Map) protect(base, length uint64, protection Protection, restrict bool)
 	splits := 0
 	for index := first; index < m.count && m.regions[index].Base < end; index++ {
 		region := m.regions[index]
-		if region.Flags&StackBatch != 0 || region.Backing == Guard && protection != 0 {
+		if region.fixed() || region.Backing == Guard && protection != 0 {
 			return PermissionDenied
 		}
 		if restrict && protection&^region.Protection != 0 {
