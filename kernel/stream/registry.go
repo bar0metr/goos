@@ -87,6 +87,18 @@ func (registry *Registry) slot(id uint64) (int, bool) {
 	return int(index), true
 }
 
+// Count counts the streams in existence.
+func (registry *Registry) Count() int {
+	guard.Check()
+	count := 0
+	for _, id := range registry.ids[:] {
+		if id != 0 {
+			count++
+		}
+	}
+	return count
+}
+
 func (registry *Registry) Lookup(id uint64) (*Stream, bool) {
 	guard.Check()
 	index, found := registry.slot(id)

@@ -9,6 +9,7 @@ import (
 	linuxcompat "goos/kernel/compat/linux"
 	kernelconsole "goos/kernel/console"
 	"goos/kernel/diag"
+	"goos/kernel/executable"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -17,6 +18,7 @@ import (
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 	"goos/kernel/sched"
+	"goos/kernel/shmem"
 	"goos/kernel/stream"
 	kernelwait "goos/kernel/wait"
 	"goos/userspace/linuxsockapi"
@@ -238,6 +240,13 @@ func (writer diagWriter) word(name, value string) {
 	writer.console.WriteString(value)
 }
 
+// usage prints a table's use against its limit, name=used/limit.
+func (writer diagWriter) usage(name string, used, limit int) {
+	writer.uint(name, uint64(used))
+	writer.console.WriteString("/")
+	writer.console.WriteUint(uint64(limit))
+}
+
 func (writer diagWriter) end() { writer.console.WriteString("\n") }
 
 var handleTypeNames = [...]string{"invalid", "process", "task", "memory", "channel", "device", "irq", "stream"}
@@ -358,6 +367,7 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("lifecycle-pending", uint64(pending))
 	out.uint("lifecycle-overflows", overflows)
 	out.end()
+	dumpTables(out)
 	unsupported := linuxcompat.Unsupported()
 	sessions := linuxcompat.VFSStatistics()
 	out.text("DIAG linux")
@@ -588,6 +598,38 @@ func boolDiag(value bool) uint64 {
 		return 1
 	}
 	return 0
+}
+
+// dumpTables prints the global tables' use against their limits: the
+// kernel's in DIAG tables, the Linux personality's in DIAG linux-tables.
+// Each count is taken under its own table's lock, so the line is not one
+// instant's state.
+func dumpTables(out diagWriter) {
+	tasks := sched.MaxTasks - amd64.FreeTaskSlots()
+	registryLock.RLock()
+	processes := processRegistry.Count()
+	registryLock.RUnlock()
+	channels := channelRegistry.Count()
+	held := takeLocks(streams|sharedMemory|executableTable, nil)
+	streamCount, shared, executableCount := streamRegistry.Count(), sharedObjects.Live(), executables.Live()
+	held.drop()
+	out.text("DIAG tables")
+	out.usage("tasks", tasks, sched.MaxTasks)
+	out.usage("processes", processes, process.MaxProcesses)
+	out.usage("channels", channels, ipc.MaxChannels)
+	out.usage("streams", streamCount, stream.MaxStreams)
+	out.usage("shmem", shared, shmem.MaxObjects)
+	out.usage("executables", executableCount, executable.MaxObjects)
+	out.end()
+	linux := linuxcompat.Tables()
+	out.text("DIAG linux-tables")
+	out.usage("descriptions", linux.Descriptions, linuxcompat.MaxOpenDescriptions)
+	out.usage("directories", linux.Directories, linuxcompat.MaxOpenDirectories)
+	out.usage("eventfds", linux.EventCounters, linuxcompat.MaxEventCounters)
+	out.usage("terminals", linux.Terminals, linuxcompat.MaxTerminals)
+	out.usage("processes", linux.Processes, linuxcompat.LinuxGlobalMaxProcesses)
+	out.usage("family-peak", linux.BusiestFamily, linuxcompat.LinuxFamilyMaxProcesses)
+	out.end()
 }
 
 // dumpWakeLatency prints the time from a wake to the switch onto the woken
