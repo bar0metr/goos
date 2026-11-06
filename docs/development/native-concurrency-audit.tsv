@@ -685,12 +685,16 @@ CA-0686	goos/userspace/runtime/arena	suspendFailures	process	atomic	runtime/aren
 CA-0687	goos/userspace/runtime/arena	suspensions	process	atomic	runtime/arena tests
 CA-0688	goos/userspace/runtime/arena	threadCaches	process	runtime	runtime/arena tests
 CA-0689	goos/userspace/runtime/arena	threaded	process	atomic	runtime/arena tests
-CA-0690	goos/userspace/runtime/arena	threads	process	runtime	runtime/arena tests
+CA-1136	goos/userspace/runtime/arena	mainThread	thread	per-thread	runtime/arena tests
+CA-1137	goos/userspace/runtime/arena	threadStates	thread	per-thread	runtime/arena tests
+CA-1138	goos/userspace/runtime/arena	threadHigh	process	atomic	runtime/arena tests
+CA-1144	goos/userspace/runtime/arena	snapshotsWide	process	runtime	runtime/arena tests
 CA-0691	goos/userspace/runtime/arena	totalPause	process	runtime	runtime/arena tests
 CA-0692	goos/userspace/runtime/arena	totalRendezvous	process	runtime	runtime/arena tests
 CA-0693	goos/userspace/runtime/arena	windowPause	process	immutable	runtime/arena tests
 CA-0694	goos/userspace/runtime/arena	zeroSized	process	immutable	runtime/arena tests
-CA-0695	goos/userspace/runtime/sys	scratch	thread	per-thread	none
+CA-1142	goos/userspace/runtime/sys	mainScratch	thread	per-thread	none
+CA-1143	goos/userspace/runtime/sys	threadScratch	thread	per-thread	none
 CA-0696	goos/userspace/runtime/thread	starting	process	lock	none
 CA-0697	goos/userspace/runtime/thread	starts	process	lock	none
 CA-0698	goos/userspace/shell	Commands	process	immutable	none
@@ -741,6 +745,9 @@ CA-0742	goos/userspace/runtime/arena	planFailures	process	runtime	none
 CA-0743	goos/userspace/runtime/arena	stackRoots	process	runtime	goprobe gc
 CA-0744	goos/userspace/runtime/goroutine	gs	process	runtime	TestReadyRacesParkWithExactlyOneEnqueue
 CA-0745	goos/userspace/runtime/goroutine	ms	process	runtime	TestRunQueueConcurrentStealers
+CA-1139	goos/userspace/runtime/goroutine	m0	thread	runtime	TestRunQueueConcurrentStealers
+CA-1140	goos/userspace/runtime/goroutine	mRecords	process	runtime	TestOnlyStartedSlotsHaveMs
+CA-1141	goos/userspace/runtime/goroutine	planHeld	process	runtime	none
 CA-0746	goos/userspace/runtime/goroutine	nativeReceiveHandler	process	immutable	goprobe io
 CA-0747	goos/userspace/runtime/goroutine	nativeWaitHandler	process	immutable	goprobe io
 CA-0748	goos/userspace/runtime/goroutine	plan	process	runtime	goprobe gc
@@ -911,3 +918,8 @@ CA-1132	goos/userspace/tcpapi	txDoneKinds	process	immutable	none
 CA-1133	goos/userspace/tcpapi	rxKinds	process	immutable	none
 CA-1134	goos/userspace/utility	ringSession	session	owned	none
 CA-1135	goos/userspace/cmd/linuxsockd	tcpRing	process	owned	none
+CA-1145	goos/userspace/cmd/logd	written	process	owned	none
+CA-1146	goos/userspace/cmd/logd	writtenPolicy	process	owned	none
+CA-1147	goos/userspace/cmd/logd	statusWritten	process	owned	none
+CA-1148	goos/userspace/cmd/logd	statusText	process	owned	none
+CA-1149	goos/userspace/cmd/shell	logStatus	process	owned	none

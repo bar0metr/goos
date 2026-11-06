@@ -709,6 +709,7 @@ func handleRequest(index int, correlation uint64) {
 		for index, count := range snapshot.States {
 			answer.TCPStates[index] = uint16(count)
 		}
+		answer.Capacity = tcpCapacity(&snapshot, stack.TCPBudgets(), sessionsInUse())
 		send(current, correlation)
 	case netapi.OpEcho:
 		if current.rights != netapi.RightsPingStatus {

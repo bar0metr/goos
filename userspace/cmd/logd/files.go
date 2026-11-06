@@ -115,6 +115,36 @@ func (files *vfsFiles) Write(data []byte) bool {
 
 func (files *vfsFiles) Close() { closeFile(files.handle) }
 
+// writeStatus replaces the status file with text: it writes a scratch file
+// and moves it over the old one, so a reader sees one whole status or the
+// previous one. It leaves the persister's append handle alone.
+func writeStatus(path, scratch, text []byte) bool {
+	created, ok := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: scratch})
+	if !ok || created.Status != vfs.StatusOK && created.Status != vfs.StatusAlreadyExists {
+		return false
+	}
+	if reply, ok := callVFS(vfs.Request{Operation: vfs.OperationTruncate, Path: scratch}); !ok || reply.Status != vfs.StatusOK {
+		return false
+	}
+	opened, ok := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: scratch})
+	if !ok || opened.Status != vfs.StatusOK {
+		return false
+	}
+	written := true
+	for written && len(text) != 0 {
+		chunk := min(len(text), vfs.MaxProtocolData)
+		reply, ok := callVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: text[:chunk]})
+		written = ok && reply.Status == vfs.StatusOK && reply.Size == uint64(chunk)
+		text = text[chunk:]
+	}
+	closeFile(opened.Handle)
+	if !written {
+		return false
+	}
+	reply, ok := callVFS(vfs.Request{Operation: vfs.OperationReplace, Path: scratch, Target: path})
+	return ok && reply.Status == vfs.StatusOK
+}
+
 func closeFile(file vfs.Handle) {
 	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: file})
 }

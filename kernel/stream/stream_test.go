@@ -100,7 +100,7 @@ func BenchmarkStreamRoundTrip(b *testing.B) {
 func TestRegistryReportsTheChargedProcessOnRelease(t *testing.T) {
 	var registry Registry
 	endpoint, id, ok := registry.Create(9)
-	if !ok {
+	if !ok || registry.Count() != 1 {
 		t.Fatal("stream was not created")
 	}
 	if _, released := registry.Release(id); released {
@@ -109,8 +109,8 @@ func TestRegistryReportsTheChargedProcessOnRelease(t *testing.T) {
 	endpoint.CloseReader()
 	endpoint.CloseWriter()
 	owner, released := registry.Release(id)
-	if !released || owner != 9 {
-		t.Fatalf("released = %v, charged to %d", released, owner)
+	if !released || owner != 9 || registry.Count() != 0 {
+		t.Fatalf("released = %v, charged to %d, %d live", released, owner, registry.Count())
 	}
 	// The slot is reusable and no longer names the old owner.
 	if _, _, created := registry.Create(11); !created {

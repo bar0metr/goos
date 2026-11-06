@@ -85,6 +85,8 @@ concurrent read pool by default; the serial VFS remains a tested fallback.
 
 `docs/architecture/` describes the system as a whole: boot, processes,
 scheduling, memory, IPC, capabilities, the filesystem stack and networking.
+[Resource policy](resource-policy.md) classifies every capacity limit and
+defines the production reference profile for a 1 GiB VM.
 `docs/kernel/` holds kernel mechanisms that are not system-wide design:
 [interrupts](../kernel/interrupts.md), the [native image format](../kernel/native-images.md)
 and [byte streams](../kernel/streams.md). `docs/userspace/` holds the services

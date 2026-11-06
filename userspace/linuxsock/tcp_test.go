@@ -40,6 +40,25 @@ func TestOpenAssignsIdentityAndArmsWait(t *testing.T) {
 	}
 }
 
+// A backlog above the old 128 cap reaches netd as asked, so a raised
+// system.net.tcp.listen-backlog applies to Linux listeners; netd clamps it
+// to the tuning.
+func TestListenPassesBacklogAboveDefault(t *testing.T) {
+	h := newHarness(t)
+	f := h.family(1, 7)
+	id := h.open(f, linuxsockapi.KindStream)
+	correlation := h.send(f, linuxsockapi.Request{Opcode: opListen, Socket: id, Length: 200})
+	h.complete(h.take(NativeBind), NativeCompletion{LocalPort: 50001})
+	if listen := h.take(NativeListen); listen.request.Length != 200 {
+		t.Fatalf("backlog %d", listen.request.Length)
+	} else {
+		h.complete(listen, NativeCompletion{})
+	}
+	if reply := h.reply(f, correlation); reply.Result != linuxsockapi.ResultOK {
+		t.Fatalf("listen %d", reply.Result)
+	}
+}
+
 func TestListenBindsFirstAndClampsBacklog(t *testing.T) {
 	h := newHarness(t)
 	f := h.family(1, 7)

@@ -204,7 +204,14 @@ Without `-n`, `log` selects all retained matching records. It selects the newest
 matches from one snapshot, then emits those selected records in chronological
 order.
 
+`log status` prints `/state/system.log.status`, the counters the log service
+rewrites at its five-second maintenance round when they changed: records appended, overwritten,
+persisted and lost, write failures, rotations and refused rotations, repairs,
+and the rotation policy in force. The file is missing until the service first
+writes it, and goes stale while persistence is off or storage fails.
+
 ```text
+goos> log status
 goos> log --component remoted --level warn -n 20
 goos> log --component remoted -f
 goos> log --component remoted

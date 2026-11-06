@@ -12,11 +12,11 @@ const (
 	// Version 4 adds a separate bounded TCP diagnostics reply, version 5
 	// its GTCP message counters, version 6 OpTCPDump, version 7 wider
 	// limits: TCP and UDP endpoints and the backlog in 16 bits, buffers in
-	// 32. A message of an older version is not this protocol and fails
-	// decoding.
-	Version          = uint16(7)
+	// 32, version 8 the TCP capacity block and a 256-byte reply. A message
+	// of an older version is not this protocol and fails decoding.
+	Version          = uint16(8)
 	RequestSize      = 24
-	ReplySize        = 248
+	ReplySize        = 256
 	MaxServers       = 4
 	MinEchoTimeoutMS = 100
 	MaxEchoTimeoutMS = 5000
@@ -69,6 +69,11 @@ const (
 	replyReserved2 = 222
 	replyServerGen = 224
 	replyServers   = 232
+	replyStatusEnd = replyServers + addressSize*MaxServers
+
+	// replyTCPSessions holds the session counts and limits, two bytes per
+	// kind; the status reply's state, mode and address use these bytes.
+	replyTCPSessions = 2
 
 	replyTCPCounters    = 8
 	replyTCPEndpoints   = 80
@@ -80,6 +85,10 @@ const (
 	replyTCPSessionEP = 116
 	replyTCPLimits    = 120
 	replyTCPMessages  = 152
+	// replyTCPCapacity is the TCPCapacity block: six 64-bit values, three
+	// 32-bit and three 16-bit.
+	replyTCPCapacity    = 184
+	replyTCPCapacityEnd = replyTCPCapacity + 66
 
 	// flagRateLimited is the only flag: the next address claim waits for
 	// the conflict rate limit.
@@ -305,6 +314,94 @@ type Reply struct {
 	// GTCP2Requests and the rest count the client messages netd decoded and
 	// the replies it sent, per GTCP version, over every session.
 	GTCP2Requests, GTCP2Replies, GTCP3Requests, GTCP3Replies uint64
+	// Capacity answers OpTCPStatus only.
+	Capacity TCPCapacity
+}
+
+// TCPCapacity is how much of each TCP and session limit is in use. A
+// lowered budget takes nothing back, so a use can exceed its budget until
+// connections close.
+type TCPCapacity struct {
+	// MemoryBytes is the ring bytes charged against MemoryBudget, and per
+	// session against OwnerMemoryBudget.
+	MemoryBytes                     uint64
+	MemoryBudget, OwnerMemoryBudget uint32
+	// TimeWait counts tombstones against TimeWaitBudget, and per session
+	// against OwnerTimeWaitBudget. TimeWaitHeld counts connections that
+	// stayed endpoints because no tombstone was free.
+	TimeWait, TimeWaitBudget, OwnerTimeWaitBudget uint16
+	TimeWaitHeld                                  uint64
+	// DropMemory counts handshakes and segments refused for want of
+	// memory, DropBacklog SYNs a full listener dropped, MemoryCapped ring
+	// growths the budgets cut short.
+	DropMemory, DropBacklog, MemoryCapped uint64
+	// LookupProbes counts index entries received segments looked at;
+	// MaxSegmentProbes is the most one segment needed.
+	LookupProbes     uint64
+	MaxSegmentProbes uint32
+	// The command, UDP and TCP sessions netd serves, and how many of each
+	// it can serve.
+	CommandSessions, CommandSessionLimit uint8
+	UDPSessions, UDPSessionLimit         uint8
+	TCPSessions, TCPSessionLimit         uint8
+}
+
+func (c *TCPCapacity) wide() [6]*uint64 {
+	return [6]*uint64{&c.MemoryBytes, &c.DropMemory, &c.DropBacklog, &c.MemoryCapped, &c.LookupProbes, &c.TimeWaitHeld}
+}
+
+func (c *TCPCapacity) words() [3]*uint32 {
+	return [3]*uint32{&c.MemoryBudget, &c.OwnerMemoryBudget, &c.MaxSegmentProbes}
+}
+
+func (c *TCPCapacity) halves() [3]*uint16 {
+	return [3]*uint16{&c.TimeWait, &c.TimeWaitBudget, &c.OwnerTimeWaitBudget}
+}
+
+func (c *TCPCapacity) sessions() [6]*uint8 {
+	return [6]*uint8{&c.CommandSessions, &c.CommandSessionLimit, &c.UDPSessions, &c.UDPSessionLimit, &c.TCPSessions, &c.TCPSessionLimit}
+}
+
+func (c *TCPCapacity) encode(payload []byte) {
+	for index, value := range c.sessions() {
+		payload[replyTCPSessions+index] = *value
+	}
+	offset := replyTCPCapacity
+	for _, value := range c.wide() {
+		binary.LittleEndian.PutUint64(payload[offset:], *value)
+		offset += 8
+	}
+	for _, value := range c.words() {
+		binary.LittleEndian.PutUint32(payload[offset:], *value)
+		offset += 4
+	}
+	for _, value := range c.halves() {
+		binary.LittleEndian.PutUint16(payload[offset:], *value)
+		offset += 2
+	}
+}
+
+func (c *TCPCapacity) decode(payload []byte) {
+	for index, value := range c.sessions() {
+		*value = payload[replyTCPSessions+index]
+	}
+	offset := replyTCPCapacity
+	for _, value := range c.wide() {
+		*value = binary.LittleEndian.Uint64(payload[offset:])
+		offset += 8
+	}
+	for _, value := range c.words() {
+		*value = binary.LittleEndian.Uint32(payload[offset:])
+		offset += 4
+	}
+	for _, value := range c.halves() {
+		*value = binary.LittleEndian.Uint16(payload[offset:])
+		offset += 2
+	}
+}
+
+func (c *TCPCapacity) valid() bool {
+	return c.CommandSessions <= c.CommandSessionLimit && c.UDPSessions <= c.UDPSessionLimit && c.TCPSessions <= c.TCPSessionLimit
 }
 
 func (r *Reply) udpCounters() [udpCounterCount]*uint64 {
@@ -332,6 +429,7 @@ func (r *Reply) tcpEmpty() bool {
 	copy.TCPSendBuffer, copy.TCPReceiveBuffer = 0, 0
 	copy.TCPConnectTimeoutMS, copy.TCPRTOMinMS, copy.TCPRTOMaxMS, copy.TCPTimeWaitMS = 0, 0, 0, 0
 	copy.GTCP2Requests, copy.GTCP2Replies, copy.GTCP3Requests, copy.GTCP3Replies = 0, 0, 0, 0
+	copy.Capacity = TCPCapacity{}
 	return copy == *r
 }
 
@@ -446,6 +544,7 @@ func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
 		for index, counter := range r.gtcpCounters() {
 			binary.LittleEndian.PutUint64(payload[replyTCPMessages+8*index:], *counter)
 		}
+		r.Capacity.encode(payload)
 		return true
 	}
 	payload[replyState] = byte(r.State)
@@ -501,9 +600,9 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 	}
 	payload := in.Payload[:ReplySize]
 	if Opcode(payload[replyOpcode]) == OpTCPStatus {
-		if opcode != OpTCPStatus || !zero(payload[2:replyTCPCounters]) || !zero(payload[replyTCPConnections+2:replyTCPStates]) ||
+		if opcode != OpTCPStatus || !zero(payload[replyTCPSessions+6:replyTCPCounters]) || !zero(payload[replyTCPConnections+2:replyTCPStates]) ||
 			!zero(payload[replyTCPStates+2*tcpStateCount:replyTCPSessionEP]) || !zero(payload[replyTCPSessionEP+1:replyTCPLimits]) ||
-			!zero(payload[replyTCPMessages+8*gtcpCounterCount:ReplySize]) {
+			!zero(payload[replyTCPCapacityEnd:ReplySize]) {
 			return false
 		}
 		r := Reply{Opcode: OpTCPStatus, Result: Result(payload[replyResult]),
@@ -526,6 +625,7 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 		for index, counter := range r.gtcpCounters() {
 			*counter = binary.LittleEndian.Uint64(payload[replyTCPMessages+8*index:])
 		}
+		r.Capacity.decode(payload)
 		if !validReply(&r) {
 			return false
 		}
@@ -534,7 +634,8 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 	}
 	field := binary.LittleEndian.Uint16(payload[replyField:])
 	if Opcode(payload[replyOpcode]) != opcode || !zero(payload[replyReserved:replyUDP]) ||
-		payload[replyReserved1] != 0 || !zero(payload[replyReserved2:replyServerGen]) || field > uint16(lastField) ||
+		payload[replyReserved1] != 0 || !zero(payload[replyReserved2:replyServerGen]) || !zero(payload[replyStatusEnd:ReplySize]) ||
+		field > uint16(lastField) ||
 		payload[replyFallback] > 1 || payload[replyFlags]&^flagRateLimited != 0 {
 		return false
 	}
@@ -605,6 +706,7 @@ func validReply(r *Reply) bool {
 		base.TCPSendBuffer, base.TCPReceiveBuffer = 0, 0
 		base.TCPConnectTimeoutMS, base.TCPRTOMinMS, base.TCPRTOMaxMS, base.TCPTimeWaitMS = 0, 0, 0, 0
 		base.GTCP2Requests, base.GTCP2Replies, base.GTCP3Requests, base.GTCP3Replies = 0, 0, 0, 0
+		base.Capacity = TCPCapacity{}
 		if base != (Reply{Opcode: OpTCPStatus, Result: r.Result}) {
 			return false
 		}
@@ -612,7 +714,7 @@ func validReply(r *Reply) bool {
 			return *r == base
 		}
 		return r.TCPListeners <= r.TCPEndpoints && r.TCPConnections <= r.TCPEndpoints &&
-			uint16(r.TCPSessionEndpoints) <= r.TCPMaxEndpoints && r.TCPListenBacklog != 0
+			uint16(r.TCPSessionEndpoints) <= r.TCPMaxEndpoints && r.TCPListenBacklog != 0 && r.Capacity.valid()
 	}
 	noAddress := [addressSize]byte{}
 	snapshot := r.State == StateDown && r.Mode == ModeDHCP && r.Local == noAddress && r.Gateway == noAddress &&
@@ -644,7 +746,7 @@ func validReply(r *Reply) bool {
 	switch r.Opcode {
 	case OpStatus:
 		if r.Result == ResultOK {
-			return echo && r.Field == FieldNone
+			return echo && r.Field == FieldNone && r.tcpEmpty()
 		}
 		return snapshot && echo && r.Field == FieldNone
 	case OpEcho:

@@ -6,6 +6,7 @@ import (
 	"goos/internal/limits"
 	"goos/kernel/compat/linux/abi"
 	"goos/kernel/handle"
+	"goos/kernel/objects"
 	"goos/kernel/process"
 	"goos/kernel/sched"
 	"goos/userspace/startup"
@@ -259,14 +260,15 @@ const (
 	// every pid_t a program may narrow it to.
 	MaxPID = int32(32767)
 	// NativeProcessReserve keeps Process registry slots unavailable to Linux.
-	// Linux launch roots and descendants together may hold 48 of the 64 slots.
-	// A family holds at most 16.
-	NativeProcessReserve    = 16
+	// Linux launch roots and descendants together may hold 224 of the 256
+	// slots. A family holds at most 64, a quarter of the registry.
+	NativeProcessReserve    = 32
 	LinuxGlobalMaxProcesses = process.MaxProcesses - NativeProcessReserve
-	LinuxFamilyMaxProcesses = 16
+	LinuxFamilyMaxProcesses = 64
 	// NativeTaskReserve leaves scheduler capacity for PID 1 and native
-	// services even when Linux processes create threads.
-	NativeTaskReserve = 16
+	// services even when Linux processes create threads: one task for each
+	// process NativeProcessReserve keeps.
+	NativeTaskReserve = NativeProcessReserve
 )
 
 type ChildRegistrationStatus uint8
@@ -284,8 +286,55 @@ var (
 
 func (state *ProcessState) CWD() []byte { return state.cwd[:state.cwdLen] }
 
-var processStates [process.MaxProcesses]ProcessState
+// processStates holds the state of each Linux process, two pages apiece taken
+// the first time a slot is used (lazyTable). Static records cost 446 KiB at
+// 64 processes and would cost 1.7 MiB at 256.
+var processStates lazyTable[ProcessState]
 var processRecords [process.MaxProcesses]ProcessRecord
+
+// SetProcessStorage installs where Linux process states take their pages.
+// The kernel calls it once at boot, before the first Linux launch.
+func SetProcessStorage(storage objects.Storage[ProcessState]) { processStates.storage = storage }
+
+// ProcessStatePages counts the process slots whose state holds pages.
+func ProcessStatePages() int {
+	tablesLock.Lock()
+	count := processStates.allocated()
+	tablesLock.Unlock()
+	return count
+}
+
+// claimProcessState returns a reset state for a new process with root. It
+// reuses a slot that holds pages before it takes pages for another, and
+// fails when root already has a state or no slot is left.
+func claimProcessState(root uint64) (*ProcessState, bool) {
+	free, unused := -1, -1
+	for index := range processStates.entries {
+		state := processStates.at(index)
+		switch {
+		case state == nil:
+			if unused == -1 {
+				unused = index
+			}
+		case state.Root == root:
+			return nil, false
+		case state.Root == 0 && free == -1:
+			free = index
+		}
+	}
+	if free == -1 {
+		free = unused
+	}
+	if free == -1 {
+		return nil, false
+	}
+	state, ok := processStates.claim(free)
+	if !ok {
+		return nil, false
+	}
+	*state = ProcessState{}
+	return state, true
+}
 
 func installProcessHeld(root uint64, goosProcessID process.ID, data startup.Data, streams StandardStreams, brkBase uint64, brkLimit uint64) bool {
 	guard.Check()
@@ -301,20 +350,10 @@ func installProcessHeld(root uint64, goosProcessID process.ID, data startup.Data
 	if !inputOK || !outputOK || !errorOK || !vfsOK || input == 0 || output == 0 || errorOutput == 0 || vfsHandle == 0 {
 		return false
 	}
-	free := -1
-	for index := range processStates {
-		if processStates[index].Root == root {
-			return false
-		}
-		if free == -1 && processStates[index].Root == 0 {
-			free = index
-		}
-	}
-	if free == -1 {
+	state, claimed := claimProcessState(root)
+	if !claimed {
 		return false
 	}
-	state := &processStates[free]
-	*state = ProcessState{}
 	// The inherited working directory is stored in canonical form, so every
 	// later relative path starts from a base that needs no second check.
 	size, _, errno := ResolvePath(state.cwd[:], nil, data.CWD())
@@ -400,20 +439,10 @@ func forkProcessHeld(parentRoot uint64, childRoot uint64, record ProcessRecord, 
 		record.ParentPID != parent.PID || record.FamilyID != parent.FamilyID || recordIndex(record.PID) < 0 {
 		return false
 	}
-	free := -1
-	for index := range processStates {
-		if processStates[index].Root == childRoot {
-			return false
-		}
-		if free == -1 && processStates[index].Root == 0 {
-			free = index
-		}
-	}
-	if free == -1 || !retainVFSContextHeld(parent.FamilyID) {
+	child, claimed := claimProcessState(childRoot)
+	if !claimed || !retainVFSContextHeld(parent.FamilyID) {
 		return false
 	}
-	child := &processStates[free]
-	*child = ProcessState{}
 	if !child.FDs.inheritHeld(&parent.FDs, owner) {
 		releaseVFSContextHeld(parent.FamilyID)
 		*child = ProcessState{}
@@ -652,25 +681,16 @@ func recordIndex(pid int32) int {
 
 func lookupFDHeld(root uint64, fd int) (FileDescription, bool) {
 	guard.Check()
-	if root != 0 {
-		for index := range processStates {
-			if processStates[index].Root == root {
-				return processStates[index].FDs.lookupHeld(fd)
-			}
-		}
+	if state, found := findProcessHeld(root); found {
+		return state.FDs.lookupHeld(fd)
 	}
 	return FileDescription{}, false
 }
 
 func allocateFDHeld(root uint64, description FileDescription, closeOnExec bool) (int, abi.Errno) {
 	guard.Check()
-	if root != 0 {
-		for index := range processStates {
-			if processStates[index].Root != root {
-				continue
-			}
-			return processStates[index].FDs.allocateHeld(description, closeOnExec)
-		}
+	if state, found := findProcessHeld(root); found {
+		return state.FDs.allocateHeld(description, closeOnExec)
 	}
 	return -1, abi.EBADF
 }
@@ -696,9 +716,10 @@ func descriptionOfHeld(root uint64, fd uint64) (*FileDescription, bool) {
 func familyRootsHeld(familyID uint64, target []uint64) int {
 	guard.Check()
 	count := 0
-	for index := range processStates {
-		if familyID != 0 && processStates[index].Root != 0 && processStates[index].FamilyID == familyID && count < len(target) {
-			target[count] = processStates[index].Root
+	for index := range processStates.entries {
+		state := processStates.at(index)
+		if familyID != 0 && state != nil && state.Root != 0 && state.FamilyID == familyID && count < len(target) {
+			target[count] = state.Root
 			count++
 		}
 	}
@@ -708,9 +729,9 @@ func familyRootsHeld(familyID uint64, target []uint64) int {
 func findProcessByPIDHeld(pid int32) (*ProcessState, bool) {
 	guard.Check()
 	if pid >= firstPID {
-		for index := range processStates {
-			if processStates[index].Root != 0 && processStates[index].PID == pid {
-				return &processStates[index], true
+		for index := range processStates.entries {
+			if state := processStates.at(index); state != nil && state.Root != 0 && state.PID == pid {
+				return state, true
 			}
 		}
 	}
@@ -720,68 +741,54 @@ func findProcessByPIDHeld(pid int32) (*ProcessState, bool) {
 func findProcessHeld(root uint64) (*ProcessState, bool) {
 	guard.Check()
 	if root != 0 {
-		for index := range processStates {
-			if processStates[index].Root == root {
-				return &processStates[index], true
+		for index := range processStates.entries {
+			if state := processStates.at(index); state != nil && state.Root == root {
+				return state, true
 			}
 		}
 	}
 	return nil, false
 }
 
+// endProcessHeld releases what the process with root holds and resets its
+// state, which keeps its pages for the next process in the slot. It returns
+// the process's PID, or zero when root has no state.
+func endProcessHeld(root uint64, released *Released) int32 {
+	state, found := findProcessHeld(root)
+	if !found {
+		return 0
+	}
+	pid, familyID := state.PID, state.FamilyID
+	closeProcessFDs(state, released)
+	if final, _ := releaseVFSContextHeld(familyID); final {
+		releaseDirectories(familyID)
+		releaseNetContextHeld(familyID)
+		releaseEventCountersHeld(familyID)
+	}
+	*state = ProcessState{}
+	forgetThreads(root)
+	if record, found := findProcessRecordHeld(pid); found && record.SID == pid {
+		detachSessionHeld(pid, released)
+	}
+	return pid
+}
+
 func removeProcessHeld(root uint64, released *Released) bool {
 	guard.Check()
-	if root != 0 {
-		for index := range processStates {
-			if processStates[index].Root == root {
-				pid := processStates[index].PID
-				familyID := processStates[index].FamilyID
-				closeProcessFDs(&processStates[index], released)
-				if final, _ := releaseVFSContextHeld(familyID); final {
-					releaseDirectories(familyID)
-					releaseNetContextHeld(familyID)
-					releaseEventCountersHeld(familyID)
-				}
-				processStates[index] = ProcessState{}
-				forgetThreads(root)
-				if record, found := findProcessRecordHeld(pid); found && record.SID == pid {
-					detachSessionHeld(pid, released)
-				}
-				if record := recordIndex(pid); record >= 0 {
-					processRecords[record] = ProcessRecord{}
-				}
-				return true
-			}
-		}
+	pid := endProcessHeld(root, released)
+	if pid == 0 {
+		return false
 	}
-	return false
+	if record := recordIndex(pid); record >= 0 {
+		processRecords[record] = ProcessRecord{}
+	}
+	return true
 }
 
 func exitProcessHeld(root uint64, termination Termination, released *Released) bool {
 	guard.Check()
-	if root == 0 {
-		return false
-	}
-	for index := range processStates {
-		if processStates[index].Root != root {
-			continue
-		}
-		pid := processStates[index].PID
-		familyID := processStates[index].FamilyID
-		closeProcessFDs(&processStates[index], released)
-		if final, _ := releaseVFSContextHeld(familyID); final {
-			releaseDirectories(familyID)
-			releaseNetContextHeld(familyID)
-			releaseEventCountersHeld(familyID)
-		}
-		processStates[index] = ProcessState{}
-		forgetThreads(root)
-		if record, found := findProcessRecordHeld(pid); found && record.SID == pid {
-			detachSessionHeld(pid, released)
-		}
-		return markProcessExited(pid, termination)
-	}
-	return false
+	pid := endProcessHeld(root, released)
+	return pid != 0 && markProcessExited(pid, termination)
 }
 
 func closeProcessFDs(state *ProcessState, released *Released) {

@@ -732,6 +732,21 @@ func (stack *Stack) TCPStats() TCPStats {
 	return stats
 }
 
+// TCPBudgets are the budgets in force: the ring bytes MemoryBytes counts
+// against, for all connections and for one owner, and the tombstones
+// TimeWait counts against.
+type TCPBudgets struct {
+	Memory, OwnerMemory     int
+	TimeWait, OwnerTimeWait int
+}
+
+// TCPBudgets reports the budgets in force, after overrides and tuning.
+func (stack *Stack) TCPBudgets() TCPBudgets {
+	return TCPBudgets{Memory: stack.tcpMemoryBudget(), OwnerMemory: stack.tcpOwnerMemoryBudget(),
+		TimeWait:      budgetOr(stack.tcpBudget.timeWait, DefaultTCPTimeWaitBudget),
+		OwnerTimeWait: budgetOr(stack.tcpBudget.ownerTimeWait, DefaultTCPOwnerTimeWaitBudget)}
+}
+
 // tcpPortTaken is the check behind automatic port choice. A bind to port 0
 // takes a port nothing holds. A connect, as on Linux, may share a local port
 // with other connections and TIME_WAIT four-tuples, which the tuple check

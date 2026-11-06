@@ -186,7 +186,9 @@ func tcp(reply *netapi.Reply) {
 	dropped = append(dropped, " no-tcb "...)
 	dropped = appendDecimal(dropped, reply.TCPDropNoTCB)
 	dropped = append(dropped, " window "...)
-	field("dropped", appendDecimal(dropped, reply.TCPDropWindow))
+	dropped = appendDecimal(dropped, reply.TCPDropWindow)
+	dropped = append(dropped, " backlog "...)
+	field("dropped", appendDecimal(dropped, reply.Capacity.DropBacklog))
 	limits := append(text[:0], "ports "...)
 	limits = appendDecimal(limits, uint64(reply.TCPEphemeralMin))
 	limits = append(limits, '-')
@@ -205,6 +207,10 @@ func tcp(reply *netapi.Reply) {
 	messages = appendDecimal(messages, reply.GTCP3Requests)
 	messages = append(messages, " replies "...)
 	field("gtcp", appendDecimal(messages, reply.GTCP3Replies))
+	field("memory", appendMemory(text[:0], &reply.Capacity))
+	field("time-wait", appendTimeWait(text[:0], &reply.Capacity))
+	field("lookups", appendLookups(text[:0], &reply.Capacity))
+	field("sessions", appendSessions(text[:0], &reply.Capacity))
 }
 
 func reload() {
@@ -232,11 +238,4 @@ func field(name string, value []byte) {
 	utility.PrintText(": ")
 	utility.Print(value)
 	utility.EndLine()
-}
-
-func appendDecimal(target []byte, value uint64) []byte {
-	if value >= 10 {
-		target = appendDecimal(target, value/10)
-	}
-	return append(target, byte('0'+value%10))
 }

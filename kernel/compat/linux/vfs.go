@@ -2,7 +2,7 @@ package linux
 
 import (
 	"goos/kernel/ipc"
-	"goos/kernel/process"
+	"goos/kernel/objects"
 	"goos/kernel/sched"
 	"goos/kernel/vfs"
 )
@@ -56,28 +56,50 @@ type LinuxVFSContext struct {
 	References uint8
 	Session    VFSSession
 	Owner      sched.TaskID
-	waiters    [LinuxFamilyMaxProcesses - 1]sched.TaskID
-	waitCount  uint8
+	// waiters queue the family's other tasks, as many as the scheduler runs.
+	waiters   [sched.MaxTasks - 1]sched.TaskID
+	waitCount uint8
 }
 
-var vfsContexts [process.MaxProcesses]LinuxVFSContext
+// vfsContexts holds one context per family, a page apiece taken the first time
+// a slot is used (lazyTable).
+var vfsContexts lazyTable[LinuxVFSContext]
+
+// SetVFSContextStorage installs where family VFS contexts take their pages.
+// The kernel calls it once at boot, before the first Linux launch.
+func SetVFSContextStorage(storage objects.Storage[LinuxVFSContext]) { vfsContexts.storage = storage }
 
 func installVFSContext(familyID uint64) bool {
 	if familyID == 0 {
 		return false
 	}
-	for index := range vfsContexts {
-		if vfsContexts[index].FamilyID == familyID {
+	free, unused := -1, -1
+	for index := range vfsContexts.entries {
+		context := vfsContexts.at(index)
+		switch {
+		case context == nil:
+			if unused == -1 {
+				unused = index
+			}
+		case context.FamilyID == familyID:
 			return false
+		case context.FamilyID == 0 && free == -1:
+			free = index
 		}
 	}
-	for index := range vfsContexts {
-		if vfsContexts[index].FamilyID == 0 {
-			vfsContexts[index] = LinuxVFSContext{FamilyID: familyID, References: 1}
-			return true
-		}
+	if free == -1 {
+		free = unused
 	}
-	return false
+	if free == -1 {
+		return false
+	}
+	context, ok := vfsContexts.claim(free)
+	if !ok {
+		return false
+	}
+	*context = LinuxVFSContext{}
+	context.FamilyID, context.References = familyID, 1
+	return true
 }
 
 func retainVFSContextHeld(familyID uint64) bool {
@@ -107,9 +129,9 @@ func releaseVFSContextHeld(familyID uint64) (final bool, released bool) {
 func vFSContextHeld(familyID uint64) (*LinuxVFSContext, bool) {
 	guard.Check()
 	if familyID != 0 {
-		for index := range vfsContexts {
-			if vfsContexts[index].FamilyID == familyID {
-				return &vfsContexts[index], true
+		for index := range vfsContexts.entries {
+			if context := vfsContexts.at(index); context != nil && context.FamilyID == familyID {
+				return context, true
 			}
 		}
 	}
@@ -162,9 +184,9 @@ func cancelVFSTaskHeld(task sched.TaskID) sched.TaskID {
 	if task == 0 {
 		return 0
 	}
-	for contextIndex := range vfsContexts {
-		context := &vfsContexts[contextIndex]
-		if context.FamilyID == 0 {
+	for contextIndex := range vfsContexts.entries {
+		context := vfsContexts.at(contextIndex)
+		if context == nil || context.FamilyID == 0 {
 			continue
 		}
 		if context.Owner == task {

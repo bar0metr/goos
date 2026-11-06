@@ -12,6 +12,9 @@ func task(slot uint32, generation uint32) sched.TaskID {
 }
 
 func TestCreateCommitAndCancel(t *testing.T) {
+	if Slots < 64 {
+		t.Fatalf("a process has %d thread slots", Slots)
+	}
 	var group Group
 	group.Adopt(task(3, 1))
 	if slot, ok := group.SlotOf(task(3, 1)); !ok || slot != 0 {

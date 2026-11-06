@@ -6,7 +6,16 @@ import (
 	"goos/userspace/runtime/sys"
 )
 
-const LogUsage = "log [-f] [-n N] [--level debug|info|warn|error] [--component NAME]"
+const LogUsage = "log [-f] [-n N] [--level debug|info|warn|error] [--component NAME] | log status"
+
+// LogStatusPath is the file the log service keeps its counters in;
+// `log status` prints it.
+const LogStatusPath = "/state/system.log.status"
+
+// IsLogStatus reports whether invocation is `log status`.
+func IsLogStatus(invocation Invocation) bool {
+	return invocation.Count == 2 && len(invocation.Arguments) >= 2 && equal(invocation.Arguments[1], "status")
+}
 const LogBatchWork = 8
 
 // LogOptions borrows Component from the invocation's stable argument storage.

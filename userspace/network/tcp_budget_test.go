@@ -200,3 +200,24 @@ func TestTCPBudgetRefusesAdmissionBelowTheMinimum(t *testing.T) {
 		t.Fatalf("accept after room appeared %d", result)
 	}
 }
+
+// TCPBudgets reports the budgets in force: the defaults, then an override,
+// then the defaults again once the override is cleared.
+func TestTCPBudgetsReportsBudgetsInForce(t *testing.T) {
+	h := newHarness(t)
+	want := TCPBudgets{Memory: h.stack.tcpMemoryBudget(), OwnerMemory: h.stack.tcpOwnerMemoryBudget(),
+		TimeWait: DefaultTCPTimeWaitBudget, OwnerTimeWait: DefaultTCPOwnerTimeWaitBudget}
+	if got := h.stack.TCPBudgets(); got != want {
+		t.Fatalf("default budgets %+v", got)
+	}
+	h.stack.SetTCPMemoryBudget(1<<20, 1<<16)
+	h.stack.SetTCPTimeWaitBudget(100, 10)
+	if got := h.stack.TCPBudgets(); got != (TCPBudgets{Memory: 1 << 20, OwnerMemory: 1 << 16, TimeWait: 100, OwnerTimeWait: 10}) {
+		t.Fatalf("set budgets %+v", got)
+	}
+	h.stack.SetTCPMemoryBudget(0, 0)
+	h.stack.SetTCPTimeWaitBudget(0, 0)
+	if got := h.stack.TCPBudgets(); got != want {
+		t.Fatalf("restored budgets %+v", got)
+	}
+}
