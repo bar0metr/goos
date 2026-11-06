@@ -499,6 +499,14 @@ func (s *Service) doneRX(o *op, c *NativeCompletion) {
 			s.counters.BytesIn += uint64(length)
 			sock.rxBurst = length == NativeSlotSize
 			sock.readable -= min(sock.readable, length)
+			if sock.readable == 0 && sock.readsOut == 0 && sock.mask&MaskReadable != 0 {
+				// The read took every byte the service knew of. Bytes that
+				// arrived since leave netd's mask as it was, so a wait
+				// naming that mask would never answer: drop the readable
+				// bit and ask netd how the endpoint stands.
+				sock.mask &^= MaskReadable
+				s.refreshReadable(global)
+			}
 		} else {
 			s.counters.DatagramsIn++
 			if c.Ready {

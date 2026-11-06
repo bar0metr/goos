@@ -149,6 +149,10 @@ func (f Field) Key() string {
 		return "system.net.tcp.rto-max-ms"
 	case FieldTCPTimeWait:
 		return "system.net.tcp.time-wait-ms"
+	case FieldTCPMemoryBudget:
+		return "system.net.tcp.memory-bytes"
+	case FieldTCPOwnerMemoryBudget:
+		return "system.net.tcp.memory-bytes-per-session"
 	}
 	return ""
 }

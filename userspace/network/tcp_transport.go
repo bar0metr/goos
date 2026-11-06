@@ -283,6 +283,7 @@ func (stack *Stack) handleACK(entry *tcpEndpoint, segment tcpSegment, now uint64
 			entry.sendSeq += acked
 			if entry.sendLen == 0 {
 				entry.sendHead = 0
+				stack.trimSend(entry)
 			}
 		}
 	}

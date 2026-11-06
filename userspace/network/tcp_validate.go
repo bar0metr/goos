@@ -90,7 +90,7 @@ func (stack *Stack) checkTCP() string {
 		owners[entry.owner]++
 		bytes[entry.owner] += int(entry.charged)
 		total += int(entry.charged)
-		if int(entry.charged) != len(entry.sendRing)+len(entry.recvRing) {
+		if int(entry.charged) != entry.sendCharge()+len(entry.recvRing) {
 			return "charge disagrees with the rings"
 		}
 		connection := entry.state >= TCPSynSent

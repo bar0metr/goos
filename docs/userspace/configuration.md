@@ -214,6 +214,8 @@ Its TCP settings (ADR 0196), all `uint`:
 | `system.net.tcp.rto-min-ms` | 1000 | 100..60000 | minimum retransmission timeout |
 | `system.net.tcp.rto-max-ms` | 60000 | 1000..300000 | maximum retransmission timeout; at least the minimum |
 | `system.net.tcp.time-wait-ms` | 60000 | 1000..600000 | TIME_WAIT retention |
+| `system.net.tcp.memory-bytes` | 41943040 | 65536..50331648 | ring bytes of all TCP connections. A connection pays 8 KiB from its handshake (a 4 KiB receive ring and a 4 KiB send floor), 20 KiB on loopback while its session has used less than half its budget; growth past that takes what is left. The ceiling fits `netd`'s 64 MiB page quota |
+| `system.net.tcp.memory-bytes-per-session` | 33554432 | 65536..50331648 | ring bytes of one TCP session; at most `memory-bytes`. A handshake whose 8 KiB the budgets cannot pay is refused: `connect` answers `Busy`, a listener drops the SYN |
 
 Lowering a TCP limit preserves existing endpoints and buffered bytes. It
 constrains the next endpoint, backlog child or buffer admission. The RTO and

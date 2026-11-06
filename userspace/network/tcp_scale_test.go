@@ -194,11 +194,12 @@ func TestTCPBacklogSaturationAndRecovery(t *testing.T) {
 	}
 }
 
-// The memory budgets refuse a handshake with no room for its ring, and a
-// write or a ring growth past them; closing gives the bytes back.
+// The memory budgets refuse a handshake with no room for its receive ring
+// and send floor, and a write or a ring growth past them; closing gives the
+// bytes back.
 func TestTCPMemoryBudget(t *testing.T) {
 	h := readyWithPeer(t)
-	h.stack.SetTCPMemoryBudget(64<<10, 3*tcpBufferFloor)
+	h.stack.SetTCPMemoryBudget(64<<10, 6*tcpBufferFloor)
 	var ids []TCPEndpointID
 	for port := uint16(1); ; port++ {
 		id, _ := h.stack.TCPOpen(0)
@@ -213,7 +214,7 @@ func TestTCPMemoryBudget(t *testing.T) {
 		ids = append(ids, id)
 	}
 	h.tcpSent()
-	if bytes := h.stack.TCPStats().MemoryBytes; bytes != 3*tcpBufferFloor {
+	if bytes := h.stack.TCPStats().MemoryBytes; bytes != 6*tcpBufferFloor {
 		t.Fatalf("charged %d", bytes)
 	}
 	// Another owner has its own share of the global budget.
@@ -224,17 +225,18 @@ func TestTCPMemoryBudget(t *testing.T) {
 	h.tcpSent()
 	h.stack.TCPClose(0, ids[0], h.now)
 	h.tcpSent()
-	if bytes := h.stack.tcpOwnerBytes[0]; bytes != 2*tcpBufferFloor {
+	if bytes := h.stack.tcpOwnerBytes[0]; bytes != 4*tcpBufferFloor {
 		t.Fatalf("owner bytes after a close %d", bytes)
 	}
 
-	// A write takes what the owner's budget lets the send ring grow to.
+	// A write takes the paid send floor and what the owner's budget lets
+	// the send ring grow to past it.
 	h.stack.SetTCPMemoryBudget(0, 0)
 	id, entry := establishedWithPeer(t, h, 50200)
 	entry.peerWindow = 0
 	h.stack.SetTCPMemoryBudget(0, h.stack.tcpOwnerBytes[0]+10000)
 	written, result := h.stack.TCPWrite(0, id, make([]byte, 50000), h.now)
-	if result != ResultOK || written != 10000 || h.stack.tcpMemoryLeft(0) != 0 {
+	if result != ResultOK || written != tcpBufferFloor+10000 || h.stack.tcpMemoryLeft(0) != 0 {
 		t.Fatalf("write %d %d, left %d", written, result, h.stack.tcpMemoryLeft(0))
 	}
 	if _, result := h.stack.TCPWrite(0, id, []byte("x"), h.now); result != ResultBusy {
@@ -266,7 +268,7 @@ func TestTCPReceiveRingGrows(t *testing.T) {
 			t.Fatalf("ring %d past the tuning", len(entry.recvRing))
 		}
 	}
-	if len(entry.recvRing) != 64<<10 || entry.charged != uint32(len(entry.recvRing)) {
+	if len(entry.recvRing) != 64<<10 || entry.charged != uint32(len(entry.recvRing)+tcpBufferFloor) {
 		t.Fatalf("ring %d charged %d", len(entry.recvRing), entry.charged)
 	}
 	got := make([]byte, len(stream))

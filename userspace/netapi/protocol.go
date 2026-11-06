@@ -196,7 +196,9 @@ const (
 	FieldTCPRTOMin
 	FieldTCPRTOMax
 	FieldTCPTimeWait
-	lastField = FieldTCPTimeWait
+	FieldTCPMemoryBudget
+	FieldTCPOwnerMemoryBudget
+	lastField = FieldTCPOwnerMemoryBudget
 )
 
 type Link uint8

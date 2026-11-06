@@ -13,7 +13,9 @@ package network
 // the tuned size. Growth copies the ring once and never shrinks the window
 // already advertised. The budgets charge each ring's full length to the
 // stack and the owner, so the memory a connection holds is the memory it
-// pays for.
+// pays for. A connection also pays for a send floor from its handshake on,
+// before its send ring exists, so the minimum it needs to make progress is
+// never left to the budgets after admission.
 
 // ringSpan returns length stored bytes that start offset bytes after head,
 // as a part up to the end of ring and the part that wraps to its start.
@@ -63,9 +65,19 @@ func growRing(ring []byte, head, size int) []byte {
 
 // tcpMemoryLeft is the ring bytes owner may still charge.
 func (stack *Stack) tcpMemoryLeft(owner uint8) int {
-	total := budgetOr(stack.tcpBudget.memory, DefaultTCPMemoryBudget) - stack.tcpBytes
-	mine := budgetOr(stack.tcpBudget.ownerMemory, DefaultTCPOwnerMemoryBudget) - stack.tcpOwnerBytes[owner]
+	total := stack.tcpMemoryBudget() - stack.tcpBytes
+	mine := stack.tcpOwnerMemoryBudget() - stack.tcpOwnerBytes[owner]
 	return max(min(total, mine), 0)
+}
+
+// tcpMemoryBudget and tcpOwnerMemoryBudget are the budgets in force:
+// SetTCPMemoryBudget's override, else the tuning, else the default.
+func (stack *Stack) tcpMemoryBudget() int {
+	return budgetOr(stack.tcpBudget.memory, budgetOr(int(stack.tuning.TCP.MemoryBudget), DefaultTCPMemoryBudget))
+}
+
+func (stack *Stack) tcpOwnerMemoryBudget() int {
+	return budgetOr(stack.tcpBudget.ownerMemory, budgetOr(int(stack.tuning.TCP.OwnerMemoryBudget), DefaultTCPOwnerMemoryBudget))
 }
 
 func (stack *Stack) charge(entry *tcpEndpoint, bytes int) {
@@ -76,36 +88,65 @@ func (stack *Stack) charge(entry *tcpEndpoint, bytes int) {
 
 func (stack *Stack) tcpSendLimit() int { return max(int(stack.tuning.TCP.SendBuffer), 1) }
 
+// tcpSendFloor is the send ring every admitted connection holds a charge
+// for, whether it has written or not.
+func (stack *Stack) tcpSendFloor() int { return min(tcpBufferFloor, stack.tcpSendLimit()) }
+
+// sendCharge is what the send side costs the budgets: the ring, or the
+// reservation while the ring is smaller.
+func (entry *tcpEndpoint) sendCharge() int { return max(len(entry.sendRing), int(entry.sendReserve)) }
+
 // tcpSendRoom is how many bytes a write takes now: room left in the ring
-// and what the ring may still grow by under the tuning and the budgets.
+// and what the ring may still grow by under the tuning and the budgets. The
+// reservation is paid for, so a connection whose ring is empty always has
+// room and its writability never waits for another connection's memory.
 func (stack *Stack) tcpSendRoom(entry *tcpEndpoint) int {
 	limit := stack.tcpSendLimit()
 	capacity := len(entry.sendRing)
 	if capacity < limit {
-		capacity = min(limit, capacity+stack.tcpMemoryLeft(entry.owner))
+		capacity = min(limit, entry.sendCharge()+stack.tcpMemoryLeft(entry.owner))
 	}
 	return max(min(capacity, limit)-int(entry.sendLen), 0)
 }
 
 // growSend makes the send ring hold need bytes. The caller checked
-// tcpSendRoom, so the budgets allow it.
+// tcpSendRoom, so the budgets allow it. Growth the budgets cut below the
+// doubling it wanted counts in MemoryCapped.
 func (stack *Stack) growSend(entry *tcpEndpoint, need int) {
 	old := len(entry.sendRing)
 	if need <= old {
 		return
 	}
 	limit := stack.tcpSendLimit()
-	size := min(max(need, 2*old, min(tcpBufferFloor, limit)), limit, old+stack.tcpMemoryLeft(entry.owner))
-	size = max(size, need)
+	paid := entry.sendCharge()
+	wanted := min(max(need, 2*old, min(tcpBufferFloor, limit)), limit)
+	size := max(min(wanted, paid+stack.tcpMemoryLeft(entry.owner)), need)
+	if size < wanted {
+		increment(&stack.tcpStats.MemoryCapped)
+	}
 	entry.sendRing = growRing(entry.sendRing, int(entry.sendHead), size)
 	entry.sendHead = 0
-	stack.charge(entry, size-old)
+	stack.charge(entry, entry.sendCharge()-paid)
 }
 
-// freeSend drops the send ring and its bytes once nothing can be sent.
+// trimSend gives back a drained send ring larger than the reservation once
+// the budgets could not pay for another full one. The next write grows a
+// ring again from the reservation.
+func (stack *Stack) trimSend(entry *tcpEndpoint) {
+	if entry.sendLen != 0 || len(entry.sendRing) <= int(entry.sendReserve) ||
+		stack.tcpMemoryLeft(entry.owner) >= stack.tcpSendLimit() {
+		return
+	}
+	paid := entry.sendCharge()
+	entry.sendRing, entry.sendHead, entry.sendSent = nil, 0, 0
+	stack.charge(entry, entry.sendCharge()-paid)
+}
+
+// freeSend drops the send ring, its reservation and their bytes once
+// nothing can be sent.
 func (stack *Stack) freeSend(entry *tcpEndpoint) {
-	stack.charge(entry, -len(entry.sendRing))
-	entry.sendRing = nil
+	stack.charge(entry, -entry.sendCharge())
+	entry.sendRing, entry.sendReserve = nil, 0
 	entry.sendHead, entry.sendLen, entry.sendSent = 0, 0, 0
 }
 
@@ -116,25 +157,37 @@ func (stack *Stack) freeBuffers(entry *tcpEndpoint) {
 	entry.recvHead, entry.recvLen = 0, 0
 }
 
-// allocateReceive gives a connection its first receive ring:
-// tcpBufferFloor bytes, or TCPLoopbackMSS to a local peer so a loopback
-// segment fits whole from the start. False means the budgets have no room;
-// the handshake does not start.
+// allocateReceive admits a connection to the budgets: it gives it its
+// first receive ring and reserves its send floor, both charged now so later
+// growth elsewhere can never take them. The receive ring is tcpBufferFloor
+// bytes, or TCPLoopbackMSS to a local peer so a loopback segment fits whole
+// from the start. A local peer gets the floor too once the larger ring
+// would leave less than half of the smaller budget, so a crowd of loopback
+// connections keeps room for later handshakes and for growth.
+// False means the budgets cannot pay even the minimum; DropMemory counts it
+// and the handshake does not start.
 func (stack *Stack) allocateReceive(entry *tcpEndpoint, local bool) bool {
 	if entry.recvRing != nil {
 		return true
 	}
-	size := tcpBufferFloor
+	limit := max(int(stack.tuning.TCP.ReceiveBuffer), 1)
+	floor := min(tcpBufferFloor, limit)
+	reserve := stack.tcpSendFloor()
+	left := stack.tcpMemoryLeft(entry.owner)
+	size := floor
 	if local {
-		size = TCPLoopbackMSS
+		half := min(stack.tcpMemoryBudget(), stack.tcpOwnerMemoryBudget()) / 2
+		if larger := min(TCPLoopbackMSS, limit); left-larger-reserve >= half {
+			size = larger
+		}
 	}
-	size = min(size, max(int(stack.tuning.TCP.ReceiveBuffer), 1))
-	if stack.tcpMemoryLeft(entry.owner) < size {
+	if left < size+reserve {
 		increment(&stack.tcpStats.DropMemory)
 		return false
 	}
 	entry.recvRing = make([]byte, size)
-	stack.charge(entry, size)
+	entry.sendReserve = uint16(reserve)
+	stack.charge(entry, size+reserve)
 	return true
 }
 
@@ -147,6 +200,9 @@ func (stack *Stack) growReceive(entry *tcpEndpoint) {
 		return
 	}
 	grown := min(2*size, limit, size+stack.tcpMemoryLeft(entry.owner))
+	if grown < min(2*size, limit) {
+		increment(&stack.tcpStats.MemoryCapped)
+	}
 	if grown <= size {
 		return
 	}
