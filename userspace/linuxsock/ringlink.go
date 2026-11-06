@@ -912,3 +912,11 @@ func (l *RingLink) accepted(ch NativeChannel, e *tcpapi.Entry) {
 	listener.acceptCount++
 	l.topUp(ch, int(e.Offset))
 }
+
+// Awaiting reports whether netd holds a send of the link: its answer comes
+// on the rings within microseconds.
+func (l *RingLink) Awaiting() bool { return !l.broken && l.txLent != 0 }
+
+// Peek reports whether netd published ring entries the link has not taken.
+// It reads the rings' indices only.
+func (l *RingLink) Peek() bool { return !l.broken && l.control.ClientPending() }

@@ -545,3 +545,11 @@ func (l *UDPRingLink) releaseRX(slot uint8) {
 	l.Stats.Releases++
 	l.pushRelease(&udpapi.Entry{Kind: udpapi.EntryRelease, Slot: slot, Generation: l.rxGen[slot]})
 }
+
+// Awaiting reports whether netd holds a send of the link: its answer comes
+// on the rings within microseconds.
+func (l *UDPRingLink) Awaiting() bool { return !l.broken && l.txLent != 0 }
+
+// Peek reports whether netd published ring entries the link has not taken.
+// It reads the rings' indices only.
+func (l *UDPRingLink) Peek() bool { return !l.broken && l.rings.Pending() }
