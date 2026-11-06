@@ -110,6 +110,10 @@ func (stack *Stack) passiveSYN(listener *tcpEndpoint, packet ipv4Packet, segment
 	child.sndUna, child.sndNxt = child.iss, child.iss+1
 	child.peerWindow, child.peerMSS = uint32(segment.window), segment.mss
 	child.localMSS = stack.tcpPathMSS(route)
+	// The SYN-ACK offers a shift only in answer to one (RFC 7323 1.3).
+	if shift := stack.tcpWindowScale(); segment.wscaleOK && shift != 0 {
+		child.rcvScale, child.sndScale = shift, segment.wscale
+	}
 	child.state = TCPSynReceived
 	stack.indexConnection(child)
 	stack.attachChild(listener, child)
@@ -166,6 +170,11 @@ func (stack *Stack) handleSynSent(entry *tcpEndpoint, segment tcpSegment, now ui
 	entry.sndUna = segment.acknowledgment
 	entry.sendSeq = entry.sndNxt
 	entry.peerWindow, entry.peerMSS = uint32(segment.window), segment.mss
+	if segment.wscaleOK && entry.rcvScale != 0 {
+		entry.sndScale = segment.wscale
+	} else {
+		entry.rcvScale, entry.sndScale = 0, 0
+	}
 	entry.sndWL1, entry.sndWL2 = segment.sequence, segment.acknowledgment
 	entry.cwnd, entry.retries = tcpInitialWindow(entry), 0
 	entry.state, entry.synchronized = TCPEstablished, true
@@ -184,7 +193,7 @@ func (stack *Stack) handleSynReceived(entry *tcpEndpoint, segment tcpSegment, no
 	}
 	entry.sndUna = segment.acknowledgment
 	entry.sendSeq = entry.sndNxt
-	entry.peerWindow = uint32(segment.window)
+	entry.peerWindow = entry.peerWindowOf(segment)
 	entry.sndWL1, entry.sndWL2 = segment.sequence, segment.acknowledgment
 	entry.cwnd, entry.retries = tcpInitialWindow(entry), 0
 	entry.state, entry.synchronized = TCPEstablished, true
@@ -219,7 +228,7 @@ func (stack *Stack) handleRST(entry *tcpEndpoint, segment tcpSegment, now uint64
 // the sequence check. It returns false when the segment's payload and FIN
 // must not be processed.
 func (stack *Stack) handleACK(entry *tcpEndpoint, segment tcpSegment, now uint64) bool {
-	acknowledgment, window := segment.acknowledgment, uint32(segment.window)
+	acknowledgment, window := segment.acknowledgment, entry.peerWindowOf(segment)
 	if seqGT(acknowledgment, entry.sndNxt) {
 		stack.sendTCP(entry, tcpFlagACK, entry.sndNxt, entry.rcvNxt, nil, now)
 		return false
@@ -392,6 +401,22 @@ func clipToPeerFIN(entry *tcpEndpoint, sequence uint32, payload []byte) []byte {
 // moves the window's right edge back.
 func (stack *Stack) tcpReceiveFree(entry *tcpEndpoint) int {
 	return max(stack.tcpReceiveLimit(entry)-int(entry.recvLen), 0)
+}
+
+// tcpWindowScale is the shift a SYN offers: the least that fits the tuned
+// receive buffer in the 16-bit window field, at most tcpMaxWindowScale. A
+// buffer that fits unscaled offers none.
+func (stack *Stack) tcpWindowScale() uint8 {
+	shift := uint8(0)
+	for stack.tuning.TCP.ReceiveBuffer>>shift > 65535 && shift < tcpMaxWindowScale {
+		shift++
+	}
+	return shift
+}
+
+// peerWindowOf is the send window a synchronized segment grants, in bytes.
+func (entry *tcpEndpoint) peerWindowOf(segment tcpSegment) uint32 {
+	return uint32(segment.window) << entry.sndScale
 }
 
 func (stack *Stack) tcpAdvertisedWindow(entry *tcpEndpoint) int {
@@ -597,9 +622,17 @@ func (stack *Stack) sendTCPParts(entry *tcpEndpoint, flags uint8, sequence, ackn
 	if result != ResultOK {
 		return false
 	}
+	// A SYN's window is never scaled (RFC 7323 2.2); it carries the
+	// shift every later segment applies.
+	offered, shift := stack.tcpOfferedWindow(entry), entry.rcvScale
+	syn := flags&tcpFlagSYN != 0
+	if syn {
+		shift = 0
+	}
 	segment := tcpSegment{sourcePort: entry.port, destinationPort: entry.remotePort, sequence: sequence,
-		acknowledgment: acknowledgment, flags: flags, window: uint16(min(stack.tcpOfferedWindow(entry), 65535)),
-		mss: entry.localMSS, payload: payload, tail: tail}
+		acknowledgment: acknowledgment, flags: flags, window: uint16(min(offered>>shift, 65535)),
+		mss: entry.localMSS, wscaleOK: syn && entry.rcvScale != 0, wscale: entry.rcvScale, payload: payload, tail: tail}
+	window := uint32(segment.window) << shift
 
 	if route.path == udpLocal {
 		// No wire lies between the two ends: the segment goes to the same
@@ -612,7 +645,7 @@ func (stack *Stack) sendTCPParts(entry *tcpEndpoint, flags uint8, sequence, ackn
 		if stack.localWire != nil {
 			// Tests compare the logical path against the parsed one.
 			length := putTCP(stack.localWire, entry.local, entry.remote, segment)
-			entry.advertised(flags, acknowledgment, segment.window)
+			entry.advertised(flags, acknowledgment, window)
 			stack.receiveTCP(ipv4Packet{source: entry.local, destination: entry.remote, protocol: protocolTCP, payload: stack.localWire[:length]}, now)
 			increment(&stack.tcpStats.TX)
 			return true
@@ -623,7 +656,7 @@ func (stack *Stack) sendTCPParts(entry *tcpEndpoint, flags uint8, sequence, ackn
 		packet := ipv4Packet{source: entry.local, destination: entry.remote, protocol: protocolTCP}
 		increment(&stack.tcpStats.TX)
 		increment(&stack.tcpStats.LocalSegments)
-		entry.advertised(flags, acknowledgment, segment.window)
+		entry.advertised(flags, acknowledgment, window)
 		stack.receiveSegment(packet, segment, now)
 		return true
 	}
@@ -650,7 +683,7 @@ func (stack *Stack) sendTCPParts(entry *tcpEndpoint, flags uint8, sequence, ackn
 	putEthernet(frame, mac, stack.mac, etherTypeIPv4)
 	stack.commitFrame(tcpAt + length)
 	increment(&stack.tcpStats.TX)
-	entry.advertised(flags, acknowledgment, segment.window)
+	entry.advertised(flags, acknowledgment, window)
 	return true
 }
 
@@ -890,10 +923,11 @@ func (stack *Stack) tcpVia(entry *tcpEndpoint, nextHop IPv4) bool {
 	return result == ResultOK && route.path != udpLocal && route.nextHop == nextHop
 }
 
-// advertised records the window edge a sent ACK told the peer.
-func (entry *tcpEndpoint) advertised(flags uint8, acknowledgment uint32, window uint16) {
+// advertised records the window edge a sent ACK told the peer. window is
+// in bytes, after the shift.
+func (entry *tcpEndpoint) advertised(flags uint8, acknowledgment, window uint32) {
 	if flags&tcpFlagACK != 0 {
-		entry.rcvEdge, entry.rcvEdgeKnown = acknowledgment+uint32(window), true
+		entry.rcvEdge, entry.rcvEdgeKnown = acknowledgment+window, true
 		entry.ackPending = false
 	}
 }

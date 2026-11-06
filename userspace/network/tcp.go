@@ -134,6 +134,11 @@ type tcpEndpoint struct {
 	sndWL1, sndWL2 uint32
 	peerMSS        uint16
 	localMSS       uint16
+	// rcvScale shifts the windows this end advertises and sndScale those
+	// the peer advertises (RFC 7323 2). Before the handshake completes,
+	// rcvScale is the shift a SYN offers; both stay zero unless both SYNs
+	// carried the option.
+	rcvScale, sndScale uint8
 
 	// sendRing and recvRing are the stream rings; tcp_ring.go describes the
 	// indexing. charged is the ring bytes the owner's budget pays for.
@@ -449,6 +454,7 @@ func (stack *Stack) TCPConnect(owner int, id TCPEndpointID, remote IPv4, port ui
 	entry.iss = uint32(stack.next())
 	entry.sndUna, entry.sndNxt = entry.iss, entry.iss+1
 	entry.localMSS = stack.tcpPathMSS(route)
+	entry.rcvScale = stack.tcpWindowScale()
 	entry.state = TCPSynSent
 	stack.indexConnection(entry)
 	stack.setDeadline(entry, addTime(now, stack.tuning.TCP.ConnectTimeout))

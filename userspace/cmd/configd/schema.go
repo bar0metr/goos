@@ -61,7 +61,7 @@ func declareSchema(target *config.Store) config.Status {
 		{"system.net.udp.ephemeral-port-min", config.Uint(49152), false},
 		{"system.net.udp.ephemeral-port-max", config.Uint(65535), false},
 		{"system.net.udp.recv-queue-depth", config.Uint(8), false},
-		{"system.net.udp.max-endpoints", config.Uint(96), false},
+		{"system.net.udp.max-endpoints", config.Uint(1024), false},
 		{"system.net.udp.max-endpoints-per-session", config.Uint(8), false},
 		{"system.net.udp.max-payload", config.Uint(4096), false},
 		{"system.net.tcp.ephemeral-port-min", config.Uint(49152), false},

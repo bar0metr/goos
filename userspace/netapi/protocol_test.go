@@ -155,7 +155,7 @@ func replies() []Reply {
 			Defenses: 9, Relinquished: 10, RateLimits: 11, Loopback: 12,
 			UDPRX: 13, UDPTX: 14, UDPDropNoEndpoint: 15, UDPDropQueueFull: 16, UDPDropChecksum: 17, UDPDropTooLong: 18,
 			UDPBindFail: 19, UDPEndpoints: 3, UDPEphemeralMin: 49152, UDPEphemeralMax: 65535, UDPMaxPayload: 4096,
-			UDPReceiveQueue: 8, UDPMaxEndpoints: 32, UDPSessionEndpoints: 8},
+			UDPReceiveQueue: 8, UDPMaxEndpoints: 1024, UDPSessionEndpoints: 8},
 		{Opcode: OpStatus, State: StateConfiguring, Link: LinkUp, MTU: 576, Fallback: true},
 		{Opcode: OpStatus},
 		{Opcode: OpStatus, Result: ResultPermissionDenied},
@@ -254,7 +254,8 @@ func TestReplyUnusedBytes(t *testing.T) {
 	statusUsed := span(2, 12)
 	statusUsed = append(statusUsed, span(24, 40)...)
 	statusUsed = append(statusUsed, span(44, 145)...)
-	statusUsed = append(statusUsed, span(replyUDP, replyServerN)...)
+	statusUsed = append(statusUsed, span(replyUDP, replyReserved1)...)
+	statusUsed = append(statusUsed, replySessionEP, replyMaxEP, replyMaxEP+1)
 	used := map[int][]int{
 		0:  statusUsed,
 		1:  statusUsed,

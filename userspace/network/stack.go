@@ -81,13 +81,23 @@ type Stack struct {
 	announcer   announcer
 	dhcp        dhcpClient
 
-	udp           [MaxUDPEndpoints]udpEndpoint
-	udpBuffers    [UDPReceiveBuffers]udpBuffer
-	udpPending    [UDPPendingSends]udpPending
-	udpGeneration uint32
-	udpStats      UDPStats
-	udpQuota      [MaxUDPSessions]uint16
-	udpBinds      uint32
+	// udp is the endpoint registry and udpUsed its slots in use; udpPorts
+	// files the bound endpoints by port (udp_registry.go). udpBuffers is
+	// the receive pool and udpFree its free buffers.
+	udp               []*udpEndpoint
+	udpUsed           []uint64
+	udpLive           int
+	udpPorts          udpPortIndex
+	udpSeed           uint64
+	udpBuffers        []*udpBuffer
+	udpFree           []uint16
+	udpOwnerBuffers   [MaxUDPSessions]int
+	udpOwnerEndpoints [MaxUDPSessions]int
+	udpPending        [UDPPendingSends]udpPending
+	udpGeneration     uint32
+	udpStats          UDPStats
+	udpQuota          [MaxUDPSessions]uint16
+	udpBinds          uint32
 
 	// tcp is the endpoint registry, nil in a free slot; it grows to the
 	// highest slot in use, up to MaxTCPEndpoints. tcpUsed marks the slots in

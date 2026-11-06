@@ -10,9 +10,10 @@ import (
 const (
 	ProtocolID = uint64(0x474e455441504931)
 	// Version 4 adds a separate bounded TCP diagnostics reply, version 5
-	// its GTCP message counters, version 6 OpTCPDump, version 7 wider TCP
-	// limits: endpoints and backlog in 16 bits, buffers in 32. A message of
-	// an older version is not this protocol and fails decoding.
+	// its GTCP message counters, version 6 OpTCPDump, version 7 wider
+	// limits: TCP and UDP endpoints and the backlog in 16 bits, buffers in
+	// 32. A message of an older version is not this protocol and fails
+	// decoding.
 	Version          = uint16(7)
 	RequestSize      = 24
 	ReplySize        = 248
@@ -60,10 +61,12 @@ const (
 	replyPortMax   = 212
 	replyPayload   = 214
 	replyQueue     = 216
-	replyMaxEP     = 217
+	// replyReserved1 held max-endpoints while it fit a byte; it stays zero.
+	replyReserved1 = 217
 	replySessionEP = 218
 	replyServerN   = 219
-	replyReserved2 = 220
+	replyMaxEP     = 220
+	replyReserved2 = 222
 	replyServerGen = 224
 	replyServers   = 232
 
@@ -281,7 +284,7 @@ type Reply struct {
 	UDPEphemeralMax     uint16
 	UDPMaxPayload       uint16
 	UDPReceiveQueue     uint8
-	UDPMaxEndpoints     uint8
+	UDPMaxEndpoints     uint16
 	UDPSessionEndpoints uint8
 	// ServerCount, Servers and Generation answer Servers.
 	ServerCount uint8
@@ -477,7 +480,8 @@ func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
 	binary.LittleEndian.PutUint16(payload[replyPortMin:], r.UDPEphemeralMin)
 	binary.LittleEndian.PutUint16(payload[replyPortMax:], r.UDPEphemeralMax)
 	binary.LittleEndian.PutUint16(payload[replyPayload:], r.UDPMaxPayload)
-	payload[replyQueue], payload[replyMaxEP], payload[replySessionEP] = r.UDPReceiveQueue, r.UDPMaxEndpoints, r.UDPSessionEndpoints
+	payload[replyQueue], payload[replySessionEP] = r.UDPReceiveQueue, r.UDPSessionEndpoints
+	binary.LittleEndian.PutUint16(payload[replyMaxEP:], r.UDPMaxEndpoints)
 	payload[replyServerN] = r.ServerCount
 	binary.LittleEndian.PutUint64(payload[replyServerGen:], r.Generation)
 	for index := range r.Servers {
@@ -528,7 +532,7 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 	}
 	field := binary.LittleEndian.Uint16(payload[replyField:])
 	if Opcode(payload[replyOpcode]) != opcode || !zero(payload[replyReserved:replyUDP]) ||
-		!zero(payload[replyReserved2:replyServerGen]) || field > uint16(lastField) ||
+		payload[replyReserved1] != 0 || !zero(payload[replyReserved2:replyServerGen]) || field > uint16(lastField) ||
 		payload[replyFallback] > 1 || payload[replyFlags]&^flagRateLimited != 0 {
 		return false
 	}
@@ -558,7 +562,7 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 		UDPEphemeralMax:     binary.LittleEndian.Uint16(payload[replyPortMax:]),
 		UDPMaxPayload:       binary.LittleEndian.Uint16(payload[replyPayload:]),
 		UDPReceiveQueue:     payload[replyQueue],
-		UDPMaxEndpoints:     payload[replyMaxEP],
+		UDPMaxEndpoints:     binary.LittleEndian.Uint16(payload[replyMaxEP:]),
 		UDPSessionEndpoints: payload[replySessionEP],
 		ServerCount:         payload[replyServerN],
 		Generation:          binary.LittleEndian.Uint64(payload[replyServerGen:]),
