@@ -51,7 +51,7 @@ func TestTCPReadinessFollowsTheStream(t *testing.T) {
 		t.Fatalf("listener after accept %#x", got)
 	}
 	ready := readiness(t, h, 1, client)
-	if ready.Mask != TCPReadyConnected|TCPReadyWritable || ready.Writable != TCPSendCapacity {
+	if ready.Mask != TCPReadyConnected|TCPReadyWritable || ready.Writable != DefaultTCPSendBuffer {
 		t.Fatalf("connected client %+v", ready)
 	}
 
@@ -132,8 +132,8 @@ func TestTCPReadinessReportsConnectingAndReset(t *testing.T) {
 		t.Fatalf("established %#x", got)
 	}
 	options, result := h.stack.TCPOptions(0, id)
-	if result != ResultOK || options.SendMSS != 1000 || options.TTL != 64 || options.SendBuffer != TCPSendCapacity ||
-		options.ReceiveBuffer != TCPReceiveCapacity {
+	if result != ResultOK || options.SendMSS != 1000 || options.TTL != 64 || options.SendBuffer != DefaultTCPSendBuffer ||
+		options.ReceiveBuffer != DefaultTCPReceiveBuffer {
 		t.Fatalf("options %+v %d", options, result)
 	}
 	entry, _ := h.stack.tcpEndpoint(0, id)
@@ -170,7 +170,7 @@ func TestTCPReuseAddressFollowsLinux(t *testing.T) {
 	h.stack.TCPClose(0, server, h.now)
 	h.stack.TCPClose(1, client, h.now)
 	// The server closed first: its side waits in TIME_WAIT on port 8080.
-	if h.timeWaits(0) != 1 {
+	if h.timeWaits(0)+h.tombstones(0) != 1 {
 		t.Fatalf("TIME_WAIT %d", h.timeWaits(0))
 	}
 	if _, _, result := h.stack.TCPBindReuse(2, other, IPv4{}, 8080, true); result != ResultAddressInUse {
@@ -202,7 +202,7 @@ func TestTCPReuseAddressRebindsOverTimeWait(t *testing.T) {
 	h.stack.TCPClose(0, server, h.now)
 	h.stack.TCPClose(1, client, h.now)
 	h.stack.TCPClose(0, listener, h.now)
-	if h.timeWaits(0) != 1 {
+	if h.timeWaits(0)+h.tombstones(0) != 1 {
 		t.Fatalf("TIME_WAIT %d", h.timeWaits(0))
 	}
 	// The child took the listener's reuse, so a restarted server binds.
@@ -258,13 +258,13 @@ func TestTCPExplicitQuota(t *testing.T) {
 
 func TestTCPListenersCapacity(t *testing.T) {
 	h := newHarness(t)
-	for owner := range 4 {
+	for owner := range 5 {
 		h.stack.SetTCPQuota(owner, MaxTCPSessionQuota)
 	}
 	for index := range MaxTCPListeners {
-		id, _ := h.stack.TCPOpen(index % 4)
-		h.stack.TCPBind(index%4, id, LoopbackAddress, uint16(9000+index))
-		if result := h.stack.TCPListen(index%4, id, 1); result != ResultOK {
+		id, _ := h.stack.TCPOpen(index % 5)
+		h.stack.TCPBind(index%5, id, LoopbackAddress, uint16(9000+index))
+		if result := h.stack.TCPListen(index%5, id, 1); result != ResultOK {
 			t.Fatalf("listener %d: %d", index, result)
 		}
 	}
@@ -344,8 +344,8 @@ func TestUDPReadinessPeekAndMaxPayload(t *testing.T) {
 
 func TestUDPExplicitQuota(t *testing.T) {
 	h := newHarness(t)
-	h.stack.SetUDPQuota(0, MaxUDPSessionQuota)
-	for count := range MaxUDPSessionQuota {
+	h.stack.SetUDPQuota(0, udpGrantedQuota)
+	for count := range udpGrantedQuota {
 		if _, result := h.stack.UDPOpen(0); result != ResultOK {
 			t.Fatalf("open %d: %d", count, result)
 		}

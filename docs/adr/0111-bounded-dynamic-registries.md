@@ -95,6 +95,19 @@ Task kernel stacks were already allocated per task. Measured on the default
 build, the kernel image's memory went from 3,624 KiB to 3,484 KiB and its file
 from 1,306 KiB to 1,209 KiB.
 
+**Revision: TCP in `netd`.** The stack's TCP endpoints were the last large
+static table in userspace: 96 entries of about 45 KiB each, 16 KiB send and
+receive arrays and eight reassembly slots included, whether connections
+existed or not. Those sizes were historical, the prototype's, and ADR 0213
+replaces them with this ADR's rule. The registry is a slice of control
+block pointers that grows to the highest slot in use; rings and reassembly
+spans come with the connection and go with it; TIME_WAIT four-tuples live
+in tombstones outside the endpoint quota. The capacity policy is the
+tuning's endpoint limit (1024 by default, 4096 at most), the session
+grants (512 at most), and the ring and tombstone budgets, which bound what
+the live connections may take. As with the kernel registries, memory in use
+is what is live, and the limits are decisions about how much may be.
+
 ## Alternatives
 
 - **Larger static arrays.** 256 channels would be 2.7 MiB of kernel memory

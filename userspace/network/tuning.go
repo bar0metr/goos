@@ -1,8 +1,9 @@
 package network
 
 // Tuning is the timer and rate policy of the stack. Times are in nanoseconds.
-// It sizes nothing: tables, sessions and the transmit ring stay fixed arrays,
-// so no setting can grow the memory a stack holds.
+// Outside TCP it sizes nothing: tables, sessions and the transmit ring stay
+// fixed arrays. TCP allocates per connection, and its memory budgets, not
+// the tuning, bound what that can take; see TCPTuning.
 //
 // A new tuning applies at each value's next point of use, never retroactively:
 //   - TTL and EchoReplyRate apply to the next packet built or reply counted;
@@ -19,7 +20,8 @@ package network
 //     conflict.
 //   - DHCP retry values apply at the client's next scheduling point. A lease,
 //     its T1, T2 and expiry stay as the server set them.
-//   - The UDP limits apply to the next acquisition; see UDPTuning.
+//   - The UDP limits apply to the next acquisition; see UDPTuning, and the
+//     TCP limits likewise; see TCPTuning.
 type Tuning struct {
 	TTL               uint8
 	ProbeCount        uint8
@@ -43,8 +45,9 @@ type Tuning struct {
 }
 
 // UDPTuning holds the runtime limits of UDP, system.net.udp.*. Each is a
-// share of a compile-time capacity: no value resizes a table, a queue or a
-// buffer. A lowered limit never takes anything back. Endpoints already open
+// share of a compile-time capacity; the endpoint registry and the receive
+// pool grow as endpoints and datagrams need them, up to that capacity. A
+// lowered limit never takes anything back. Endpoints already open
 // stay open and keep their port and queued datagrams, and the new limit
 // refuses the next Open, the next queued datagram or the next payload that
 // exceeds it. Explicit binds may use any port; the ephemeral range only
@@ -54,23 +57,32 @@ type UDPTuning struct {
 	EphemeralMin     uint16
 	EphemeralMax     uint16
 	ReceiveQueue     uint8
-	MaxEndpoints     uint8
+	MaxEndpoints     uint16
 	SessionEndpoints uint8
 	MaxPayload       uint16
 }
 
+// TCPTuning holds the runtime limits of TCP, system.net.tcp.*. The stack
+// allocates endpoints and rings as connections need them, so a limit costs
+// nothing until connections use it; the memory budgets bound the rings
+// whatever the buffer sizes allow. A lowered limit takes nothing back: it
+// refuses the next open, listen child or ring growth past it.
 type TCPTuning struct {
 	EphemeralMin     uint16
 	EphemeralMax     uint16
-	MaxEndpoints     uint8
+	MaxEndpoints     uint16
 	SessionEndpoints uint8
-	ListenBacklog    uint8
-	SendBuffer       uint16
-	ReceiveBuffer    uint16
+	ListenBacklog    uint16
+	SendBuffer       uint32
+	ReceiveBuffer    uint32
 	ConnectTimeout   uint64
 	RTOMin           uint64
 	RTOMax           uint64
 	TimeWait         uint64
+	// MemoryBudget and OwnerMemoryBudget bound the ring bytes of all
+	// connections and of one session (tcp_ring.go).
+	MemoryBudget      uint32
+	OwnerMemoryBudget uint32
 }
 
 // TuningFields is the number of stored tuning values ParseTuning takes.
@@ -105,22 +117,24 @@ func DefaultTuning() Tuning {
 			EphemeralMin:     49152,
 			EphemeralMax:     65535,
 			ReceiveQueue:     8,
-			MaxEndpoints:     MaxUDPEndpoints,
+			MaxEndpoints:     DefaultUDPEndpoints,
 			SessionEndpoints: MaxUDPSessionEndpoints,
 			MaxPayload:       UDPPayloadCapacity,
 		},
 		TCP: TCPTuning{
-			EphemeralMin:     49152,
-			EphemeralMax:     65535,
-			MaxEndpoints:     MaxTCPEndpoints,
-			SessionEndpoints: MaxTCPEndpointsPerSession,
-			ListenBacklog:    MaxTCPBacklog,
-			SendBuffer:       TCPSendCapacity,
-			ReceiveBuffer:    TCPReceiveCapacity,
-			ConnectTimeout:   30 * second,
-			RTOMin:           second,
-			RTOMax:           60 * second,
-			TimeWait:         60 * second,
+			EphemeralMin:      49152,
+			EphemeralMax:      65535,
+			MaxEndpoints:      DefaultTCPEndpoints,
+			SessionEndpoints:  MaxTCPEndpointsPerSession,
+			ListenBacklog:     DefaultTCPBacklog,
+			SendBuffer:        DefaultTCPSendBuffer,
+			ReceiveBuffer:     DefaultTCPReceiveBuffer,
+			ConnectTimeout:    30 * second,
+			RTOMin:            second,
+			RTOMax:            60 * second,
+			TimeWait:          60 * second,
+			MemoryBudget:      DefaultTCPMemoryBudget,
+			OwnerMemoryBudget: DefaultTCPOwnerMemoryBudget,
 		},
 	}
 }
@@ -150,23 +164,25 @@ var tuningRange = [TuningFields]struct {
 	{4000, 300_000, true},   // FieldDHCPMaxRetry
 	{1000, 300_000, true},   // FieldDHCPConflictRetry
 
-	{udpEphemeralFloor, 65535, false},          // FieldUDPEphemeralMin
-	{udpEphemeralFloor, 65535, false},          // FieldUDPEphemeralMax
-	{1, UDPQueueCapacity, false},               // FieldUDPReceiveQueue
-	{1, MaxUDPEndpoints, false},                // FieldUDPMaxEndpoints
-	{1, MaxUDPSessionEndpoints, false},         // FieldUDPSessionEndpoints
-	{UDPMinPayload, UDPPayloadCapacity, false}, // FieldUDPMaxPayload
-	{udpEphemeralFloor, 65535, false},          // FieldTCPEphemeralMin
-	{udpEphemeralFloor, 65535, false},          // FieldTCPEphemeralMax
-	{1, MaxTCPEndpoints, false},                // FieldTCPMaxEndpoints
-	{1, MaxTCPEndpointsPerSession, false},      // FieldTCPSessionEndpoints
-	{1, MaxTCPBacklog, false},                  // FieldTCPListenBacklog
-	{1, TCPSendCapacity, false},                // FieldTCPSendBuffer
-	{1, TCPReceiveCapacity, false},             // FieldTCPReceiveBuffer
-	{1000, 300_000, true},                      // FieldTCPConnectTimeout
-	{100, 60_000, true},                        // FieldTCPRTOMin
-	{1000, 300_000, true},                      // FieldTCPRTOMax
-	{1000, 600_000, true},                      // FieldTCPTimeWait
+	{udpEphemeralFloor, 65535, false},               // FieldUDPEphemeralMin
+	{udpEphemeralFloor, 65535, false},               // FieldUDPEphemeralMax
+	{1, UDPQueueCapacity, false},                    // FieldUDPReceiveQueue
+	{1, MaxUDPEndpoints, false},                     // FieldUDPMaxEndpoints
+	{1, MaxUDPSessionEndpoints, false},              // FieldUDPSessionEndpoints
+	{UDPMinPayload, UDPPayloadCapacity, false},      // FieldUDPMaxPayload
+	{udpEphemeralFloor, 65535, false},               // FieldTCPEphemeralMin
+	{udpEphemeralFloor, 65535, false},               // FieldTCPEphemeralMax
+	{1, MaxTCPEndpoints, false},                     // FieldTCPMaxEndpoints
+	{1, MaxTCPEndpointsPerSession, false},           // FieldTCPSessionEndpoints
+	{1, MaxTCPBacklog, false},                       // FieldTCPListenBacklog
+	{1, MaxTCPBuffer, false},                        // FieldTCPSendBuffer
+	{1, MaxTCPBuffer, false},                        // FieldTCPReceiveBuffer
+	{1000, 300_000, true},                           // FieldTCPConnectTimeout
+	{100, 60_000, true},                             // FieldTCPRTOMin
+	{1000, 300_000, true},                           // FieldTCPRTOMax
+	{1000, 600_000, true},                           // FieldTCPTimeWait
+	{minTCPMemoryBudget, MaxTCPMemoryBudget, false}, // FieldTCPMemoryBudget
+	{minTCPMemoryBudget, MaxTCPMemoryBudget, false}, // FieldTCPOwnerMemoryBudget
 }
 
 const (
@@ -222,22 +238,24 @@ func tuningFrom(values *[TuningFields]uint64) Tuning {
 			EphemeralMin:     uint16(values[FieldUDPEphemeralMin-FieldTTL]),
 			EphemeralMax:     uint16(values[FieldUDPEphemeralMax-FieldTTL]),
 			ReceiveQueue:     uint8(values[FieldUDPReceiveQueue-FieldTTL]),
-			MaxEndpoints:     uint8(values[FieldUDPMaxEndpoints-FieldTTL]),
+			MaxEndpoints:     uint16(values[FieldUDPMaxEndpoints-FieldTTL]),
 			SessionEndpoints: uint8(values[FieldUDPSessionEndpoints-FieldTTL]),
 			MaxPayload:       uint16(values[FieldUDPMaxPayload-FieldTTL]),
 		},
 		TCP: TCPTuning{
-			EphemeralMin:     uint16(values[FieldTCPEphemeralMin-FieldTTL]),
-			EphemeralMax:     uint16(values[FieldTCPEphemeralMax-FieldTTL]),
-			MaxEndpoints:     uint8(values[FieldTCPMaxEndpoints-FieldTTL]),
-			SessionEndpoints: uint8(values[FieldTCPSessionEndpoints-FieldTTL]),
-			ListenBacklog:    uint8(values[FieldTCPListenBacklog-FieldTTL]),
-			SendBuffer:       uint16(values[FieldTCPSendBuffer-FieldTTL]),
-			ReceiveBuffer:    uint16(values[FieldTCPReceiveBuffer-FieldTTL]),
-			ConnectTimeout:   values[FieldTCPConnectTimeout-FieldTTL],
-			RTOMin:           values[FieldTCPRTOMin-FieldTTL],
-			RTOMax:           values[FieldTCPRTOMax-FieldTTL],
-			TimeWait:         values[FieldTCPTimeWait-FieldTTL],
+			EphemeralMin:      uint16(values[FieldTCPEphemeralMin-FieldTTL]),
+			EphemeralMax:      uint16(values[FieldTCPEphemeralMax-FieldTTL]),
+			MaxEndpoints:      uint16(values[FieldTCPMaxEndpoints-FieldTTL]),
+			SessionEndpoints:  uint8(values[FieldTCPSessionEndpoints-FieldTTL]),
+			ListenBacklog:     uint16(values[FieldTCPListenBacklog-FieldTTL]),
+			SendBuffer:        uint32(values[FieldTCPSendBuffer-FieldTTL]),
+			ReceiveBuffer:     uint32(values[FieldTCPReceiveBuffer-FieldTTL]),
+			ConnectTimeout:    values[FieldTCPConnectTimeout-FieldTTL],
+			RTOMin:            values[FieldTCPRTOMin-FieldTTL],
+			RTOMax:            values[FieldTCPRTOMax-FieldTTL],
+			TimeWait:          values[FieldTCPTimeWait-FieldTTL],
+			MemoryBudget:      uint32(values[FieldTCPMemoryBudget-FieldTTL]),
+			OwnerMemoryBudget: uint32(values[FieldTCPOwnerMemoryBudget-FieldTTL]),
 		},
 	}
 }
@@ -278,12 +296,14 @@ func (tuning *Tuning) values() [TuningFields]uint64 {
 		tuning.TCP.RTOMin,
 		tuning.TCP.RTOMax,
 		tuning.TCP.TimeWait,
+		uint64(tuning.TCP.MemoryBudget),
+		uint64(tuning.TCP.OwnerMemoryBudget),
 	}
 }
 
 // Validate returns the first field outside its range, or the second field of
 // a pair out of order: ProbeMax below ProbeMin, DHCPMaxRetry below
-// DHCPInitialRetry, then the UDP pairs.
+// DHCPInitialRetry, then the UDP and TCP pairs.
 func (tuning Tuning) Validate() Field {
 	values := tuning.values()
 	for index, value := range values {
@@ -314,7 +334,7 @@ func (udp UDPTuning) validate() Field {
 	if udp.EphemeralMax < udp.EphemeralMin {
 		return FieldUDPEphemeralMax
 	}
-	if udp.SessionEndpoints > udp.MaxEndpoints {
+	if uint16(udp.SessionEndpoints) > udp.MaxEndpoints {
 		return FieldUDPSessionEndpoints
 	}
 	return FieldNone
@@ -324,7 +344,7 @@ func (tcp TCPTuning) validate() Field {
 	if tcp.EphemeralMax < tcp.EphemeralMin {
 		return FieldTCPEphemeralMax
 	}
-	if tcp.SessionEndpoints > tcp.MaxEndpoints {
+	if uint16(tcp.SessionEndpoints) > tcp.MaxEndpoints {
 		return FieldTCPSessionEndpoints
 	}
 	if tcp.ConnectTimeout < tcp.RTOMin {
@@ -332,6 +352,9 @@ func (tcp TCPTuning) validate() Field {
 	}
 	if tcp.RTOMax < tcp.RTOMin {
 		return FieldTCPRTOMax
+	}
+	if tcp.OwnerMemoryBudget > tcp.MemoryBudget {
+		return FieldTCPOwnerMemoryBudget
 	}
 	return FieldNone
 }

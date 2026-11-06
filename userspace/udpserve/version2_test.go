@@ -129,8 +129,14 @@ func TestUDPQuotaSession(t *testing.T) {
 	if big.session.StartQuota(stack, 0, network.MaxUDPSessionQuota+1, big.tx, big.rx) {
 		t.Fatal("quota past the maximum")
 	}
-	big.session.StartQuota(stack, 0, network.MaxUDPSessionQuota, big.tx, big.rx)
-	for range network.MaxUDPSessionQuota {
+	// The largest grant is accepted; a smaller explicit one leaves the
+	// global limit room for the ordinary session below.
+	if !big.session.StartQuota(stack, 0, network.MaxUDPSessionQuota, big.tx, big.rx) {
+		t.Fatal("largest quota refused")
+	}
+	const granted = 64
+	big.session.StartQuota(stack, 0, granted, big.tx, big.rx)
+	for range granted {
 		big.open()
 	}
 	if reply := big.call(udpapi.Request{Opcode: udpapi.OpOpen}); reply.Result != udpapi.ResultBusy {

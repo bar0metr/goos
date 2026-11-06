@@ -100,13 +100,13 @@ func (p *pair4) connected(port uint16) (client tcpapi.Reply, server tcpapi.Entry
 	}
 	p.deliver()
 	if status := p.a.control.PopRX(&server); status != shmring.OK || server.Kind != tcpapi.EntryAccepted ||
-		server.Slot != listener.Slot || server.Generation != listener.Endpoint || server.Port != client.LocalPort {
+		server.Offset != uint32(listener.Index) || server.Generation != listener.Endpoint || server.Port != client.LocalPort {
 		p.t.Fatalf("accepted %d %+v", status, server)
 	}
 	return client, server
 }
 
-func (p *pair4) write(e *end4, slot uint8, index uint8, endpoint uint32, offset uint32, data []byte) {
+func (p *pair4) write(e *end4, slot uint8, index uint16, endpoint uint32, offset uint32, data []byte) {
 	p.t.Helper()
 	base := tcpapi.Layout4.Offset(slot)
 	copy(e.tx[base:], data)
@@ -135,8 +135,8 @@ func TestSession4StreamsWithoutReplies(t *testing.T) {
 	client, server := p.connected(9100)
 	p.push(&p.a, tcpapi.Entry{Kind: tcpapi.EntryCredit, Index: server.Index, Endpoint: server.Endpoint, Length: 2})
 	data := pattern(0, 20000)
-	p.write(&p.b, 0, client.Slot, client.Endpoint, 0, data[:tcpapi.SlotSize4])
-	p.write(&p.b, 1, client.Slot, client.Endpoint, tcpapi.SlotSize4, data[tcpapi.SlotSize4:])
+	p.write(&p.b, 0, client.Index, client.Endpoint, 0, data[:tcpapi.SlotSize4])
+	p.write(&p.b, 1, client.Index, client.Endpoint, tcpapi.SlotSize4, data[tcpapi.SlotSize4:])
 	p.deliver()
 	p.deliver()
 	if len(p.out.sent) != 0 {
@@ -165,7 +165,7 @@ func TestSession4StreamsWithoutReplies(t *testing.T) {
 		t.Fatalf("readiness %+v", ready)
 	}
 	// A write at the wrong offset comes back unsent.
-	p.write(&p.b, 0, client.Slot, client.Endpoint, 5, []byte("x"))
+	p.write(&p.b, 0, client.Index, client.Endpoint, 5, []byte("x"))
 	p.deliver()
 	if p.b.control.PopTXDone(&e) != shmring.OK || e.Result != tcpapi.ResultInvalidArgument || e.Length != 0 || e.Generation != 2 {
 		t.Fatalf("misplaced write %+v", e)
@@ -176,19 +176,19 @@ func TestSession4RejectsOwnershipViolations(t *testing.T) {
 	for name, violate := range map[string]func(p *pair4, client tcpapi.Reply, server tcpapi.Entry){
 		"write of a held slot": func(p *pair4, client tcpapi.Reply, _ tcpapi.Entry) {
 			// The second entry names the slot before netd handed it back.
-			p.write(&p.b, 3, client.Slot, client.Endpoint, 0, pattern(0, 100))
-			p.write(&p.b, 3, client.Slot, client.Endpoint, 100, pattern(0, 100))
+			p.write(&p.b, 3, client.Index, client.Endpoint, 0, pattern(0, 100))
+			p.write(&p.b, 3, client.Index, client.Endpoint, 100, pattern(0, 100))
 		},
 		"stale TX generation": func(p *pair4, client tcpapi.Reply, _ tcpapi.Entry) {
 			p.b.txGen[2] = 5
-			p.write(&p.b, 2, client.Slot, client.Endpoint, 0, []byte("x"))
+			p.write(&p.b, 2, client.Index, client.Endpoint, 0, []byte("x"))
 		},
 		"release of a slot not lent": func(p *pair4, _ tcpapi.Reply, _ tcpapi.Entry) {
 			p.push(&p.a, tcpapi.Entry{Kind: tcpapi.EntryRelease, Slot: 4, Generation: 0})
 		},
 		"release with a stale generation": func(p *pair4, client tcpapi.Reply, server tcpapi.Entry) {
 			p.push(&p.a, tcpapi.Entry{Kind: tcpapi.EntryCredit, Index: server.Index, Endpoint: server.Endpoint, Length: 1})
-			p.write(&p.b, 0, client.Slot, client.Endpoint, 0, []byte("abc"))
+			p.write(&p.b, 0, client.Index, client.Endpoint, 0, []byte("abc"))
 			p.deliver()
 			p.deliver()
 			var e tcpapi.Entry
@@ -231,11 +231,12 @@ func TestSession4RejectsOwnershipViolations(t *testing.T) {
 
 func TestSession4CloseIsAnOwnershipTransfer(t *testing.T) {
 	p := newPair4(t)
+	smallBuffers(t, p.stack)
 	client, server := p.connected(9102)
 	// Queue more than loopback buffers so slots are still held at Close.
 	var offset uint32
 	for slot := range uint8(8) {
-		p.write(&p.b, slot, client.Slot, client.Endpoint, offset, pattern(offset, tcpapi.SlotSize4))
+		p.write(&p.b, slot, client.Index, client.Endpoint, offset, pattern(offset, tcpapi.SlotSize4))
 		offset += tcpapi.SlotSize4
 	}
 	p.deliver()
@@ -246,7 +247,7 @@ func TestSession4CloseIsAnOwnershipTransfer(t *testing.T) {
 		t.Fatalf("close %+v", reply)
 	}
 	// A write after Close comes back closed; a second Close is refused.
-	p.write(&p.b, 9, client.Slot, client.Endpoint, offset, []byte("late"))
+	p.write(&p.b, 9, client.Index, client.Endpoint, offset, []byte("late"))
 	if reply := p.call(&p.b, tcpapi.Request{Opcode: tcpapi.OpClose, Endpoint: client.Endpoint}); reply.Result != tcpapi.ResultInvalidArgument {
 		t.Fatalf("second close %+v", reply)
 	}
@@ -293,19 +294,19 @@ func TestSession4CloseIsAnOwnershipTransfer(t *testing.T) {
 	}
 	// The ID stays reserved until the client forgets it; then a stale
 	// write naming it comes back invalid.
-	if snap := p.b.s.Snapshot(int(client.Slot)); snap.ID != client.Endpoint || snap.State != uint8(endpointClosed) {
+	if snap := p.b.s.Snapshot(int(client.Index)); snap.ID != client.Endpoint || snap.State != uint8(endpointClosed) {
 		t.Fatalf("entry %+v", snap)
 	}
-	p.push(&p.b, tcpapi.Entry{Kind: tcpapi.EntryForget, Index: client.Slot, Endpoint: client.Endpoint})
+	p.push(&p.b, tcpapi.Entry{Kind: tcpapi.EntryForget, Index: client.Index, Endpoint: client.Endpoint})
 	p.deliver()
-	if snap := p.b.s.Snapshot(int(client.Slot)); snap.ID != 0 {
+	if snap := p.b.s.Snapshot(int(client.Index)); snap.ID != 0 {
 		t.Fatalf("forgotten entry %+v", snap)
 	}
 	again := p.call(&p.b, tcpapi.Request{Opcode: tcpapi.OpOpen})
-	if again.Slot != client.Slot || again.Endpoint == client.Endpoint {
+	if again.Index != client.Index || again.Endpoint == client.Endpoint {
 		t.Fatalf("reopen %+v", again)
 	}
-	p.write(&p.b, 0, client.Slot, client.Endpoint, 0, []byte("stale"))
+	p.write(&p.b, 0, client.Index, client.Endpoint, 0, []byte("stale"))
 	p.deliver()
 	if p.b.control.PopTXDone(&e) != shmring.OK || e.Result != tcpapi.ResultInvalidArgument || e.Endpoint != client.Endpoint {
 		t.Fatalf("stale write %+v", e)
@@ -315,7 +316,7 @@ func TestSession4CloseIsAnOwnershipTransfer(t *testing.T) {
 func TestSession4ShutdownFollowsQueuedSlots(t *testing.T) {
 	p := newPair4(t)
 	client, server := p.connected(9103)
-	p.write(&p.b, 0, client.Slot, client.Endpoint, 0, pattern(0, 1000))
+	p.write(&p.b, 0, client.Index, client.Endpoint, 0, pattern(0, 1000))
 	if reply := p.call(&p.b, tcpapi.Request{Opcode: tcpapi.OpShutdownWrite, Endpoint: client.Endpoint}); reply.Result != tcpapi.ResultOK {
 		t.Fatalf("shutdown %+v", reply)
 	}
@@ -336,15 +337,15 @@ func TestSession4DoorbellOnlyWhenArmed(t *testing.T) {
 	client, server := p.connected(9104)
 	p.out.doorbells = 0
 	p.push(&p.a, tcpapi.Entry{Kind: tcpapi.EntryCredit, Index: server.Index, Endpoint: server.Endpoint, Length: 4})
-	p.write(&p.b, 0, client.Slot, client.Endpoint, 0, []byte("one"))
+	p.write(&p.b, 0, client.Index, client.Endpoint, 0, []byte("one"))
 	p.deliver()
 	if p.out.doorbells != 0 {
 		t.Fatalf("%d doorbells to clients that never armed", p.out.doorbells)
 	}
 	p.a.control.ClientArm()
 	p.b.control.ClientArm()
-	p.write(&p.b, 1, client.Slot, client.Endpoint, 3, []byte("two"))
-	p.write(&p.b, 2, client.Slot, client.Endpoint, 6, []byte("three"))
+	p.write(&p.b, 1, client.Index, client.Endpoint, 3, []byte("two"))
+	p.write(&p.b, 2, client.Index, client.Endpoint, 6, []byte("three"))
 	p.deliver()
 	p.deliver()
 	// Each armed client hears one doorbell, however many entries followed.
@@ -389,7 +390,7 @@ func TestSession4RunnableFindsDeliverWork(t *testing.T) {
 	if _, op, found := p.b.s.Runnable(p.stack); found {
 		t.Fatalf("idle session runnable %q", op)
 	}
-	p.write(&p.b, 0, client.Slot, client.Endpoint, 0, []byte("x"))
+	p.write(&p.b, 0, client.Index, client.Endpoint, 0, []byte("x"))
 	if _, op, found := p.b.s.Runnable(p.stack); !found || op != "rings" {
 		t.Fatalf("runnable %q", op)
 	}
@@ -398,5 +399,20 @@ func TestSession4RunnableFindsDeliverWork(t *testing.T) {
 	p.deliver()
 	if _, op, found := p.a.s.Runnable(p.stack); found {
 		t.Fatalf("after deliver %q", op)
+	}
+}
+
+// The stack grants larger quotas than a GTCP 4 table can index; such a
+// session does not start.
+func TestSession4QuotaStopsAtTheTable(t *testing.T) {
+	stack := new(network.Stack)
+	stack.Init(99)
+	tx, rx := make([]byte, tcpapi.Layout4.TXPool()), make([]byte, tcpapi.Layout4.RXPool())
+	var s Session4
+	if s.Start(stack, 0, tcpapi.Endpoints4+1, tx, rx, 1) {
+		t.Fatal("quota past the table accepted")
+	}
+	if !s.Start(stack, 0, tcpapi.Endpoints4, tx, rx, 1) {
+		t.Fatal("quota of the whole table refused")
 	}
 }

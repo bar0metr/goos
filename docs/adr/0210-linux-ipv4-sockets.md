@@ -28,7 +28,7 @@ Linux program
    | socket syscalls
    v
 kernel/compat/linux  -- descriptors, errno, signals, poll/select, sockaddr
-   | GLNXSOCK2, one session per Linux family
+   | GLNXSOCK3, one session per Linux family
    v
 linuxsockd  -- Linux socket objects, readiness, options
    | GTCP version 3          | GUDP version 2
@@ -38,14 +38,14 @@ netd  -- TCBs, UDP endpoints, bind conflicts, routing, ARP
 
 `linuxsockd` (`/system/services/linuxsockd`, logic in `userspace/linuxsock`) is a
 supervised native service that PID 1 starts after `netd`. It holds one
-GLNXCTL1 control channel from PID 1, one GTCP session and one GUDP session
+GLNXCTL2 control channel from PID 1, one GTCP session and one GUDP session
 with an explicit endpoint quota, and the service side of every family
 session. It holds no VFS, configuration, network-admin, device, IRQ, DMA or
 launch authority.
 
 ### Family sessions
 
-A family session is one channel and one 66-page pool
+A family session is one channel and one 76-page pool
 (`userspace/linuxsockapi`). PID 1 creates both for every Linux launch while
 `linuxsockd` is running and grants them to the launch as two more roles,
 after `vfs` and the optional `linux-tty`:
@@ -56,13 +56,13 @@ after `vfs` and the optional `linux-tty`:
 | `linux-net-pool` | memory | Read, Write |
 
 It sends the other channel end and a second handle to the pool to
-`linuxsockd` with GLNXCTL1 `AddFamily`, under a family token. The kernel
+`linuxsockd` with GLNXCTL2 `AddFamily`, under a family token. The kernel
 keeps both roles for the family, not for one process: `fork`, threads and
 `execve` share the session, and an independent launch has its own. A launch
 without the roles runs; `socket(AF_INET, ...)` fails with `ENETDOWN`.
 
-The pool is a readiness page, a ring page, eight TX slots and eight RX
-slots of 16 KiB each. The channel carries the control plane and the
+The pool is five readiness pages, a ring page, six snapshot pages for
+diagnostics, eight TX slots and eight RX slots of 16 KiB each. The channel carries the control plane and the
 doorbells; payload never travels in a message, and no message carries an
 address.
 
@@ -121,7 +121,7 @@ registered.
 client's queue full waits in the session, at most 128 of them, and goes
 when the channel turns writable.
 
-### GLNXSOCK2
+### GLNXSOCK3
 
 Requests are fixed 48-byte bodies with a nonzero correlation; replies echo
 it. Unused fields and reserved bytes are zero; a malformed message fails the
@@ -146,9 +146,9 @@ belong to the socket: a signal after the commit cannot take them back, and a
 call interrupted after some slots went returns the bytes it committed.
 Received slots stay queued for the socket across an interrupted read.
 
-Socket identities carry the session generation, a per-slot generation and
-the family table index. A reused slot or a new session never matches an old
-identity.
+Socket identities carry the session generation in the high 32 bits, a
+20-bit per-slot generation, and the family table index in the low 12 bits.
+A reused slot or a new session never matches an old identity.
 
 ### Readiness
 
@@ -216,6 +216,12 @@ every other request. Commands and `resolved` get 8, which
 not lower a grant above 8. `netd` holds 96 TCP and 96 UDP endpoints, 16 TCP
 listeners and 128 UDP receive buffers, of which one session holds at most
 64.
+
+These numbers were the limits when this ADR was accepted. ADR 0213 replaced
+the TCP side: the control quota is 16 bits, PID 1 grants `linuxsockd` 512
+endpoints per protocol, TCP allocates endpoints and rings per connection up
+to a tuned 1024 endpoints, and the native backlog is 128. Its revision
+grows the UDP registry the same way, 1024 endpoints by default.
 
 SO_REUSEADDR follows Linux. A TCP bind conflicts with an endpoint or
 TIME_WAIT four-tuple on the same port and an overlapping address, equal or
@@ -370,6 +376,66 @@ static libc resolves names with ordinary socket traffic.
   requests and frames of the pass share that time; it read the clock once
   per message before. The stack's TCP scans walk a mark per slot in use: a
   slot holds two 16 KiB rings, and the scans read the state of all 96.
+- Socket capacity moved from fixed tables to quotas. `linuxsockd` held 64
+  sockets in one static table, 32 per family. It now keeps sockets and
+  operations in 64-entry chunks it allocates as use grows, with a stack of
+  free entries, so opening and closing cost the same at any size and no
+  lookup scans the table. Three quotas (`Limits` in
+  `userspace/linuxsock/registry.go`) bound the sockets, the ones still
+  opening or accepted ahead included: 1024 across families, 512 per family,
+  and 32 that the service keeps back for each live family. A family at its
+  own quota gets `FamilyLimit`, which `socket` and `accept` report as
+  `EMFILE`, since closing its own sockets frees the room. A full service
+  gets `ServiceLimit`, reported as `ENFILE`. The service checks the family
+  quota first, then admits a socket only if the reserves the other families
+  still lack stay free: with 16 families each one keeps 32 sockets, half of
+  the service in all. `SetLimits` changes the quotas while no socket is
+  open; it refuses a family quota above the protocol's 512 or reserves that
+  do not fit the service quota together.
+
+  The protocol bound per family is a wire bound, so the session protocol
+  moved to GLNXSOCK3. The readiness entries of 512 sockets take five pages,
+  the socket snapshots move from the ring page to six pages of their own,
+  and the pool grows from 66 to 76 pages. An identity's index field grew
+  from 8 to 12 bits and its generation shrank from 24 to 20. The kernel
+  reads each entry from the page that holds it, keeps its socket slots on a
+  free stack, and maps the service's index to its slot, so a reply that
+  names a socket resolves without a scan. GLNXCTL2's Status reply carries
+  the service's use and quota, the family quota and reserve, and each
+  family's use; the family snapshot in the ring page carries the same for
+  its family, and the kernel's `linux-net-plane` diagnostic prints them.
+
+  `netd` grants `linuxsockd` 512 endpoints per protocol (ADR 0213), and
+  TCP and UDP sockets both reach that grant.
+
+- `linuxsockd`'s TCP session moved to GTCP 4 (ADR 0214); PID 1 opens it
+  with `tcpapi.Layout4` and the 512-endpoint quota. `linuxsock.RingLink`
+  maps the core's native operations onto the rings. A write copies the
+  family TX slot into a GTCP 4 TX slot and publishes `EntryWrite`; the
+  family slot goes back on `EntryWriteDone`. A read posts one fill of
+  credit, and `EntryData` fills the family RX slot before the link releases
+  the GTCP 4 slot. Waits and readiness queries answer from netd's readiness
+  page. A wait goes to netd only while a connect runs, or when the core
+  marks it `NativeWake`: a stream with no read posted whose bytes the
+  kernel does not hold, which learns of new bytes only through the wait. A
+  stream socket opens its endpoint when a request first needs one, so a
+  connect is one `OpOpenConnect`, and the warm pool keeps UDP endpoints
+  only. A listener has netd accept up to four children ahead
+  (`OpAcceptAhead`); `accept` takes them off the RX ring without a request.
+  Close hands the endpoint to netd, which still sends the queued slots; the
+  link gives closed endpoints up in batched `EntryForget`s. Before it
+  sleeps, `linuxsockd` takes the rings, arms its doorbell and checks them
+  once more; it waits on the TCP channel in the same WaitAny as the family
+  channels. UDP keeps GUDP 2 through `NativeLink`.
+
+  The world tests (`userspace/linuxsock/world*_test.go`) run the core and
+  the link against `tcpserve.Session4` and the real stack, each side
+  sleeping after every exchange. A steady 1 MiB stream costs no channel
+  request or reply, and 57 doorbells, 3.6 per 64 KiB; GTCP 3 costs 24
+  channel messages per 64 KiB in `tcpring`'s comparison. 150 loopback
+  connections (300 sockets) cost one `OpOpenConnect`, about one probe and
+  four waits each: one for the connect, the rest for sockets that found no
+  family RX slot free.
 
 ## Validation
 

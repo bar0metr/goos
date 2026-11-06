@@ -1,4 +1,4 @@
-// Package linuxsockapi defines GLNXSOCK2, the protocol between the kernel's
+// Package linuxsockapi defines GLNXSOCK3, the protocol between the kernel's
 // Linux compatibility layer and linuxsockd (ADR 0210).
 //
 // One session serves one Linux family: a channel and one shared pool. The
@@ -9,8 +9,8 @@
 // sleeps on readiness instead.
 //
 // Payload moves through the pool, not through the channel. The pool holds
-// a readiness page, a ring page, eight TX slots of 16 KiB and eight RX
-// slots of 16 KiB. The kernel copies a send into TX slots it owns and
+// the readiness pages, a ring page, the socket snapshot pages, eight TX
+// slots of 16 KiB and eight RX slots of 16 KiB. The kernel copies a send into TX slots it owns and
 // commits each slot on the submit ring; linuxsockd drains the slot into
 // netd and hands it back on the complete ring. linuxsockd reads ahead from
 // netd into RX slots it owns and publishes each slot to the kernel on the
@@ -31,13 +31,21 @@ import (
 )
 
 const (
-	ProtocolID  = uint64(0x474c4e58534f4332) // "GLNXSOC2"
-	Version     = uint16(2)
+	ProtocolID  = uint64(0x474c4e58534f4333) // "GLNXSOC3"
+	Version     = uint16(3)
 	RequestSize = 48
 	ReplySize   = 48
 
-	// MaxSockets bounds the sockets of one family, TCP and UDP together.
-	MaxSockets = 32
+	// MaxSockets is the wire bound on the sockets of one family, TCP and
+	// UDP together: it sizes the readiness pages and the snapshot pages of
+	// the pool and must fit the identity's index field. linuxsockd applies
+	// its own quota at or below it.
+	MaxSockets = 512
+	// IndexBits and GenerationBits split the low 32 bits of a socket
+	// identity.
+	IndexBits      = 12
+	GenerationBits = 32 - IndexBits
+	GenerationMask = 1<<GenerationBits - 1
 
 	SlotSize = 16384
 	TXSlots  = 8
@@ -45,14 +53,17 @@ const (
 	pageSize = 4096
 	// SlotPages is the pages of one slot.
 	SlotPages = SlotSize / pageSize
-	// The pool: the readiness page, the ring page, the TX slots, then the
-	// RX slots.
-	ReadinessPage = 0
-	RingPage      = 1
-	TXFirstPage   = 2
-	RXFirstPage   = TXFirstPage + TXSlots*SlotPages
-	PoolPages     = RXFirstPage + RXSlots*SlotPages
-	PoolBytes     = PoolPages * pageSize
+	// The pool: the readiness pages, the ring page, the snapshot pages, the
+	// TX slots, then the RX slots.
+	ReadinessPage  = 0
+	ReadinessPages = (ReadinessBytes + pageSize - 1) / pageSize
+	RingPage       = ReadinessPage + ReadinessPages
+	SnapshotPage   = RingPage + 1
+	SnapshotPages  = (MaxSockets + SnapshotsPerPage - 1) / SnapshotsPerPage
+	TXFirstPage    = SnapshotPage + SnapshotPages
+	RXFirstPage    = TXFirstPage + TXSlots*SlotPages
+	PoolPages      = RXFirstPage + RXSlots*SlotPages
+	PoolBytes      = PoolPages * pageSize
 
 	// MaxDatagram is the largest datagram either way, the GUDP limit.
 	MaxDatagram = 4096
@@ -159,7 +170,7 @@ const (
 	FlagEOF = uint8(1 << 0) // Read: the stream ended and nothing is left
 )
 
-// Result is a GLNXSOCK2 result. The kernel turns it into a Linux errno with
+// Result is a GLNXSOCK3 result. The kernel turns it into a Linux errno with
 // the call's context.
 type Result uint8
 
@@ -213,17 +224,20 @@ const (
 )
 
 // Socket identities: the session generation in the high 32 bits, a socket
-// generation in bits 8 to 31, and the family table index in the low byte.
-// The kernel uses only the index, to find the readiness entry; it never
-// builds an identity itself.
+// generation in the GenerationBits above the index, and the family table
+// index in the low IndexBits. The kernel uses only the index, to find the
+// readiness entry; it never builds an identity itself.
 func SocketIndex(socket uint64) (int, bool) {
-	index := int(socket & 0xff)
+	index := int(socket & (1<<IndexBits - 1))
 	return index, socket != 0 && index < MaxSockets
 }
 
 func MakeSocket(session uint32, generation uint32, index int) uint64 {
-	return uint64(session)<<32 | uint64(generation&0xffffff)<<8 | uint64(index&0xff)
+	return uint64(session)<<32 | uint64(generation&GenerationMask)<<IndexBits | uint64(index&(1<<IndexBits-1))
 }
+
+// The index field holds every family index.
+var _ [1<<IndexBits - MaxSockets]byte
 
 // SessionOf is the session generation a socket identity belongs to.
 func SessionOf(socket uint64) uint32 { return uint32(socket >> 32) }

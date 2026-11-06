@@ -126,8 +126,8 @@ func LayoutFor(version uint16) (Layout, bool) {
 	return Layout{}, false
 }
 
-func (l Layout) TXPool() uint64           { return uint64(l.TXSlots)*uint64(l.SlotSize) + l.controlBytes() }
-func (l Layout) RXPool() uint64           { return uint64(l.RXSlots)*uint64(l.SlotSize) + l.controlBytes() }
+func (l Layout) TXPool() uint64           { return uint64(l.TXSlots)*uint64(l.SlotSize) + l.txControlBytes() }
+func (l Layout) RXPool() uint64           { return uint64(l.RXSlots)*uint64(l.SlotSize) + l.rxControlBytes() }
 func (l Layout) TXPoolPages() uint64      { return l.TXPool() / pageSize }
 func (l Layout) RXPoolPages() uint64      { return l.RXPool() / pageSize }
 func (l Layout) Offset(slot uint8) uint64 { return uint64(slot) * uint64(l.SlotSize) }
@@ -255,6 +255,9 @@ type Reply struct {
 	Mask      uint16
 	Value     uint32
 	Room      uint32
+	// Index, in version 4, is the table index of the endpoint an Open,
+	// OpenConnect or Accept made; it travels in the length field.
+	Index uint16
 }
 
 var noAddress [4]byte
@@ -381,6 +384,9 @@ func validReply(l *Layout, r *Reply) bool {
 	if l.Version == Version4 {
 		return validReply4(r)
 	}
+	if r.Index != 0 {
+		return false
+	}
 	if r.Opcode < OpOpen || r.Opcode > lastOpcode || r.Opcode == OpRelease || r.Result > lastResult {
 		return false
 	}
@@ -438,7 +444,7 @@ func (l Layout) EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool
 	binary.LittleEndian.PutUint32(out.Payload[4:8], r.Endpoint)
 	copy(out.Payload[8:12], r.Address[:])
 	binary.LittleEndian.PutUint16(out.Payload[12:14], r.Port)
-	binary.LittleEndian.PutUint16(out.Payload[14:16], r.Length)
+	binary.LittleEndian.PutUint16(out.Payload[14:16], r.Length|r.Index)
 	copy(out.Payload[16:20], r.Local[:])
 	binary.LittleEndian.PutUint16(out.Payload[20:22], r.LocalPort)
 	binary.LittleEndian.PutUint16(out.Payload[22:24], r.Mask)
@@ -459,6 +465,9 @@ func (l Layout) DecodeReply(in *ipc.Message, out *Reply) (uint64, bool) {
 		Room: binary.LittleEndian.Uint32(in.Payload[28:32])}
 	copy(r.Address[:], in.Payload[8:12])
 	copy(r.Local[:], in.Payload[16:20])
+	if l.Version == Version4 {
+		r.Index, r.Length = r.Length, 0
+	}
 	if !validReply(&l, &r) {
 		return 0, false
 	}

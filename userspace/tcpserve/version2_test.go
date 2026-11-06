@@ -190,13 +190,13 @@ func TestNoWaitWriteTakesWhatFits(t *testing.T) {
 			}
 			break
 		}
-		if reply.Result != tcpapi.ResultOK || round > 16 {
+		if reply.Result != tcpapi.ResultOK || round > (network.DefaultTCPSendBuffer+network.DefaultTCPReceiveBuffer)/tcpapi.SlotSize+1 {
 			t.Fatalf("write %d %+v", round, reply)
 		}
 		total += int(reply.Length)
 	}
 	// The receiver's window and buffer and the sender's buffer hold it all.
-	if total < network.TCPSendCapacity {
+	if total < network.DefaultTCPSendBuffer {
 		t.Fatalf("took %d bytes", total)
 	}
 	ready := p.call(&p.client, tcpapi.Request{Opcode: tcpapi.OpReady, Endpoint: client})
@@ -311,7 +311,7 @@ func TestNoWaitConnectInProgressThenWaitReady(t *testing.T) {
 	if option.Result != tcpapi.ResultOK || option.Value != 536 { // the peer announced no MSS
 		t.Fatalf("MSS %+v", option)
 	}
-	for selector, want := range map[uint8]uint32{tcpapi.OptionSendBuffer: network.TCPSendCapacity, tcpapi.OptionReceiveBuffer: network.TCPReceiveCapacity, tcpapi.OptionTTL: 64} {
+	for selector, want := range map[uint8]uint32{tcpapi.OptionSendBuffer: 16384, tcpapi.OptionReceiveBuffer: 16384, tcpapi.OptionTTL: 64} {
 		if option := out.call(t, r.stack, &session, tcpapi.Request{Opcode: tcpapi.OpOption, Endpoint: id, Option: selector}, 6, r.now, out); option.Value != want {
 			t.Fatalf("option %d %+v", selector, option)
 		}

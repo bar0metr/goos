@@ -225,32 +225,33 @@ func TestDecodeReplyRefusesReservedBytes(t *testing.T) {
 }
 
 func TestSocketIdentity(t *testing.T) {
-	id := MakeSocket(0xdeadbeef, 0x123456, 31)
-	if index, ok := SocketIndex(id); !ok || index != 31 || SessionOf(id) != 0xdeadbeef {
+	id := MakeSocket(0xdeadbeef, 0x12345, 311)
+	if index, ok := SocketIndex(id); !ok || index != 311 || SessionOf(id) != 0xdeadbeef {
 		t.Fatalf("identity %#x", id)
 	}
 	if _, ok := SocketIndex(0); ok {
 		t.Fatal("zero identity")
 	}
-	if _, ok := SocketIndex(MakeSocket(1, 1, 32)); ok {
+	if _, ok := SocketIndex(MakeSocket(1, 1, MaxSockets)); ok {
 		t.Fatal("index past the family table")
 	}
 }
 
 func TestPoolLayout(t *testing.T) {
-	if TXOffset(0) != 2*pageSize || RXOffset(0) != 34*pageSize || PoolPages != 66 || RXOffset(RXSlots-1)+SlotSize != PoolBytes {
+	// Five readiness pages, the ring page, six snapshot pages, then the slots.
+	if TXOffset(0) != 12*pageSize || RXOffset(0) != 44*pageSize || PoolPages != 76 || RXOffset(RXSlots-1)+SlotSize != PoolBytes {
 		t.Fatalf("layout tx %d rx %d pages %d", TXOffset(0), RXOffset(0), PoolPages)
 	}
 	if TXPage(1, 2) != uint32(TXOffset(1)/pageSize)+2 || RXPage(7, 3)+1 != PoolPages {
 		t.Fatal("slot pages")
 	}
-	if ReadinessBytes > pageSize || RingBytes > ServiceCountersOffset || ServiceCountersOffset+8*ServiceCounterCount > pageSize {
+	if ReadinessBytes > ReadinessPages*pageSize || RingBytes > ServiceCountersOffset || SnapshotEnd > pageSize {
 		t.Fatal("a page overflows")
 	}
 }
 
 func TestReadinessPublishAndRead(t *testing.T) {
-	page := make([]byte, pageSize)
+	page := make([]byte, ReadinessPages*pageSize)
 	InitReadiness(page, 3)
 	if Magic(page) != ReadinessMagic || Session(page) != 3 {
 		t.Fatal("header")
@@ -278,7 +279,7 @@ func TestReadinessPublishAndRead(t *testing.T) {
 }
 
 func TestReadinessToken(t *testing.T) {
-	page := make([]byte, pageSize)
+	page := make([]byte, ReadinessPages*pageSize)
 	InitReadiness(page, 1)
 	if !ClaimToken(page) || ClaimToken(page) {
 		t.Fatal("token claimed twice")
@@ -296,7 +297,7 @@ func TestReadinessToken(t *testing.T) {
 // The kernel reads entries while the service rewrites them; a read never
 // returns a mix of two states.
 func TestReadinessReadsAreConsistent(t *testing.T) {
-	page := make([]byte, pageSize)
+	page := make([]byte, ReadinessPages*pageSize)
 	InitReadiness(page, 1)
 	var group sync.WaitGroup
 	group.Add(1)
@@ -317,7 +318,7 @@ func TestReadinessReadsAreConsistent(t *testing.T) {
 // An entry a writer holds is busy, not broken: the kernel waits for the
 // notification instead of failing the session.
 func TestReadEntryTellsBusyFromInvalid(t *testing.T) {
-	page := make([]byte, pageSize)
+	page := make([]byte, ReadinessPages*pageSize)
 	InitReadiness(page, 1)
 	Publish(page, 3, Readiness{Socket: socket, Ready: ReadyOut})
 	if state, status := ReadEntry(page, 3, 4); status != EntrySettled || state.Ready != ReadyOut {

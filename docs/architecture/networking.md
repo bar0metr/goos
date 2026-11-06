@@ -102,7 +102,8 @@ holds no device authority, and the driver holds no filesystem,
 configuration or client session.
 
 `netd` waits on its driver channel, its control channel, up to eight
-command sessions and up to eight UDP sessions in one `WaitAny`, with a timeout set by the stack's earliest
+command sessions, up to eight UDP sessions and up to 46 TCP sessions in one
+`WaitAny`, with a timeout set by the stack's earliest
 timer, or 30 seconds when no timer is due. The driver waits on its channel
 and its interrupt line in one `WaitAny` with a 10-second timeout and does not
 touch the device when the timeout expires.
@@ -252,11 +253,14 @@ multicast, a subnet's network or broadcast address and port 0 are refused as
 destinations. A received datagram goes to the endpoint bound to its
 destination address and port, or else to the one bound to the wildcard on
 that port. Among endpoints that share a binding by `ReuseAddr`, the one bound
-last receives unicast, as on Linux. Queued payloads share 128 receive
-buffers of 4096 bytes, 512 KiB in all, and one session holds at most 64 of
-them, one for each endpoint of a session at the largest quota; a full queue
-or share drops the newcomer and keeps what is queued. No ICMP Port
-Unreachable is sent for an unbound port.
+last receives unicast, as on Linux. The stack files bound endpoints in a
+hash table by port, so delivery reads one bucket, and the endpoint registry
+grows as sessions open endpoints: 1024 by default, 4096 at most. Queued
+payloads share at most 512 receive buffers of 4096 bytes; the pool allocates
+a buffer when no free one is left and keeps it, so it holds 2 MiB at its
+peak. One session holds at most 256 of them. A full queue or share drops the
+newcomer and keeps what is queued. No ICMP Port Unreachable is sent for an
+unbound port.
 
 ## TCP
 
@@ -337,25 +341,36 @@ its old connections wait out TIME_WAIT.
 
 The stack supports bind, ephemeral ports, listen, deferred accept and connect,
 bounded byte-stream reads and writes, retransmission, receive and congestion
-windows, bounded out-of-order reassembly, zero-window probes, FIN half-close,
-RST and TIME_WAIT. Each connection has fixed 16 KiB send and receive arrays;
-the global table has 96 endpoints and at most 16 listeners. Runtime settings
-can lower these limits but cannot allocate more storage.
+windows, window scaling, bounded out-of-order reassembly, zero-window probes,
+FIN half-close, RST and TIME_WAIT. The stack allocates a control block per endpoint, a
+receive ring when a handshake starts and a send ring on the first write;
+rings start at 4 KiB (16 KiB on loopback) and double up to the tuned buffer,
+256 KiB by default. A SYN offers the RFC 7323 window scale option when the
+tuned receive buffer exceeds 65535 bytes, with the least shift that fits it
+(3 for 256 KiB). A SYN-ACK offers one only in answer to a SYN that did. With
+both offered, every later segment's window carries the shift, so a grown
+ring widens the window on the wire past 64 KiB; with either missing,
+neither side scales. Loopback connections negotiate the same way.
+Out-of-order bytes wait in the receive ring. The
+endpoint limit is 1024 by default and 4096 at most, with at most 256
+listeners; ring memory is bounded to 16 MiB, 8 MiB per owner. Indexes find
+a segment's connection, a listener or a port's holders without walking the
+endpoints, and a heap holds the timers (ADR 0213).
 
 ### Session quotas
 
 Each TCP and UDP session has an endpoint quota that PID 1 names in
-GNETCTL version 6 (`ControlAddTCPSession` and `ControlAddUDPSession` carry
-it in byte 2, 1 to 64). Commands and `resolved` get the ordinary quota of
-8; `max-endpoints-per-session` can lower it. PID 1 asks for 64 for
+GNETCTL version 7 (`ControlAddTCPSession` and `ControlAddUDPSession` carry
+it in bytes 4 and 5, 1 to 512). Commands and `resolved` get the ordinary
+quota of 8; `max-endpoints-per-session` can lower it. PID 1 asks for 512 for
 `linuxsockd`, and the tuning does not lower a grant above the ordinary
-quota. `netd` holds 8 TCP and 8 UDP sessions. Its per-session tables and the
-TIME_WAIT tombstone table fit the largest quota, so a session at 64 cannot
-take another session's share: an owner keeps four tombstones for each
-endpoint of its quota, and at least 32, in a table of 2048. A server that
-clients close first leaves one per connection; at 64 endpoints `linuxsockd`
-serves 320 connections in a TIME_WAIT interval before `Open` waits for one to
-expire. A passive child counts against its listener's session.
+quota. `netd` holds 46 TCP and 8 UDP sessions, and each session's table
+fits its own quota, so `linuxsockd` can hold 512 UDP endpoints. A
+connection its owner closed leaves TIME_WAIT as a
+tombstone outside the quota, 2048 per owner and 8192 in all; with the
+budget full the connection stays an endpoint on the quota and the owner's
+next `Open` gets `Busy`. A passive child counts against its listener's
+session.
 
 Traffic to `127.0.0.0/8` or the current interface address is fed back through
 the TCP parser and state machine. It does not use ARP or the virtio driver.

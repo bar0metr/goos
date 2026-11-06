@@ -12,7 +12,11 @@ const (
 	tcpOptionEOL  = 0
 	tcpOptionNOP  = 1
 	tcpOptionMSS  = 2
-	tcpDefaultMSS = 536
+	// tcpOptionWindowScale is the RFC 7323 option. A shift above
+	// tcpMaxWindowScale counts as tcpMaxWindowScale (RFC 7323 2.3).
+	tcpOptionWindowScale = 3
+	tcpMaxWindowScale    = 14
+	tcpDefaultMSS        = 536
 )
 
 type tcpStatus uint8
@@ -31,7 +35,11 @@ type tcpSegment struct {
 	flags           uint8
 	window          uint16
 	mss             uint16
-	payload         []byte
+	// wscaleOK marks a segment carrying the window scale option, and
+	// wscale its shift. Only a SYN's option counts.
+	wscaleOK bool
+	wscale   uint8
+	payload  []byte
 	// tail continues payload on output only; parseTCP never sets it.
 	tail []byte
 }
@@ -90,18 +98,29 @@ func parseTCP(packet ipv4Packet) (tcpSegment, tcpStatus) {
 			}
 			segment.mss = mss
 		}
+		if kind == tcpOptionWindowScale {
+			if optionLength != 3 {
+				return tcpSegment{}, tcpMalformed
+			}
+			segment.wscaleOK, segment.wscale = true, min(data[offset+2], tcpMaxWindowScale)
+		}
 		offset += optionLength
 	}
 	segment.payload = data[headerLength:]
 	return segment, tcpOK
 }
 
-// putTCP writes a header, an MSS option on SYN, payload and tail. It returns
-// the segment length. The caller must provide enough space.
+// putTCP writes a header, the MSS and window scale options on SYN, payload
+// and tail. It returns the segment length. The caller must provide enough
+// space.
 func putTCP(out []byte, source, destination IPv4, segment tcpSegment) int {
 	headerLength := tcpHeaderSize
-	if segment.flags&tcpFlagSYN != 0 {
+	syn := segment.flags&tcpFlagSYN != 0
+	if syn {
 		headerLength += 4
+		if segment.wscaleOK {
+			headerLength += 4
+		}
 	}
 	length := headerLength + len(segment.payload) + len(segment.tail)
 	for index := 0; index < headerLength; index++ {
@@ -114,9 +133,12 @@ func putTCP(out []byte, source, destination IPv4, segment tcpSegment) int {
 	out[12] = byte(headerLength/4) << 4
 	out[13] = segment.flags
 	binary.BigEndian.PutUint16(out[14:16], segment.window)
-	if headerLength > tcpHeaderSize {
+	if syn {
 		out[20], out[21] = tcpOptionMSS, 4
 		binary.BigEndian.PutUint16(out[22:24], segment.mss)
+		if segment.wscaleOK {
+			out[24], out[25], out[26], out[27] = tcpOptionNOP, tcpOptionWindowScale, 3, segment.wscale
+		}
 	}
 	copied := copy(out[headerLength:length], segment.payload)
 	copy(out[headerLength+copied:length], segment.tail)

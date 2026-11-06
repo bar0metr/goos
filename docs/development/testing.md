@@ -1070,8 +1070,15 @@ Run TCP parser, state-machine, GTCP1 and service tests on the host first:
 
 ```sh
 go test ./userspace/network ./userspace/tcpapi ./userspace/tcpserve
+go test -tags goos_validation ./userspace/network
+go test -run '^$' -fuzz FuzzTCPReassembly -fuzztime 30s ./userspace/network
 go test ./tools/netpeer
 ```
+
+The host harness checks the TCP indexes, timer heap and memory charges after
+every step. The `goos_validation` build also compares each lookup with a
+walk of every endpoint. `TestTCPManyLoopbackConnections` holds 300
+connections and fails if a segment's lookups need more than eight probes.
 
 `make test-network` is the only TCP VM gate. It reuses the existing private
 network boots and adds remote echo, payloads across MSS boundaries, delayed

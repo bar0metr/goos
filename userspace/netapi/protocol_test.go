@@ -155,7 +155,7 @@ func replies() []Reply {
 			Defenses: 9, Relinquished: 10, RateLimits: 11, Loopback: 12,
 			UDPRX: 13, UDPTX: 14, UDPDropNoEndpoint: 15, UDPDropQueueFull: 16, UDPDropChecksum: 17, UDPDropTooLong: 18,
 			UDPBindFail: 19, UDPEndpoints: 3, UDPEphemeralMin: 49152, UDPEphemeralMax: 65535, UDPMaxPayload: 4096,
-			UDPReceiveQueue: 8, UDPMaxEndpoints: 32, UDPSessionEndpoints: 8},
+			UDPReceiveQueue: 8, UDPMaxEndpoints: 1024, UDPSessionEndpoints: 8},
 		{Opcode: OpStatus, State: StateConfiguring, Link: LinkUp, MTU: 576, Fallback: true},
 		{Opcode: OpStatus},
 		{Opcode: OpStatus, Result: ResultPermissionDenied},
@@ -175,8 +175,8 @@ func replies() []Reply {
 		{Opcode: OpServers, Result: ResultPermissionDenied},
 		{Opcode: OpTCPStatus, TCPRX: 1, TCPTX: 2, TCPRetransmits: 3, TCPDropChecksum: 4,
 			TCPEndpoints: 3, TCPListeners: 1, TCPConnections: 2, TCPStates: [tcpStateCount]uint16{0, 1, 1, 1},
-			TCPEphemeralMin: 49152, TCPEphemeralMax: 65535, TCPMaxEndpoints: 32, TCPSessionEndpoints: 8,
-			TCPListenBacklog: 8, TCPSendBuffer: 16384, TCPReceiveBuffer: 16384,
+			TCPEphemeralMin: 49152, TCPEphemeralMax: 65535, TCPMaxEndpoints: 1024, TCPSessionEndpoints: 8,
+			TCPListenBacklog: 128, TCPSendBuffer: 262144, TCPReceiveBuffer: 262144,
 			TCPConnectTimeoutMS: 30000, TCPRTOMinMS: 1000, TCPRTOMaxMS: 60000, TCPTimeWaitMS: 60000,
 			GTCP2Requests: 5, GTCP2Replies: 6, GTCP3Requests: 1 << 40, GTCP3Replies: ^uint64(0)},
 		{Opcode: OpTCPStatus, Result: ResultPermissionDenied},
@@ -254,7 +254,8 @@ func TestReplyUnusedBytes(t *testing.T) {
 	statusUsed := span(2, 12)
 	statusUsed = append(statusUsed, span(24, 40)...)
 	statusUsed = append(statusUsed, span(44, 145)...)
-	statusUsed = append(statusUsed, span(replyUDP, replyServerN)...)
+	statusUsed = append(statusUsed, span(replyUDP, replyReserved1)...)
+	statusUsed = append(statusUsed, replySessionEP, replyMaxEP, replyMaxEP+1)
 	used := map[int][]int{
 		0:  statusUsed,
 		1:  statusUsed,
@@ -272,7 +273,7 @@ func TestReplyUnusedBytes(t *testing.T) {
 		16: append([]int{replyServerN}, span(replyServerGen, replyServers)...),
 		18: append(append(append(span(replyTCPCounters, replyTCPConnections+2),
 			span(replyTCPStates, replyTCPStates+2*tcpStateCount)...),
-			span(replyTCPLimits, replyTCPLimits+7)...), append(span(replyTCPLimits+8, replyTCPLimits+28),
+			replyTCPSessionEP), append(span(replyTCPLimits, replyTCPLimits+32),
 			span(replyTCPMessages, replyTCPMessages+8*gtcpCounterCount)...)...),
 	}
 	for index, reply := range replies() {
@@ -314,7 +315,8 @@ func TestReplyRejects(t *testing.T) {
 		{"version 2", func(m *ipc.Message) { m.Version = 2 }},
 		{"version 3", func(m *ipc.Message) { m.Version = 3 }},
 		{"version 4", func(m *ipc.Message) { m.Version = 4 }},
-		{"version 7", func(m *ipc.Message) { m.Version = 7 }},
+		{"version 6", func(m *ipc.Message) { m.Version = 6 }},
+		{"version 8", func(m *ipc.Message) { m.Version = 8 }},
 		{"version 5", func(m *ipc.Message) { m.Version = 5 }},
 		{"request kind", func(m *ipc.Message) { m.Kind = ipc.KindRequest }},
 		{"correlation", func(m *ipc.Message) { m.Correlation = 8 }},

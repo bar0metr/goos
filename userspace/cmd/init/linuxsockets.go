@@ -4,7 +4,7 @@ package main
 
 // The Linux socket service (ADR 0210). PID 1 runs linuxsockd from the
 // installed system in normal mode, after netd, and holds the client end of
-// its GLNXCTL1 control channel. It gives the service a native TCP and a
+// its GLNXCTL2 control channel. It gives the service a native TCP and a
 // native UDP session at every start of either service, and a family session
 // for every Linux launch while the service runs: a channel and a 17-page
 // pool, one end of each granted to the launch as linux-net and
@@ -140,8 +140,8 @@ func linuxSockRunning() bool {
 
 // bindLinuxSockBackends hands the service a TCP and a UDP session, each
 // under a new generation. openLinuxSocketSessions asks netd for both with
-// the endpoint quota the service's socket table needs and GTCP 3 for TCP
-// (GNETCTL 6).
+// netd's largest per-session endpoint quota and GTCP 4 for TCP (GNETCTL 6).
+// The service's socket quotas reach past it.
 func bindLinuxSockBackends() {
 	tcp, udp, ok := openLinuxSocketSessions()
 	if !ok {

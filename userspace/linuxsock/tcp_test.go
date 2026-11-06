@@ -133,7 +133,7 @@ func TestAcceptWithFullFamilyLeavesChildInNetd(t *testing.T) {
 	h := newHarness(t)
 	f := h.family(1, 7)
 	id := listener(h, f)
-	for h.svc.families[f].count < linuxsockapi.MaxSockets {
+	for h.svc.families[f].count < h.svc.Limits().Family {
 		h.open(f, linuxsockapi.KindDatagram)
 	}
 	if reply := h.call(f, linuxsockapi.Request{Opcode: opAccept, Socket: id}); reply.Result != linuxsockapi.ResultFamilyLimit {

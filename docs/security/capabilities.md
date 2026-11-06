@@ -431,7 +431,7 @@ check reads them.
 
 | Object | PID 1 keeps | Moved to `linuxsockd` | Consumed |
 | --- | --- | --- | --- |
-| `GLNXCTL1` control channel, service end | the other end | R W Wait | yes |
+| `GLNXCTL2` control channel, service end | the other end | R W Wait | yes |
 | console device | yes | W | no |
 | TCP session channel, pools, quota 64, in `SetTCP` | - | as for a command | yes |
 | UDP session channel, pools, quota 64, in `SetUDP` | - | as for a command | yes |

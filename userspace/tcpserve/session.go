@@ -54,14 +54,14 @@ type waiter struct {
 	readyMask uint16
 }
 
-// Session's endpoint table fits the largest quota a session can be granted;
-// the stack enforces the session's own quota.
+// Session's endpoint table fits the session's quota, sized when it starts;
+// the stack enforces the quota.
 type Session struct {
 	owner     int
 	layout    tcpapi.Layout
 	tx, rx    []byte
 	rxSlots   tcpapi.Slots
-	endpoints [network.MaxTCPSessionQuota]waiter
+	endpoints []waiter
 	reply     tcpapi.Reply
 	// delivered counts the answers of the Deliver pass under way.
 	delivered int
@@ -94,6 +94,7 @@ func (s *Session) StartLayout(stack *network.Stack, owner, quota int, layout tcp
 	}
 	s.owner, s.layout, s.tx, s.rx = owner, layout, tx, rx
 	s.rxSlots.Reset(layout.RXSlots)
+	s.endpoints = tableFor(s.endpoints, max(quota, network.MaxTCPEndpointsPerSession))
 	for index := range s.endpoints {
 		s.endpoints[index] = waiter{}
 	}
@@ -661,3 +662,12 @@ func Result(result network.Result) tcpapi.Result {
 
 // RXLentBits reports the RX slots the client holds, for diagnostics.
 func (s *Session) RXLentBits() uint8 { return s.rxSlots.Bits() }
+
+// tableFor returns table resized to size entries, reusing its storage when
+// it is large enough.
+func tableFor(table []waiter, size int) []waiter {
+	if cap(table) < size {
+		return make([]waiter, size)
+	}
+	return table[:size]
+}

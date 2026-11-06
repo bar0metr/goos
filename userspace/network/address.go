@@ -71,7 +71,9 @@ const (
 	FieldTCPRTOMin
 	FieldTCPRTOMax
 	FieldTCPTimeWait
-	lastField = FieldTCPTimeWait
+	FieldTCPMemoryBudget
+	FieldTCPOwnerMemoryBudget
+	lastField = FieldTCPOwnerMemoryBudget
 )
 
 // Result values are the GNETAPI1 wire values.

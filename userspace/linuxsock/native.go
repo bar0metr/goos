@@ -7,7 +7,7 @@ import (
 	"goos/userspace/udpapi"
 )
 
-// The native sessions' sizes (GTCP 3, GUDP 2). A TCP NativeWrite carries at
+// The native sessions' sizes (GTCP 4, GUDP 2). A TCP NativeWrite carries at
 // most NativeStreamSlot bytes and a TCP NativeRead returns at most that many;
 // the backend sends a longer write's first NativeStreamSlot bytes only. One
 // TCP endpoint should have at most NativePipelinedWrites writes in flight
@@ -15,11 +15,20 @@ import (
 // session has NativeStreamTXSlots write slots over all its endpoints. A
 // datagram holds at most NativeDatagramSlot bytes.
 const (
-	NativeStreamSlot      = tcpapi.SlotSize3
-	NativeStreamTXSlots   = tcpapi.TXSlots3
-	NativePipelinedWrites = tcpapi.PipelinedWrites3
-	NativeQueuedReads     = tcpapi.QueuedReads3
+	NativeStreamSlot      = tcpapi.SlotSize4
+	NativeStreamTXSlots   = tcpapi.TXSlots4
+	NativePipelinedWrites = 4
+	NativeQueuedReads     = 4
 	NativeDatagramSlot    = udpapi.SlotSize
+)
+
+// A version 3 session must carry the same sizes, as the GTCP 3 link and its
+// tests still do.
+var (
+	_ [tcpapi.SlotSize3 - NativeStreamSlot]byte
+	_ [tcpapi.PipelinedWrites3 - NativePipelinedWrites]byte
+	_ [tcpapi.QueuedReads3 - NativeQueuedReads]byte
+	_ [tcpapi.MaxCredit4 - NativeQueuedReads - 1]byte
 )
 
 // Proto names the native session a request goes to.
@@ -31,8 +40,9 @@ const (
 )
 
 // NativeOp is one operation of the native TCP or UDP protocol, in the form
-// the service needs from GTCP version 3 and GUDP version 2 (ADR 0210).
-// Every operation but WaitReady completes at once in netd.
+// the service needs from GTCP version 4 and GUDP version 2 (ADR 0210).
+// Every operation but WaitReady completes at once in netd; a GTCP 4 read
+// completes once data, the end of the stream or an error arrives.
 type NativeOp uint8
 
 const (
@@ -79,6 +89,11 @@ const (
 	NativeError
 	// NativeOption reads the effective value of Option into Value.
 	NativeOption
+	// NativeOpenConnect opens a TCP endpoint and connects it to Address and
+	// Port, NoWait as NativeConnect is. The completion's Endpoint names the
+	// endpoint, zero when the failure left none open; an InProgress
+	// completion carries MaskConnecting in Mask. GTCP 4 only.
+	NativeOpenConnect
 )
 
 // NativeFlags qualify a request.
@@ -88,6 +103,13 @@ const (
 	NativeNoWait NativeFlags = 1 << iota
 	NativePeek
 	NativeReuseAddr
+	// NativeWake marks a NativeWaitReady on a stream that has no read
+	// posted and none of whose bytes the kernel holds: only the wait's
+	// answer would tell the core that bytes arrived. A GTCP 4 link holds
+	// other waits itself and answers them from the readiness page. A wait
+	// submitted again under its own tag with NativeWake set marks the held
+	// one.
+	NativeWake
 )
 
 // NativeMask is an endpoint's readiness as netd reports it.
@@ -219,7 +241,7 @@ type Transport interface {
 	Drop(family int)
 }
 
-// nativeResult maps a native outcome onto GLNXSOCK2.
+// nativeResult maps a native outcome onto GLNXSOCK3.
 func nativeResult(result NativeResult) linuxsockapi.Result {
 	switch result {
 	case NativeOK, NativeEOF:

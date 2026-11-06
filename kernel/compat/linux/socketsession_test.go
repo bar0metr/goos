@@ -350,3 +350,71 @@ func TestSocketDeferredCloses(t *testing.T) {
 		t.Fatalf("took %d", count)
 	}
 }
+
+// A family holds MaxSockets sockets; a closed slot takes the next one, and
+// identities resolve through the service's index without a scan, also
+// after a reattach leaves the old session's sockets in their slots.
+func TestSocketTableFillsAndResolvesByIndex(t *testing.T) {
+	_, endpoint := newTestSession(t)
+	objects := make([]uint64, MaxSockets)
+	for index := range objects {
+		object, created := NewSocket(testFamily, endpoint.Session, linuxsockapi.MakeSocket(endpoint.Session, 1, index), index%2 == 0)
+		if !created {
+			t.Fatalf("socket %d", index)
+		}
+		objects[index] = object
+	}
+	if HasSocketRoom(testFamily) {
+		t.Fatal("room past MaxSockets")
+	}
+	if _, created := NewSocket(testFamily, endpoint.Session, linuxsockapi.MakeSocket(endpoint.Session, 2, 0), false); created {
+		t.Fatal("socket past MaxSockets")
+	}
+	context, _, _ := netContextHeld(testFamily)
+	last := linuxsockapi.MakeSocket(endpoint.Session, 1, MaxSockets-1)
+	if datagram, found := context.socketKindHeld(last); !found || datagram {
+		t.Fatalf("lookup of index %d", MaxSockets-1)
+	}
+	if context.knownIdentityHeld(linuxsockapi.MakeSocket(endpoint.Session, 2, MaxSockets-1)) {
+		t.Fatal("an older generation resolves")
+	}
+	if _, _, send := CloseSocket(objects[300]); !send {
+		t.Fatal("close")
+	}
+	if !HasSocketRoom(testFamily) || context.knownIdentityHeld(linuxsockapi.MakeSocket(endpoint.Session, 1, 300)) {
+		t.Fatal("closed slot")
+	}
+	reused, created := NewSocket(testFamily, endpoint.Session, linuxsockapi.MakeSocket(endpoint.Session, 2, 300), true)
+	if !created || reused == objects[300] {
+		t.Fatal("reuse")
+	}
+	if _, _, _, found := SocketOf(objects[300]); found {
+		t.Fatal("a stale description resolves")
+	}
+	if _, _, failed := FailNet(testFamily, endpoint.Session, nil); !failed {
+		t.Fatal("fail")
+	}
+	grant := NetGrant{Holder: 7, ChannelHandle: 5, PoolHandle: 6, Channel: 0xa000, Side: 0, PoolObject: 0x78}
+	if _, _, ok := AttachNet(testFamily, grant, false); !ok {
+		t.Fatal("reattach")
+	}
+	fresh, _, _ := NetSession(testFamily)
+	if context.knownIdentityHeld(last) {
+		t.Fatal("an old session's socket resolves in the new one")
+	}
+	// The new session's socket at index 9 lives beside the old one; closing
+	// the old one leaves the new mapping.
+	CloseSocket(objects[7])
+	newIdentity := linuxsockapi.MakeSocket(fresh.Session, 1, 9)
+	object, created := NewSocket(testFamily, fresh.Session, newIdentity, false)
+	if !created || !context.knownIdentityHeld(newIdentity) {
+		t.Fatal("new session socket")
+	}
+	CloseSocket(objects[9])
+	if !context.knownIdentityHeld(newIdentity) {
+		t.Fatal("closing the old socket dropped the new mapping")
+	}
+	if _, _, _, found := SocketOf(object); !found {
+		t.Fatal("new socket lost")
+	}
+}

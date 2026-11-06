@@ -44,6 +44,7 @@ func newPools3() pools {
 func newPair3(t *testing.T) *pair3 {
 	p := &pair3{t: t, stack: new(network.Stack), now: 1_000_000_000, out: new(codec3), serverPools: newPools3(), clientPools: newPools3()}
 	p.stack.Init(1234)
+	smallBuffers(t, p.stack)
 	if !p.server.StartLayout(p.stack, 0, 0, tcpapi.Layout3, p.serverPools.tx, p.serverPools.rx, p.now) ||
 		!p.client.StartLayout(p.stack, 1, 0, tcpapi.Layout3, p.clientPools.tx, p.clientPools.rx, p.now) {
 		t.Fatal("start")

@@ -1,10 +1,10 @@
 //go:build goos_userspace
 
 // Command linuxsockd keeps the Linux socket objects of every Linux family
-// (ADR 0210). The kernel talks GLNXSOCK2 to it over one family session per
+// (ADR 0210). The kernel talks GLNXSOCK3 to it over one family session per
 // Linux launch; it keeps each socket over a native TCP or UDP endpoint in
 // netd. PID 1 hands it the family sessions and the native sessions over
-// GLNXCTL1. It holds no VFS, configuration, device or launch authority.
+// GLNXCTL2. It holds no VFS, configuration, device or launch authority.
 //
 // The logic is userspace/linuxsock. This file owns the handles: the control
 // channel, each family's channel and mapped pool, and the event loop.
@@ -75,16 +75,25 @@ func userspaceMain() {
 		fatal("LINUXSOCKD_CONTROL_MISSING\n")
 	}
 	core.Init(backend{}, transport{})
+	core.SetStreamRing(true)
 	core.SetWarm(linuxsock.MaxWarm)
-	core.SetLinkView(&links[linuxsock.TCP].state)
+	core.SetLinkView(&tcpRing)
 	mark("LINUXSOCKD_STARTED_OK\n")
 	serve()
 }
 
 func serve() {
 	for {
+		// The rings first: whatever the TCP session published must be taken
+		// before linuxsockd sleeps, and its doorbell armed.
+		timeout := kcall.WaitAnyInfiniteTimeout
+		if settleRing() {
+			// Release entries wait for ring room; netd says nothing when it
+			// takes entries, so come back after a tick.
+			timeout = 1
+		}
 		count := buildInterests()
-		result, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout)
+		result, status := userwait.Any(&interests, count, timeout)
 		if status == kcall.StatusTimeout {
 			continue
 		}

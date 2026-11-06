@@ -2,7 +2,7 @@
 
 package main
 
-// The kernel's data plane of a GLNXSOCK2 session (ADR 0210): copying a send
+// The kernel's data plane of a GLNXSOCK3 session (ADR 0210): copying a send
 // into TX slots and committing them, taking received bytes from the RX
 // slots a socket has queued, draining the complete ring, and ringing the
 // service's doorbell. The ownership rules are in compat/linux/socketdata.go.

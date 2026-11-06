@@ -33,6 +33,9 @@ type Session4 struct {
 	// rotor is the endpoint the next RX fill pass starts from, so one busy
 	// endpoint cannot keep every RX slot.
 	rotor int
+	// limit is one past the highest table index the session used; the
+	// passes over the table stop there.
+	limit int
 	// worked counts the ring entries taken and published, the stack calls
 	// that moved bytes and the replies of the pass under way.
 	worked     int
@@ -47,6 +50,9 @@ type Counters4 struct {
 	// Doorbells counts the OpDoorbell notifications netd sent.
 	Doorbells uint64
 }
+
+// The table holds the largest quota the stack grants a session.
+var _ [tcpapi.Endpoints4 - network.MaxTCPSessionQuota]byte
 
 // FaultProtocol ends a session whose ring entry broke the data plane rules.
 const FaultProtocol Fault = "data plane protocol violation"
@@ -93,7 +99,7 @@ type endpoint4 struct {
 type txSlot4 struct {
 	held       bool
 	generation uint32
-	index      uint8
+	index      uint16
 	endpoint   uint32
 	length     uint32
 	taken      uint32
@@ -106,16 +112,35 @@ type txSlot4 struct {
 func (s *Session4) Start(stack *network.Stack, owner, quota int, tx, rx []byte, now uint64) bool {
 	stack.TCPCloseOwner(owner, now)
 	control, ok := tcpapi.ControlOf(tx, rx)
-	if !ok || uint64(len(tx)) < tcpapi.Layout4.TXPool() || uint64(len(rx)) < tcpapi.Layout4.RXPool() || !stack.SetTCPQuota(owner, quota) {
+	// The ring entries name a table index in eight bits, so the table and
+	// the quota stop at tcpapi.Endpoints4 whatever the stack grants.
+	if !ok || uint64(len(tx)) < tcpapi.Layout4.TXPool() || uint64(len(rx)) < tcpapi.Layout4.RXPool() ||
+		quota > tcpapi.Endpoints4 || !stack.SetTCPQuota(owner, quota) {
 		stack.SetTCPQuota(owner, 0)
 		return false
 	}
-	*s = Session4{owner: owner, tx: tx, rx: rx, control: control}
-	for index := range s.endpoints {
-		s.endpoints[index].txHead, s.endpoints[index].txTail = -1, -1
-	}
+	s.reset()
+	s.owner, s.tx, s.rx, s.control = owner, tx, rx, control
 	s.control.InitService()
 	return true
+}
+
+// reset clears the session in place; a literal of its size would go to
+// the heap under TinyGo.
+func (s *Session4) reset() {
+	for index := range s.endpoints {
+		s.endpoints[index] = endpoint4{txHead: -1, txTail: -1}
+	}
+	for slot := range s.txSlots {
+		s.txSlots[slot] = txSlot4{}
+	}
+	for slot := range s.rxGen {
+		s.rxGen[slot] = 0
+	}
+	s.tx, s.rx, s.control = nil, nil, tcpapi.Control{}
+	s.txDone, s.rxLent, s.rotor, s.worked, s.limit = 0, 0, 0, 0, 0
+	s.published, s.progressed = false, false
+	s.reply, s.Counters = tcpapi.Reply{}, Counters4{}
 }
 
 // End closes everything the session held. The client's slots return to it
@@ -123,7 +148,7 @@ func (s *Session4) Start(stack *network.Stack, owner, quota int, tx, rx []byte, 
 func (s *Session4) End(stack *network.Stack, now uint64) {
 	stack.TCPCloseOwner(s.owner, now)
 	stack.SetTCPQuota(s.owner, 0)
-	*s = Session4{owner: s.owner}
+	s.reset()
 }
 
 func (s *Session4) Layout() tcpapi.Layout { return tcpapi.Layout4 }
@@ -147,7 +172,7 @@ func (s *Session4) Idle() bool {
 // Waiting counts the parked channel requests.
 func (s *Session4) Waiting() int {
 	count := 0
-	for index := range s.endpoints {
+	for index := range s.endpoints[:s.limit] {
 		e := &s.endpoints[index]
 		for _, correlation := range [...]uint64{e.accept, e.connect, e.ready} {
 			if correlation != 0 {
@@ -200,9 +225,9 @@ func (s *Session4) Handle(stack *network.Stack, request *tcpapi.Request, correla
 			reply.Result, reply.Endpoint = Result(result), 0
 			break
 		}
+		s.claim(free, opened)
 		e := &s.endpoints[free]
-		*e = endpoint4{id: opened, state: endpointOpen, txHead: -1, txTail: -1}
-		reply.Endpoint, reply.Slot = uint32(opened), uint8(free)
+		reply.Endpoint, reply.Index = uint32(opened), uint16(free)
 		if request.Opcode == tcpapi.OpOpen {
 			break
 		}
@@ -210,7 +235,7 @@ func (s *Session4) Handle(stack *network.Stack, request *tcpapi.Request, correla
 		if result != network.ResultOK {
 			stack.TCPClose(s.owner, opened, now)
 			s.forget(free)
-			reply.Result, reply.Endpoint, reply.Slot = Result(result), 0, 0
+			reply.Result, reply.Endpoint, reply.Index = Result(result), 0, 0
 			break
 		}
 		if !noWait {
@@ -374,7 +399,7 @@ func (s *Session4) pass(stack *network.Stack, now uint64, out Notifier) Fault {
 	if fault := s.takeRings(stack, now); fault != FaultNone {
 		return fault
 	}
-	for index := range s.endpoints {
+	for index := range s.endpoints[:s.limit] {
 		if fault := s.deliverConnect(stack, index, out); fault != FaultNone {
 			return fault
 		}
@@ -580,8 +605,8 @@ func (s *Session4) reportedID(stack *network.Stack, id network.TCPEndpointID, re
 // fill copies arrived bytes into free RX slots for endpoints with credit,
 // starting at the rotor.
 func (s *Session4) fill(stack *network.Stack, now uint64) {
-	for step := range tcpapi.Endpoints4 {
-		index := (s.rotor + step) % tcpapi.Endpoints4
+	for step := range s.limit {
+		index := (s.rotor + step) % s.limit
 		target := &s.endpoints[index]
 		for target.state == endpointOpen && target.credit != 0 {
 			slot, free := s.freeRX()
@@ -594,7 +619,7 @@ func (s *Session4) fill(stack *network.Stack, now uint64) {
 			if result == network.ResultBusy || result == network.ResultOK && read == 0 {
 				break
 			}
-			e := tcpapi.Entry{Index: uint8(index), Endpoint: uint32(target.id)}
+			e := tcpapi.Entry{Index: uint16(index), Endpoint: uint32(target.id)}
 			if result == network.ResultOK {
 				s.rxGen[slot]++
 				e.Kind, e.Slot, e.Length, e.Generation = tcpapi.EntryData, slot, uint32(read), s.rxGen[slot]
@@ -617,7 +642,9 @@ func (s *Session4) fill(stack *network.Stack, now uint64) {
 			s.published = true
 		}
 	}
-	s.rotor = (s.rotor + 1) % tcpapi.Endpoints4
+	if s.limit != 0 {
+		s.rotor = (s.rotor + 1) % s.limit
+	}
 }
 
 func (s *Session4) freeRX() (uint8, bool) {
@@ -646,8 +673,8 @@ func (s *Session4) acceptAhead(stack *network.Stack, index int) {
 			listener.ahead = 0
 			return
 		}
-		s.endpoints[free] = endpoint4{id: child, state: endpointOpen, txHead: -1, txTail: -1}
-		e := tcpapi.Entry{Kind: tcpapi.EntryAccepted, Index: uint8(free), Endpoint: uint32(child), Slot: uint8(index),
+		s.claim(free, child)
+		e := tcpapi.Entry{Kind: tcpapi.EntryAccepted, Index: uint16(free), Endpoint: uint32(child), Offset: uint32(index),
 			Generation: uint32(listener.id), Address: tuple.Remote, Port: tuple.RemotePort, Local: tuple.Local, LocalPort: tuple.LocalPort}
 		if s.control.PushRX(&e) != shmring.OK {
 			stack.TCPClose(s.owner, child, 0)
@@ -664,7 +691,7 @@ func (s *Session4) acceptAhead(stack *network.Stack, index int) {
 // finishCloses closes the connections of closed endpoints whose queues
 // drained, and announces each closed endpoint once on the TXDone ring.
 func (s *Session4) finishCloses(stack *network.Stack, now uint64) {
-	for index := range s.endpoints {
+	for index := range s.endpoints[:s.limit] {
 		target := &s.endpoints[index]
 		if target.state == endpointClosing && target.txHead < 0 {
 			stack.TCPClose(s.owner, target.id, now)
@@ -674,7 +701,7 @@ func (s *Session4) finishCloses(stack *network.Stack, now uint64) {
 		if target.state != endpointClosed || target.announced || s.control.TXDoneRoom() == 0 || s.finishing(index) {
 			continue
 		}
-		e := tcpapi.Entry{Kind: tcpapi.EntryClosed, Index: uint8(index), Endpoint: uint32(target.id)}
+		e := tcpapi.Entry{Kind: tcpapi.EntryClosed, Index: uint16(index), Endpoint: uint32(target.id)}
 		if s.control.PushTXDone(&e) != shmring.OK {
 			return
 		}
@@ -698,7 +725,7 @@ func (s *Session4) finishing(index int) bool {
 
 // showReadiness rewrites the readiness entries that changed.
 func (s *Session4) showReadiness(stack *network.Stack) {
-	for index := range s.endpoints {
+	for index := range s.endpoints[:s.limit] {
 		target := &s.endpoints[index]
 		if target.state == endpointFree {
 			continue
@@ -728,7 +755,7 @@ func (s *Session4) deliverConnect(stack *network.Stack, index int, out Notifier)
 	reply := tcpapi.Reply{Opcode: tcpapi.OpConnect, Result: Result(result), Endpoint: uint32(target.id)}
 	if target.openConnect {
 		reply.Opcode = tcpapi.OpOpenConnect
-		reply.Slot = uint8(index)
+		reply.Index = uint16(index)
 	}
 	if result == network.ResultOK {
 		reply.Address, reply.Port, reply.Local, reply.LocalPort = tuple.Remote, tuple.RemotePort, tuple.Local, tuple.LocalPort
@@ -740,7 +767,7 @@ func (s *Session4) deliverConnect(stack *network.Stack, index int, out Notifier)
 		// The client never saw this endpoint; it goes with the failure.
 		stack.TCPClose(s.owner, target.id, 0)
 		s.forget(index)
-		reply.Endpoint, reply.Slot = 0, 0
+		reply.Endpoint, reply.Index = 0, 0
 	}
 	s.worked++
 	if !out.Reply(&reply, correlation) {
@@ -764,8 +791,8 @@ func (s *Session4) deliverAccept(stack *network.Stack, index int, out Notifier) 
 	}
 	reply := tcpapi.Reply{Opcode: tcpapi.OpAccept, Result: Result(result), Endpoint: uint32(listener.id)}
 	if result == network.ResultOK {
-		s.endpoints[free] = endpoint4{id: child, state: endpointOpen, txHead: -1, txTail: -1}
-		reply.Endpoint, reply.Slot = uint32(child), uint8(free)
+		s.claim(free, child)
+		reply.Endpoint, reply.Index = uint32(child), uint16(free)
 		reply.Address, reply.Port, reply.Local, reply.LocalPort = tuple.Remote, tuple.RemotePort, tuple.Local, tuple.LocalPort
 	}
 	correlation := listener.accept
@@ -829,12 +856,18 @@ func (s *Session4) find(id network.TCPEndpointID) (*endpoint4, int) {
 	if id == 0 {
 		return nil, -1
 	}
-	for index := range s.endpoints {
+	for index := range s.endpoints[:s.limit] {
 		if s.endpoints[index].id == id && s.endpoints[index].state == endpointOpen {
 			return &s.endpoints[index], index
 		}
 	}
 	return nil, -1
+}
+
+// claim gives table entry index to the open endpoint id.
+func (s *Session4) claim(index int, id network.TCPEndpointID) {
+	s.endpoints[index] = endpoint4{id: id, state: endpointOpen, txHead: -1, txTail: -1}
+	s.limit = max(s.limit, index+1)
 }
 
 func (s *Session4) free() int {
@@ -857,7 +890,7 @@ func (s *Session4) Runnable(stack *network.Stack) (endpoint uint32, op string, f
 	}
 	_, rxFree := s.freeRX()
 	rxRoom := s.control.RXRoom() != 0
-	for index := range s.endpoints {
+	for index := range s.endpoints[:s.limit] {
 		target := &s.endpoints[index]
 		if target.state == endpointFree {
 			continue

@@ -95,8 +95,10 @@ func startNetwork(ticks uint64) {
 		capabilities = append(capabilities, supervisor.Capability{Name: "config", Handle: settings,
 			Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
+	// The large profile's 64 MiB page quota holds the TCP ring budget,
+	// network.MaxTCPMemoryBudget at most, beside the rest of netd (ADR 0213).
 	if manager.Register(supervisor.Definition{Name: netServiceName, Executable: supervisor.ServicePath(netServiceName, boot.Mode()),
-		Capabilities: capabilities, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
+		Capabilities: capabilities, Restart: supervisor.RestartOnFailure, Profile: supervisor.ProfileLarge}) != supervisor.StatusOK {
 		syslog.Warn("network service registration failed")
 		closePair(control)
 		netControl = 0
@@ -274,12 +276,12 @@ func openTCPSession() ([3]handle.ID, bool) {
 // openLinuxSocketSessions opens the TCP and UDP sessions of linuxsockd, the
 // Linux socket service, each with the largest endpoint quota,
 // netapi.MaxSessionQuota, so one service can back many Linux sockets. Its
-// TCP session speaks GTCP 3, whose 16 KiB slots carry stream data in larger
-// units. Each result is a session's channel, TX pool and RX pool. Ordinary
+// TCP session speaks GTCP 4, whose rings carry stream data in 16 KiB slots
+// without a channel message per slot. Each result is a session's channel, TX pool and RX pool. Ordinary
 // commands and the resolver keep the ordinary quota and GTCP 2. On failure
 // nothing stays open.
 func openLinuxSocketSessions() (tcp, udp [3]handle.ID, ok bool) {
-	if tcp, ok = openTCPSessionQuota(netapi.MaxSessionQuota, tcpapi.Layout3); !ok {
+	if tcp, ok = openTCPSessionQuota(netapi.MaxSessionQuota, tcpapi.Layout4); !ok {
 		return tcp, udp, false
 	}
 	if udp, ok = openUDPSessionQuota(netapi.MaxSessionQuota); !ok {
@@ -295,7 +297,7 @@ func openLinuxSocketSessions() (tcp, udp [3]handle.ID, ok bool) {
 // whose endpoints are bounded by quota, and returns the client's channel,
 // TX pool and RX pool, in that order. Each side's pool handles are narrowed
 // to what it writes: the client writes the TX pool, the service the RX pool.
-func openUDPSessionQuota(quota uint8) ([3]handle.ID, bool) {
+func openUDPSessionQuota(quota uint16) ([3]handle.ID, bool) {
 	var none [3]handle.ID
 	if netControl == 0 {
 		return none, false
@@ -348,7 +350,7 @@ func openUDPSessionQuota(quota uint8) ([3]handle.ID, bool) {
 // openTCPSessionQuota creates the channel and directionally restricted
 // stream pools for one GTCP client whose endpoints are bounded by quota and
 // which speaks layout's version over pools of layout's size.
-func openTCPSessionQuota(quota uint8, layout tcpapi.Layout) ([3]handle.ID, bool) {
+func openTCPSessionQuota(quota uint16, layout tcpapi.Layout) ([3]handle.ID, bool) {
 	var none [3]handle.ID
 	if netControl == 0 {
 		return none, false

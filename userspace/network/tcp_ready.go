@@ -53,7 +53,7 @@ func (stack *Stack) TCPReadiness(owner int, id TCPEndpointID) (TCPReadiness, Res
 	switch {
 	case entry.state == TCPListen:
 		ready.Mask |= TCPReadyListening
-		if stack.tcpAcceptable(id) {
+		if stack.tcpAcceptable(entry) {
 			ready.Mask |= TCPReadyAcceptable
 		}
 	case entry.state == TCPSynSent:
@@ -114,7 +114,7 @@ func (stack *Stack) TCPPeek(owner int, id TCPEndpointID, dst []byte) (int, Resul
 		}
 		return 0, ResultBusy
 	}
-	return ringLoad(dst, entry.receive[:], int(entry.recvHead), min(len(dst), int(entry.recvLen))), ResultOK
+	return ringLoad(dst, entry.recvRing, int(entry.recvHead), min(len(dst), int(entry.recvLen))), ResultOK
 }
 
 // TCPOptions are the effective values behind the socket options a caller
@@ -134,23 +134,17 @@ func (stack *Stack) TCPOptions(owner int, id TCPEndpointID) (TCPOptions, Result)
 		return TCPOptions{}, ResultInvalidArgument
 	}
 	options := TCPOptions{SendMSS: tcpDefaultMSS, TTL: uint32(stack.tuning.TTL),
-		SendBuffer:    uint32(min(int(stack.tuning.TCP.SendBuffer), TCPSendCapacity)),
-		ReceiveBuffer: uint32(min(int(stack.tuning.TCP.ReceiveBuffer), TCPReceiveCapacity))}
+		SendBuffer: stack.tuning.TCP.SendBuffer, ReceiveBuffer: stack.tuning.TCP.ReceiveBuffer}
 	if entry.state >= TCPSynSent {
 		options.SendMSS = tcpSMSS(entry)
 	}
 	return options, ResultOK
 }
 
-func (stack *Stack) tcpSendRoom(entry *tcpEndpoint) int {
-	limit := min(int(stack.tuning.TCP.SendBuffer), TCPSendCapacity)
-	return max(limit-int(entry.sendLen), 0)
-}
-
-func (stack *Stack) tcpAcceptable(listener TCPEndpointID) bool {
-	for index := stack.nextTCP(0); index >= 0; index = stack.nextTCP(index + 1) {
-		child := &stack.tcp[index]
-		if child.listener == listener && child.state >= TCPEstablished && child.state < TCPClosed && !child.accepted {
+// tcpAcceptable reports an established child on the listener's list.
+func (stack *Stack) tcpAcceptable(listener *tcpEndpoint) bool {
+	for child := listener.children.head; child != nil; child = child.links[tcpLinkChild].next {
+		if child.state >= TCPEstablished && child.state < TCPClosed {
 			return true
 		}
 	}

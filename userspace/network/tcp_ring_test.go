@@ -2,6 +2,7 @@ package network
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 )
 
@@ -38,6 +39,22 @@ func TestTCPRingSpanHelpers(t *testing.T) {
 	}
 }
 
+// testRing is the ring size the ring tests lay their streams out in.
+const testRing = 16 * 1024
+
+// fixedRings gives an established connection rings of testRing bytes and
+// caps both buffers there, so no ring grows under a test that places its
+// heads by hand.
+func fixedRings(h *harness, entry *tcpEndpoint) {
+	h.stack.tuning.TCP.SendBuffer, h.stack.tuning.TCP.ReceiveBuffer = testRing, testRing
+	h.stack.growSend(entry, testRing)
+	if grow := testRing - len(entry.recvRing); grow > 0 {
+		entry.recvRing = growRing(entry.recvRing, int(entry.recvHead), testRing)
+		entry.recvHead = 0
+		h.stack.charge(entry, grow)
+	}
+}
+
 // peerData is a data segment from the peer at the next expected sequence.
 func peerData(entry *tcpEndpoint, offset uint32, payload []byte, flags uint8) tcpSegment {
 	return tcpSegment{sequence: entry.rcvNxt + offset, acknowledgment: entry.sndNxt, flags: tcpFlagACK | flags,
@@ -55,8 +72,9 @@ func joinPayloads(segments []tcpSegment) []byte {
 func TestTCPSendRingWrapAckAndRetransmit(t *testing.T) {
 	h := readyWithPeer(t)
 	id, entry := establishedWithPeer(t, h, 50100)
+	fixedRings(h, entry)
 	entry.peerWindow = 60000
-	entry.sendHead = TCPSendCapacity - 700
+	entry.sendHead = testRing - 700
 	data := pattern(0, 2000)
 	if written, result := h.stack.TCPWrite(0, id, data, h.now); result != ResultOK || written != len(data) {
 		t.Fatalf("write %d %d", written, result)
@@ -74,7 +92,7 @@ func TestTCPSendRingWrapAckAndRetransmit(t *testing.T) {
 
 	// A partial ACK moves the head without moving bytes.
 	h.tcpFromPeer(entry, ackSegment(entry, 600, 60000))
-	if entry.sendHead != TCPSendCapacity-200 || entry.sendLen != 1500 || entry.sendSent != 1500 || entry.sendSeq != 600 {
+	if entry.sendHead != testRing-200 || entry.sendLen != 1500 || entry.sendSent != 1500 || entry.sendSeq != 600 {
 		t.Fatalf("partial ACK head=%d len=%d sent=%d seq=%d", entry.sendHead, entry.sendLen, entry.sendSent, entry.sendSeq)
 	}
 	h.drain()
@@ -104,18 +122,19 @@ func TestTCPSendRingWrapAckAndRetransmit(t *testing.T) {
 func TestTCPSendRingFillsAfterWrap(t *testing.T) {
 	h := readyWithPeer(t)
 	id, entry := establishedWithPeer(t, h, 50101)
+	fixedRings(h, entry)
 	entry.peerWindow = 0
 	entry.sendHead = 5000
-	data := pattern(0, TCPSendCapacity+10)
+	data := pattern(0, testRing+10)
 	written, result := h.stack.TCPWrite(0, id, data, h.now)
-	if result != ResultOK || written != TCPSendCapacity {
+	if result != ResultOK || written != testRing {
 		t.Fatalf("write %d %d", written, result)
 	}
 	if _, result = h.stack.TCPWrite(0, id, data[:1], h.now); result != ResultBusy {
 		t.Fatalf("write to a full ring %d", result)
 	}
-	if !bytes.Equal(entry.send[:5000], data[TCPSendCapacity-5000:TCPSendCapacity]) ||
-		!bytes.Equal(entry.send[5000:], data[:TCPSendCapacity-5000]) {
+	if !bytes.Equal(entry.sendRing[:5000], data[testRing-5000:testRing]) ||
+		!bytes.Equal(entry.sendRing[5000:], data[:testRing-5000]) {
 		t.Fatal("ring layout")
 	}
 }
@@ -123,8 +142,9 @@ func TestTCPSendRingFillsAfterWrap(t *testing.T) {
 func TestTCPPersistProbeWithWrappedSendData(t *testing.T) {
 	h := readyWithPeer(t)
 	id, entry := establishedWithPeer(t, h, 50102)
+	fixedRings(h, entry)
 	entry.peerWindow = 0
-	entry.sendHead = TCPSendCapacity - 1
+	entry.sendHead = testRing - 1
 	if written, result := h.stack.TCPWrite(0, id, []byte("xyz"), h.now); result != ResultOK || written != 3 {
 		t.Fatalf("write %d %d", written, result)
 	}
@@ -150,14 +170,15 @@ func TestTCPPersistProbeWithWrappedSendData(t *testing.T) {
 func TestTCPReceiveRingWrapReadAndWindow(t *testing.T) {
 	h := readyWithPeer(t)
 	id, entry := establishedWithPeer(t, h, 50103)
-	entry.recvHead = TCPReceiveCapacity - 100
+	fixedRings(h, entry)
+	entry.recvHead = testRing - 100
 	var stream []byte
 	for index := 0; index < 12; index++ {
 		chunk := pattern(len(stream), 1360)
 		h.tcpFromPeer(entry, peerData(entry, 0, chunk, 0))
 		stream = append(stream, chunk...)
 		sent := h.tcpSent()
-		want := TCPReceiveCapacity - len(stream)
+		want := testRing - len(stream)
 		if len(sent) != 1 || int(sent[0].window) != want || stack(h).tcpAdvertisedWindow(entry) != want {
 			t.Fatalf("chunk %d window %d want %d", index, sent[0].window, want)
 		}
@@ -170,7 +191,7 @@ func TestTCPReceiveRingWrapReadAndWindow(t *testing.T) {
 		t.Fatalf("readable %d", ready.Readable)
 	}
 
-	peek := make([]byte, TCPReceiveCapacity)
+	peek := make([]byte, testRing)
 	if n, result := h.stack.TCPPeek(0, id, peek); result != ResultOK || !bytes.Equal(peek[:n], stream) {
 		t.Fatalf("peek %d %d", n, result)
 	}
@@ -191,7 +212,7 @@ func TestTCPReceiveRingWrapReadAndWindow(t *testing.T) {
 		// A read sends a window update only once the window opened by a
 		// segment or half the buffer; one that goes names the window exactly.
 		sent := h.tcpSent()
-		want := TCPReceiveCapacity - (len(stream) - len(got))
+		want := testRing - (len(stream) - len(got))
 		if len(sent) > 1 || len(sent) == 1 && int(sent[0].window) != want {
 			t.Fatalf("after a read of %d: %d updates, window %v want %d", size, len(sent), sent, want)
 		}
@@ -200,7 +221,7 @@ func TestTCPReceiveRingWrapReadAndWindow(t *testing.T) {
 	if updates == 0 {
 		t.Fatal("reads that opened the window sent no update")
 	}
-	if entry.recvHead != uint16(TCPReceiveCapacity-100+len(got)-TCPReceiveCapacity) {
+	if entry.recvHead != uint32(testRing-100+len(got)-testRing) {
 		t.Fatalf("head %d", entry.recvHead)
 	}
 	// New data lands after the wrapped tail while unread bytes remain.
@@ -208,7 +229,7 @@ func TestTCPReceiveRingWrapReadAndWindow(t *testing.T) {
 	h.tcpFromPeer(entry, peerData(entry, 0, more, 0))
 	stream = append(stream, more...)
 	h.drain()
-	rest := make([]byte, TCPReceiveCapacity)
+	rest := make([]byte, testRing)
 	n, result := h.stack.TCPRead(0, id, rest, h.now)
 	got = append(got, rest[:n]...)
 	if result != ResultOK || !bytes.Equal(got, stream) {
@@ -224,18 +245,20 @@ func stack(h *harness) *Stack { return h.stack }
 func TestTCPOutOfOrderPromotionIntoWrappedSpace(t *testing.T) {
 	h := readyWithPeer(t)
 	id, entry := establishedWithPeer(t, h, 50104)
-	entry.recvHead = TCPReceiveCapacity - 4
+	fixedRings(h, entry)
+	entry.recvHead = testRing - 4
 	h.tcpFromPeer(entry, peerData(entry, 3, []byte("defgh"), 0))
-	if entry.recvLen != 0 || !entry.reorder[0].used {
+	if entry.recvLen != 0 || entry.heldBytes() == 0 {
 		t.Fatal("held segment delivered early")
 	}
 	sent := h.tcpSent()
-	if len(sent) != 1 || int(sent[0].window) != TCPReceiveCapacity-5 {
+	// The held bytes sit inside the window, so its right edge stays put.
+	if len(sent) != 1 || int(sent[0].window) != testRing {
 		t.Fatalf("window with a held segment %d", sent[0].window)
 	}
 	h.tcpFromPeer(entry, peerData(entry, 0, []byte("abc"), 0))
-	if entry.recvLen != 8 || entry.reorder[0].used || string(entry.receive[TCPReceiveCapacity-4:]) != "abcd" ||
-		string(entry.receive[:4]) != "efgh" {
+	if entry.recvLen != 8 || entry.heldBytes() != 0 || string(entry.recvRing[testRing-4:]) != "abcd" ||
+		string(entry.recvRing[:4]) != "efgh" {
 		t.Fatalf("promotion len=%d", entry.recvLen)
 	}
 	var buffer [16]byte
@@ -252,7 +275,8 @@ func TestTCPFINAtAndAcrossRingEnd(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			h := readyWithPeer(t)
 			id, entry := establishedWithPeer(t, h, 50105)
-			entry.recvHead = TCPReceiveCapacity - 5
+			fixedRings(h, entry)
+			entry.recvHead = testRing - 5
 			h.tcpFromPeer(entry, peerData(entry, 0, []byte(test.payload), tcpFlagFIN))
 			if !entry.finReceived || entry.state != TCPCloseWait || entry.rcvNxt != 200+uint32(len(test.payload))+1 {
 				t.Fatalf("FIN state=%d rcvNxt=%d", entry.state, entry.rcvNxt)
@@ -271,7 +295,8 @@ func TestTCPFINAtAndAcrossRingEnd(t *testing.T) {
 func TestTCPHeldFINClipsAcrossRingEnd(t *testing.T) {
 	h := readyWithPeer(t)
 	id, entry := establishedWithPeer(t, h, 50106)
-	entry.recvHead = TCPReceiveCapacity - 2
+	fixedRings(h, entry)
+	entry.recvHead = testRing - 2
 	// "lo" and the FIN wait for the gap; a later copy of the start carries
 	// bytes past the FIN, which the stream must not take.
 	h.tcpFromPeer(entry, peerData(entry, 3, []byte("lo"), tcpFlagFIN))
@@ -379,8 +404,8 @@ func TestTCPLoopbackLongTransfer(t *testing.T) {
 
 // localScenario runs one loopback connection through a handshake, streams
 // of odd sizes both ways that wrap both rings, a half close each way and
-// TIME_WAIT, and returns the stack's endpoint and tombstone tables.
-func localScenario(t *testing.T, wire bool) ([len(Stack{}.tcp)]tcpEndpoint, TCPStats) {
+// TIME_WAIT, and returns what the stack's endpoints and tombstones hold.
+func localScenario(t *testing.T, wire bool) ([]string, TCPStats) {
 	h := newHarness(t)
 	if wire {
 		h.stack.localWire = make([]byte, 1<<17)
@@ -418,7 +443,22 @@ func localScenario(t *testing.T, wire bool) ([len(Stack{}.tcp)]tcpEndpoint, TCPS
 	}
 	h.stack.TCPClose(1, client, h.now)
 	h.stack.TCPClose(0, server, h.now)
-	return h.stack.tcp, h.stack.tcpStats
+	var state []string
+	for _, entry := range h.stack.tcp {
+		if entry == nil {
+			state = append(state, "free")
+			continue
+		}
+		// The links and rings are addresses; compare what they hold.
+		flat := *entry
+		flat.links, flat.parent, flat.children, flat.reorder = [tcpLinkKinds]tcpLink{}, nil, tcpList{}, nil
+		flat.sendRing, flat.recvRing = nil, nil
+		state = append(state, fmt.Sprintf("%+v send %x recv %x", flat, entry.sendRing, entry.recvRing))
+	}
+	for _, tomb := range h.stack.tcpTombstones.slots {
+		state = append(state, fmt.Sprintf("%+v", tomb))
+	}
+	return state, h.stack.tcpStats
 }
 
 // TestLocalSegmentsMatchParsedOnes runs the same connection with local
@@ -448,7 +488,7 @@ func TestLocalSegmentCarriesWholeSlot(t *testing.T) {
 	h.stack.TCPConnect(1, client, LoopbackAddress, 8092, h.now)
 	server, _, _ := h.stack.TCPAccept(0, listener)
 	before := h.stack.tcpStats.LocalSegments
-	data := pattern(0, TCPSendCapacity)
+	data := pattern(0, testRing)
 	if n, result := h.stack.TCPWrite(1, client, data, h.now); result != ResultOK || n != len(data) {
 		t.Fatalf("write %d %d", n, result)
 	}
@@ -456,12 +496,12 @@ func TestLocalSegmentCarriesWholeSlot(t *testing.T) {
 	if sent := h.stack.tcpStats.LocalSegments - before; sent != 2 {
 		t.Fatalf("%d local segments for one 16 KiB write", sent)
 	}
-	buffer := make([]byte, TCPReceiveCapacity)
+	buffer := make([]byte, testRing)
 	if n, _ := h.stack.TCPRead(0, server, buffer, h.now); n != len(data) || !bytes.Equal(buffer[:n], data) {
 		t.Fatalf("read %d", n)
 	}
 	// More than a segment: still in order.
-	big := pattern(5, 3*TCPSendCapacity)
+	big := pattern(5, 3*testRing)
 	got := 0
 	for sent := 0; got < len(big); {
 		n, _ := h.stack.TCPWrite(1, client, big[sent:], h.now)
@@ -477,6 +517,7 @@ func TestLocalSegmentCarriesWholeSlot(t *testing.T) {
 func TestWindowUpdateWaitsForAFreeFrame(t *testing.T) {
 	h := readyWithPeer(t)
 	id, entry := establishedWithPeer(t, h, 50105)
+	fixedRings(h, entry)
 	// Twelve segments without a drain: the ACKs after the eighth find the
 	// transmit queue full.
 	for index := 0; index < 12; index++ {
@@ -485,7 +526,7 @@ func TestWindowUpdateWaitsForAFreeFrame(t *testing.T) {
 	if !entry.ackPending {
 		t.Fatal("lost ACK not marked")
 	}
-	buffer := make([]byte, TCPReceiveCapacity)
+	buffer := make([]byte, testRing)
 	if n, result := h.stack.TCPRead(0, id, buffer, h.now); result != ResultOK || n != 12*1360 {
 		t.Fatalf("read %d %d", n, result)
 	}
@@ -494,7 +535,7 @@ func TestWindowUpdateWaitsForAFreeFrame(t *testing.T) {
 	}
 	h.stack.Advance(h.now)
 	sent := h.tcpSent()
-	if len(sent) != 1 || int(sent[0].window) != TCPReceiveCapacity || sent[0].acknowledgment != entry.rcvNxt {
+	if len(sent) != 1 || int(sent[0].window) != testRing || sent[0].acknowledgment != entry.rcvNxt {
 		t.Fatalf("after a free frame: %v", sent)
 	}
 	if entry.ackPending {
@@ -509,11 +550,12 @@ func TestWindowUpdateWaitsForAFreeFrame(t *testing.T) {
 func TestACKKeepsTheRightEdgeUntilItMovesASegment(t *testing.T) {
 	h := readyWithPeer(t)
 	id, entry := establishedWithPeer(t, h, 50106)
+	fixedRings(h, entry)
 	for index := 0; index < 6; index++ {
 		h.tcpFromPeer(entry, peerData(entry, 0, pattern(index*1360, 1360), 0))
 		h.tcpSent()
 	}
-	before := TCPReceiveCapacity - 6*1360
+	before := testRing - 6*1360
 	buffer := make([]byte, 500)
 	if n, result := h.stack.TCPRead(0, id, buffer, h.now); result != ResultOK || n != 500 {
 		t.Fatalf("read %d %d", n, result)

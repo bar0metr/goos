@@ -419,7 +419,7 @@ func (handler *linuxCallHandler) socketConnect(request linuxcompat.Request) linu
 		default:
 			address, unspecified, errno := handler.socketAddressIn(request.Arguments[1], request.Arguments[2], linuxcompat.AddressConnect)
 			if errno == 0 && unspecified {
-				// Dissolving an association has no GLNXSOCK2 operation.
+				// Dissolving an association has no GLNXSOCK3 operation.
 				errno = linuxabi.EOPNOTSUPP
 			}
 			if errno == 0 && address.Port == 0 {

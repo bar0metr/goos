@@ -225,6 +225,8 @@ func grantValue(expression ast.Expr) (commands.Grant, error) {
 		return commands.GrantHostname, nil
 	case isSelector(expression, "commands", "GrantTCPBulk"):
 		return commands.GrantTCPBulk, nil
+	case isSelector(expression, "commands", "GrantTCPRing"):
+		return commands.GrantTCPRing, nil
 	case isSelector(expression, "commands", "GrantRemote"):
 		return commands.GrantRemote, nil
 	default:

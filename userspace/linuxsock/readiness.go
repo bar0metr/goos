@@ -85,10 +85,10 @@ func (s *Service) readiness(sock *socket) linuxsockapi.Readiness {
 // publish writes a socket's entry when it changed and owes the family a
 // notification.
 func (s *Service) publish(global int) {
-	if global < 0 || global >= MaxSockets {
+	if global < 0 || global >= s.socketCap() {
 		return
 	}
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if !sock.used || sock.opening || sock.closing {
 		return
 	}
@@ -134,15 +134,19 @@ func (s *Service) notify(index int) {
 // arm holds a NativeWaitReady on the socket's endpoint, naming the mask
 // the service knows, so netd answers on the first difference.
 func (s *Service) arm(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if !sock.used || sock.waiting || sock.needWait || sock.noWait || sock.dead || sock.endpoint == 0 ||
 		!s.backends[sock.proto].up || s.backends[sock.proto].generation != sock.generation {
 		return
 	}
+	wake := s.needsWake(global)
 	s.native = NativeRequest{Op: NativeWaitReady, Endpoint: sock.endpoint, Mask: sock.mask}
+	if wake {
+		s.native.Flags = NativeWake
+	}
 	switch s.backend.Submit(sock.proto, makeTag(tagWait, global, sock.serial), &s.native) {
 	case SubmitAccepted:
-		sock.waiting, sock.armedMask = true, sock.mask
+		sock.waiting, sock.armedMask, sock.wakeWait = true, sock.mask, wake
 		s.families[sock.family].stats.WaitsArmed++
 	case SubmitBusy:
 		sock.needWait = true
@@ -152,13 +156,42 @@ func (s *Service) arm(global int) {
 	}
 }
 
+// needsWake reports whether a stream on a GTCP 4 session depends on its
+// wait to learn that bytes arrived: it can receive, has no read posted, and
+// the kernel holds none of its bytes. A read it could not post for want of
+// a family RX slot comes back only through the wait.
+func (s *Service) needsWake(global int) bool {
+	sock := s.sock(global)
+	if !s.streamRing || !sock.stream || sock.readsOut != 0 || !receiving(sock) {
+		return false
+	}
+	_, published := s.rxOf(&s.families[sock.family], global)
+	return published == 0
+}
+
+// wakeUp marks the held wait of a stream that came to depend on it.
+func (s *Service) wakeUp(global int) {
+	sock := s.sock(global)
+	if !sock.waiting || sock.wakeWait || !s.needsWake(global) {
+		return
+	}
+	s.native = NativeRequest{Op: NativeWaitReady, Flags: NativeWake, Endpoint: sock.endpoint, Mask: sock.armedMask}
+	if s.backend.Submit(sock.proto, makeTag(tagWait, global, sock.serial), &s.native) == SubmitAccepted {
+		sock.wakeWait = true
+	}
+}
+
 // waited takes the answer to a socket's wait and holds the next one.
 func (s *Service) waited(global int, serial uint32, c *NativeCompletion) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if !sock.used || sock.serial != serial || !sock.waiting || c.Op != NativeWaitReady {
 		return
 	}
-	sock.waiting = false
+	if c.Endpoint != 0 && c.Endpoint != sock.endpoint {
+		// The answer to the wait of an endpoint a connect replaced.
+		return
+	}
+	sock.waiting, sock.wakeWait = false, false
 	switch c.Result {
 	case NativeOK:
 	case NativeBusy:
@@ -180,7 +213,7 @@ func (s *Service) waited(global int, serial uint32, c *NativeCompletion) {
 // observe applies a mask from netd: a connect that ended moves the
 // stream's state and an error netd holds is fetched.
 func (s *Service) observe(global int, mask NativeMask, readable uint32) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	sock.mask, sock.readable = mask, readable
 	if mask&MaskWritable != 0 && sock.txBlocked {
 		sock.txBlocked = false
@@ -204,7 +237,7 @@ func (s *Service) observe(global int, mask NativeMask, readable uint32) {
 // failSocket ends a socket whose native endpoint broke: its pending error
 // says why, readiness reports every condition, and the endpoint closes.
 func (s *Service) failSocket(global int, result NativeResult) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if !sock.used || sock.dead {
 		return
 	}
@@ -236,7 +269,7 @@ func (s *Service) SetLinkView(view LinkView) { s.linkView = view }
 
 // snapshot writes a socket's state where the kernel's diagnostics read it.
 func (s *Service) snapshot(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if !sock.used || sock.opening {
 		return
 	}
@@ -262,7 +295,7 @@ func (s *Service) snapshot(global int) {
 			flags |= bit.flag
 		}
 	}
-	linuxsockapi.StoreSocketSnapshot(f.rings, int(sock.index), &linuxsockapi.SocketSnapshot{Socket: sock.id, Endpoint: sock.endpoint,
+	linuxsockapi.StoreSocketSnapshot(f.snapshotPage(int(sock.index)), int(sock.index), &linuxsockapi.SocketSnapshot{Socket: sock.id, Endpoint: sock.endpoint,
 		State: uint8(sock.state), TXQueue: sock.txqLen, WritesOut: sock.writesOut, ReadsOut: sock.readsOut, Flags: flags,
 		TXAccepted: sock.txAccepted, TXSent: sock.txSent, TXStream: sock.txStream, Mask: uint32(sock.mask), Readable: sock.readable})
 }
@@ -271,7 +304,9 @@ func (s *Service) snapshot(global int) {
 func (s *Service) snapshotFamily(index int) {
 	f := &s.families[index]
 	snap := linuxsockapi.FamilySnapshot{TXHeld: f.txHeld, RXUsed: f.rxUsed, RXPublished: f.rxPub,
-		Inflight: uint8(f.inflight), Parked: uint8(f.parked), Replies: uint8(f.replies)}
+		Inflight: uint8(f.inflight), Parked: uint8(f.parked), Replies: uint8(f.replies),
+		Sockets: uint16(f.count), FamilyLimit: uint16(s.limits.Family), Reserve: uint16(s.limits.Reserve),
+		SystemSockets: uint16(s.sockets.live), SystemLimit: uint16(s.limits.System)}
 	if s.linkView != nil {
 		snap.LinkTXLent, snap.LinkReleases, snap.LinkBlocked = s.linkView.Snapshot()
 	}

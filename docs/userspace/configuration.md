@@ -178,14 +178,14 @@ Its UDP limits (ADR 0195), all `uint`:
 | `system.net.udp.ephemeral-port-min` | 49152 | 1024..65535 | lowest port a bind to port 0 or a connect may pick |
 | `system.net.udp.ephemeral-port-max` | 65535 | 1024..65535 | highest such port; at least `ephemeral-port-min` |
 | `system.net.udp.recv-queue-depth` | 8 | 1..16 | datagrams queued on one endpoint before newcomers are dropped |
-| `system.net.udp.max-endpoints` | 96 | 1..96 | endpoints open across all sessions |
+| `system.net.udp.max-endpoints` | 1024 | 1..4096 | endpoints open across all sessions |
 | `system.net.udp.max-endpoints-per-session` | 8 | 1..8 | endpoints open in one ordinary session; at most `max-endpoints`. A session PID 1 grants a larger quota keeps it |
 | `system.net.udp.max-payload` | 4096 | 1232..4096 | largest payload sent or queued, loopback included |
 
 The upper ends are compile-time capacities that no setting raises: 8 UDP
-sessions, 32 endpoints with 8 per session, queues of 16 datagrams, payloads
-of 4096 bytes, 32 receive buffers with 16 per session, and 8 sends waiting
-for ARP. Off the host a payload is also limited to the link MTU less 28
+sessions, 4096 endpoints with 8 per ordinary session and 512 per granted
+one, queues of 16 datagrams, payloads of 4096 bytes, 512 receive buffers
+with 256 per session, and 8 sends waiting for ARP. Off the host a payload is also limited to the link MTU less 28
 bytes, 1472 on a 1500-byte link, whatever `max-payload` says. The 1024 floor
 keeps the well-known ports, DHCP's 67 and 68 among them, out of automatic
 allocation; an explicit bind may still name any port. The 1232 floor is the
@@ -205,15 +205,17 @@ Its TCP settings (ADR 0196), all `uint`:
 | --- | ---: | ---: | --- |
 | `system.net.tcp.ephemeral-port-min` | 49152 | 1024..65535 | lowest automatic local port |
 | `system.net.tcp.ephemeral-port-max` | 65535 | 1024..65535 | highest automatic local port; at least the minimum |
-| `system.net.tcp.max-endpoints` | 96 | 1..96 | endpoints across all TCP sessions |
+| `system.net.tcp.max-endpoints` | 1024 | 1..4096 | endpoints across all TCP sessions; each is allocated when opened |
 | `system.net.tcp.max-endpoints-per-session` | 8 | 1..8 | endpoints in one ordinary session; at most the global limit. A session PID 1 grants a larger quota keeps it |
-| `system.net.tcp.listen-backlog` | 8 | 1..8 | children retained by one listener |
-| `system.net.tcp.send-buffer-bytes` | 16384 | 1..16384 | send bytes accepted per connection |
-| `system.net.tcp.recv-buffer-bytes` | 16384 | 1..16384 | contiguous receive bytes retained per connection |
+| `system.net.tcp.listen-backlog` | 128 | 1..4096 | children retained by one listener; a larger listen gets this value |
+| `system.net.tcp.send-buffer-bytes` | 262144 | 1..4194304 | send bytes accepted per connection; the ring grows to it while the memory budget allows |
+| `system.net.tcp.recv-buffer-bytes` | 262144 | 1..4194304 | receive bytes retained per connection, out-of-order bytes included; the ring grows to it while the memory budget allows. Above 65535 a new connection offers window scaling |
 | `system.net.tcp.connect-timeout-ms` | 30000 | 1000..300000 | active and embryonic handshake deadline |
 | `system.net.tcp.rto-min-ms` | 1000 | 100..60000 | minimum retransmission timeout |
 | `system.net.tcp.rto-max-ms` | 60000 | 1000..300000 | maximum retransmission timeout; at least the minimum |
 | `system.net.tcp.time-wait-ms` | 60000 | 1000..600000 | TIME_WAIT retention |
+| `system.net.tcp.memory-bytes` | 41943040 | 65536..50331648 | ring bytes of all TCP connections. A connection pays 8 KiB from its handshake (a 4 KiB receive ring and a 4 KiB send floor), 20 KiB on loopback while its session has used less than half its budget; growth past that takes what is left. The ceiling fits `netd`'s 64 MiB page quota |
+| `system.net.tcp.memory-bytes-per-session` | 33554432 | 65536..50331648 | ring bytes of one TCP session; at most `memory-bytes`. A handshake whose 8 KiB the budgets cannot pay is refused: `connect` answers `Busy`, a listener drops the SYN |
 
 Lowering a TCP limit preserves existing endpoints and buffered bytes. It
 constrains the next endpoint, backlog child or buffer admission. The RTO and

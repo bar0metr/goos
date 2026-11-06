@@ -7,28 +7,29 @@ import "goos/userspace/linuxsockapi"
 //
 // TX. The kernel commits TX slots on the submit ring; drainSubmit queues
 // each on its socket in ring order. A stream's queue goes to netd in
-// pipelined NoWait writes of at most NativeSlotSize bytes, NativeWriteDepth
-// at a time, each naming the stream offset of its first byte; netd takes a
-// write only at the offset it reached, so a write after one that took a
-// prefix takes nothing and the queue sends again from the first byte netd
-// did not take. A slot goes back on the complete ring once netd took all of
-// it. A datagram slot is one datagram and goes back once netd answered it.
+// pipelined writes of at most NativeSlotSize bytes, NativeWriteDepth at a
+// time. On GTCP 4 (RingLink) each write is a TX ring entry that netd hands
+// back once the stack took every byte. On a GTCP 3 link each is a NoWait
+// request naming the stream offset of its first byte; netd takes a write
+// only at the offset it reached, so a write after one that took a prefix
+// takes nothing and the queue sends again from the first byte netd did not
+// take. A slot goes back on the complete ring once netd took all of it. A datagram slot is one datagram and goes back once netd answered it.
 // A transport error drops the queue, hands every slot back and becomes the
 // socket's pending error: those bytes were reported written already.
 //
 // RX. While a socket can receive, the core keeps native reads parked in
-// netd, each into an RX slot it reserved, leaving linuxsockapi.RXReserve
+// netd (on GTCP 4, credit for one fill each), each into an RX slot it
+// reserved, leaving linuxsockapi.RXReserve
 // slots free for a read the kernel asks for. A read that netd answers fills
 // its slot, which goes on the complete ring for the kernel; the kernel
 // hands it back once a Linux read consumed all of it.
 
 const (
 	// NativeSlotSize is the most one native write or read carries: the
-	// GTCP 3 slot of linuxsockd's session.
+	// slot of linuxsockd's TCP session.
 	NativeSlotSize = NativeStreamSlot
 	// NativeWriteDepth bounds a stream's writes in netd at once, and
-	// NativeReadDepth its reads parked there: GTCP 3 accepts pipelined
-	// writes with offsets and queues that many reads per endpoint.
+	// NativeReadDepth its reads parked there.
 	NativeWriteDepth = NativePipelinedWrites
 	NativeReadDepth  = NativeQueuedReads
 	// datagramWriteDepth bounds a datagram socket's sends in netd at once.
@@ -85,7 +86,7 @@ func (s *Service) committed(index int, e *linuxsockapi.RingEntry) bool {
 		s.txDone(index, e.Slot)
 		return true
 	}
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if sock.stream && f.txDest[e.Slot] || !sock.stream && e.Length > linuxsockapi.MaxDatagram ||
 		int(sock.txqLen) >= len(sock.txq) {
 		return false
@@ -113,7 +114,7 @@ func (s *Service) handedBack(index int, e *linuxsockapi.RingEntry) bool {
 	owner, serial := int(f.rxOwner[e.Slot])-1, f.rxSerial[e.Slot]
 	s.freeRX(f, e.Slot)
 	f.stats.RingReleases++
-	if owner >= 0 && s.sockets[owner].used && s.sockets[owner].serial == serial {
+	if owner >= 0 && s.sock(owner).used && s.sock(owner).serial == serial {
 		s.kick(owner)
 		s.publish(owner)
 	}
@@ -143,7 +144,7 @@ func (s *Service) txDone(index int, slot uint8) {
 // dropTX hands back every slot of a socket's TX queue unsent, except the
 // slots under a write, which go back when their write answers.
 func (s *Service) dropTX(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if !sock.used || sock.txqLen == 0 {
 		return
 	}
@@ -167,9 +168,9 @@ func (s *Service) dropTX(global int) {
 // underWrite reports whether a native write of the socket carries bytes of
 // TX slot.
 func (s *Service) underWrite(global int, slot uint8) bool {
-	sock := &s.sockets[global]
-	for index := range s.ops {
-		o := &s.ops[index]
+	sock := s.sock(global)
+	for index := 0; index < s.opCap(); index++ {
+		o := s.op(index)
 		if o.state == opNative && o.kind == kindTX && int(o.socket) == global && o.socketSerial == sock.serial && o.slot == slot {
 			return true
 		}
@@ -179,7 +180,7 @@ func (s *Service) underWrite(global int, slot uint8) bool {
 
 // unqueue takes slot out of a socket's TX queue and hands it back.
 func (s *Service) unqueue(global int, slot uint8) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	for position := uint8(0); position < sock.txqLen; position++ {
 		if sock.txq[position] == slot {
 			copy(sock.txq[position:], sock.txq[position+1:sock.txqLen])
@@ -204,7 +205,7 @@ func (s *Service) want(sock *socket, tx bool) {
 
 // kick moves a socket's data plane forward: its TX queue and its reads.
 func (s *Service) kick(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if !sock.used || sock.opening {
 		return
 	}
@@ -214,6 +215,7 @@ func (s *Service) kick(global int) {
 		s.sendDatagrams(global)
 	}
 	s.readAhead(global)
+	s.wakeUp(global)
 	s.acceptAhead(global)
 	if sock.shutQueued && sock.txqLen == 0 && sock.writesOut == 0 {
 		s.shutdownLater(global)
@@ -229,7 +231,7 @@ func (s *Service) kick(global int) {
 
 // sendStream issues the writes a stream's queue allows.
 func (s *Service) sendStream(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	f := &s.families[sock.family]
 	if sock.dead || sock.endpoint == 0 || sock.txqLen == 0 || sock.txDropped {
 		return
@@ -277,7 +279,7 @@ func (s *Service) sendStream(global int) {
 
 // sendDatagrams issues a datagram socket's queued sends.
 func (s *Service) sendDatagrams(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	f := &s.families[sock.family]
 	if sock.dead || sock.endpoint == 0 || sock.txBlocked || sock.txDropped {
 		return
@@ -340,7 +342,7 @@ func receiving(sock *socket) bool {
 
 // readAhead parks reads in netd while the socket and its family have room.
 func (s *Service) readAhead(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	f := &s.families[sock.family]
 	if !receiving(sock) {
 		return
@@ -406,7 +408,7 @@ func (s *Service) doneTX(o *op, c *NativeCompletion) {
 }
 
 func (s *Service) doneStreamWrite(global int, length uint32, c *NativeCompletion) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	f := &s.families[sock.family]
 	sock.txSent -= min(sock.txSent, length)
 	switch c.Result {
@@ -449,7 +451,7 @@ func (s *Service) doneStreamWrite(global int, length uint32, c *NativeCompletion
 }
 
 func (s *Service) doneDatagram(global int, slot uint8, c *NativeCompletion) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	f := &s.families[sock.family]
 	f.txInFlight &^= 1 << slot
 	switch c.Result {
@@ -497,6 +499,14 @@ func (s *Service) doneRX(o *op, c *NativeCompletion) {
 			s.counters.BytesIn += uint64(length)
 			sock.rxBurst = length == NativeSlotSize
 			sock.readable -= min(sock.readable, length)
+			if sock.readable == 0 && sock.readsOut == 0 && sock.mask&MaskReadable != 0 {
+				// The read took every byte the service knew of. Bytes that
+				// arrived since leave netd's mask as it was, so a wait
+				// naming that mask would never answer: drop the readable
+				// bit and ask netd how the endpoint stands.
+				sock.mask &^= MaskReadable
+				s.refreshReadable(global)
+			}
 		} else {
 			s.counters.DatagramsIn++
 			if c.Ready {
@@ -536,7 +546,7 @@ func (s *Service) doneRX(o *op, c *NativeCompletion) {
 // publishRX puts a filled RX slot on the complete ring for the kernel.
 func (s *Service) publishRX(index, global int, slot uint8, length uint32, c *NativeCompletion) bool {
 	f := &s.families[index]
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	f.rxGen[slot]++
 	entry := linuxsockapi.RingEntry{Kind: linuxsockapi.RingRXData, Slot: slot, Length: length, Socket: sock.id, Generation: f.rxGen[slot]}
 	if !sock.stream {
@@ -556,7 +566,7 @@ func (s *Service) publishRX(index, global int, slot uint8, length uint32, c *Nat
 
 // shutdownLater sends the half-close a SHUT_WR left behind its queue.
 func (s *Service) shutdownLater(global int) {
-	sock := &s.sockets[global]
+	sock := s.sock(global)
 	if sock.dead || sock.endpoint == 0 {
 		sock.shutQueued = false
 		return

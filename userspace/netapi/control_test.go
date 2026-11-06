@@ -1,6 +1,7 @@
 package netapi
 
 import (
+	"encoding/binary"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"testing"
@@ -122,11 +123,12 @@ func TestControlRequestRejects(t *testing.T) {
 		{"rights", func(m *ipc.Message) { m.Payload[1] = byte(RightsTCP + 1) }},
 		{"quota", func(m *ipc.Message) {
 			if m.Payload[0] == byte(ControlAddUDPSession) || m.Payload[0] == byte(ControlAddTCPSession) {
-				m.Payload[controlQuota] = 0
+				binary.LittleEndian.PutUint16(m.Payload[controlQuota:], 0)
 			} else {
-				m.Payload[controlQuota] = 1
+				binary.LittleEndian.PutUint16(m.Payload[controlQuota:], 1)
 			}
 		}},
+		{"reserved byte", func(m *ipc.Message) { m.Payload[controlReserved1] = 1 }},
 		{"tcp version", func(m *ipc.Message) {
 			if m.Payload[0] == byte(ControlAddTCPSession) {
 				m.Payload[controlTCPVersion] = 0
