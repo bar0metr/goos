@@ -14,6 +14,7 @@ package main
 import (
 	"goos/internal/capability"
 	"goos/internal/validation"
+	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -226,15 +227,38 @@ func setNetDevice(driver, rx, tx handle.ID, generation uint64) bool {
 
 // awaitNetControl waits, bounded, for the service's answer to the request just
 // sent with the current correlation.
+//
+// An answer to an earlier request that came after its wait ended is skipped:
+// left in the queue it would be taken for the answer to every later request,
+// and each of them would fail one answer behind.
 func awaitNetControl(opcode netapi.ControlOpcode) bool {
-	reply, status := receive(uint64(netControl), vfsSessionDeadline)
 	var decoded netapi.ControlReply
-	if status != ipc.StatusOK || !netapi.DecodeControlReply(&reply, correlation, opcode, &decoded) || decoded.Result != netapi.ControlOK {
-		syslog.Warn("network service refused a control request", syslog.Uint("operation", uint64(opcode)), syslog.Uint("result", uint64(decoded.Result)))
-		return false
+	for skipped := 0; skipped <= maxStaleNetReplies; skipped++ {
+		reply, status := receive(uint64(netControl), netControlDeadline)
+		if status == ipc.StatusOK && reply.Correlation != 0 && reply.Correlation < correlation {
+			syslog.Warn("network service answered late", syslog.Uint("correlation", reply.Correlation))
+			continue
+		}
+		if status != ipc.StatusOK || !netapi.DecodeControlReply(&reply, correlation, opcode, &decoded) || decoded.Result != netapi.ControlOK {
+			syslog.Warn("network service refused a control request", syslog.Uint("operation", uint64(opcode)),
+				syslog.Uint("result", uint64(decoded.Result)), syslog.Uint("status", uint64(status)))
+			return false
+		}
+		return true
 	}
-	return true
+	syslog.Warn("network service answered late too often", syslog.Uint("operation", uint64(opcode)))
+	return false
 }
+
+// netControlDeadline bounds the wait for one answer. The first request goes
+// to a service init has just launched, which answers once its stack is set
+// up; on an emulated processor that took longer than the two seconds a VFS
+// session gets.
+const netControlDeadline = 10 * clock.TicksPerSecond
+
+// maxStaleNetReplies bounds the late answers one wait skips; each request
+// init gave up on leaves at most one.
+const maxStaleNetReplies = 8
 
 // openNetSession asks the network service to accept a session with the
 // rights of class and returns the client end for a command. The command
