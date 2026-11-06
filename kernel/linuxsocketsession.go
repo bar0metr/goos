@@ -18,16 +18,22 @@ package main
 //     fails with ETIMEDOUT and leaves the request abandoned; the session
 //     stays.
 //   - A readiness sleep waits for a socket's readiness to change. It
-//     registers on the session channel, with a deadline for SO_RCVTIMEO or
-//     SO_SNDTIMEO, drains the channel, which clears the readiness token,
+//     registers on the socket's key and on the session channel's close,
+//     with a deadline for SO_RCVTIMEO or SO_SNDTIMEO, drains the channel,
 //     reads the readiness page again, and sleeps only if the socket is
-//     still not ready. The service's ReadyChanged notification wakes it, so
+//     still not ready. A drain that finds the socket changed wakes it, so
 //     does the session's end, and a handled signal interrupts it.
 //
 // Draining the channel files each reply with the request it answers. A
 // reply whose caller still waits for it stays for that caller; one whose
 // caller is gone is applied: a socket opened or accepted for nobody is
 // closed. Anything that does not fit the protocol fails the session.
+//
+// The service's send drains the channel too, right after its message lands
+// (dispatchLinuxNet), so a reply or a readiness change wakes only the call
+// it concerns. One drain of a session runs at a time; one asked for while
+// another runs is left to that one, and a call that finds its reply only
+// after it blocked takes it back itself.
 
 import (
 	"goos/internal/capability"
@@ -74,6 +80,9 @@ type linuxSocketScratch struct {
 	bell        ipc.Message
 	pieces      [linuxsockapi.RXSlots]linuxcompat.RXPiece
 	waiters     [16]sched.TaskID
+	wakes       [32]uint64
+	// pollEpoch is the wake epoch of the socket pollSocket last looked at.
+	pollEpoch uint32
 	address     [linuxcompat.SockaddrInSize]byte
 	word        [4]byte
 	header      [linuxcompat.MsghdrSize]byte
@@ -270,6 +279,21 @@ func (handler *linuxCallHandler) socketAwait(call *socketCall) (linuxsockapi.Rep
 		ipcWaitSet.Cancel(handler.task)
 		return linuxsockapi.Reply{}, linuxabi.EIO, false
 	}
+	// A drain on another processor may have filed the reply after the look
+	// above and found the call not blocked yet. Whoever moves the call out
+	// of its wait first carries on: this call when it does, otherwise the
+	// wake already sent.
+	if linuxcompat.ReplyReady(call.familyID, pending.Correlation) &&
+		linuxcompat.SyscallContinuations.Resume(handler.task, pending.Correlation, linuxcompat.WakeMessage) {
+		ipcWaitSet.Cancel(handler.task)
+		wait, _, woken = linuxcompat.TakeReply(call.familyID, endpoint.Session, pending.Correlation, &local.linuxSocket.reply, local.linuxSocket.waiters[:])
+		wakeSocketWaiters(local.linuxSocket.waiters[:woken])
+		if wait != linuxcompat.ReplyTaken {
+			return linuxsockapi.Reply{}, linuxabi.ENETRESET, false
+		}
+		handler.socketProgress(pending.Partial)
+		return local.linuxSocket.reply, 0, false
+	}
 	return linuxsockapi.Reply{}, 0, true
 }
 
@@ -358,9 +382,9 @@ func (handler *linuxCallHandler) socketSleep(call *socketCall, want linuxsockapi
 			deadline = amd64.TimerTicks() + linuxcompat.RemainingTicks(end-now, clock.TicksPerSecond, linuxSleepTicks)
 		}
 	}
-	interest := local.linuxPollEntries[:1]
-	interest[0] = kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindChannel, Object: call.endpoint.Channel, Side: call.endpoint.Side},
-		Events: kernelwait.Readable | kernelwait.PeerClosed}
+	interest := local.linuxPollEntries[:2]
+	interest[0] = kernelwait.Entry{Key: socketWaitKey(call.object), Events: socketWaitEvents(want)}
+	interest[1] = sessionCloseEntry(call.endpoint)
 	if !linuxcompat.SyscallContinuations.Issue(handler.task, 1, linuxcompat.SocketSleepCorrelation) ||
 		!waitAnyTable.Begin(handler.task, interest, deadline) {
 		waitAnyTable.Cancel(handler.task)
@@ -401,6 +425,22 @@ func refreshSocket(call *socketCall) {
 //
 //go:noinline
 func pumpSocketSession(familyID uint64, endpoint linuxcompat.NetEndpoint, self sched.TaskID) bool {
+	if !linuxcompat.BeginPump(familyID) {
+		return true
+	}
+	for {
+		live := drainSocketSession(familyID, endpoint, self)
+		if live {
+			wakeChangedSockets(familyID, endpoint)
+		}
+		if !linuxcompat.EndPump(familyID) {
+			return live
+		}
+	}
+}
+
+// drainSocketSession is one pass of pumpSocketSession.
+func drainSocketSession(familyID uint64, endpoint linuxcompat.NetEndpoint, self sched.TaskID) bool {
 	local := thisCPU()
 	scratch := &local.linuxSocket
 	for drained := 0; drained <= ipc.QueueCapacity; drained++ {
@@ -418,6 +458,7 @@ func pumpSocketSession(familyID uint64, endpoint linuxcompat.NetEndpoint, self s
 			if page, found := socketPoolPage(endpoint, linuxsockapi.ReadinessPage); found {
 				linuxsockapi.TakeToken(page)
 			}
+			linuxcompat.NoteReadyChanged(familyID)
 		case linuxcompat.MessageReply:
 			if owner != 0 && socketOwnerWaits(owner, correlation) && linuxcompat.DeliverReply(familyID, correlation, &scratch.pumpReply) {
 				if owner != self && ipcWaitSet.Cancel(owner) {
@@ -522,6 +563,11 @@ func failSocketSession(familyID uint64, endpoint linuxcompat.NetEndpoint, reason
 	}
 	kernelLogUints(logfmt.Warn, "linux socket session failed", "family", familyID, "reason", uint64(reason))
 	wakeSocketWaiters(local.linuxSocket.waiters[:woken])
+	for cursor := 0; cursor >= 0; {
+		var count int
+		count, cursor = linuxcompat.FamilySocketObjects(familyID, cursor, local.linuxSocket.wakes[:])
+		publishSocketWakes(local.linuxSocket.wakes[:count])
+	}
 	if closeChannelSide(endpoint.Channel, endpoint.Side) {
 		wakeIPCWaiters(endpoint.Channel, endpoint.Side^1, ipc.WaitPeerDied)
 	}
@@ -543,6 +589,8 @@ func wakeSocketWaiters(tasks []sched.TaskID) {
 // sends Close without waiting for the reply.
 func releaseSocketDescription(object uint64) {
 	identity, familyID, send := linuxcompat.CloseSocket(object)
+	// A call another thread left asleep on the socket wakes to find it gone.
+	publishWaitAny(socketWaitKey(object), socketWakeEvents)
 	if !send {
 		return
 	}
@@ -617,4 +665,72 @@ func closeLinuxNetHandles(holder *process.Process, old linuxcompat.NetGrant) {
 	if typeID, authority, found := holder.Handles().Describe(old.PoolHandle); found && typeID == handle.TypeMemory && holder.Handles().Close(old.PoolHandle) {
 		releaseMemory(authority)
 	}
+}
+
+// socketWakeEvents is what a drain publishes for a socket that changed:
+// every event a socket wait names, since the drain does not tell them
+// apart.
+const socketWakeEvents = kernelwait.Readable | kernelwait.Writable | kernelwait.PeerClosed
+
+// socketWaitKey is the wait key of the socket a description Object names.
+func socketWaitKey(object uint64) kernelwait.Key {
+	return kernelwait.Key{Kind: kernelwait.KindLinuxSocket, Object: object}
+}
+
+// socketWaitEvents is the wait events for a call that wants want: errors
+// and hangups always end the wait.
+func socketWaitEvents(want linuxsockapi.Ready) kernelwait.Event {
+	events := kernelwait.PeerClosed
+	if want&linuxsockapi.ReadyIn != 0 {
+		events |= kernelwait.Readable
+	}
+	if want&linuxsockapi.ReadyOut != 0 {
+		events |= kernelwait.Writable
+	}
+	return events
+}
+
+// sessionCloseEntry wakes a socket wait when the service's side of the
+// session closes: the service died, and nobody sends a ReadyChanged again.
+func sessionCloseEntry(endpoint linuxcompat.NetEndpoint) kernelwait.Entry {
+	return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindChannel, Object: endpoint.Channel, Side: endpoint.Side},
+		Events: kernelwait.PeerClosed}
+}
+
+// publishSocketWakes wakes the calls that wait on the sockets objects name.
+func publishSocketWakes(objects []uint64) {
+	for index := range objects {
+		publishWaitAny(socketWaitKey(objects[index]), socketWakeEvents)
+		objects[index] = 0
+	}
+}
+
+// wakeChangedSockets runs the wake scan after a drain that took a
+// ReadyChanged or a ring entry.
+func wakeChangedSockets(familyID uint64, endpoint linuxcompat.NetEndpoint) {
+	if !linuxcompat.TakeRescan(familyID) {
+		return
+	}
+	scratch := &thisCPU().linuxSocket
+	var pages linuxcompat.ReadinessView
+	for index := range pages {
+		pages[index], _ = socketPoolPage(endpoint, linuxsockapi.ReadinessPage+uint32(index))
+	}
+	for cursor := 0; cursor >= 0; {
+		var count int
+		count, cursor = linuxcompat.ScanSocketWakes(familyID, endpoint.Session, &pages, cursor, scratch.wakes[:])
+		publishSocketWakes(scratch.wakes[:count])
+	}
+}
+
+// dispatchLinuxNet drains the session whose kernel side is channel's side,
+// in the send of the service that just queued a message on it. It reports
+// false for a channel that carries no live session.
+func dispatchLinuxNet(channel uint64, side uint8) bool {
+	familyID, endpoint, found := linuxcompat.NetFamilyOfChannel(channel, side)
+	if !found {
+		return false
+	}
+	pumpSocketSession(familyID, endpoint, 0)
+	return true
 }

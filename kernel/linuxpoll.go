@@ -226,7 +226,16 @@ func pollReadiness(state *linuxcompat.ProcessState, fd int32, events uint16, cou
 	}
 	revents, entry, watch := pollDescriptor(state, fd, events)
 	if revents == 0 && watch {
+		before := count
 		count = addPollInterest(count, entry)
+		if entry.Key.Kind == kernelwait.KindLinuxSocket {
+			// A second descriptor of the same socket merges into the first
+			// entry and keeps the epoch that one saw, the older of the two.
+			if count > before {
+				thisCPU().linuxPollEpochs[count-1] = thisCPU().linuxSocket.pollEpoch
+			}
+			count = addPollInterest(count, sessionCloseEntry(thisCPU().linuxSocket.call.endpoint))
+		}
 	}
 	return revents, count
 }

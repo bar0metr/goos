@@ -148,6 +148,17 @@ func ReadEntry(page []byte, index int, tries int) (Readiness, EntryStatus) {
 	return Readiness{}, EntryBusy
 }
 
+// EntrySequence loads entry index's sequence from page, the pool page
+// EntryPage(index) names. Each write of the entry adds two to it, so a
+// reader that kept an earlier value sees the entry changed. ok is false
+// for an index or page outside the layout.
+func EntrySequence(page []byte, index int) (sequence uint32, ok bool) {
+	if index < 0 || index >= MaxSockets || len(page) < pageSize {
+		return 0, false
+	}
+	return atomic.LoadUint32(word(page, entryOffset(index)%pageSize+offEntrySequence)), true
+}
+
 // Read is ReadEntry on a whole pool that reports only whether it got a
 // settled state.
 func Read(pool []byte, index int, tries int) (Readiness, bool) {

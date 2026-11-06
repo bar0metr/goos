@@ -834,8 +834,9 @@ func (handler *linuxCallHandler) socketIoctl(description *linuxcompat.FileDescri
 }
 
 // pollSocket evaluates a socket for poll from the readiness page after
-// draining the session. watch reports the channel wait that wakes a poll
-// on it.
+// draining the session. watch reports the socket's wait, which a drain that
+// finds the socket changed wakes; the socket's wake epoch goes to the
+// scratch's pollEpoch.
 //
 //go:noinline
 func pollSocket(description linuxcompat.FileDescription, events uint16) (uint16, kernelwait.Entry, bool) {
@@ -852,34 +853,55 @@ func pollSocket(description linuxcompat.FileDescription, events uint16) (uint16,
 		pumpSocketSession(familyID, endpoint, thisCPU().linuxHandler.task)
 		refreshSocket(call)
 	}
+	// The epoch comes before the readiness: a wake that goes out after it
+	// shows as a new epoch when the poll registers.
+	scratch.pollEpoch = call.socket.WakeEpoch()
 	state, ready := socketReadiness(call)
 	revents := linuxcompat.SocketPollRevents(events, state.Ready, ready, call.socket.ShutRead)
 	if revents != 0 || !ready {
 		return revents, kernelwait.Entry{}, false
 	}
-	return 0, kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindChannel, Object: endpoint.Channel, Side: endpoint.Side},
-		Events: kernelwait.Readable | kernelwait.PeerClosed}, true
+	wait := linuxsockapi.Ready(0)
+	if events&(linuxcompat.PollIn|linuxcompat.PollReadNormal|linuxcompat.PollReadHangup) != 0 {
+		wait |= linuxsockapi.ReadyIn
+	}
+	if events&(linuxcompat.PollOut|linuxcompat.PollWriteNormal) != 0 {
+		wait |= linuxsockapi.ReadyOut
+	}
+	return 0, kernelwait.Entry{Key: socketWaitKey(description.Object), Events: socketWaitEvents(wait)}, true
 }
 
 // rearmSocketInterests closes the gap between a poll's scan and its
-// registration: a session message queued in between published its event to
-// nobody, so it is published again for the registration just made.
+// registration. A wake scan in between published to nobody: a socket whose
+// wake epoch moved since the scan, or that closed or failed, is published
+// again for the registration just made. A session channel whose service
+// side closed in between is published as closed.
 func rearmSocketInterests(entries []kernelwait.Entry) {
+	local := thisCPU()
 	for index := range entries {
 		key := entries[index].Key
-		if key.Kind != kernelwait.KindChannel {
-			continue
-		}
-		channel, live := channelRegistry.Acquire(key.Object)
-		if !live {
-			continue
-		}
-		status := channel.ReceiveStatus(key.Side)
-		channel.Unlock()
-		if status == ipc.StatusOK {
-			publishWaitAny(key, kernelwait.Readable)
-		} else if status != ipc.StatusNotFound {
-			publishWaitAny(key, kernelwait.PeerClosed)
+		switch key.Kind {
+		case kernelwait.KindLinuxSocket:
+			socket, familyID, live, found := linuxcompat.SocketOf(key.Object)
+			if found && live {
+				endpoint, sessionLive, _ := linuxcompat.NetSession(familyID)
+				live = sessionLive && endpoint.Session == socket.Session
+			}
+			if !found || !live || socket.WakeEpoch() != local.linuxPollEpochs[index] {
+				publishWaitAny(key, socketWakeEvents)
+			}
+		case kernelwait.KindChannel:
+			channel, live := channelRegistry.Acquire(key.Object)
+			if !live {
+				continue
+			}
+			status := channel.ReceiveStatus(key.Side)
+			channel.Unlock()
+			if status == ipc.StatusOK {
+				publishWaitAny(key, kernelwait.Readable)
+			} else if status != ipc.StatusNotFound {
+				publishWaitAny(key, kernelwait.PeerClosed)
+			}
 		}
 	}
 }

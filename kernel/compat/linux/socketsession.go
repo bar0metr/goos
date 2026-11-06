@@ -62,7 +62,18 @@ type NetSocket struct {
 	SendTimeout uint64
 	generation  uint32
 	used        bool
+	// seen is the readiness entry's sequence at the last wake scan, and
+	// touched marks a ring entry for the socket since that scan
+	// (socketwake.go).
+	seen    uint32
+	touched bool
+	// wakes counts the wake scans that listed the socket, so a poll that
+	// registers after its scan sees whether a wake went out in between.
+	wakes uint32
 }
+
+// WakeEpoch is the count of wake scans that listed the socket.
+func (socket NetSocket) WakeEpoch() uint32 { return socket.wakes }
 
 type requestState uint8
 
@@ -120,6 +131,13 @@ type NetContext struct {
 	waiters      [socketWaiterSlots]sched.TaskID
 	waiterCount  uint8
 	nextSocketGn uint32
+	// pumping marks a drain of the session in progress, and pumpAgain a
+	// drain another processor asked for meanwhile (socketwake.go).
+	pumping   bool
+	pumpAgain bool
+	// rescan marks a change the wake scan has yet to look at: a
+	// ReadyChanged taken or a ring entry drained.
+	rescan bool
 }
 
 // MaxNetFamilies bounds the families that hold a socket session at once:
@@ -161,6 +179,8 @@ func (context *NetContext) reset(familyID uint64) {
 	context.closeCount = 0
 	clear(context.waiters[:])
 	context.waiterCount = 0
+	context.pumping, context.pumpAgain, context.rescan = false, false, false
+	context.mirrorChannel()
 }
 
 func netContextHeld(familyID uint64) (*NetContext, int, bool) {
@@ -258,6 +278,7 @@ func AttachNet(familyID uint64, grant NetGrant, replaceLive bool) (old NetGrant,
 	context.data = dataPlane{}
 	clear(context.closes[:])
 	context.closeCount = 0
+	context.mirrorChannel()
 	noteNetHeld(&netDiagnostics.Attaches)
 	return old, replaced, true
 }
@@ -301,6 +322,7 @@ func FailNet(familyID uint64, session uint32, waiters []sched.TaskID) (NetEndpoi
 		return NetEndpoint{}, 0, false
 	}
 	context.failed = true
+	context.mirrorChannel()
 	noteNetHeld(&netDiagnostics.SessionFailures)
 	return context.endpoint, context.takeWaitersHeld(waiters), true
 }
