@@ -38,6 +38,10 @@ const (
 	// user data or part of the immutable system image. Older segments are
 	// logPath.1, logPath.2 and so on.
 	logPath = "/state/system.log"
+	// statusPath holds the counters for `log status`; statusScratch is
+	// where the next one is written before it replaces the last.
+	statusPath    = logPath + logpersist.StatusSuffix
+	statusScratch = statusPath + ".new"
 	// maintenanceTicks is how often the service rereads its settings and
 	// retries storage that failed. Records never wait for it.
 	maintenanceTicks = 5 * clock.TicksPerSecond
@@ -81,6 +85,12 @@ var (
 	policyRefused bool
 	// lastReport holds the counters as last reported.
 	lastReport logpersist.Stats
+	// written holds the counters and policy the status file last got;
+	// statusWritten says whether it got any.
+	written       logpersist.Stats
+	writtenPolicy logpersist.Policy
+	statusWritten bool
+	statusText    [logpersist.MaxStatus]byte
 	rounds     int
 	interests  [userwait.MaxObjects]userwait.CursorInterest
 )
@@ -194,6 +204,7 @@ func maintain() {
 	refreshSettings()
 	rounds++
 	stats := persister.Stats
+	saveStatus(stats)
 	changed := stats.Lost != lastReport.Lost || stats.Failures != lastReport.Failures ||
 		stats.RotationFailures != lastReport.RotationFailures || stats.Repaired != lastReport.Repaired
 	if !changed && rounds < reportEvery {
@@ -206,6 +217,21 @@ func maintain() {
 		syslog.Uint("persisted", stats.Persisted), syslog.Uint("lost", stats.Lost), syslog.Uint("failed", stats.Failures))
 	syslog.Info("rotation counters", syslog.Uint("rotations", stats.Rotations), syslog.Uint("refused", stats.RotationFailures),
 		syslog.Uint("repaired", stats.Repaired), syslog.Uint("cut-bytes", stats.RepairedBytes))
+}
+
+// saveStatus rewrites the status file when the counters or the policy
+// changed since the last write. It writes nothing while persistence is off
+// or storage is failing, and a failed write is retried next round without a
+// record, as the log itself would carry it.
+func saveStatus(stats logpersist.Stats) {
+	policy := persister.Policy()
+	if !persisting || failing || vfsClosed || statusWritten && stats == written && policy == writtenPolicy {
+		return
+	}
+	text := logpersist.AppendStatus(statusText[:0], stats, policy)
+	if writeStatus([]byte(statusPath), []byte(statusScratch), text) {
+		written, writtenPolicy, statusWritten = stats, policy, true
+	}
 }
 
 // refreshSettings asks the configuration service whether to persist and how
