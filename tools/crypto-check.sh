@@ -4,7 +4,7 @@ set -eu
 
 work=${1:?output directory required}
 opt=${OPT:-2}
-tags=${BUILD_TAGS:-goos_hz100 goos_validation}
+tags=${BUILD_TAGS:-goos_hz250 goos_validation}
 mkdir -p "$work/elf" "$work/images" "$work/logs"
 make --no-print-directory toolchain-check build/userspace/runtime.o
 if [ "${CRYPTO_COMPAT:-0}" = 1 ]; then

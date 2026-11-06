@@ -13,9 +13,14 @@ import (
 	"goos/kernel/vfs"
 	blockproto "goos/userspace/block"
 	supervisor "goos/userspace/init"
+	syslog "goos/userspace/log"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 )
+
+// probeOutputWait is how long, in ticks, init waits for the next output of a
+// Linux probe: 10 s at HZ=250.
+const probeOutputWait = 2500
 
 var linuxProbeStreams [2][3][2]uint64
 var linuxProbeGrants [2][5]supervisor.Capability
@@ -207,7 +212,11 @@ func runLinuxMusl(executable supervisor.Executable, name string, path []byte) bo
 	sys.HandleClose(handle.ID(streams[2][0]))
 	printed := linuxProbeRead(streams[1][0], "argc=3\nargv[1]=one\nargv[2]=two\nvfs session ok\npaths ok\nfiles ok\nstatus ok\nstatx ok\npositions ok\nstdio ok\nlisting ok\nvectors ok\ndescriptors ok\nnames ok\ndevices ok\nsystem ok\nsignals ok\nrandom ok\nabi-probe ok\n")
 	sys.HandleClose(handle.ID(streams[1][0]))
-	return waitApplicationExit(launched.ProcessHandle) == 0 && printed
+	code := waitApplicationExit(launched.ProcessHandle)
+	if code != 0 || !printed {
+		syslog.Warn("linux probe ended", syslog.Str("probe", name), syslog.Uint("exit", code))
+	}
+	return code == 0 && printed
 }
 
 func prepareLinuxProbe(index int) (*[3][2]uint64, []supervisor.Capability, handle.ID, bool) {
@@ -249,7 +258,11 @@ func linuxProbeWrite(endpoint uint64, data string) bool {
 func linuxProbeRead(endpoint uint64, expected string) bool {
 	received := 0
 	for received < len(expected) {
-		if sys.StreamWait(handle.ID(endpoint), 200) != kcall.StatusOK {
+		// A probe writes between system calls of its own; on a loaded TCG
+		// host 200 ticks between two writes was too short, and the probe then
+		// died of SIGPIPE on its next write. The wait bounds a stuck probe,
+		// not the speed of a working one.
+		if sys.StreamWait(handle.ID(endpoint), probeOutputWait) != kcall.StatusOK {
 			mark("LINUX_RAW_WAIT_FAILED\n")
 			linuxProbeShow(received)
 			return false

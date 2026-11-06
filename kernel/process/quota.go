@@ -47,6 +47,12 @@ const (
 // (ADR 0104). Reservations cost nothing until touched, so the limit bounds
 // memory actually used: 32 MiB, room for a full default stack, a large heap,
 // and multi-megabyte buffers.
+//
+// Tasks are threads. A large process may run MaxTasksPerProcess of them, a
+// normal one 16 and a tiny one only its first. Each task past the first also
+// holds TaskPages of the page quota for its kernel stack, so 64 tasks cost a
+// large process 378 of its 16384 pages, and a thread the page quota cannot
+// cover is refused (ADR 0122).
 const (
 	tinyChannelLimit   = 2
 	tinyStreamLimit    = 8
@@ -54,11 +60,11 @@ const (
 	tinyPageLimit      = 2048
 	normalChannelLimit = 4
 	normalStreamLimit  = 16
-	normalTaskLimit    = 4
+	normalTaskLimit    = 16
 	normalPageLimit    = 8192
 	largeChannelLimit  = 8
 	largeStreamLimit   = 32
-	largeTaskLimit     = 8
+	largeTaskLimit     = MaxTasksPerProcess
 	largePageLimit     = 16384
 )
 
@@ -85,7 +91,7 @@ const (
 const (
 	systemChannelLimit = ipc.MaxChannels
 	systemStreamLimit  = 64
-	systemTaskLimit    = 8
+	systemTaskLimit    = 16
 	systemPageLimit    = 16384
 )
 

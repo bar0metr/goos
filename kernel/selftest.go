@@ -69,10 +69,11 @@ func runKernelSelfTests(pageTable uint64) {
 	rootB, addressSpaceB := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
 	addressSpaceA = addressSpaceA && amd64.PrepareUserAddressSpace(&pageAllocator, rootA)
 	addressSpaceB = addressSpaceB && amd64.PrepareUserAddressSpace(&pageAllocator, rootB)
-	if _, mapped := vm.Resolve(rootA, vm.KernelImageBase); mapped {
+	kernelImage, _ := vm.LoadedImage()
+	if _, mapped := vm.Resolve(rootA, kernelImage.Base); mapped {
 		panicSerial("process root retained the low kernel image")
 	}
-	if _, mapped := vm.Resolve(rootA, vm.KernelLowBase+vm.KernelImageBase); mapped {
+	if _, mapped := vm.Resolve(rootA, vm.KernelLowBase+kernelImage.Base); mapped {
 		panicSerial("process root retained the complete kernel alias")
 	}
 	if framebufferVirtual != 0 {

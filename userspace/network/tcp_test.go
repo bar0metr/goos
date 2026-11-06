@@ -204,6 +204,7 @@ func TestTCPZeroWindowPersistAndReopen(t *testing.T) {
 	entry.localMSS, entry.peerMSS = 1460, 1200
 	entry.sndUna, entry.sndNxt, entry.sendSeq = 100, 100, 100
 	entry.rcvNxt, entry.peerWindow, entry.cwnd = 200, 0, tcpInitialWindow(entry)
+	h.stack.indexConnection(entry)
 	if written, result := h.stack.TCPWrite(0, id, []byte("x"), h.now); result != ResultOK || written != 1 {
 		t.Fatalf("write %d %d", written, result)
 	}
@@ -251,23 +252,23 @@ func TestTCPOutOfOrderOverlapAndDuplicate(t *testing.T) {
 	stack := Stack{tuning: DefaultTuning()}
 	entry := tcpEndpoint{state: TCPEstablished, rcvNxt: 100, sndNxt: 50}
 	stack.handlePayload(&entry, tcpSegment{sequence: 103, flags: tcpFlagACK, payload: []byte("def")}, second)
-	if entry.recvLen != 0 || !entry.reorder[0].used {
-		t.Fatalf("later segment delivered early: recv=%d held=%v", entry.recvLen, entry.reorder[0].used)
+	if entry.recvLen != 0 || entry.heldBytes() == 0 {
+		t.Fatalf("later segment delivered early: recv=%d held=%v", entry.recvLen, entry.heldBytes() != 0)
 	}
 	stack.handlePayload(&entry, tcpSegment{sequence: 100, flags: tcpFlagACK, payload: []byte("abc")}, second)
-	if entry.rcvNxt != 106 || string(entry.receive[:entry.recvLen]) != "abcdef" {
-		t.Fatalf("reassembled rcvNxt=%d data=%q", entry.rcvNxt, entry.receive[:entry.recvLen])
+	if entry.rcvNxt != 106 || entry.testStream() != "abcdef" {
+		t.Fatalf("reassembled rcvNxt=%d data=%q", entry.rcvNxt, entry.testStream())
 	}
 	stack.handlePayload(&entry, tcpSegment{sequence: 100, flags: tcpFlagACK, payload: []byte("abcdef")}, second)
-	if entry.rcvNxt != 106 || string(entry.receive[:entry.recvLen]) != "abcdef" {
-		t.Fatalf("duplicate changed stream: rcvNxt=%d data=%q", entry.rcvNxt, entry.receive[:entry.recvLen])
+	if entry.rcvNxt != 106 || entry.testStream() != "abcdef" {
+		t.Fatalf("duplicate changed stream: rcvNxt=%d data=%q", entry.rcvNxt, entry.testStream())
 	}
 
 	entry = tcpEndpoint{state: TCPEstablished, rcvNxt: 200, sndNxt: 50}
 	stack.handlePayload(&entry, tcpSegment{sequence: 202, flags: tcpFlagACK, payload: []byte("cdef")}, second)
 	stack.handlePayload(&entry, tcpSegment{sequence: 200, flags: tcpFlagACK, payload: []byte("abcd")}, second)
-	if entry.rcvNxt != 206 || string(entry.receive[:entry.recvLen]) != "abcdef" {
-		t.Fatalf("overlap reassembled rcvNxt=%d data=%q", entry.rcvNxt, entry.receive[:entry.recvLen])
+	if entry.rcvNxt != 206 || entry.testStream() != "abcdef" {
+		t.Fatalf("overlap reassembled rcvNxt=%d data=%q", entry.rcvNxt, entry.testStream())
 	}
 }
 
@@ -279,8 +280,8 @@ func TestTCPOutOfOrderFINWaitsForGap(t *testing.T) {
 		t.Fatal("out-of-order FIN delivered before gap")
 	}
 	stack.handlePayload(&entry, tcpSegment{sequence: 100, flags: tcpFlagACK, payload: []byte("abc")}, second)
-	if !entry.finReceived || entry.rcvNxt != 104 || entry.state != TCPCloseWait || string(entry.receive[:entry.recvLen]) != "abc" {
-		t.Fatalf("FIN promotion state=%d rcvNxt=%d fin=%v data=%q", entry.state, entry.rcvNxt, entry.finReceived, entry.receive[:entry.recvLen])
+	if !entry.finReceived || entry.rcvNxt != 104 || entry.state != TCPCloseWait || entry.testStream() != "abc" {
+		t.Fatalf("FIN promotion state=%d rcvNxt=%d fin=%v data=%q", entry.state, entry.rcvNxt, entry.finReceived, entry.testStream())
 	}
 }
 
@@ -428,6 +429,10 @@ func establishedWithPeer(t *testing.T, h *harness, port uint16) (TCPEndpointID, 
 	entry.sndUna, entry.sndNxt, entry.sendSeq = 100, 100, 100
 	entry.rcvNxt, entry.peerWindow, entry.cwnd = 200, 1000, 14600
 	entry.sndWL1, entry.sndWL2 = 200, 100
+	h.stack.indexConnection(entry)
+	if !h.stack.allocateReceive(entry, false) {
+		t.Fatal("no receive ring")
+	}
 	return id, entry
 }
 
@@ -481,8 +486,8 @@ func TestTCPOldACKStillDeliversPayload(t *testing.T) {
 	h := readyWithPeer(t)
 	_, entry := establishedWithPeer(t, h, 50011)
 	h.tcpFromPeer(entry, tcpSegment{sequence: 200, acknowledgment: 90, flags: tcpFlagACK, window: 9000, payload: []byte("abc")})
-	if entry.rcvNxt != 203 || string(entry.receive[:entry.recvLen]) != "abc" || entry.peerWindow != 1000 {
-		t.Fatalf("old ACK: rcvNxt=%d data=%q window=%d", entry.rcvNxt, entry.receive[:entry.recvLen], entry.peerWindow)
+	if entry.rcvNxt != 203 || entry.testStream() != "abc" || entry.peerWindow != 1000 {
+		t.Fatalf("old ACK: rcvNxt=%d data=%q window=%d", entry.rcvNxt, entry.testStream(), entry.peerWindow)
 	}
 }
 
@@ -622,6 +627,12 @@ func TestTCPPassiveCloseReleasesOrphan(t *testing.T) {
 			t.Fatalf("round %d endpoints %d states %v", round, stats.Endpoints, stats.States)
 		}
 	}
+	// Each client's TIME_WAIT four-tuple stays in a tombstone, whose expiry
+	// is the only timer left.
+	if stats := h.stack.TCPStats(); stats.TimeWait != 3*MaxTCPEndpointsPerSession {
+		t.Fatalf("tombstones %d", stats.TimeWait)
+	}
+	h.runUntil(h.now + h.stack.tuning.TCP.TimeWait)
 	if _, ok := h.stack.Deadline(); ok {
 		t.Fatal("released endpoints left a timer")
 	}
@@ -889,7 +900,7 @@ func TestTCPFINFailsWithNeighbor(t *testing.T) {
 	}
 }
 
-func receivedStream(entry *tcpEndpoint) string { return string(entry.receive[:entry.recvLen]) }
+func receivedStream(entry *tcpEndpoint) string { return entry.testStream() }
 
 func TestTCPFINAtReceiveWindowRightEdge(t *testing.T) {
 	for _, start := range []uint32{100, 0xfffffffe} {
@@ -960,10 +971,8 @@ func TestTCPFINBeyondClippedPayload(t *testing.T) {
 	if entry.rcvNxt != 104 || receivedStream(entry) != "abcd" || entry.peerFIN || entry.finReceived {
 		t.Fatalf("rcvNxt=%d data=%q peerFIN=%v fin=%v", entry.rcvNxt, receivedStream(entry), entry.peerFIN, entry.finReceived)
 	}
-	for index := range entry.reorder {
-		if entry.reorder[index].used {
-			t.Fatalf("out-of-window bytes held in slot %d", index)
-		}
+	if held := entry.heldBytes(); held != 0 {
+		t.Fatalf("out-of-window bytes held: %d", held)
 	}
 	if sent := h.tcpSent(); len(sent) != 1 || sent[0].acknowledgment != 104 {
 		t.Fatalf("ACKs %+v", sent)
@@ -976,7 +985,7 @@ func TestTCPFINWithZeroReceiveWindow(t *testing.T) {
 	_, entry := establishedWithPeer(t, h, 50103)
 	entry.rcvNxt = 100
 	entry.recvLen = 4
-	copy(entry.receive[:], "abcd")
+	copy(entry.recvRing, "abcd")
 	fin := tcpSegment{sequence: 100, acknowledgment: entry.sndNxt, flags: tcpFlagACK | tcpFlagFIN}
 	h.tcpFromPeer(entry, fin)
 	if entry.rcvNxt != 100 || entry.peerFIN || entry.finReceived || entry.state != TCPEstablished {
@@ -1010,9 +1019,7 @@ func TestTCPNoDataAfterFIN(t *testing.T) {
 		}
 	}
 	var buffer [16]byte
-	stack.tcp[0] = entry
-	stack.tcp[0].generation, stack.tcp[0].owner = 1, 0
-	id := tcpID(&stack.tcp[0], 0)
+	id := stack.adoptTCP(&entry, 0)
 	if read, result := stack.TCPRead(0, id, buffer[:], second); result != ResultOK || string(buffer[:read]) != "abc" {
 		t.Fatalf("read %d %d", read, result)
 	}
@@ -1043,9 +1050,7 @@ func TestTCPOutOfOrderFINKeepsItsSequence(t *testing.T) {
 	if !entry.finReceived || entry.rcvNxt != 105 || receivedStream(&entry) != "abcd" || entry.state != TCPCloseWait {
 		t.Fatalf("overlap fin=%v rcvNxt=%d data=%q state=%d", entry.finReceived, entry.rcvNxt, receivedStream(&entry), entry.state)
 	}
-	for index := range entry.reorder {
-		if entry.reorder[index].used {
-			t.Fatalf("reassembly slot %d still held after FIN", index)
-		}
+	if entry.reorder != nil {
+		t.Fatalf("reassembly spans still held after FIN: %v", entry.reorder.spans)
 	}
 }

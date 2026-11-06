@@ -47,9 +47,22 @@ const (
 	GrantRemote
 	// GrantHostname grants one exact-key durable hostname session.
 	GrantHostname
+	// GrantTCPBulk asks for the TCP session in GTCP 3, whose 16 KiB slots,
+	// pipelined writes and queued reads carry bulk streams, in place of
+	// GTCP 2. The authority is GrantTCP's; a command names one of the two.
+	GrantTCPBulk
+	// GrantTCPRing asks for the TCP session in GTCP 4, whose stream data
+	// moves through shared rings, for a command that speaks it through
+	// package tcpring. The authority is GrantTCP's.
+	GrantTCPRing
+	// GrantUDPRing asks for a UDP session in GUDP 3, whose datagrams move
+	// through shared rings (ADR 0216), alongside any other grant. The
+	// authority is GrantUDP's.
+	GrantUDPRing
 
 	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal | GrantLaunch | GrantNetworkPing | GrantNetworkAdmin |
-		GrantResolve | GrantResolveAdmin | GrantUDP | GrantTCP | GrantRemote | GrantHostname
+		GrantResolve | GrantResolveAdmin | GrantUDP | GrantTCP | GrantRemote | GrantHostname | GrantTCPBulk | GrantTCPRing |
+		GrantUDPRing
 )
 
 // Unbounded is the MaxArgs of a command that takes any number of arguments.
@@ -86,8 +99,10 @@ const (
 	MaxArgs = 99
 	// IndexFormat names the line format below and the meaning of its grant
 	// bits. An installed system records it, so a system built for another
-	// format is refused (ADR 0175). Format 7 adds the exact-key hostname grant.
-	IndexFormat = 7
+	// format is refused (ADR 0175). Format 7 adds the exact-key hostname grant,
+	// format 8 the GTCP 3 session grant, format 9 the GTCP 4 one, format 10
+	// the GUDP 3 one.
+	IndexFormat = 10
 )
 
 // Entry is one decoded index line. Its byte slices alias the index.

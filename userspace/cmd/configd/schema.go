@@ -1,8 +1,10 @@
 package main
 
 import (
+	"goos/internal/validation"
 	"goos/internal/version"
 	"goos/userspace/config"
+	"goos/userspace/logpersist"
 	"goos/userspace/remotepolicy"
 )
 
@@ -13,6 +15,7 @@ func declareSchema(target *config.Store) config.Status {
 	name, _ := config.Text([]byte(version.Name))
 	release, _ := config.Text([]byte(version.Release))
 	machine, _ := config.Text([]byte(version.Machine))
+	logRotation := logpersist.DefaultPolicy(validation.Enabled)
 	declarations := [...]struct {
 		key      string
 		value    config.Value
@@ -25,6 +28,12 @@ func declareSchema(target *config.Store) config.Status {
 		{"system.build.machine", machine, true},
 		{"system.hostname", mustText("goos"), false},
 		{"system.log.persist", config.Bool(true), false},
+		// The log service's rotation: bytes per segment and segments kept,
+		// the live file included. A validation build's default is small so
+		// one boot rotates. The service refuses values outside the bounds of
+		// logpersist.Policy and keeps the ones it had.
+		{"system.log.segment-bytes", config.Uint(logRotation.SegmentBytes), false},
+		{"system.log.segments", config.Uint(uint64(logRotation.Segments)), false},
 		// The network service's settings (ADR 0191) and timer policy (ADR 0192).
 		// The service validates them as a whole when it loads them; the store
 		// only checks their types. Times are in milliseconds.
@@ -52,20 +61,22 @@ func declareSchema(target *config.Store) config.Status {
 		{"system.net.udp.ephemeral-port-min", config.Uint(49152), false},
 		{"system.net.udp.ephemeral-port-max", config.Uint(65535), false},
 		{"system.net.udp.recv-queue-depth", config.Uint(8), false},
-		{"system.net.udp.max-endpoints", config.Uint(32), false},
+		{"system.net.udp.max-endpoints", config.Uint(1024), false},
 		{"system.net.udp.max-endpoints-per-session", config.Uint(8), false},
 		{"system.net.udp.max-payload", config.Uint(4096), false},
 		{"system.net.tcp.ephemeral-port-min", config.Uint(49152), false},
 		{"system.net.tcp.ephemeral-port-max", config.Uint(65535), false},
-		{"system.net.tcp.max-endpoints", config.Uint(32), false},
+		{"system.net.tcp.max-endpoints", config.Uint(1024), false},
 		{"system.net.tcp.max-endpoints-per-session", config.Uint(8), false},
-		{"system.net.tcp.listen-backlog", config.Uint(8), false},
-		{"system.net.tcp.send-buffer-bytes", config.Uint(16384), false},
-		{"system.net.tcp.recv-buffer-bytes", config.Uint(16384), false},
+		{"system.net.tcp.listen-backlog", config.Uint(128), false},
+		{"system.net.tcp.send-buffer-bytes", config.Uint(262144), false},
+		{"system.net.tcp.recv-buffer-bytes", config.Uint(262144), false},
 		{"system.net.tcp.connect-timeout-ms", config.Uint(30000), false},
 		{"system.net.tcp.rto-min-ms", config.Uint(1000), false},
 		{"system.net.tcp.rto-max-ms", config.Uint(60000), false},
 		{"system.net.tcp.time-wait-ms", config.Uint(60000), false},
+		{"system.net.tcp.memory-bytes", config.Uint(41943040), false},
+		{"system.net.tcp.memory-bytes-per-session", config.Uint(33554432), false},
 		// The resolver service's settings (ADR 0194). 0.0.0.0 marks an unused
 		// server slot.
 		{"system.dns.server1", mustText("0.0.0.0"), false},

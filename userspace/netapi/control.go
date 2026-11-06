@@ -9,14 +9,25 @@ import (
 const (
 	ControlProtocolID = uint64(0x474e455443544c31)
 	// Version 3 adds capability-bound TCP sessions, version 4 the resolver's
-	// TCP session.
-	ControlVersion = uint16(4)
+	// TCP session, version 5 the endpoint quota of a TCP or UDP session,
+	// version 6 the GTCP version of a TCP session, version 7 a 16-bit quota,
+	// version 8 the GUDP version of a UDP session.
+	ControlVersion = uint16(8)
 	ControlSize    = 16
 
 	controlOpcode     = 0
 	controlClass      = 1
-	controlReserved   = 2
+	controlUDPVersion = 2
+	controlTCPVersion = 3
+	controlQuota      = 4
+	controlReserved   = 6
 	controlGeneration = 8
+
+	// OrdinarySessionQuota is the endpoint quota of a command's or the
+	// resolver's session. MaxSessionQuota is the largest a session can be
+	// granted; netd sizes its per-session tables to it.
+	OrdinarySessionQuota = 8
+	MaxSessionQuota      = 512
 
 	// AddSessionHandles counts the attached client channel endpoint.
 	AddSessionHandles = 1
@@ -79,9 +90,21 @@ const (
 	lastControlResult = ControlDriverFault
 )
 
+// ControlRequest is one control request. Quota is the number of endpoints
+// the session may hold, 1 to MaxSessionQuota, for ControlAddTCPSession and
+// ControlAddUDPSession, and zero for every other opcode. TCPVersion is the
+// GTCP version a ControlAddTCPSession session speaks, which fixes its slot
+// pools (tcpapi.LayoutFor); it is zero for every other opcode. The codec
+// requires it nonzero; netd refuses a version it does not serve.
+// UDPVersion is the GUDP version a ControlAddUDPSession session speaks:
+// zero for the request and reply protocol, 3 for GUDP 3, whose datagrams
+// move through shared rings (ADR 0216). It is zero for every other opcode.
 type ControlRequest struct {
 	Opcode     ControlOpcode
 	Rights     RightsClass
+	Quota      uint16
+	TCPVersion uint8
+	UDPVersion uint8
 	Generation uint64
 }
 
@@ -110,6 +133,14 @@ func controlHandles(opcode ControlOpcode) (int, bool) {
 }
 
 func validControlRequest(r *ControlRequest) bool {
+	sessionQuota := r.Quota >= 1 && r.Quota <= MaxSessionQuota
+	if r.Opcode != ControlAddUDPSession && r.Opcode != ControlAddTCPSession {
+		sessionQuota = r.Quota == 0
+	}
+	if !sessionQuota || (r.TCPVersion != 0) != (r.Opcode == ControlAddTCPSession) ||
+		r.UDPVersion != 0 && (r.Opcode != ControlAddUDPSession || r.UDPVersion != 3) {
+		return false
+	}
 	switch r.Opcode {
 	case ControlAddSession:
 		return r.Generation == 0 && r.Rights >= RightsPingStatus && r.Rights <= RightsResolveStatus
@@ -139,6 +170,9 @@ func EncodeControlRequest(r *ControlRequest, attachments []handle.ID, correlatio
 	copy(out.Handles[:], attachments)
 	out.Payload[controlOpcode] = byte(r.Opcode)
 	out.Payload[controlClass] = byte(r.Rights)
+	binary.LittleEndian.PutUint16(out.Payload[controlQuota:], r.Quota)
+	out.Payload[controlTCPVersion] = r.TCPVersion
+	out.Payload[controlUDPVersion] = r.UDPVersion
 	binary.LittleEndian.PutUint64(out.Payload[controlGeneration:], r.Generation)
 	return true
 }
@@ -153,6 +187,9 @@ func DecodeControlRequest(in *ipc.Message, out *ControlRequest) (correlation uin
 	r := ControlRequest{
 		Opcode:     ControlOpcode(payload[controlOpcode]),
 		Rights:     RightsClass(payload[controlClass]),
+		Quota:      binary.LittleEndian.Uint16(payload[controlQuota:]),
+		TCPVersion: payload[controlTCPVersion],
+		UDPVersion: payload[controlUDPVersion],
 		Generation: binary.LittleEndian.Uint64(payload[controlGeneration:]),
 	}
 	count, known := controlHandles(r.Opcode)
@@ -207,7 +244,7 @@ func DecodeControlReply(in *ipc.Message, correlation uint64, opcode ControlOpcod
 	payload := in.Payload[:ControlSize]
 	result := ControlResult(payload[controlClass])
 	if ControlOpcode(payload[controlOpcode]) != opcode || result > lastControlResult ||
-		!zero(payload[controlReserved:controlGeneration]) {
+		!zero(payload[controlUDPVersion:controlGeneration]) {
 		return false
 	}
 	if _, known := controlHandles(opcode); !known {

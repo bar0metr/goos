@@ -1,0 +1,947 @@
+package linuxsock
+
+import "goos/userspace/linuxsockapi"
+
+// Linux shutdown directions.
+const (
+	shutRead  = 0
+	shutWrite = 1
+	shutBoth  = 2
+)
+
+// step moves an operation forward: it answers from local state, or builds
+// its next native request in s.native and submits it, or leaves it waiting
+// for the pump.
+func (s *Service) step(o *op) {
+	switch o.kind {
+	case kindError:
+		s.stepError(o)
+		return
+	case kindRefresh:
+		s.stepRefresh(o)
+		return
+	case kindTX, kindRX, kindShutdown, kindWarm, kindAccept:
+		// Data-plane operations issue their request when they are made.
+		return
+	}
+	r := &o.request
+	if r.Opcode == linuxsockapi.OpOpen {
+		s.stepOpen(o)
+		return
+	}
+	sock := s.socketOf(o)
+	if sock == nil {
+		s.finish(o, linuxsockapi.ResultStale)
+		return
+	}
+	switch r.Opcode {
+	case linuxsockapi.OpBind:
+		s.stepBind(o, sock)
+	case linuxsockapi.OpListen:
+		s.stepListen(o, sock)
+	case linuxsockapi.OpAccept:
+		s.stepAccept(o, sock)
+	case linuxsockapi.OpConnect:
+		s.stepConnect(o, sock)
+	case linuxsockapi.OpRead:
+		s.stepRead(o, sock)
+	case linuxsockapi.OpWrite:
+		s.stepWrite(o, sock, false)
+	case linuxsockapi.OpSendTo:
+		s.stepWrite(o, sock, true)
+	case linuxsockapi.OpShutdown:
+		s.stepShutdown(o, sock)
+	case linuxsockapi.OpGetSockName:
+		o.reply.Local, o.reply.LocalPort = sock.local, sock.localPort
+		s.finish(o, linuxsockapi.ResultOK)
+	case linuxsockapi.OpGetPeerName:
+		if sock.state != stateConnected || sock.dead && sock.stream {
+			s.finish(o, linuxsockapi.ResultNotConnected)
+			return
+		}
+		o.reply.Address, o.reply.Port = sock.peer, sock.peerPort
+		s.finish(o, linuxsockapi.ResultOK)
+	case linuxsockapi.OpGetOption, linuxsockapi.OpSetOption:
+		s.stepOption(o, sock)
+	case linuxsockapi.OpGetPendingError:
+		s.stepPendingError(o, sock)
+	case linuxsockapi.OpQueryReady:
+		if sock.dead || sock.endpoint == 0 {
+			s.answerReady(o, sock)
+			return
+		}
+		s.native = NativeRequest{Op: NativeReady, Endpoint: sock.endpoint}
+		s.submit(o, sock.proto)
+	case linuxsockapi.OpClose:
+		s.stepClose(o, sock)
+	default:
+		s.finish(o, linuxsockapi.ResultInvalidArgument)
+	}
+}
+
+// done handles the completion of an operation's native request.
+func (s *Service) done(o *op, c *NativeCompletion) {
+	if c.Result != NativeOK && c.Result != NativeWouldBlock && c.Result != NativeInProgress && c.Result != NativeEOF {
+		s.counters.NativeFailures++
+	}
+	// An endpoint a completion created belongs to no one unless a handler
+	// takes it.
+	created := c.Result == NativeOK && (c.Op == NativeOpen || c.Op == NativeAccept) && c.Endpoint != 0 ||
+		c.Op == NativeOpenConnect && c.Endpoint != 0
+	if o.kind == kindWarm {
+		s.doneWarm(o, c)
+		return
+	}
+	if o.orphan {
+		if created {
+			s.queueClose(o.proto, o.generation, c.Endpoint)
+		}
+		s.freeOp(o)
+		return
+	}
+	switch o.kind {
+	case kindError:
+		s.doneError(o, c)
+		return
+	case kindRefresh:
+		s.doneRefresh(o, c)
+		return
+	case kindTX:
+		s.doneTX(o, c)
+		return
+	case kindRX:
+		s.doneRX(o, c)
+		return
+	case kindAccept:
+		s.doneAcceptAhead(o, c)
+		return
+	case kindShutdown:
+		global := int(o.socket)
+		live := s.socketOf(o) != nil
+		s.freeOp(o)
+		if live {
+			s.publish(global)
+		}
+		return
+	}
+	r := &o.request
+	sock := s.socketOf(o)
+	if r.Opcode == linuxsockapi.OpOpen {
+		s.doneOpen(o, c)
+		return
+	}
+	if r.Opcode == linuxsockapi.OpAccept {
+		s.doneAccept(o, c)
+		return
+	}
+	if sock == nil {
+		if created {
+			s.queueClose(o.proto, o.generation, c.Endpoint)
+		}
+		s.finish(o, linuxsockapi.ResultClosed)
+		return
+	}
+	if c.Result == NativeLost {
+		s.finish(o, linuxsockapi.ResultServiceLost)
+		return
+	}
+	switch c.Op {
+	case NativeOpen: // a connect replacing a spent endpoint
+		if c.Result != NativeOK {
+			s.finish(o, nativeResult(c.Result))
+			return
+		}
+		if sock.endpoint != 0 {
+			// Another request opened one meanwhile; this one goes on with it.
+			s.queueClose(o.proto, o.generation, c.Endpoint)
+			o.stage++
+			s.wait(o)
+			s.step(o)
+			return
+		}
+		sock.endpoint, sock.generation, sock.state, sock.reopen = c.Endpoint, o.generation, stateUnbound, false
+		sock.mask, sock.readable, sock.pending = 0, 0, linuxsockapi.ResultOK
+		sock.waiting, sock.noWait = false, false
+		s.arm(int(o.socket))
+		o.stage++
+		s.wait(o)
+		s.step(o)
+	case NativeOpenConnect:
+		s.doneOpenConnect(o, sock, c)
+	case NativeBind:
+		s.doneBind(o, sock, c)
+	case NativeListen:
+		if c.Result == NativeOK {
+			sock.state = stateListening
+		}
+		s.finish(o, nativeResult(c.Result))
+	case NativeConnect:
+		s.doneConnect(o, sock, c)
+	case NativeRead:
+		s.doneRead(o, sock, c)
+	case NativeShutdownWrite:
+		if c.Result == NativeOK {
+			sock.writeShut = true
+			s.publish(int(o.socket))
+		}
+		s.finish(o, nativeResult(c.Result))
+	case NativeOption:
+		s.doneOption(o, sock, c)
+	case NativeError:
+		value := sock.pending
+		if c.Result == NativeOK && NativeResult(c.Value) != NativeOK {
+			value = nativeResult(NativeResult(c.Value))
+		}
+		sock.pending = linuxsockapi.ResultOK
+		sock.mask &^= MaskPendingError
+		o.reply.Value = uint64(value)
+		s.publish(int(o.socket))
+		s.finish(o, linuxsockapi.ResultOK)
+	case NativeReady:
+		if c.Result == NativeOK {
+			s.observe(int(o.socket), c.Mask, c.Readable)
+		}
+		s.answerReady(o, sock)
+	default:
+		s.finish(o, nativeResult(c.Result))
+	}
+}
+
+func (s *Service) stepOpen(o *op) {
+	r := &o.request
+	stream := r.Length == linuxsockapi.KindStream
+	proto := UDP
+	if stream {
+		proto = TCP
+	}
+	if o.socket < 0 {
+		if !s.backends[proto].up {
+			s.finish(o, linuxsockapi.ResultDown)
+			return
+		}
+		global, result := s.allocSocket(int(o.family), stream)
+		if global < 0 {
+			s.finish(o, result)
+			return
+		}
+		o.socket, o.socketSerial = int16(global), s.sock(global).serial
+	}
+	if stream && s.streamRing {
+		// The endpoint comes with the first request that needs one.
+		s.counters.Opens++
+		s.adopt(int(o.socket), 0, s.backends[proto].generation)
+		o.reply.Socket = s.sock(int(o.socket)).id
+		s.finish(o, linuxsockapi.ResultOK)
+		return
+	}
+	if endpoint, ok := s.takeWarm(proto); ok {
+		s.families[o.family].stats.WarmHits++
+		s.counters.Opens++
+		s.adopt(int(o.socket), endpoint, s.backends[proto].generation)
+		o.reply.Socket = s.sock(int(o.socket)).id
+		s.finish(o, linuxsockapi.ResultOK)
+		return
+	}
+	s.families[o.family].stats.WarmMisses++
+	s.native = NativeRequest{Op: NativeOpen}
+	s.submit(o, proto)
+}
+
+func (s *Service) doneOpen(o *op, c *NativeCompletion) {
+	sock := s.socketOf(o)
+	if c.Result != NativeOK || sock == nil {
+		if sock != nil {
+			s.releaseSocket(int(o.socket), false)
+		}
+		result := nativeResult(c.Result)
+		switch c.Result {
+		case NativeBusy:
+			result = linuxsockapi.ResultServiceLimit
+		case NativeLost:
+			result = linuxsockapi.ResultDown
+		}
+		s.finish(o, result)
+		return
+	}
+	s.counters.Opens++
+	s.adopt(int(o.socket), c.Endpoint, o.generation)
+	o.reply.Socket = sock.id
+	s.finish(o, linuxsockapi.ResultOK)
+}
+
+// usable answers a request on a socket whose native side is gone.
+func (s *Service) usable(o *op, sock *socket) bool {
+	if sock.dead {
+		sock.pending = linuxsockapi.ResultOK
+		s.publish(int(o.socket))
+		s.finish(o, linuxsockapi.ResultServiceLost)
+		return false
+	}
+	return true
+}
+
+func (s *Service) stepBind(o *op, sock *socket) {
+	if !s.usable(o, sock) {
+		return
+	}
+	if sock.state != stateUnbound || sock.reopen {
+		s.finish(o, linuxsockapi.ResultInvalidArgument)
+		return
+	}
+	if s.openFirst(o, sock) {
+		return
+	}
+	r := &o.request
+	s.native = NativeRequest{Op: NativeBind, Endpoint: sock.endpoint, Address: r.Address, Port: r.Port}
+	if r.Flags&linuxsockapi.FlagReuseAddr != 0 || sock.reuse {
+		s.native.Flags = NativeReuseAddr
+	}
+	s.submit(o, sock.proto)
+}
+
+// bindAny binds to an ephemeral port on the wildcard, as Linux does for a
+// listen or a send on an unbound socket.
+func (s *Service) bindAny(o *op, sock *socket) {
+	if s.openFirst(o, sock) {
+		return
+	}
+	s.native = NativeRequest{Op: NativeBind, Endpoint: sock.endpoint}
+	if sock.reuse {
+		s.native.Flags = NativeReuseAddr
+	}
+	s.submit(o, sock.proto)
+}
+
+func (s *Service) doneBind(o *op, sock *socket, c *NativeCompletion) {
+	if c.Result != NativeOK {
+		s.finish(o, nativeResult(c.Result))
+		return
+	}
+	sock.state, sock.local, sock.localPort = stateBound, c.Local, c.LocalPort
+	s.publish(int(o.socket))
+	s.kick(int(o.socket))
+	if o.request.Opcode == linuxsockapi.OpBind {
+		o.reply.Local, o.reply.LocalPort = c.Local, c.LocalPort
+		s.finish(o, linuxsockapi.ResultOK)
+		return
+	}
+	// A listen or a send that bound first goes on.
+	o.stage++
+	s.wait(o)
+	s.step(o)
+}
+
+func clampBacklog(backlog uint32) uint32 {
+	if backlog == 0 {
+		return 1
+	}
+	return min(backlog, MaxBacklog)
+}
+
+// stepListen binds an unbound stream first. A listener's backlog changes
+// only in the service: netd keeps the one it was given.
+func (s *Service) stepListen(o *op, sock *socket) {
+	if !sock.stream {
+		s.finish(o, linuxsockapi.ResultNotSupported)
+		return
+	}
+	if !s.usable(o, sock) {
+		return
+	}
+	backlog := clampBacklog(o.request.Length)
+	switch {
+	case sock.state == stateListening:
+		sock.backlog = backlog
+		s.finish(o, linuxsockapi.ResultOK)
+	case sock.state == stateUnbound && !sock.reopen:
+		s.bindAny(o, sock)
+	case sock.state == stateBound:
+		sock.backlog = backlog
+		s.native = NativeRequest{Op: NativeListen, Endpoint: sock.endpoint, Length: backlog}
+		s.submit(o, sock.proto)
+	default:
+		s.finish(o, linuxsockapi.ResultInvalidArgument)
+	}
+}
+
+// stepAccept reserves the child's socket before asking netd, so a full
+// table leaves the child queued in netd rather than taken and lost.
+func (s *Service) stepAccept(o *op, sock *socket) {
+	if !sock.stream {
+		s.finish(o, linuxsockapi.ResultNotSupported)
+		return
+	}
+	if !s.usable(o, sock) {
+		return
+	}
+	if sock.state != stateListening || sock.readShut {
+		s.finish(o, linuxsockapi.ResultInvalidArgument)
+		return
+	}
+	if o.child < 0 && s.takeAccepted(o, sock) {
+		s.families[o.family].stats.AcceptHits++
+		return
+	}
+	if o.child < 0 && sock.accepting != 0 {
+		// A child accepted ahead is on its way from netd.
+		if !s.park(o) {
+			s.finish(o, linuxsockapi.ResultWouldBlock)
+			return
+		}
+		s.wait(o)
+		return
+	}
+	s.unpark(o)
+	if o.child < 0 {
+		child, result := s.allocSocket(int(o.family), true)
+		if child < 0 {
+			s.finish(o, result)
+			return
+		}
+		o.child, o.childSerial = int16(child), s.sock(child).serial
+	}
+	s.families[o.family].stats.AcceptMisses++
+	s.native = NativeRequest{Op: NativeAccept, Flags: NativeNoWait, Endpoint: sock.endpoint}
+	s.submit(o, TCP)
+}
+
+func (s *Service) doneAccept(o *op, c *NativeCompletion) {
+	child := s.sock(int(o.child))
+	if c.Result != NativeOK || !child.used || child.serial != o.childSerial {
+		if c.Result == NativeOK && c.Endpoint != 0 {
+			s.queueClose(o.proto, o.generation, c.Endpoint)
+		}
+		result := nativeResult(c.Result)
+		if c.Result == NativeOK {
+			result = linuxsockapi.ResultClosed
+		}
+		s.finish(o, result)
+		return
+	}
+	child.state, child.peer, child.peerPort = stateConnected, c.Address, c.Port
+	child.local, child.localPort = c.Local, c.LocalPort
+	s.adopt(int(o.child), c.Endpoint, o.generation)
+	s.counters.Accepts++
+	o.reply.Value, o.reply.Address, o.reply.Port = child.id, c.Address, c.Port
+	o.reply.Local, o.reply.LocalPort = c.Local, c.LocalPort
+	o.child = -1
+	s.finish(o, linuxsockapi.ResultOK)
+}
+
+// stepConnect follows Linux's state rules for a stream: a connect while
+// one is in progress is EALREADY, one on a connected stream or a listener
+// EISCONN, except that the first one after a nonblocking connect finished
+// reports its outcome. A stream whose connect failed connects again on a
+// new native endpoint, as Linux's socket returns to its closed state; its
+// earlier bind does not carry over.
+func (s *Service) stepConnect(o *op, sock *socket) {
+	if !s.usable(o, sock) {
+		return
+	}
+	r := &o.request
+	if !sock.stream {
+		s.native = NativeRequest{Op: NativeConnect, Endpoint: sock.endpoint, Address: r.Address, Port: r.Port}
+		s.submit(o, UDP)
+		return
+	}
+	switch sock.state {
+	case stateConnecting:
+		s.finish(o, linuxsockapi.ResultAlready)
+		return
+	case stateConnected:
+		if !sock.connectDone {
+			s.finish(o, linuxsockapi.ResultIsConnected)
+			return
+		}
+		// The first connect after a nonblocking one finished reports it.
+		sock.connectDone = false
+		o.reply.Address, o.reply.Port = sock.peer, sock.peerPort
+		o.reply.Local, o.reply.LocalPort = sock.local, sock.localPort
+		s.finish(o, linuxsockapi.ResultOK)
+		return
+	case stateListening:
+		s.finish(o, linuxsockapi.ResultIsConnected)
+		return
+	case stateFailed:
+		// The first connect after a nonblocking one failed reports its
+		// error; the next one starts again.
+		if sock.fetching {
+			s.wait(o)
+			return
+		}
+		if sock.pending != linuxsockapi.ResultOK && o.stage == 0 {
+			s.finishPending(o, sock)
+			return
+		}
+	}
+	if o.stage == 0 && (sock.state == stateFailed || sock.reopen || sock.endpoint == 0) {
+		s.queueClose(TCP, sock.generation, sock.endpoint)
+		sock.endpoint = 0
+		if sock.needWait {
+			sock.needWait = false
+			s.waits--
+		}
+		s.native = NativeRequest{Op: NativeOpen}
+		if s.streamRing {
+			s.native = NativeRequest{Op: NativeOpenConnect, Flags: NativeNoWait, Address: r.Address, Port: r.Port}
+		}
+		s.submit(o, TCP)
+		return
+	}
+	s.native = NativeRequest{Op: NativeConnect, Flags: NativeNoWait, Endpoint: sock.endpoint, Address: r.Address, Port: r.Port}
+	s.submit(o, TCP)
+}
+
+// openFirst opens the endpoint of a stream socket that has none yet, for a
+// request that needs one; doneOpen's replacement path steps the request
+// again once it is open. It reports whether it took the request.
+func (s *Service) openFirst(o *op, sock *socket) bool {
+	if !sock.stream || sock.endpoint != 0 || sock.dead {
+		return false
+	}
+	s.native = NativeRequest{Op: NativeOpen}
+	s.submit(o, TCP)
+	return true
+}
+
+// doneOpenConnect takes the answer to an open-and-connect: the endpoint it
+// opened, if any, replaces the socket's, then the connect's outcome applies
+// as doneConnect's does.
+func (s *Service) doneOpenConnect(o *op, sock *socket, c *NativeCompletion) {
+	global := int(o.socket)
+	if sock.endpoint != 0 {
+		// Another request opened one meanwhile; the connect's replaces it.
+		s.queueClose(TCP, sock.generation, sock.endpoint)
+	}
+	sock.endpoint, sock.generation, sock.reopen = c.Endpoint, o.generation, false
+	sock.state, sock.mask, sock.readable, sock.pending = stateUnbound, c.Mask, 0, linuxsockapi.ResultOK
+	sock.waiting, sock.noWait = false, false
+	s.doneConnect(o, sock, c)
+	if sock.endpoint != 0 {
+		s.arm(global)
+	}
+}
+
+func (s *Service) doneConnect(o *op, sock *socket, c *NativeCompletion) {
+	r := &o.request
+	switch c.Result {
+	case NativeOK, NativeInProgress:
+		sock.peer, sock.peerPort = r.Address, r.Port
+		if c.Local != ([4]byte{}) || c.LocalPort != 0 {
+			sock.local, sock.localPort = c.Local, c.LocalPort
+		}
+		s.counters.Connects++
+		// A stream connect answers InProgress even when netd finished it
+		// inside the request, as a loopback connect does: Linux reports
+		// EINPROGRESS for every nonblocking TCP connect, and the next
+		// connect or SO_ERROR gives the outcome.
+		if c.Result == NativeOK && sock.stream {
+			sock.state, sock.connectDone = stateConnected, true
+			s.publish(int(o.socket))
+			s.kick(int(o.socket))
+			s.finish(o, linuxsockapi.ResultInProgress)
+			return
+		}
+		if c.Result == NativeInProgress {
+			sock.state = stateConnecting
+			s.publish(int(o.socket))
+			s.finish(o, linuxsockapi.ResultInProgress)
+			return
+		}
+		sock.state = stateConnected
+		s.publish(int(o.socket))
+		s.kick(int(o.socket))
+		o.reply.Address, o.reply.Port = r.Address, r.Port
+		o.reply.Local, o.reply.LocalPort = sock.local, sock.localPort
+		s.finish(o, linuxsockapi.ResultOK)
+	case NativeRefused, NativeReset, NativeTimeout:
+		if !sock.stream {
+			s.finish(o, nativeResult(c.Result))
+			return
+		}
+		// A refusal netd learned at once, from loopback, reaches the
+		// caller the way a remote one does: InProgress now, the error in
+		// SO_ERROR and the next connect.
+		sock.state, sock.pending = stateFailed, nativeResult(c.Result)
+		s.publish(int(o.socket))
+		s.finish(o, linuxsockapi.ResultInProgress)
+	default:
+		if sock.stream {
+			sock.reopen = true
+		}
+		s.finish(o, nativeResult(c.Result))
+	}
+}
+
+// stepRead answers a kernel that holds no data for the socket and asks
+// for more. Data always reaches the kernel through the complete ring: the
+// answer only says whether to look there, to wait, or that the stream
+// ended. A read ahead under way that netd will answer at once is waited
+// for; with none, the read goes to netd directly into any free RX slot,
+// since the reserve exists for it.
+func (s *Service) stepRead(o *op, sock *socket) {
+	if !s.usable(o, sock) {
+		return
+	}
+	f := &s.families[o.family]
+	global := int(o.socket)
+	if sock.stream {
+		switch sock.state {
+		case stateConnecting:
+			s.finish(o, linuxsockapi.ResultWouldBlock)
+			return
+		case stateConnected:
+		default:
+			if sock.pending != linuxsockapi.ResultOK {
+				s.finishPending(o, sock)
+				return
+			}
+			s.finish(o, linuxsockapi.ResultNotConnected)
+			return
+		}
+	} else if sock.state == stateUnbound {
+		// Nothing can arrive at a datagram socket without a port.
+		if sock.pending != linuxsockapi.ResultOK {
+			s.finishPending(o, sock)
+			return
+		}
+		if sock.readShut {
+			o.reply.Flags = linuxsockapi.FlagEOF
+			s.finish(o, linuxsockapi.ResultOK)
+			return
+		}
+		s.finish(o, linuxsockapi.ResultWouldBlock)
+		return
+	}
+	if o.rx < 0 {
+		if _, published := s.rxOf(f, global); published != 0 {
+			// Published after the kernel last drained the ring.
+			s.unpark(o)
+			s.finish(o, linuxsockapi.ResultOK)
+			return
+		}
+		if sock.eof {
+			s.endRead(o, sock)
+			return
+		}
+		if sock.readsOut != 0 {
+			if sock.mask&MaskReadable == 0 || sock.readable == 0 {
+				s.endRead(o, sock)
+				return
+			}
+			// netd holds bytes, so the read ahead is about to come back.
+			if !s.park(o) {
+				s.finish(o, linuxsockapi.ResultWouldBlock)
+				return
+			}
+			s.refreshReadable(global)
+			s.wait(o)
+			return
+		}
+		if o.rx = s.reserveRX(f, global, 0); o.rx < 0 {
+			if !s.park(o) {
+				s.finish(o, linuxsockapi.ResultWouldBlock)
+				return
+			}
+			s.wait(o)
+			return
+		}
+	}
+	s.unpark(o)
+	s.native = NativeRequest{Op: NativeRead, Flags: NativeNoWait, Endpoint: sock.endpoint, Length: NativeSlotSize}
+	s.submit(o, sock.proto)
+}
+
+// endRead answers a read with nothing to give: the pending error, the end
+// of the stream, or WouldBlock.
+func (s *Service) endRead(o *op, sock *socket) {
+	s.unpark(o)
+	switch {
+	case sock.pending != linuxsockapi.ResultOK:
+		s.finishPending(o, sock)
+	case sock.eof || sock.readShut || sock.stream && sock.mask&(MaskReceiveEOF|MaskHungUp) != 0 && sock.readsOut == 0:
+		o.reply.Flags = linuxsockapi.FlagEOF
+		s.finish(o, linuxsockapi.ResultOK)
+	default:
+		s.finish(o, linuxsockapi.ResultWouldBlock)
+	}
+}
+
+func (s *Service) finishPending(o *op, sock *socket) {
+	result := sock.pending
+	sock.pending = linuxsockapi.ResultOK
+	s.publish(int(o.socket))
+	s.finish(o, result)
+}
+
+// doneRead takes the answer to a read the kernel asked for: a filled slot
+// goes on the complete ring like a read ahead's.
+func (s *Service) doneRead(o *op, sock *socket, c *NativeCompletion) {
+	global := int(o.socket)
+	switch c.Result {
+	case NativeOK:
+	case NativeEOF:
+		sock.eof = true
+		sock.mask |= MaskReceiveEOF
+		s.publish(global)
+		s.endRead(o, sock)
+		return
+	case NativeWouldBlock:
+		sock.mask &^= MaskReadable
+		sock.readable = 0
+		s.refreshReadable(global)
+		s.publish(global)
+		s.endRead(o, sock)
+		return
+	default:
+		if sock.pending != linuxsockapi.ResultOK {
+			s.finishPending(o, sock)
+			return
+		}
+		s.finish(o, nativeResult(c.Result))
+		return
+	}
+	f := &s.families[o.family]
+	slot := uint8(o.rx)
+	length := min(uint32(len(c.Data)), linuxsockapi.SlotSize)
+	copy(s.rxSlot(f, slot), c.Data[:length])
+	o.rx = -1
+	if !s.publishRX(int(o.family), global, slot, length, c) {
+		return
+	}
+	if sock.stream {
+		s.counters.BytesIn += uint64(length)
+		sock.readable -= min(sock.readable, length)
+		if sock.readable == 0 && sock.mask&MaskReadable != 0 {
+			s.refreshReadable(global)
+		}
+	} else {
+		s.counters.DatagramsIn++
+		sock.mask &^= MaskReadable
+		sock.readable = 0
+		s.refreshReadable(global)
+	}
+	s.publish(global)
+	s.finish(o, linuxsockapi.ResultOK)
+}
+
+// stepWrite answers a kernel whose readiness entry does not let it commit
+// a send: OK once the socket takes sends, otherwise what a send reports.
+// A stream that is not connected answers as Linux's does: EPIPE (Closed)
+// unless a connect is under way. A datagram sent to an address on a
+// connected socket must name its peer: netd keeps a connected endpoint to
+// its peer. An unbound datagram socket binds first.
+func (s *Service) stepWrite(o *op, sock *socket, addressed bool) {
+	if !s.usable(o, sock) {
+		return
+	}
+	r := &o.request
+	if sock.stream {
+		switch {
+		case sock.pending != linuxsockapi.ResultOK && sock.state != stateConnecting:
+			s.finishPending(o, sock)
+		case sock.writeShut || sock.mask&(MaskWriteClosed|MaskHungUp) != 0 && sock.state == stateConnected:
+			s.finish(o, linuxsockapi.ResultClosed)
+		case sock.state == stateConnecting:
+			s.finish(o, linuxsockapi.ResultWouldBlock)
+		case sock.state != stateConnected:
+			s.finish(o, linuxsockapi.ResultClosed)
+		default:
+			s.finish(o, linuxsockapi.ResultOK)
+		}
+		return
+	}
+	switch {
+	case sock.writeShut:
+		s.finish(o, linuxsockapi.ResultClosed)
+	case !addressed && sock.state != stateConnected:
+		s.finish(o, linuxsockapi.ResultDestinationRequired)
+	case addressed && sock.state == stateConnected && (r.Address != sock.peer || r.Port != sock.peerPort):
+		s.finish(o, linuxsockapi.ResultIsConnected)
+	case sock.state == stateUnbound:
+		s.bindAny(o, sock)
+	default:
+		s.finish(o, linuxsockapi.ResultOK)
+	}
+}
+
+// stepClose closes a socket the kernel no longer has. Bytes still queued
+// go to netd first, so the stream ends after them; the socket lingers
+// without readiness until then and its endpoint closes once they are in.
+func (s *Service) stepClose(o *op, sock *socket) {
+	global := int(o.socket)
+	if sock.txqLen != 0 && !sock.dead && !sock.txDropped {
+		linuxsockapi.Publish(s.families[o.family].pool, int(sock.index), linuxsockapi.Readiness{})
+		sock.closing = true
+		s.finish(o, linuxsockapi.ResultOK)
+		s.kick(global)
+		return
+	}
+	s.counters.Closes++
+	s.releaseSocket(global, true)
+	s.finish(o, linuxsockapi.ResultOK)
+}
+
+// stepShutdown: after SHUT_RD reads return the bytes already buffered and
+// then end of file, as Linux's do; SHUT_WR half-closes in netd. A listener
+// takes SHUT_RD as the end of its accepting.
+func (s *Service) stepShutdown(o *op, sock *socket) {
+	how := o.request.Length
+	read, write := how == shutRead || how == shutBoth, how == shutWrite || how == shutBoth
+	if sock.dead || sock.state != stateConnected && !(sock.stream && sock.state == stateListening) {
+		s.finish(o, linuxsockapi.ResultNotConnected)
+		return
+	}
+	if read && !sock.readShut {
+		sock.readShut = true
+		s.publish(int(o.socket))
+	}
+	if !write || sock.writeShut || sock.state == stateListening {
+		s.finish(o, linuxsockapi.ResultOK)
+		return
+	}
+	if sock.txqLen != 0 && !sock.dead && !sock.txDropped {
+		// The half-close follows the bytes already reported written; it
+		// goes to netd once they did, and the call returns now, as Linux's
+		// does.
+		sock.writeShut, sock.shutQueued = true, true
+		s.publish(int(o.socket))
+		s.finish(o, linuxsockapi.ResultOK)
+		return
+	}
+	if !sock.stream {
+		sock.writeShut = true
+		s.publish(int(o.socket))
+		s.finish(o, linuxsockapi.ResultOK)
+		return
+	}
+	s.native = NativeRequest{Op: NativeShutdownWrite, Endpoint: sock.endpoint}
+	s.submit(o, TCP)
+}
+
+// stepPendingError returns and clears SO_ERROR: the socket's own error
+// first, then whatever netd holds.
+func (s *Service) stepPendingError(o *op, sock *socket) {
+	// The kernel reads a finished connect's outcome here, so the
+	// connect after it is EISCONN.
+	sock.connectDone = false
+	if sock.pending != linuxsockapi.ResultOK || !sock.stream || sock.dead || sock.endpoint == 0 ||
+		sock.mask&MaskPendingError == 0 && !sock.fetching {
+		o.reply.Value = uint64(sock.pending)
+		sock.pending = linuxsockapi.ResultOK
+		s.publish(int(o.socket))
+		s.finish(o, linuxsockapi.ResultOK)
+		return
+	}
+	s.native = NativeRequest{Op: NativeError, Endpoint: sock.endpoint}
+	s.submit(o, TCP)
+}
+
+func (s *Service) answerReady(o *op, sock *socket) {
+	state := s.readiness(sock)
+	o.reply.Value, o.reply.Extra = uint64(state.Ready), uint64(state.Readable)
+	s.finish(o, linuxsockapi.ResultOK)
+}
+
+// --- internal operations -------------------------------------------------------
+
+// refreshReadable asks netd for a stream's mask and readable count, after
+// reads used up the count or a write found the send buffer full.
+//
+// The request never disappears: one asked while another is out goes again
+// once that answers, since its answer may predate the reason, and one that
+// finds no free operation stays wanted for the pump.
+func (s *Service) refreshReadable(global int) {
+	sock := s.sock(global)
+	if !sock.used || sock.dead || sock.endpoint == 0 {
+		sock.needRefresh = false
+		return
+	}
+	sock.needRefresh = true
+	if sock.refreshing {
+		return
+	}
+	o := s.newOp(int(sock.family), kindRefresh)
+	if o == nil {
+		s.retryInternal = true
+		return
+	}
+	o.socket, o.socketSerial = int16(global), sock.serial
+	sock.refreshing, sock.needRefresh = true, false
+	s.families[sock.family].stats.Refreshes++
+	s.step(o)
+}
+
+func (s *Service) stepRefresh(o *op) {
+	sock := s.socketOf(o)
+	if sock == nil || sock.dead || sock.endpoint == 0 {
+		s.freeOp(o)
+		return
+	}
+	s.native = NativeRequest{Op: NativeReady, Endpoint: sock.endpoint}
+	s.submit(o, sock.proto)
+}
+
+func (s *Service) doneRefresh(o *op, c *NativeCompletion) {
+	sock := s.socketOf(o)
+	global := int(o.socket)
+	s.freeOp(o)
+	if sock == nil {
+		return
+	}
+	if c.Result == NativeOK {
+		s.observe(global, c.Mask, c.Readable)
+	}
+	// netd answers the held wait only when the endpoint's mask differs from
+	// the one the wait names. A refresh that saw another mask may have seen
+	// a passing state: if the endpoint goes back to the named mask before
+	// netd looks, the wait never answers. Ask again until the two agree or
+	// the wait answers; each ask makes netd look at the wait too.
+	if sock.used && sock.waiting && sock.armedMask != sock.mask {
+		sock.needRefresh = true
+	}
+	if sock.needRefresh {
+		s.refreshReadable(global)
+	}
+}
+
+// fetchError reads netd's pending error into the socket.
+func (s *Service) fetchError(global int) {
+	sock := s.sock(global)
+	if sock.fetching || sock.dead || sock.endpoint == 0 || !sock.stream {
+		sock.needFetch = false
+		return
+	}
+	o := s.newOp(int(sock.family), kindError)
+	if o == nil {
+		sock.needFetch, s.retryInternal = true, true
+		return
+	}
+	o.socket, o.socketSerial = int16(global), sock.serial
+	sock.fetching, sock.needFetch = true, false
+	s.step(o)
+}
+
+func (s *Service) stepError(o *op) {
+	sock := s.socketOf(o)
+	if sock == nil || sock.dead || sock.endpoint == 0 {
+		s.freeOp(o)
+		return
+	}
+	s.native = NativeRequest{Op: NativeError, Endpoint: sock.endpoint}
+	s.submit(o, TCP)
+}
+
+func (s *Service) doneError(o *op, c *NativeCompletion) {
+	sock := s.socketOf(o)
+	global := int(o.socket)
+	s.freeOp(o)
+	if sock == nil {
+		return
+	}
+	if c.Result == NativeOK && NativeResult(c.Value) != NativeOK {
+		sock.pending = nativeResult(NativeResult(c.Value))
+	}
+	sock.mask &^= MaskPendingError
+	s.publish(global)
+}

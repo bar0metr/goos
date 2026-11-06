@@ -29,6 +29,9 @@ const linuxPollCorrelation = 1
 // EINTR: the handler that interrupted the call runs under the temporary mask
 // and its return gives the old one back.
 func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.Result {
+	if request.Number == linuxabi.SysSelect || request.Number == linuxabi.SysPselect6 {
+		return handler.Select(request)
+	}
 	local := thisCPU()
 	state, found := linuxcompat.FindProcess(handler.root)
 	if !found {
@@ -62,39 +65,20 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 			end += nowNanos()
 		}
 	}
-	if count > linuxcompat.LinuxMaxPollFD {
+	if soft, _ := state.FDs.Limits(); !linuxcompat.PollCount(count, soft) {
 		return handler.pollReturn(state, request, end, linuxErrno(linuxabi.EINVAL))
 	}
-	wire := local.linuxPollWire[:count*linuxcompat.PollFDSize]
-	if count != 0 && !vm.CopyIn(handler.root, address, wire) {
-		return handler.pollReturn(state, request, end, linuxErrno(linuxabi.EFAULT))
-	}
-	ready, interests := uint64(0), 0
-	for index := 0; index < int(count); index++ {
-		fd, events := linuxcompat.PollEntry(wire, index)
-		if description, open := state.FDs.Lookup(int(fd)); fd >= 0 && open && description.Kind == linuxcompat.FDTerminal {
-			revents := pollTerminal(state, linuxcompat.TerminalID(description.Object), events)
-			linuxcompat.SetPollRevents(wire, index, revents)
-			if revents != 0 {
-				ready++
-			} else {
-				interests = addTerminalInterests(interests, linuxcompat.TerminalID(description.Object), events)
-			}
-			continue
-		}
-		revents, entry, watch := pollDescriptor(state, fd, events)
-		linuxcompat.SetPollRevents(wire, index, revents)
-		if revents != 0 {
-			ready++
-		} else if watch {
-			interests = addPollInterest(interests, entry)
-		}
+	ready, interests, errno := handler.pollScan(state, address, int(count), false)
+	if errno != 0 {
+		return handler.pollReturn(state, request, end, linuxErrno(errno))
 	}
 	now := nowNanos()
 	expired := finite && (end == 0 || now >= end)
 	if ready != 0 || expired {
-		if count != 0 && !vm.CopyOut(handler.root, address, wire) {
-			return handler.pollReturn(state, request, end, linuxErrno(linuxabi.EFAULT))
+		// The second pass writes what it finds; the count it returns
+		// matches the revents the caller reads.
+		if ready, _, errno = handler.pollScan(state, address, int(count), true); errno != 0 {
+			return handler.pollReturn(state, request, end, linuxErrno(errno))
 		}
 		return handler.pollReturn(state, request, end, linuxcompat.Result{Value: ready})
 	}
@@ -107,6 +91,7 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 	if finite {
 		deadline = amd64.TimerTicks() + linuxcompat.RemainingTicks(end-now, clock.TicksPerSecond, linuxSleepTicks)
 	}
+	deadline = pollRescanDeadline(interests, deadline)
 	if !linuxcompat.SyscallContinuations.Begin(handler.task, request, nil) ||
 		!linuxcompat.SyscallContinuations.Annotate(handler.task, nil, end) ||
 		!linuxcompat.SyscallContinuations.Issue(handler.task, 1, linuxPollCorrelation) ||
@@ -116,7 +101,55 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 		linuxcompat.SyscallContinuations.Cancel(handler.task)
 		return handler.pollReturn(state, request, end, linuxErrno(linuxabi.ENOMEM))
 	}
+	rearmSocketInterests(local.linuxPollEntries[:interests])
 	return linuxBlocked
+}
+
+// pollScan evaluates the count pollfd entries at address, PollWindow at a
+// time, and reports how many are ready and how many native interests the
+// rest added. With write set it stores each revents back.
+func (handler *linuxCallHandler) pollScan(state *linuxcompat.ProcessState, address uint64, count int, write bool) (uint64, int, linuxabi.Errno) {
+	local := thisCPU()
+	ready, interests := uint64(0), 0
+	for base := 0; base < count; base += linuxcompat.PollWindow {
+		window := count - base
+		if window > linuxcompat.PollWindow {
+			window = linuxcompat.PollWindow
+		}
+		wire := local.linuxPollWire[:window*linuxcompat.PollFDSize]
+		at := address + uint64(base*linuxcompat.PollFDSize)
+		if !vm.CopyIn(handler.root, at, wire) {
+			return 0, 0, linuxabi.EFAULT
+		}
+		for index := 0; index < window; index++ {
+			fd, events := linuxcompat.PollEntry(wire, index)
+			var revents uint16
+			revents, interests = pollReadiness(state, fd, events, interests)
+			if write {
+				linuxcompat.SetPollRevents(wire, index, revents)
+			}
+			if revents != 0 {
+				ready++
+			}
+		}
+		if write && !vm.CopyOut(handler.root, at, wire) {
+			return 0, 0, linuxabi.EFAULT
+		}
+	}
+	return ready, interests, 0
+}
+
+// pollRescanDeadline bounds the sleep of a poll or select whose interests
+// filled the wait: the descriptors left out wake no one, so the call scans
+// again on the next tick.
+func pollRescanDeadline(interests int, deadline uint64) uint64 {
+	if interests < len(thisCPU().linuxPollEntries) {
+		return deadline
+	}
+	if next := amd64.TimerTicks() + 1; deadline == 0 || next < deadline {
+		return next
+	}
+	return deadline
 }
 
 // pollTimeout reads the timeout of poll or ppoll and installs the temporary
@@ -179,6 +212,34 @@ func (handler *linuxCallHandler) pollReturn(state *linuxcompat.ProcessState, req
 	return result
 }
 
+// pollReadiness evaluates one descriptor for poll or select, which asks for
+// events. A descriptor that is not ready adds the native waits that would
+// change it to the interests, of which there are count so far, and the new
+// count comes back with its poll events.
+func pollReadiness(state *linuxcompat.ProcessState, fd int32, events uint16, count int) (uint16, int) {
+	if description, open := state.FDs.Lookup(int(fd)); fd >= 0 && open && description.Kind == linuxcompat.FDTerminal {
+		revents := pollTerminal(state, linuxcompat.TerminalID(description.Object), events)
+		if revents == 0 {
+			count = addTerminalInterests(count, linuxcompat.TerminalID(description.Object), events)
+		}
+		return revents, count
+	}
+	revents, entry, watch := pollDescriptor(state, fd, events)
+	if revents == 0 && watch {
+		before := count
+		count = addPollInterest(count, entry)
+		if entry.Key.Kind == kernelwait.KindLinuxSocket {
+			// A second descriptor of the same socket merges into the first
+			// entry and keeps the epoch that one saw, the older of the two.
+			if count > before {
+				thisCPU().linuxPollEpochs[count-1] = thisCPU().linuxSocket.pollEpoch
+			}
+			count = addPollInterest(count, sessionCloseEntry(thisCPU().linuxSocket.call.endpoint))
+		}
+	}
+	return revents, count
+}
+
 // pollDescriptor evaluates one pollfd. watch reports a stream end that is not
 // ready yet, with the native readiness that would make it ready.
 func pollDescriptor(state *linuxcompat.ProcessState, fd int32, events uint16) (uint16, kernelwait.Entry, bool) {
@@ -221,6 +282,10 @@ func pollDescriptor(state *linuxcompat.ProcessState, fd int32, events uint16) (u
 		default:
 			readiness.Error = true
 		}
+	case linuxcompat.FDSocket:
+		return pollSocket(description, events)
+	case linuxcompat.FDEvent:
+		return pollEvent(state, description, events)
 	default:
 		// Regular files, directories, and devices never block.
 		readiness.Readable, readiness.Writable = true, true
@@ -229,7 +294,10 @@ func pollDescriptor(state *linuxcompat.ProcessState, fd int32, events uint16) (u
 }
 
 // addPollInterest adds a native wait entry, merging it with an earlier entry
-// for the same stream end, which two descriptors of one pipe can name.
+// for the same stream end, which two descriptors of one pipe can name. A
+// terminal adds several entries, so a full table of descriptors with one
+// among them can ask for more waits than the table holds; the rest are
+// dropped, and the call still wakes on the waits it kept and on its timer.
 func addPollInterest(count int, entry kernelwait.Entry) int {
 	local := thisCPU()
 	for index := 0; index < count; index++ {
@@ -237,6 +305,9 @@ func addPollInterest(count int, entry kernelwait.Entry) int {
 			local.linuxPollEntries[index].Events |= entry.Events
 			return count
 		}
+	}
+	if count >= len(local.linuxPollEntries) {
+		return count
 	}
 	local.linuxPollEntries[count] = entry
 	return count + 1

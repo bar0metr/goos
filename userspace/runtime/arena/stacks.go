@@ -126,9 +126,9 @@ func Preemptible(slot int) bool {
 	if slot < 0 || slot >= tls.Slots {
 		return false
 	}
-	t := &threads[slot]
-	if !threaded.Load() {
-		t = &threads[0]
+	t := &mainThread
+	if threaded.Load() {
+		t = stateOf(slot)
 	}
 	return t.fast.Load() == 0 && t.regions.depth == 0
 }

@@ -12,6 +12,7 @@ import (
 	"goos/internal/capability"
 	"goos/internal/validation"
 	"goos/kernel/clock"
+	"goos/kernel/diag"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -144,14 +145,28 @@ func userspaceMain() {
 	serve()
 }
 
+// servedAt is the clock after the loop's wait. The requests and frames
+// served after it take it as their time: they run within microseconds of
+// it, and one read per loop costs a call where one per message cost many.
+// The next lap's timers take it too, late by what the lap served: a busy
+// loop laps every few tens of microseconds, and a second read would cost
+// each lap another system call.
+var servedAt uint64
+
 func serve() {
+	servedAt = clockNanos()
 	for {
-		now := clockNanos()
+		now := servedAt
 		stack.Advance(now)
+		stage(stageAdvance, now)
 		deliverCompletions()
-		deliverUDP()
-		deliverTCP(now)
+		// A session that spent its Deliver budget with work left gets
+		// another call next lap. Until then the wait only polls, so the
+		// driver and each session's requests still get their turn.
+		pending := deliverUDP()
+		pending = deliverTCP(now) || pending
 		deliverServers()
+		stage(stageDeliver, 0)
 		transmitPending()
 		announceState(now)
 		count := buildInterests()
@@ -166,8 +181,24 @@ func serve() {
 				}
 			}
 		}
+		// A GTCP 4 client that published after the last Deliver and saw
+		// netd's doorbell unarmed sent no doorbell: netd must look first.
+		if !pending && !armTCP() {
+			pending = true
+		}
+		if !pending && !armUDP() {
+			pending = true
+		}
+		if pending {
+			timeout = 0
+		} else if validation.Enabled {
+			checkSettled()
+		}
+		stage(stagePrepare, 0)
 		result, status := userwait.Any(&interests, count, timeout)
 		ready := result.ReadyMask
+		servedAt = clockNanos()
+		stage(stageWait, 0)
 		if status == kcall.StatusTimeout {
 			continue
 		}
@@ -193,7 +224,64 @@ func serve() {
 				}
 			}
 		}
+		stage(stageService, 0)
 	}
+}
+
+// checkSettled stops netd when a parked TCP or UDP request could finish
+// now while the loop is about to sleep: only an unrelated event or the
+// idle timeout would wake the loop for it.
+func checkSettled() {
+	proto := "tcp"
+	session, endpoint, op, found := stalledTCP()
+	if !found {
+		proto = "udp"
+		session, endpoint, op, found = stalledUDP()
+	}
+	if !found {
+		return
+	}
+	syslog.Error("parked request runnable before the wait", syslog.Str("proto", proto),
+		syslog.Uint("session", uint64(session)), syslog.Uint("endpoint", uint64(endpoint)), syslog.Str("op", op))
+	fatal("NETD_DELIVERY_STALLED\n")
+}
+
+// Loop stages, timed in a diagnostic build: the time from the previous
+// mark to each one adds to its total, so the totals split netd's loop into
+// timers, deliveries, the wait's preparation, the wait itself and the
+// requests served after it. A diagnostic build pays a clock read per mark.
+const (
+	stageAdvance = iota
+	stageDeliver
+	stagePrepare
+	stageWait
+	stageService
+	stageCount
+)
+
+var (
+	stageNanos [stageCount]uint64
+	stageLoops uint64
+	stageLast  uint64
+)
+
+// stage charges the time since the last mark to which. The top of the
+// loop starts a new lap; the first lap starts at the clock it passes.
+func stage(which int, start uint64) {
+	if !diag.Enabled {
+		return
+	}
+	if which == stageAdvance {
+		stageLoops++
+		if stageLast == 0 {
+			stageLast = start
+		}
+	}
+	now := clockNanos()
+	if now > stageLast {
+		stageNanos[which] += now - stageLast
+	}
+	stageLast = now
 }
 
 func buildInterests() int {
@@ -215,11 +303,17 @@ func buildInterests() int {
 	for index := range udpSessions {
 		if udpSessions[index].channel != 0 {
 			add(udpSessions[index].channel, udpOwner+index)
+			if udpSessions[index].heldCount != 0 || udpSessions[index].doorbellHeld {
+				interests[count-1].Events |= kcall.WaitWritable
+			}
 		}
 	}
 	for index := range tcpSessions {
 		if tcpSessions[index].channel != 0 {
 			add(tcpSessions[index].channel, tcpOwner+index)
+			if tcpSessions[index].heldCount != 0 || tcpSessions[index].doorbellHeld {
+				interests[count-1].Events |= kcall.WaitWritable
+			}
 		}
 	}
 	return count
@@ -278,7 +372,7 @@ func serviceDriver() {
 			faultDriver(netdev.FaultGeneration, "driver generation mismatch")
 			return
 		}
-		now := clockNanos()
+		now := servedAt
 		switch frame.Opcode {
 		case netdev.OpReady:
 			device.ready = true
@@ -618,10 +712,13 @@ func handleRequest(index int, correlation uint64) {
 			TCPMaxEndpoints: limits.MaxEndpoints, TCPSessionEndpoints: limits.SessionEndpoints, TCPListenBacklog: limits.ListenBacklog,
 			TCPSendBuffer: limits.SendBuffer, TCPReceiveBuffer: limits.ReceiveBuffer,
 			TCPConnectTimeoutMS: uint32(limits.ConnectTimeout / 1_000_000), TCPRTOMinMS: uint32(limits.RTOMin / 1_000_000),
-			TCPRTOMaxMS: uint32(limits.RTOMax / 1_000_000), TCPTimeWaitMS: uint32(limits.TimeWait / 1_000_000)}
+			TCPRTOMaxMS: uint32(limits.RTOMax / 1_000_000), TCPTimeWaitMS: uint32(limits.TimeWait / 1_000_000),
+			GTCP2Requests: gtcpMessages[0][0], GTCP2Replies: gtcpMessages[0][1],
+			GTCP3Requests: gtcpMessages[1][0], GTCP3Replies: gtcpMessages[1][1]}
 		for index, count := range snapshot.States {
 			answer.TCPStates[index] = uint16(count)
 		}
+		answer.Capacity = tcpCapacity(&snapshot, stack.TCPBudgets(), sessionsInUse())
 		send(current, correlation)
 	case netapi.OpEcho:
 		if current.rights != netapi.RightsPingStatus {
@@ -639,6 +736,14 @@ func handleRequest(index int, correlation uint64) {
 		}
 		current.echo, current.sequence = correlation, request.Sequence
 		transmitPending()
+	case netapi.OpTCPDump:
+		if current.rights != netapi.RightsAdminStatus {
+			respond(current, request.Opcode, netapi.ResultPermissionDenied, correlation)
+			return
+		}
+		dumpTCP()
+		answer = netapi.Reply{Opcode: netapi.OpTCPDump, Result: netapi.ResultOK}
+		send(current, correlation)
 	case netapi.OpReload:
 		if current.rights != netapi.RightsAdminStatus {
 			respond(current, request.Opcode, netapi.ResultPermissionDenied, correlation)

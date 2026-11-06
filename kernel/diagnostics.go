@@ -9,15 +9,19 @@ import (
 	linuxcompat "goos/kernel/compat/linux"
 	kernelconsole "goos/kernel/console"
 	"goos/kernel/diag"
+	"goos/kernel/executable"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/klog"
 	"goos/kernel/lock"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 	"goos/kernel/sched"
+	"goos/kernel/shmem"
 	"goos/kernel/stream"
 	kernelwait "goos/kernel/wait"
+	"goos/userspace/linuxsockapi"
 )
 
 var diagRing diag.Ring
@@ -63,7 +67,7 @@ func traceAddress(out diagWriter, root, address uint64) {
 	out.uint("mapped", boolValue(mapped))
 	out.uint("pmm-allocated", boolValue(pageAllocator.IsAllocated(page)))
 	image, valid := vm.LoadedImage()
-	out.uint("in-kernel-image", boolValue(valid && page >= vm.KernelImageBase && page < vm.KernelImageBase+image.Size))
+	out.uint("in-kernel-image", boolValue(valid && page >= image.Base && page < image.Base+image.Size))
 	out.end()
 	if !mapped {
 		return
@@ -117,7 +121,7 @@ func auditAddressSpace(out diagWriter, root uint64) {
 		}
 		leaves++
 		allocated := pageAllocator.IsAllocated(physical)
-		inImage := physical >= vm.KernelImageBase && physical < vm.KernelImageBase+image.Size
+		inImage := physical >= image.Base && physical < image.Base+image.Size
 		sharedWith := uint64(0)
 		for other := 0; ; other++ {
 			candidate, exists := processRegistry.At(other)
@@ -205,6 +209,23 @@ func (writer diagWriter) hex(name string, value uint64) {
 	writer.console.WriteHex(value)
 }
 
+// tasks prints a task set as one hexadecimal number, slot 0 in the lowest
+// bit, however many words the set has: 0x1 is slot 0 and 0x1 followed by 16
+// zero digits is slot 64.
+func (writer diagWriter) tasks(name string, set sched.TaskSet) {
+	top := sched.TaskWords - 1
+	for top > 0 && set[top] == 0 {
+		top--
+	}
+	writer.hex(name, set[top])
+	const digits = "0123456789abcdef"
+	for word := top - 1; word >= 0; word-- {
+		for shift := 60; shift >= 0; shift -= 4 {
+			writer.console.WriteByte(digits[set[word]>>uint(shift)&0xf])
+		}
+	}
+}
+
 func (writer diagWriter) uint(name string, value uint64) {
 	writer.console.WriteString(" ")
 	writer.console.WriteString(name)
@@ -217,6 +238,13 @@ func (writer diagWriter) word(name, value string) {
 	writer.console.WriteString(name)
 	writer.console.WriteString("=")
 	writer.console.WriteString(value)
+}
+
+// usage prints a table's use against its limit, name=used/limit.
+func (writer diagWriter) usage(name string, used, limit int) {
+	writer.uint(name, uint64(used))
+	writer.console.WriteString("/")
+	writer.console.WriteUint(uint64(limit))
 }
 
 func (writer diagWriter) end() { writer.console.WriteString("\n") }
@@ -232,11 +260,11 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("requester", uint64(requester))
 	out.end()
 	out.text("DIAG sched")
-	out.hex("runnable", state.Runnable)
-	out.hex("dead", state.Dead)
+	out.tasks("runnable", state.Runnable)
+	out.tasks("dead", state.Dead)
 	out.uint("slots", state.Count)
 	out.uint("current", state.Current)
-	out.hex("running", state.Running)
+	out.tasks("running", state.Running)
 	out.hex("online", state.Online)
 	out.uint("switches", state.Stats.Switches)
 	out.uint("steals", state.Stats.Steals)
@@ -251,6 +279,7 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("shootdown-ipis", targets)
 	out.uint("shootdown-timeouts", timeouts)
 	out.end()
+	dumpWakeLatency(out)
 	// One line per lock level ever taken; spin times are TSC cycles.
 	for level := lock.Level(1); int(level) < lock.Levels; level++ {
 		stats := lock.Statistics(level)
@@ -338,6 +367,7 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("lifecycle-pending", uint64(pending))
 	out.uint("lifecycle-overflows", overflows)
 	out.end()
+	dumpTables(out)
 	unsupported := linuxcompat.Unsupported()
 	sessions := linuxcompat.VFSStatistics()
 	out.text("DIAG linux")
@@ -373,6 +403,31 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("vfs-failures", sessions.Failures)
 	out.uint("vfs-stale", sessions.Stale)
 	out.end()
+	network := linuxcompat.NetStatistics()
+	out.text("DIAG linux-net")
+	out.uint("attaches", network.Attaches)
+	out.uint("opens", network.Opens)
+	out.uint("closes", network.Closes)
+	out.uint("connects", network.Connects)
+	out.uint("accepts", network.Accepts)
+	out.uint("bytes-sent", network.BytesSent)
+	out.uint("bytes-received", network.BytesReceived)
+	out.uint("datagrams-sent", network.DatagramsSent)
+	out.uint("datagrams-received", network.DatagramsRecv)
+	out.uint("would-block", network.WouldBlock)
+	out.uint("readiness-wakeups", network.PollWakeups)
+	out.uint("requests", network.Requests)
+	out.uint("reply-timeouts", network.ReplyTimeouts)
+	out.uint("abandoned", network.Abandoned)
+	out.uint("interrupted", network.Interrupted)
+	out.uint("session-failures", network.SessionFailures)
+	out.uint("ring-tx", network.RingTX)
+	out.uint("ring-rx", network.RingRX)
+	out.uint("doorbells", network.Doorbells)
+	out.uint("bytes-to-pool", network.BytesToPool)
+	out.uint("bytes-from-pool", network.BytesFromPool)
+	out.end()
+	dumpSocketServices(out)
 	for index := 0; index < linuxcompat.MaxTerminals; index++ {
 		id, terminal, live := linuxcompat.TerminalAt(index)
 		if !live {
@@ -397,6 +452,16 @@ func dumpDiagnostics(requester process.ID) {
 		out.end()
 	}
 	dumpTiming(out)
+	// The log ring's counters: appended counts every record since boot, and
+	// overwritten counts those the ring dropped to make room. Persistence
+	// counters belong to the log service, which reports them in the log.
+	logOldest, logTotal := systemLog.Bounds()
+	out.text("DIAG log")
+	out.uint("capacity", klog.Capacity)
+	out.uint("appended", logTotal)
+	out.uint("retained", logTotal-logOldest)
+	out.uint("overwritten", logOldest)
+	out.end()
 	out.text("DIAG events")
 	out.uint("total", diagRing.Total())
 	out.end()
@@ -421,15 +486,17 @@ func dumpDiagnostics(requester process.ID) {
 func dumpProcess(out diagWriter, owner *process.Process, state amd64.SchedulerState) {
 	out.text("DIAG process")
 	out.uint("pid", uint64(owner.ID()))
+	out.console.WriteString(" name=")
+	out.console.Write(owner.Name())
 	out.hex("root", owner.AddressSpace().Root)
 	for _, task := range owner.Tasks() {
 		slot, _, valid := task.Parts()
 		taskState := "invalid"
 		if valid {
 			switch {
-			case state.Dead&(1<<slot) != 0:
+			case state.Dead.Has(int(slot)):
 				taskState = "dead"
-			case state.Runnable&(1<<slot) != 0:
+			case state.Runnable.Has(int(slot)):
 				taskState = "runnable"
 			default:
 				taskState = "blocked"
@@ -437,6 +504,14 @@ func dumpProcess(out diagWriter, owner *process.Process, state amd64.SchedulerSt
 		}
 		out.hex("task", uint64(task))
 		out.word("state", taskState)
+		if valid {
+			out.uint("run-us", cyclesToMicros(amd64.TaskRunCycles(int(slot))))
+			cost := &callCosts[slot]
+			out.uint("calls", cost.calls)
+			out.uint("call-us", cyclesToMicros(cost.cycles))
+			out.uint("waits", cost.waits)
+			out.uint("sends", cost.sends)
+		}
 	}
 	out.uint("free-handles", uint64(owner.Handles().Available()))
 	out.end()
@@ -528,4 +603,182 @@ func boolDiag(value bool) uint64 {
 		return 1
 	}
 	return 0
+}
+
+// dumpTables prints the global tables' use against their limits: the
+// kernel's in DIAG tables, the Linux personality's in DIAG linux-tables.
+// Each count is taken under its own table's lock, so the line is not one
+// instant's state.
+func dumpTables(out diagWriter) {
+	tasks := sched.MaxTasks - amd64.FreeTaskSlots()
+	registryLock.RLock()
+	processes := processRegistry.Count()
+	registryLock.RUnlock()
+	channels := channelRegistry.Count()
+	held := takeLocks(streams|sharedMemory|executableTable, nil)
+	streamCount, shared, executableCount := streamRegistry.Count(), sharedObjects.Live(), executables.Live()
+	held.drop()
+	out.text("DIAG tables")
+	out.usage("tasks", tasks, sched.MaxTasks)
+	out.usage("processes", processes, process.MaxProcesses)
+	out.usage("channels", channels, ipc.MaxChannels)
+	out.usage("streams", streamCount, stream.MaxStreams)
+	out.usage("shmem", shared, shmem.MaxObjects)
+	out.usage("executables", executableCount, executable.MaxObjects)
+	out.end()
+	linux := linuxcompat.Tables()
+	out.text("DIAG linux-tables")
+	out.usage("descriptions", linux.Descriptions, linuxcompat.MaxOpenDescriptions)
+	out.usage("directories", linux.Directories, linuxcompat.MaxOpenDirectories)
+	out.usage("eventfds", linux.EventCounters, linuxcompat.MaxEventCounters)
+	out.usage("terminals", linux.Terminals, linuxcompat.MaxTerminals)
+	out.usage("processes", linux.Processes, linuxcompat.LinuxGlobalMaxProcesses)
+	out.usage("family-peak", linux.BusiestFamily, linuxcompat.LinuxFamilyMaxProcesses)
+	out.end()
+}
+
+// dumpWakeLatency prints the time from a wake to the switch onto the woken
+// task: the count, the mean, and the bucket bounds of three percentiles, in
+// microseconds.
+func cyclesToMicros(cycles uint64) uint64 {
+	hz := monotonicClock.Hz()
+	if hz < 1_000_000 {
+		return 0
+	}
+	return cycles / (hz / 1_000_000)
+}
+
+func dumpWakeLatency(out diagWriter) {
+	latency := amd64.ReadWakeLatency()
+	micros := cyclesToMicros
+	percentile := func(share uint64) uint64 {
+		want := (latency.Count*share + 99) / 100
+		seen := uint64(0)
+		for bucket := 0; bucket < amd64.WakeBuckets; bucket++ {
+			seen += latency.Buckets[bucket]
+			if seen >= want && want != 0 {
+				return micros(amd64.WakeBucketBound(bucket))
+			}
+		}
+		return 0
+	}
+	out.text("DIAG wake")
+	out.uint("count", latency.Count)
+	if latency.Count != 0 {
+		out.uint("mean-us", micros(latency.Cycles/latency.Count))
+	} else {
+		out.uint("mean-us", 0)
+	}
+	out.uint("p50-us", percentile(50))
+	out.uint("p90-us", percentile(90))
+	out.uint("p99-us", percentile(99))
+	out.end()
+}
+
+// dumpSocketServices prints the data-plane counters linuxsockd keeps in
+// each live family session's ring page.
+func dumpSocketServices(out diagWriter) {
+	var families [linuxcompat.MaxNetFamilies]uint64
+	var endpoints [linuxcompat.MaxNetFamilies]linuxcompat.NetEndpoint
+	count := linuxcompat.LiveSessions(&families, &endpoints)
+	// The pool pages are shared memory, read under its lock as a socket
+	// call reads them; the tables lock nests inside it.
+	shmemLock.Lock()
+	defer shmemLock.Unlock()
+	for index := 0; index < count; index++ {
+		rings, found := socketPoolPage(endpoints[index], linuxsockapi.RingPage)
+		if !found {
+			continue
+		}
+		counters := linuxsockapi.LoadServiceCounters(rings)
+		out.text("DIAG linuxsockd")
+		out.uint("family", families[index])
+		out.uint("requests", counters.Requests)
+		out.uint("doorbells", counters.Doorbells)
+		out.uint("ring-tx", counters.RingTX)
+		out.uint("ring-releases", counters.RingReleases)
+		out.uint("ring-tx-done", counters.RingTXDone)
+		out.uint("ring-rx-data", counters.RingRXData)
+		out.uint("native-writes", counters.NativeWrites)
+		out.uint("native-reads", counters.NativeReads)
+		out.uint("tx-bytes-copied", counters.TXBytesCopied)
+		out.uint("rx-bytes-copied", counters.RXBytesCopied)
+		out.uint("warm-hits", counters.WarmHits)
+		out.uint("warm-misses", counters.WarmMisses)
+		out.uint("accept-hits", counters.AcceptHits)
+		out.uint("accept-misses", counters.AcceptMisses)
+		out.uint("refreshes", counters.Refreshes)
+		out.uint("waits-armed", counters.WaitsArmed)
+		out.uint("accepts-ahead", counters.AcceptsAhead)
+		out.uint("completions", counters.Completions)
+		out.end()
+		dumpSocketPlane(out, families[index], endpoints[index], rings)
+	}
+}
+
+// dumpSocketPlane prints a family's data plane as both sides see it: the
+// ring positions and tokens, the kernel's slots, and the snapshot linuxsockd
+// keeps of the family and each of its sockets.
+func dumpSocketPlane(out diagWriter, familyID uint64, endpoint linuxcompat.NetEndpoint, rings []byte) {
+	submitHead, submitTail, completeHead, completeTail, doorbell := linuxsockapi.RingPositions(rings)
+	token := uint32(0)
+	if page, found := socketPoolPage(endpoint, linuxsockapi.ReadinessPage); found {
+		token = linuxsockapi.Token(page)
+	}
+	filling, committed, held := linuxcompat.DataPlaneState(familyID)
+	family := linuxsockapi.LoadFamilySnapshot(rings)
+	out.text("DIAG linux-net-plane")
+	out.uint("family", familyID)
+	out.uint("submit-head", uint64(submitHead))
+	out.uint("submit-tail", uint64(submitTail))
+	out.uint("complete-head", uint64(completeHead))
+	out.uint("complete-tail", uint64(completeTail))
+	out.uint("doorbell", uint64(doorbell))
+	out.uint("token", uint64(token))
+	out.hex("kernel-tx-filling", uint64(filling))
+	out.hex("kernel-tx-committed", uint64(committed))
+	out.hex("kernel-rx-held", uint64(held))
+	out.hex("service-tx-held", uint64(family.TXHeld))
+	out.hex("service-rx-used", uint64(family.RXUsed))
+	out.hex("service-rx-published", uint64(family.RXPublished))
+	out.uint("inflight", uint64(family.Inflight))
+	out.uint("parked", uint64(family.Parked))
+	out.uint("replies", uint64(family.Replies))
+	out.hex("link-tx-lent", uint64(family.LinkTXLent))
+	out.hex("link-releases", uint64(family.LinkReleases))
+	out.uint("link-blocked", boolDiag(family.LinkBlocked))
+	out.uint("sockets", uint64(family.Sockets))
+	out.uint("family-limit", uint64(family.FamilyLimit))
+	out.uint("family-reserve", uint64(family.Reserve))
+	out.uint("system-sockets", uint64(family.SystemSockets))
+	out.uint("system-limit", uint64(family.SystemLimit))
+	out.end()
+	var snapshots []byte
+	for index := 0; index < linuxsockapi.MaxSockets; index++ {
+		if index%linuxsockapi.SnapshotsPerPage == 0 {
+			page, found := socketPoolPage(endpoint, linuxsockapi.SocketSnapshotPage(index))
+			if !found {
+				return
+			}
+			snapshots = page
+		}
+		socket := linuxsockapi.LoadSocketSnapshot(snapshots, index)
+		if socket.Socket == 0 {
+			continue
+		}
+		out.text("DIAG linux-net-socket")
+		out.hex("id", socket.Socket)
+		out.uint("endpoint", uint64(socket.Endpoint))
+		out.uint("state", uint64(socket.State))
+		out.uint("txq", uint64(socket.TXQueue))
+		out.uint("writes", uint64(socket.WritesOut))
+		out.uint("reads", uint64(socket.ReadsOut))
+		out.hex("flags", uint64(socket.Flags))
+		out.uint("tx-accepted", uint64(socket.TXAccepted))
+		out.uint("tx-sent", uint64(socket.TXSent))
+		out.uint("tx-stream", uint64(socket.TXStream))
+		out.hex("mask", uint64(socket.Mask))
+		out.uint("readable", uint64(socket.Readable))
+		out.end()
+	}
 }

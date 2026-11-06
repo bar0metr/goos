@@ -232,3 +232,52 @@ func TestSyncWithoutAVolumeHasNothingToFlush(t *testing.T) {
 		t.Fatal("sync of a mounted volume whose service is gone succeeded")
 	}
 }
+
+// The boot archive's etc directory is /etc: ordinary files a C library
+// reads, listed in the root with or without a volume, and refused every
+// change under both of its names.
+func TestEtcIsTheArchiveEtcReadOnly(t *testing.T) {
+	for _, device := range []*testBlockDevice{nil, installedDevice(t)} {
+		var service *Service
+		if device == nil {
+			service = startedService(t, nil)
+		} else {
+			service = startedService(t, device)
+			if service.Publish() != vfs.StatusOK {
+				t.Fatal("publish failed")
+			}
+		}
+		if names := listNames(t, service, testSession, "/"); !names["etc"] || !names["bootstrap"] {
+			t.Fatalf("root lists %v", names)
+		}
+		if names := listNames(t, service, testSession, "/etc"); len(names) != 1 || !names["resolv.conf"] {
+			t.Fatalf("/etc lists %v", names)
+		}
+		opened := dispatchOK(t, service, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/etc/resolv.conf")})
+		if reply := dispatchOK(t, service, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64}); string(reply.Data) != testResolvConf {
+			t.Fatalf("resolv.conf = %q", reply.Data)
+		}
+		dispatchOK(t, service, vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+		if stat := dispatchOK(t, service, vfs.Request{Operation: vfs.OperationStat, Path: []byte("/etc/resolv.conf")}); stat.Attributes&ramfs.AttrReadOnly == 0 || stat.Size != uint64(len(testResolvConf)) {
+			t.Fatalf("stat %+v", stat)
+		}
+		for _, root := range []string{"/etc", "/bootstrap/etc"} {
+			for _, request := range []vfs.Request{
+				{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: []byte(root + "/resolv.conf")},
+				{Operation: vfs.OperationTruncate, Path: []byte(root + "/resolv.conf")},
+				{Operation: vfs.OperationCreate, Path: []byte(root + "/hosts.new")},
+				{Operation: vfs.OperationMkdir, Path: []byte(root + "/sub")},
+				{Operation: vfs.OperationUnlink, Path: []byte(root + "/resolv.conf")},
+				{Operation: vfs.OperationRename, Path: []byte(root + "/resolv.conf"), Target: []byte(root + "/old")},
+				vfs.MetadataRequest([]byte(root+"/resolv.conf"), 0, ramfs.MetadataChange{SetModified: true}),
+			} {
+				if reply := service.Dispatch(testSession, request); reply.Status != vfs.StatusPermissionDenied {
+					t.Fatalf("operation %d on %s = %d, want permission denied", request.Operation, request.Path, reply.Status)
+				}
+			}
+		}
+		if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationUnlink, Path: []byte("/etc")}); reply.Status == vfs.StatusOK {
+			t.Fatal("/etc removed")
+		}
+	}
+}

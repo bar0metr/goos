@@ -1,6 +1,9 @@
 package tls
 
 import (
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -35,5 +38,18 @@ func TestBlockLayout(t *testing.T) {
 	}
 	if unsafe.Sizeof(b) != 64 {
 		t.Fatalf("block is %d bytes", unsafe.Sizeof(b))
+	}
+}
+
+// TestAssemblyReservesEveryBlock checks that goos_tcbs in the runtime's
+// assembly holds a block for each slot: blocks indexes it up to Slots.
+func TestAssemblyReservesEveryBlock(t *testing.T) {
+	source, err := os.ReadFile("../amd64.S")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("goos_tcbs:\n    // One block per thread slot, kcall.ThreadSlots of them (tls_test.go).\n    .zero 64 * %d\n", Slots)
+	if !strings.Contains(string(source), want) {
+		t.Fatalf("goos_tcbs does not reserve %d blocks", Slots)
 	}
 }

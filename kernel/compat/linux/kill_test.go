@@ -7,7 +7,7 @@ import (
 	"goos/kernel/handle"
 )
 
-func TestSignalTargetAllowsSelfAndDescendantsOnly(t *testing.T) {
+func TestSignalTargetStaysInTheFamily(t *testing.T) {
 	resetCompatibilityProcesses()
 	root, _ := installProcessRecord(800, 1, 0)
 	child, _ := registerChildForTest(801, root.PID)
@@ -22,8 +22,8 @@ func TestSignalTargetAllowsSelfAndDescendantsOnly(t *testing.T) {
 		{root.PID, child.PID, 0},
 		{root.PID, grandchild.PID, 0},
 		{child.PID, grandchild.PID, 0},
-		{child.PID, root.PID, abi.EPERM},
-		{child.PID, sibling.PID, abi.EPERM},
+		{child.PID, root.PID, 0},
+		{child.PID, sibling.PID, 0},
 		{root.PID, other.PID, abi.ESRCH},
 		{other.PID, child.PID, abi.ESRCH},
 		{root.PID, 30000, abi.ESRCH},

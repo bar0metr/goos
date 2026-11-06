@@ -9,8 +9,9 @@ import (
 // them, in Field order from FieldTTL.
 var storedDefaults = [TuningFields]uint64{64, 3, 1000, 1000, 2000, 2, 2000, 10000, 10, 60000,
 	60000, 1000, 3, 20, 4000, 64000, 10000,
-	49152, 65535, 8, 32, 8, 4096,
-	49152, 65535, 32, 8, 8, 16384, 16384, 30000, 1000, 60000, 60000}
+	49152, 65535, 8, 1024, 8, 4096,
+	49152, 65535, 1024, 8, 128, 262144, 262144, 30000, 1000, 60000, 60000,
+	41943040, 33554432}
 
 func TestParseTuningDefaults(t *testing.T) {
 	values := storedDefaults
@@ -70,6 +71,12 @@ func TestParseTuningRanges(t *testing.T) {
 			if field == FieldTCPRTOMax {
 				values[FieldTCPRTOMin-FieldTTL] = tuningRange[FieldTCPRTOMin-FieldTTL].min
 			}
+			if field == FieldTCPMemoryBudget {
+				values[FieldTCPOwnerMemoryBudget-FieldTTL] = tuningRange[FieldTCPOwnerMemoryBudget-FieldTTL].min
+			}
+			if field == FieldTCPOwnerMemoryBudget {
+				values[FieldTCPMemoryBudget-FieldTTL] = tuningRange[FieldTCPMemoryBudget-FieldTTL].max
+			}
 			if _, got := ParseTuning(&values); got != FieldNone {
 				t.Errorf("field %d value %d refused as %d", field, value, got)
 			}
@@ -107,6 +114,12 @@ func TestParseTuningCrossField(t *testing.T) {
 	values[FieldDHCPMaxRetry-FieldTTL] = 30000
 	if _, field := ParseTuning(&values); field != FieldNone {
 		t.Fatalf("equal retry bounds refused: %d", field)
+	}
+	// One session may not hold more ring memory than all of them.
+	values[FieldTCPMemoryBudget-FieldTTL] = 8 << 20
+	values[FieldTCPOwnerMemoryBudget-FieldTTL] = 16 << 20
+	if _, field := ParseTuning(&values); field != FieldTCPOwnerMemoryBudget {
+		t.Fatalf("field %d, want the session memory budget", field)
 	}
 }
 

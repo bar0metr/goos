@@ -14,6 +14,7 @@ package main
 import (
 	"goos/internal/capability"
 	"goos/internal/validation"
+	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -95,8 +96,10 @@ func startNetwork(ticks uint64) {
 		capabilities = append(capabilities, supervisor.Capability{Name: "config", Handle: settings,
 			Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
+	// The large profile's 64 MiB page quota holds the TCP ring budget,
+	// network.MaxTCPMemoryBudget at most, beside the rest of netd (ADR 0213).
 	if manager.Register(supervisor.Definition{Name: netServiceName, Executable: supervisor.ServicePath(netServiceName, boot.Mode()),
-		Capabilities: capabilities, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
+		Capabilities: capabilities, Restart: supervisor.RestartOnFailure, Profile: supervisor.ProfileLarge}) != supervisor.StatusOK {
 		syslog.Warn("network service registration failed")
 		closePair(control)
 		netControl = 0
@@ -224,15 +227,38 @@ func setNetDevice(driver, rx, tx handle.ID, generation uint64) bool {
 
 // awaitNetControl waits, bounded, for the service's answer to the request just
 // sent with the current correlation.
+//
+// An answer to an earlier request that came after its wait ended is skipped:
+// left in the queue it would be taken for the answer to every later request,
+// and each of them would fail one answer behind.
 func awaitNetControl(opcode netapi.ControlOpcode) bool {
-	reply, status := receive(uint64(netControl), vfsSessionDeadline)
 	var decoded netapi.ControlReply
-	if status != ipc.StatusOK || !netapi.DecodeControlReply(&reply, correlation, opcode, &decoded) || decoded.Result != netapi.ControlOK {
-		syslog.Warn("network service refused a control request", syslog.Uint("operation", uint64(opcode)), syslog.Uint("result", uint64(decoded.Result)))
-		return false
+	for skipped := 0; skipped <= maxStaleNetReplies; skipped++ {
+		reply, status := receive(uint64(netControl), netControlDeadline)
+		if status == ipc.StatusOK && reply.Correlation != 0 && reply.Correlation < correlation {
+			syslog.Warn("network service answered late", syslog.Uint("correlation", reply.Correlation))
+			continue
+		}
+		if status != ipc.StatusOK || !netapi.DecodeControlReply(&reply, correlation, opcode, &decoded) || decoded.Result != netapi.ControlOK {
+			syslog.Warn("network service refused a control request", syslog.Uint("operation", uint64(opcode)),
+				syslog.Uint("result", uint64(decoded.Result)), syslog.Uint("status", uint64(status)))
+			return false
+		}
+		return true
 	}
-	return true
+	syslog.Warn("network service answered late too often", syslog.Uint("operation", uint64(opcode)))
+	return false
 }
+
+// netControlDeadline bounds the wait for one answer. The first request goes
+// to a service init has just launched, which answers once its stack is set
+// up; on an emulated processor that took longer than the two seconds a VFS
+// session gets.
+const netControlDeadline = 10 * clock.TicksPerSecond
+
+// maxStaleNetReplies bounds the late answers one wait skips; each request
+// init gave up on leaves at most one.
+const maxStaleNetReplies = 8
 
 // openNetSession asks the network service to accept a session with the
 // rights of class and returns the client end for a command. The command
@@ -260,11 +286,44 @@ func openNetSession(class netapi.RightsClass) (handle.ID, bool) {
 	return handle.ID(pair[0]), true
 }
 
-// openUDPSession asks the network service to serve a new UDP session and
-// returns the client's channel, TX pool and RX pool, in that order. Each
-// side's pool handles are narrowed to what it writes: the client writes the
-// TX pool, the service the RX pool.
+// openUDPSession asks the network service to serve a new UDP session with
+// the ordinary endpoint quota.
 func openUDPSession() ([3]handle.ID, bool) {
+	return openUDPSessionQuota(netapi.OrdinarySessionQuota, 0)
+}
+
+// openTCPSession asks for a GTCP 2 session with the ordinary endpoint quota.
+func openTCPSession() ([3]handle.ID, bool) {
+	return openTCPSessionQuota(netapi.OrdinarySessionQuota, tcpapi.Layout2)
+}
+
+// openLinuxSocketSessions opens the TCP and UDP sessions of linuxsockd, the
+// Linux socket service, each with the largest endpoint quota,
+// netapi.MaxSessionQuota, so one service can back many Linux sockets. Its
+// TCP session speaks GTCP 4, whose rings carry stream data in 16 KiB slots
+// without a channel message per slot, and its UDP session GUDP 3, whose
+// rings carry datagrams the same way (ADR 0216). Each result is a session's
+// channel, TX pool and RX pool. Ordinary commands and the resolver keep the
+// ordinary quota, GTCP 2 and GUDP 2. On failure nothing stays open.
+func openLinuxSocketSessions() (tcp, udp [3]handle.ID, ok bool) {
+	if tcp, ok = openTCPSessionQuota(netapi.MaxSessionQuota, tcpapi.Layout4); !ok {
+		return tcp, udp, false
+	}
+	if udp, ok = openUDPSessionQuota(netapi.MaxSessionQuota, udpapi.Version3); !ok {
+		for _, id := range tcp {
+			sys.HandleClose(id)
+		}
+		return [3]handle.ID{}, udp, false
+	}
+	return tcp, udp, true
+}
+
+// openUDPSessionQuota asks the network service to serve a new UDP session
+// whose endpoints are bounded by quota and which speaks GUDP version, zero
+// for GUDP 2, and returns the client's channel, TX pool and RX pool, in
+// that order. Each side's pool handles are narrowed to what it writes: the
+// client writes the TX pool, the service the RX pool.
+func openUDPSessionQuota(quota uint16, version uint8) ([3]handle.ID, bool) {
 	var none [3]handle.ID
 	if netControl == 0 {
 		return none, false
@@ -273,8 +332,12 @@ func openUDPSession() ([3]handle.ID, bool) {
 	if !createChannel(&pair) {
 		return none, false
 	}
-	tx, txStatus := sys.MemoryCreate(udpapi.TXPoolPages)
-	rx, rxStatus := sys.MemoryCreate(udpapi.RXPoolPages)
+	txPages, rxPages := uint64(udpapi.TXPoolPages), uint64(udpapi.RXPoolPages)
+	if version == udpapi.Version3 {
+		txPages, rxPages = udpapi.TXPoolPages3, udpapi.RXPoolPages3
+	}
+	tx, txStatus := sys.MemoryCreate(txPages)
+	rx, rxStatus := sys.MemoryCreate(rxPages)
 	if txStatus != kcall.StatusOK || rxStatus != kcall.StatusOK {
 		closePair(pair)
 		closeOpen(tx)
@@ -297,7 +360,7 @@ func openUDPSession() ([3]handle.ID, bool) {
 	correlation++
 	var message ipc.Message
 	attachments := [...]handle.ID{handle.ID(pair[1]), serviceTX, serviceRX}
-	request := netapi.ControlRequest{Opcode: netapi.ControlAddUDPSession, Rights: netapi.RightsUDP}
+	request := netapi.ControlRequest{Opcode: netapi.ControlAddUDPSession, Rights: netapi.RightsUDP, Quota: quota, UDPVersion: version}
 	if !netapi.EncodeControlRequest(&request, attachments[:], correlation, &message) || !sendMessage(uint64(netControl), message) {
 		closePair(pair)
 		for _, id := range [...]handle.ID{serviceTX, serviceRX, clientTX, clientRX} {
@@ -314,9 +377,10 @@ func openUDPSession() ([3]handle.ID, bool) {
 	return [3]handle.ID{handle.ID(pair[0]), clientTX, clientRX}, true
 }
 
-// openTCPSession creates the channel and directionally restricted stream
-// pools for one GTCP1 client.
-func openTCPSession() ([3]handle.ID, bool) {
+// openTCPSessionQuota creates the channel and directionally restricted
+// stream pools for one GTCP client whose endpoints are bounded by quota and
+// which speaks layout's version over pools of layout's size.
+func openTCPSessionQuota(quota uint16, layout tcpapi.Layout) ([3]handle.ID, bool) {
 	var none [3]handle.ID
 	if netControl == 0 {
 		return none, false
@@ -325,8 +389,8 @@ func openTCPSession() ([3]handle.ID, bool) {
 	if !createChannel(&pair) {
 		return none, false
 	}
-	tx, txStatus := sys.MemoryCreate(tcpapi.TXPoolPages)
-	rx, rxStatus := sys.MemoryCreate(tcpapi.RXPoolPages)
+	tx, txStatus := sys.MemoryCreate(layout.TXPoolPages())
+	rx, rxStatus := sys.MemoryCreate(layout.RXPoolPages())
 	if txStatus != kcall.StatusOK || rxStatus != kcall.StatusOK {
 		closePair(pair)
 		closeOpen(tx)
@@ -349,7 +413,8 @@ func openTCPSession() ([3]handle.ID, bool) {
 	correlation++
 	var message ipc.Message
 	attachments := [...]handle.ID{handle.ID(pair[1]), serviceTX, serviceRX}
-	request := netapi.ControlRequest{Opcode: netapi.ControlAddTCPSession, Rights: netapi.RightsTCP}
+	request := netapi.ControlRequest{Opcode: netapi.ControlAddTCPSession, Rights: netapi.RightsTCP, Quota: quota,
+		TCPVersion: uint8(layout.Version)}
 	if !netapi.EncodeControlRequest(&request, attachments[:], correlation, &message) || !sendMessage(uint64(netControl), message) {
 		closePair(pair)
 		for _, id := range [...]handle.ID{serviceTX, serviceRX, clientTX, clientRX} {

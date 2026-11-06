@@ -209,6 +209,27 @@ for the same reason. Its own DMA domain means that its exit resets the NIC
 and never the disk. That contains a crash and does nothing against a
 malicious driver.
 
+### Linux program using sockets
+
+A static Linux program that calls the socket ABI with hostile arguments.
+
+- It reaches the network only through its family session to `linuxsockd`.
+  It holds no GTCP or GUDP session, no `netd` control, no pool of another
+  family, and no handle it could pass on (ADR 0210).
+- The kernel copies every sockaddr, iovec array, `msghdr`, option value and
+  length through the checked copy helpers and bounds each count before it
+  indexes anything; a bad pointer is `EFAULT` and a short length `EINVAL`.
+- A socket identity names a slot of its own family under the current session
+  generation. An identity from another family, a closed slot, or an older
+  session answers `Stale` and becomes an errno.
+- One family holds at most 512 sockets and eight requests in flight, and
+  `linuxsockd` holds 16 families and 1024 sockets. Each live family keeps 32
+  sockets that no other family can take, so one family that fills its quota
+  leaves room for the rest. `netd` gives `linuxsockd` a quota of 64
+  endpoints per protocol, apart from the 8 of each command session.
+- Ports below 1024 are `EACCES`, so a program cannot take the resolver's
+  stub on `127.0.0.1:53`.
+
 ### Hostile network peer
 
 Anything on the link can send the guest arbitrary frames.
@@ -410,6 +431,8 @@ as it can for any session (ADR 0117); scopes on that target still apply by node.
 | network driver crash | `netd` fails pending echoes and unbinds; PID 1 starts a driver with a new generation, channel and pools; the disk is untouched (ADR 0190, 0191) |
 | missing or failed NIC | the network reports down; storage, the installed system and the shell keep running, and recovery is never entered for it (ADR 0191) |
 | resolver crash or `netd` restart | PID 1 restarts the service and hands the resolver a new UDP and status session with a new generation; lookups on the old ones fail as `Reconfigured`, and `ping` with a numeric address keeps working (ADR 0194, ADR 0195) |
+| `linuxsockd` crash | every Linux socket of the old sessions fails with `ENETRESET` and its waiters wake; PID 1 restarts the service and gives each running Linux launch a new family session with `LinuxNetAttach`, and old socket identities match nothing (ADR 0210) |
+| `netd` restart under Linux sockets | `linuxsockd` fails the sockets the dead native sessions backed and takes fresh sessions from PID 1; family sessions and later `socket` calls keep working (ADR 0210) |
 | no DNS server known | `localhost` and the hosts table still answer; other names give `NoServers` (ADR 0194) |
 | terminal or shell crash | PID 1 restarts it on a fresh session and hands the survivor the other end; a dead shell's jobs are stopped with it (ADR 0089) |
 | a pipeline stage exiting | closes only its own copies of shared stream ends; the terminal's writing end stays open for the other stages (ADR 0089) |

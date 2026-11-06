@@ -17,12 +17,19 @@ import (
 // runtime makes for it. Pinned threads run outside GOMAXPROCS.
 
 func installThreadHooks() {
-	thread.SetHooks(thread.Hooks{Starting: ensureStarted, Run: runPinned, Exiting: exitPinnedSelf})
+	thread.SetHooks(thread.Hooks{Starting: startingPinned, Run: runPinned, Exiting: exitPinnedSelf})
+}
+
+// startingPinned is thread.Start's hook. It reserves the Ms before the new
+// thread exists, so the thread's claimM finds them.
+func startingPinned() {
+	ensureStarted()
+	reserveMs()
 }
 
 // runPinned runs fn(argument) as the pinned goroutine of the thread in slot.
 func runPinned(fn func(uintptr), argument uintptr, slot int) {
-	m := &ms[slot]
+	m := claimM(slot)
 	m.queue = runQueue{}
 	if !makeSchedulerStack(m, 0) {
 		fatal("goroutine: no scheduler stack for a thread")

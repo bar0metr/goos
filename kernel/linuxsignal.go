@@ -277,9 +277,10 @@ func (handler *linuxCallHandler) interrupted(restartable bool) linuxcompat.Resul
 
 // interruptLinuxSleeper wakes the task of state from an interruptible wait
 // once a signal with a handler is pending for it: a stream read or write,
-// wait4, nanosleep, poll, ppoll, rt_sigsuspend, or pause. A VFS exchange, a queued VFS request,
-// and a vfork parent keep waiting, as Linux file I/O and vfork do. A signal
-// that would end the process has already ended it.
+// wait4, nanosleep, poll, ppoll, select, pselect6, rt_sigsuspend, or pause.
+// A VFS exchange, a queued VFS request, and a vfork parent keep waiting, as
+// Linux file I/O and vfork do. A signal that would end the process has
+// already ended it.
 func interruptLinuxSleeper(state *linuxcompat.ProcessState) {
 	if !state.Signals.Interrupting() {
 		return
@@ -308,16 +309,26 @@ func interruptLinuxTask(state *linuxcompat.ProcessState, task sched.TaskID) bool
 	switch pending.Number {
 	case linuxabi.SysRead, linuxabi.SysReadv, linuxabi.SysWrite, linuxabi.SysWritev:
 		// A pipe read or write waits on its stream; a terminal read on its
-		// streams and the terminal at once.
+		// streams and the terminal at once; a socket read or write on its
+		// session channel while it sleeps on readiness. A reply wait is in
+		// neither table and keeps waiting.
 		if !streamWaitSet.Cancel(task) && !waitAnyTable.Cancel(task) {
 			return false
 		}
 	case linuxabi.SysWait4:
 		linuxcompat.ReleaseChildWaiter(state.PID)
-	case linuxabi.SysNanosleep, linuxabi.SysPoll, linuxabi.SysPpoll, linuxabi.SysRtSigsuspend, linuxabi.SysPause:
+	case linuxabi.SysNanosleep, linuxabi.SysPoll, linuxabi.SysPpoll, linuxabi.SysSelect, linuxabi.SysPselect6,
+		linuxabi.SysRtSigsuspend, linuxabi.SysPause:
 		waitAnyTable.Cancel(task)
 	case linuxabi.SysFutex:
 		return interruptFutexWaiter(task)
+	case linuxabi.SysConnect, linuxabi.SysAccept, linuxabi.SysAccept4, linuxabi.SysSendto, linuxabi.SysRecvfrom,
+		linuxabi.SysSendmsg, linuxabi.SysRecvmsg:
+		// Only a readiness sleep ends for a signal. A reply wait does not:
+		// the service answers every request at once.
+		if pending.Correlation != linuxcompat.SocketSleepCorrelation || !waitAnyTable.Cancel(task) {
+			return false
+		}
 	default:
 		return false
 	}

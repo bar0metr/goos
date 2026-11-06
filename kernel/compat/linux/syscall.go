@@ -80,8 +80,11 @@ type Handler interface {
 	SigSuspend(Request) Result
 	// Kill serves kill, tkill, and tgkill.
 	Kill(Request) Result
-	// Poll serves poll and ppoll.
+	// Poll serves poll, ppoll, select, and pselect6, which share one
+	// readiness engine.
 	Poll(Request) Result
+	// Socket serves the socket calls, 41 to 55 and accept4.
+	Socket(Request) Result
 	Exit(Request, bool) Result
 }
 
@@ -178,7 +181,7 @@ func route(request Request, handler Handler) Result {
 		case abi.SysGetpid, abi.SysGettid, abi.SysGetppid, abi.SysSetpgid, abi.SysGetpgrp, abi.SysSetsid, abi.SysGetpgid, abi.SysGetsid, abi.SysGetuid, abi.SysGeteuid, abi.SysGetgid, abi.SysGetegid,
 			abi.SysSetuid, abi.SysSetgid, abi.SysGetgroups,
 			abi.SysUname, abi.SysClockGettime, abi.SysGettimeofday, abi.SysTime, abi.SysSysinfo, abi.SysNanosleep, abi.SysPrlimit64,
-			abi.SysRtSigaction, abi.SysRtSigprocmask, abi.SysGetrandom,
+			abi.SysRtSigaction, abi.SysRtSigprocmask, abi.SysRtSigpending, abi.SysEventfd, abi.SysEventfd2, abi.SysGetrandom,
 			abi.SysUmask, abi.SysSetRobustList, abi.SysFutex, abi.SysSchedYield, abi.SysSchedGetaffinity, abi.SysSchedSetaffinity, abi.SysGetcpu:
 			return handler.System(request)
 		case abi.SysAccess, abi.SysFaccessat, abi.SysGetdents64, abi.SysStat, abi.SysFstat, abi.SysLstat, abi.SysNewfstatat, abi.SysLseek, abi.SysGetcwd, abi.SysChdir, abi.SysRename, abi.SysMkdir, abi.SysRmdir, abi.SysUnlink,
@@ -212,8 +215,12 @@ func route(request Request, handler Handler) Result {
 			return handler.SigSuspend(request)
 		case abi.SysKill, abi.SysTkill, abi.SysTgkill:
 			return handler.Kill(request)
-		case abi.SysPoll, abi.SysPpoll:
+		case abi.SysPoll, abi.SysPpoll, abi.SysSelect, abi.SysPselect6:
 			return handler.Poll(request)
+		case abi.SysSocket, abi.SysConnect, abi.SysAccept, abi.SysSendto, abi.SysRecvfrom, abi.SysSendmsg, abi.SysRecvmsg,
+			abi.SysShutdown, abi.SysBind, abi.SysListen, abi.SysGetsockname, abi.SysGetpeername, abi.SysSetsockopt,
+			abi.SysGetsockopt, abi.SysAccept4:
+			return handler.Socket(request)
 		case abi.SysExit:
 			return handler.Exit(request, false)
 		case abi.SysExitGroup:

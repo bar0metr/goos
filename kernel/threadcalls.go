@@ -48,6 +48,12 @@ func executableEntry(owner *process.Process, entry uint64) bool {
 	return ok && found.Protection&region.Execute != 0 && found.Protection&region.Read != 0 && found.Protection&region.Write == 0
 }
 
+// A thread's page charge is its kernel stack allocation, no more and no less.
+var (
+	_ = [process.TaskPages - amd64.TaskStackPages]struct{}{}
+	_ = [amd64.TaskStackPages - process.TaskPages]struct{}{}
+)
+
 // ThreadCreate starts a thread of the caller's process at entry. Every step
 // that can fail runs before the task starts, and undoes what came before it.
 func (handler nativeCallHandler) ThreadCreate(entry uint64, argument uint64, address uint64) kcall.Status {
@@ -77,13 +83,7 @@ func (handler nativeCallHandler) ThreadCreate(entry uint64, argument uint64, add
 	}
 	guard, top := threadStackRange(slot)
 	regions := owner.Regions()
-	if regions.Insert(region.Region{Base: guard, Length: kcall.ThreadGuardSize, Backing: region.Guard, Flags: region.Pinned}) != region.OK {
-		owner.CancelReservedTask()
-		group.Cancel(slot)
-		return kcall.StatusResourceExhausted
-	}
-	if regions.Insert(region.Region{Base: top - kcall.ThreadStackSize, Length: kcall.ThreadStackSize, Protection: region.Read | region.Write, Backing: region.Anonymous, Flags: region.Pinned}) != region.OK {
-		regions.Remove(guard, kcall.ThreadGuardSize, true)
+	if regions.Insert(nativethread.StackRegion(slot)) != region.OK {
 		owner.CancelReservedTask()
 		group.Cancel(slot)
 		return kcall.StatusResourceExhausted

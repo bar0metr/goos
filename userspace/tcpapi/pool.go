@@ -47,3 +47,6 @@ func (s *Slots) Lent(slot uint8) bool {
 }
 
 func Offset(slot uint8) uint64 { return uint64(slot) * SlotSize }
+
+// Bits reports the lent slots as a bitmap, for diagnostics.
+func (s *Slots) Bits() uint8 { return s.lent }

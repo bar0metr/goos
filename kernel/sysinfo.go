@@ -67,7 +67,7 @@ func (handler nativeCallHandler) ProcessInfo(index uint64, address uint64) kcall
 		case !valid:
 		case uint64(slot) == state.Current:
 			status = kcall.ProcessRunning
-		case state.Runnable&(1<<slot) != 0 && status != kcall.ProcessRunning:
+		case state.Runnable.Has(int(slot)) && status != kcall.ProcessRunning:
 			status = kcall.ProcessReady
 		}
 	}

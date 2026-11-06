@@ -71,6 +71,12 @@ const (
 	FaultRemoteSigner
 	// FaultRemoteWorker kills the SSH worker of one running SFTP session.
 	FaultRemoteWorker
+	// FaultNetService kills netd, which PID 1 restarts; the services that
+	// use it get new native sessions (ADR 0210).
+	FaultNetService
+	// FaultLinuxSockets kills linuxsockd, which PID 1 restarts with new
+	// native sessions and new family sessions for running Linux launches.
+	FaultLinuxSockets
 )
 
 // ControlStatus answers control requests. Remote shutdown returns Accepted
@@ -136,7 +142,7 @@ func validControl(operation ControlOperation, argument uint8) bool {
 	case ControlKill:
 		return argument < Slots
 	case ControlFault:
-		return argument >= FaultTerminal && argument <= FaultRemoteWorker
+		return argument >= FaultTerminal && argument <= FaultLinuxSockets
 	default:
 		return false
 	}

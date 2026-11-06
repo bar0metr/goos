@@ -127,7 +127,7 @@ func (handler *linuxCallHandler) forkChild(stack uint64) (int32, *linuxcompat.Pr
 	// The child names the same VFS endpoint through its own handle. The
 	// family context, not any one process, decides when the endpoint closes.
 	vfsHandle, inserted := child.Handles().Insert(handle.TypeChannel, vfsAuthority)
-	if !inserted || !linuxcompat.ForkProcess(handler.root, root, record, vfsHandle) {
+	if !inserted || !linuxcompat.ForkProcess(handler.root, root, record, vfsHandle, child) {
 		abandonFork(pid, root, child, false)
 		return 0, nil, linuxabi.ENOMEM
 	}
@@ -244,6 +244,7 @@ func exitLinuxProcess(exited *process.Process, code uint64) {
 	if _, shared := linuxcompat.VFSContext(familyID); shared {
 		exited.Handles().Close(vfsHandle)
 	}
+	endLinuxNetHolder(exited, familyID)
 }
 
 // linuxForkFaultDirectory is the working directory under which a validation

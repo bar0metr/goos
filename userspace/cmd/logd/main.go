@@ -3,24 +3,30 @@
 // The log service is the persistent backend of the system log. The kernel ring
 // is bounded and volatile: it holds the newest records and loses them at reset,
 // which is exactly when a log is most wanted. This service drains the ring into
-// a file on the persistent volume so that what happened before a reboot can be
-// read after one.
+// rotated files on the persistent volume so that what happened before a reboot
+// can be read after one.
 //
 // It holds no authority beyond the log capability that authorises reading the
-// ring, console write for its own records, and a VFS session for its own file, and it never becomes a path that
-// other services log through: they keep writing to the kernel ring, which stays
-// the single ordering point.
+// ring, console write for its own records, and a VFS session for its own
+// files, and it never becomes a path that other services log through: they
+// keep writing to the kernel ring, which stays the single ordering point.
+//
+// The service blocks on the ring with its cursor. A new record wakes it, it
+// drains batches until the cursor reaches the ring's end, and it blocks
+// again. The wait's timeout runs maintenance only: reading settings, retrying
+// storage that failed, and reporting counters.
 package main
 
 import (
-	"goos/internal/logfmt"
 	"goos/internal/validation"
+	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	"goos/userspace/config"
 	syslog "goos/userspace/log"
+	"goos/userspace/logpersist"
 	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
@@ -29,24 +35,19 @@ import (
 
 const (
 	// logPath is on /state because a log is mutable system state rather than
-	// user data or part of the immutable system image.
-	logPath    = "/state/system.log"
-	rotatePath = "/state/system.log.1"
-	// releaseLogBytes bounds the live file. FAT32 here holds at most 64 KiB per
-	// file, and one rotation keeps between this and twice this much history.
-	releaseLogBytes = uint64(24 * 1024)
-	// A boot produces a few kilobytes of records, so the validation build uses
-	// a bound a single session crosses. Only the threshold differs; the
-	// rotation the boot test exercises is the one a release build performs.
-	// Calendar timestamps add fifteen bytes per record over the former
-	// monotonic prefix. Keep the validation session to one rotation without
-	// making the post-rotation live file empty.
-	validationLogBytes = uint64(1536)
-	// drainInterval is how long the service sleeps between passes, in timer
-	// ticks. The ring holds 64 records, so a burst larger than that inside one
-	// interval loses the oldest of them, which the service reports rather than
-	// hides.
-	drainInterval    = uint64(100)
+	// user data or part of the immutable system image. Older segments are
+	// logPath.1, logPath.2 and so on.
+	logPath = "/state/system.log"
+	// statusPath holds the counters for `log status`; statusScratch is
+	// where the next one is written before it replaces the last.
+	statusPath    = logPath + logpersist.StatusSuffix
+	statusScratch = statusPath + ".new"
+	// maintenanceTicks is how often the service rereads its settings and
+	// retries storage that failed. Records never wait for it.
+	maintenanceTicks = 5 * clock.TicksPerSecond
+	// reportEvery is how many maintenance rounds pass between counter
+	// reports when nothing went wrong: one an hour.
+	reportEvery      = 720
 	vfsReplyDeadline = uint64(200)
 	vfsReplyAttempts = 5
 )
@@ -62,20 +63,36 @@ var (
 	// when the VFS was restarted and the old one died with it (ADR 0099).
 	controlHandle handle.ID
 	configWire    [ipc.WireMaxSize]byte
-	// persisting is the setting that governs this service. It is consulted on
-	// every pass, so turning persistence off takes effect at the next one
-	// rather than at the next boot.
+	// persisting is the setting that governs this service, reread at each
+	// maintenance round.
 	persisting  = true
 	wire        [ipc.WireMaxSize]byte
-	descriptor  [3]uint64
-	logLine     [kcall.LogText]byte
-	lostLine    [64]byte
 	correlation uint64
-	// cursor is the sequence number of the next record to persist.
-	cursor uint64
 	// reported bounds how often a persistent failure is announced, so a full
 	// or broken volume cannot turn every drain into more log records.
 	reported bool
+	// vfsClosed is set once the filesystem session's peer is gone; the
+	// service stops writing until PID 1 hands over a new one.
+	vfsClosed bool
+	// failing holds off draining until the next maintenance round after
+	// storage failed, so a broken volume is retried, not spun on.
+	failing bool
+
+	persister logpersist.Persister
+	ring      kernelRing
+	files     vfsFiles
+	// policyRefused reports a refused rotation setting once.
+	policyRefused bool
+	// lastReport holds the counters as last reported.
+	lastReport logpersist.Stats
+	// written holds the counters and policy the status file last got;
+	// statusWritten says whether it got any.
+	written       logpersist.Stats
+	writtenPolicy logpersist.Policy
+	statusWritten bool
+	statusText    [logpersist.MaxStatus]byte
+	rounds     int
+	interests  [userwait.MaxObjects]userwait.CursorInterest
 )
 
 //export userspaceMain
@@ -99,177 +116,164 @@ func userspaceMain() {
 	if !ok {
 		fatal("LOG_VFS_MISSING\n")
 	}
-	// The configuration session is optional: without one the service keeps its
-	// default, which is to persist.
+	// The configuration session is optional: without one the service keeps
+	// its build's defaults, which are to persist with the default rotation.
 	configHandle, _ = data.Handle("config")
 	controlHandle, _ = data.Handle("control")
 	_, restarted := data.Env(startup.RestartVariable)
-	if !openLog(restarted) {
+	if !persister.Init(&ring, &files, logPath, logpersist.DefaultPolicy(validation.Enabled)) {
+		fatal("LOG_POLICY_INVALID\n")
+	}
+	maintain()
+	if !persister.Start(restarted) {
 		fatal("LOG_RING_UNAVAILABLE\n")
 	}
 	mark("LOG_SERVICE_OK\n")
-	syslog.Info("persisting", syslog.Str("path", logPath))
-	for {
-		userwait.Sleep(drainInterval)
-		drain()
-	}
-}
-
-// openLog makes sure the file exists and starts the cursor at the end of the
-// ring. Records already in the ring at startup are persisted: they describe
-// this boot, and losing them would mean the log never covers its own start.
-// openLog fixes the starting cursor. The file itself is created by the first
-// pass that has something to write, so storage that is not ready yet delays
-// persistence rather than disabling it.
-func openLog(restarted bool) bool {
-	oldest, total, status := sys.LogBounds(logHandle)
-	if status != kcall.StatusOK {
-		return false
-	}
-	cursor = oldest
-	// A service started again in the same boot finds the records its
-	// predecessor wrote at the end of the file, and the ring still holds
-	// them. It resumes after the last one, so a crash of this service writes
-	// nothing twice (ADR 0100). After a reboot the file ends with an earlier
-	// boot's records, whose times say nothing about this one's.
-	if last, found := lastPersisted(); restarted && found {
-		for cursor < total && sys.LogRead(logHandle, cursor-oldest, &logLine) == kcall.StatusOK {
-			written, ok := logfmt.TimeOf(logLine[:])
-			if !ok || written > last {
-				break
-			}
-			cursor++
-		}
-		syslog.Info("resumed", syslog.Uint("skipped", cursor-oldest))
+	policy := persister.Policy()
+	syslog.Info("persisting", syslog.Str("path", logPath), syslog.Uint("segment-bytes", policy.SegmentBytes), syslog.Uint("segments", uint64(policy.Segments)))
+	if restarted {
+		// A service started again in the same boot resumes after the last
+		// record its predecessor wrote, so a crash writes nothing twice
+		// (ADR 0100).
+		syslog.Info("resumed", syslog.Uint("cursor", persister.Cursor()))
 		mark("LOG_RESUMED_OK\n")
 	}
-	return true
-}
-
-// tailSize is how much of a log file is read to find its last record: more
-// than the longest record and its newline, so the last one is always whole.
-const tailSize = kcall.LogText + 16
-
-var tail [tailSize]byte
-
-// lastPersisted returns the time of the last record in the log, which is in
-// the rotated file when the current one has just been started.
-func lastPersisted() (uint64, bool) {
-	for _, path := range [...]string{logPath, rotatePath} {
-		if last, found := lastRecordTime([]byte(path)); found {
-			return last, true
+	next := now() + maintenanceTicks
+	for {
+		takeSession()
+		if !before(now(), next) {
+			maintain()
+			failing = false
+			next = now() + maintenanceTicks
 		}
-	}
-	return 0, false
-}
-
-func lastRecordTime(path []byte) (uint64, bool) {
-	stat, ok := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: path})
-	if !ok || stat.Status != vfs.StatusOK || stat.Size == 0 {
-		return 0, false
-	}
-	opened, ok := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path})
-	if !ok || opened.Status != vfs.StatusOK {
-		return 0, false
-	}
-	start := stat.Size - min(stat.Size, tailSize)
-	size := 0
-	if reply, ok := callVFS(vfs.Request{Operation: vfs.OperationSeek, Handle: opened.Handle, Offset: start}); ok && reply.Status == vfs.StatusOK {
-		for size < len(tail) {
-			reply, ok := callVFS(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: uint32(min(len(tail)-size, vfs.MaxReplyData))})
-			if !ok || reply.Status != vfs.StatusOK || len(reply.Data) == 0 {
-				break
+		waitLog := false
+		switch {
+		case !persisting:
+			// The cursor follows the ring. Re-enabling persistence starts
+			// from the present rather than writing out what happened while
+			// it was off.
+			persister.Skip()
+		case failing || vfsClosed:
+		default:
+			switch persister.Drain() {
+			case logpersist.CaughtUp:
+				reported = false
+				waitLog = true
+			case logpersist.More:
+				continue
+			case logpersist.Failed:
+				announce("log write failed")
+				failing = true
 			}
-			size += copy(tail[size:], reply.Data)
+		}
+		count := 0
+		if waitLog {
+			interests[count] = userwait.CursorInterest{Handle: logHandle, Events: kcall.WaitReadable, Cursor: persister.Cursor()}
+			count++
+		}
+		if controlHandle != 0 {
+			interests[count] = userwait.CursorInterest{Handle: controlHandle, Events: kcall.WaitReadable}
+			count++
+		}
+		if !vfsClosed {
+			interests[count] = userwait.CursorInterest{Handle: vfsHandle, Events: kcall.WaitPeerClosed}
+			count++
+		}
+		timeout := uint64(1)
+		if current := now(); before(current, next) {
+			timeout = next - current
+		}
+		result, status := userwait.AnyCursor(&interests, count, timeout)
+		if status == kcall.StatusOK && !vfsClosed && result.ReadyMask&(1<<(count-1)) != 0 {
+			vfsClosed = true
+			syslog.Warn("filesystem session closed")
 		}
 	}
-	closeFile(uint64(opened.Handle))
-	return logfmt.TimeOf(lastLine(tail[:size]))
 }
 
-// lastLine returns the last newline-terminated line of data, without its
-// newline.
-func lastLine(data []byte) []byte {
-	if len(data) == 0 || data[len(data)-1] != '\n' {
-		return nil
-	}
-	end := len(data) - 1
-	start := end
-	for start > 0 && data[start-1] != '\n' {
-		start--
-	}
-	return data[start:end]
+func now() uint64 {
+	ticks, _ := sys.ClockRead()
+	return ticks
 }
 
-// drain appends every record produced since the last pass. A cursor below the
-// ring's oldest retained sequence means records were overwritten before this
-// pass reached them; the count is written into the file rather than skipped, so
-// a gap in the persisted log is visible as a gap.
-func drain() {
-	takeSession()
-	oldest, total, status := sys.LogBounds(logHandle)
-	if status != kcall.StatusOK {
+func before(left, right uint64) bool { return int64(left-right) < 0 }
+
+// maintain rereads the settings and reports the counters when something
+// went wrong since the last report, or once an hour.
+func maintain() {
+	refreshSettings()
+	rounds++
+	stats := persister.Stats
+	saveStatus(stats)
+	changed := stats.Lost != lastReport.Lost || stats.Failures != lastReport.Failures ||
+		stats.RotationFailures != lastReport.RotationFailures || stats.Repaired != lastReport.Repaired
+	if !changed && rounds < reportEvery {
 		return
 	}
-	if !shouldPersist() {
-		// The cursor still advances. Re-enabling persistence should start from
-		// the present rather than write out everything that happened while it
-		// was off, which the ring has mostly lost anyway.
-		cursor = total
+	rounds = 0
+	lastReport = stats
+	// Two records, because the fields of one are bounded.
+	syslog.Info("counters", syslog.Uint("appended", stats.Appended), syslog.Uint("overwritten", stats.Overwritten),
+		syslog.Uint("persisted", stats.Persisted), syslog.Uint("lost", stats.Lost), syslog.Uint("failed", stats.Failures))
+	syslog.Info("rotation counters", syslog.Uint("rotations", stats.Rotations), syslog.Uint("refused", stats.RotationFailures),
+		syslog.Uint("repaired", stats.Repaired), syslog.Uint("cut-bytes", stats.RepairedBytes))
+}
+
+// saveStatus rewrites the status file when the counters or the policy
+// changed since the last write. It writes nothing while persistence is off
+// or storage is failing, and a failed write is retried next round without a
+// record, as the log itself would carry it.
+func saveStatus(stats logpersist.Stats) {
+	policy := persister.Policy()
+	if !persisting || failing || vfsClosed || statusWritten && stats == written && policy == writtenPolicy {
 		return
 	}
-	if cursor >= total && cursor >= oldest {
-		// Nothing new. An idle pass costs one native call and touches neither
-		// the filesystem nor the disk, so a quiet system pays almost nothing
-		// for having a log service.
+	text := logpersist.AppendStatus(statusText[:0], stats, policy)
+	if writeStatus([]byte(statusPath), []byte(statusScratch), text) {
+		written, writtenPolicy, statusWritten = stats, policy, true
+	}
+}
+
+// refreshSettings asks the configuration service whether to persist and how
+// to rotate. A session it cannot reach leaves the last known values in place:
+// configuration governs the service, it does not decide whether the service
+// works. A rotation setting out of bounds is refused with an error record.
+func refreshSettings() {
+	if configHandle == 0 {
 		return
 	}
-	// The file is opened once for the whole pass. Reopening per record would
-	// triple the requests a pass makes, and a pass holds the single-threaded
-	// filesystem service for as long as it runs.
-	file, offset, ok := openForAppend()
-	if !ok {
-		announce("log file unavailable")
+	if value, ok := setting("system.log.persist", config.KindBool); ok && (value == 1) != persisting {
+		persisting = value == 1
+		syslog.Info("persistence changed", syslog.Uint("enabled", value))
+	}
+	policy := persister.Policy()
+	if value, ok := setting("system.log.segment-bytes", config.KindUint); ok {
+		policy.SegmentBytes = value
+	}
+	if value, ok := setting("system.log.segments", config.KindUint); ok {
+		policy.Segments = int(min(value, logpersist.MaxSegments+1))
+	}
+	if policy == persister.Policy() {
+		policyRefused = false
 		return
 	}
-	if cursor < oldest {
-		lost := oldest - cursor
-		cursor = oldest
-		size := copy(lostLine[:], "[lost ")
-		size += putUint(lostLine[size:], lost)
-		size += copy(lostLine[size:], " records]\n")
-		written, ok := appendRecord(file, lostLine[:size])
-		offset += written
-		if !ok {
-			closeFile(file)
-			announce("log write failed")
-			return
-		}
+	if persister.SetPolicy(policy) {
+		policyRefused = false
+		syslog.Info("rotation changed", syslog.Uint("segment-bytes", policy.SegmentBytes), syslog.Uint("segments", uint64(policy.Segments)))
+		return
 	}
-	for cursor < total {
-		// One record at a time. A drain can persist the whole ring; each
-		// record's request becomes garbage once it is written.
-		if sys.LogRead(logHandle, cursor-oldest, &logLine) != kcall.StatusOK {
-			break
-		}
-		size := 0
-		for size < len(logLine) && logLine[size] != 0 {
-			size++
-		}
-		written, ok := appendRecord(file, logLine[:size])
-		offset += written
-		if !ok {
-			closeFile(file)
-			announce("log write failed")
-			return
-		}
-		cursor++
+	if !policyRefused {
+		policyRefused = true
+		syslog.Error("rotation setting refused", syslog.Uint("segment-bytes", policy.SegmentBytes), syslog.Uint("segments", uint64(policy.Segments)))
 	}
-	closeFile(file)
-	reported = false
-	if offset >= rotationBound() {
-		rotate()
+}
+
+func setting(key string, kind config.Kind) (uint64, bool) {
+	reply, ok := callConfig(config.Request{Operation: config.OperationGet, Key: []byte(key)})
+	if !ok || reply.Status != config.StatusOK || reply.Value.Kind != kind {
+		return 0, false
 	}
+	return reply.Value.Uint, true
 }
 
 // takeSession installs a filesystem session PID 1 has handed over, if there
@@ -299,30 +303,10 @@ func takeSession() {
 			continue
 		}
 		sys.HandleClose(vfsHandle)
-		vfsHandle, reported = session, false
+		vfsHandle, reported, vfsClosed, failing = session, false, false, false
 		syslog.Info("filesystem session renewed")
 		mark("LOG_SESSION_RENEWED_OK\n")
 	}
-}
-
-// shouldPersist asks the configuration service whether this service should be
-// writing. A session it cannot reach, or an answer it cannot use, leaves the
-// last known value in place: configuration governs the service, it does not
-// decide whether the service works.
-func shouldPersist() bool {
-	if configHandle == 0 {
-		return persisting
-	}
-	reply, ok := callConfig(config.Request{Operation: config.OperationGet, Key: []byte("system.log.persist")})
-	if !ok || reply.Status != config.StatusOK || reply.Value.Kind != config.KindBool {
-		return persisting
-	}
-	enabled := reply.Value.Uint == 1
-	if enabled != persisting {
-		persisting = enabled
-		syslog.Info("persistence changed", syslog.Uint("enabled", reply.Value.Uint))
-	}
-	return persisting
 }
 
 func callConfig(request config.Request) (config.Reply, bool) {
@@ -347,78 +331,6 @@ func callConfig(request config.Request) (config.Reply, bool) {
 	return reply, valid && reply.Operation == request.Operation
 }
 
-func rotationBound() uint64 {
-	if validation.Enabled {
-		return validationLogBytes
-	}
-	return releaseLogBytes
-}
-
-// rotate keeps one previous file. The old one is removed first so the rename
-// never has to replace a live entry, and a failure leaves the current file in
-// place rather than losing it.
-func rotate() {
-	callVFS(vfs.Request{Operation: vfs.OperationUnlink, Path: []byte(rotatePath)})
-	if reply, ok := callVFS(vfs.Request{Operation: vfs.OperationRename, Path: []byte(logPath), Target: []byte(rotatePath)}); !ok || reply.Status != vfs.StatusOK {
-		announce("log rotation failed")
-		return
-	}
-	if reply, ok := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: []byte(logPath)}); !ok || reply.Status != vfs.StatusOK {
-		announce("log rotation failed")
-	}
-}
-
-// openForAppend opens the live file and positions it at the end, returning the
-// handle and the size it starts at.
-func openForAppend() (uint64, uint64, bool) {
-	// The file is created here rather than only at startup. Storage can be
-	// absent when this service starts and arrive later, and the file can be
-	// removed from under it; either way the next pass makes one rather than
-	// giving up until a restart.
-	created, ok := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: []byte(logPath)})
-	if !ok || created.Status != vfs.StatusOK && created.Status != vfs.StatusAlreadyExists {
-		return 0, 0, false
-	}
-	stat, ok := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: []byte(logPath)})
-	if !ok || stat.Status != vfs.StatusOK {
-		return 0, 0, false
-	}
-	opened, ok := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: []byte(logPath)})
-	if !ok || opened.Status != vfs.StatusOK {
-		return 0, 0, false
-	}
-	if reply, ok := callVFS(vfs.Request{Operation: vfs.OperationSeek, Handle: opened.Handle, Offset: stat.Size}); !ok || reply.Status != vfs.StatusOK {
-		closeFile(uint64(opened.Handle))
-		return 0, 0, false
-	}
-	return uint64(opened.Handle), stat.Size, true
-}
-
-func closeFile(file uint64) {
-	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: vfs.Handle(file)})
-}
-
-// appendRecord writes one line through an already positioned handle and reports
-// how many bytes reached the file. The VFS protocol carries a bounded amount of
-// inline data per request, so a line goes out in chunks of that size and each
-// write advances the handle's own offset.
-func appendRecord(file uint64, data []byte) (uint64, bool) {
-	written := uint64(0)
-	for len(data) != 0 {
-		chunk := len(data)
-		if chunk > vfs.MaxProtocolData {
-			chunk = vfs.MaxProtocolData
-		}
-		reply, ok := callVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: vfs.Handle(file), Data: data[:chunk]})
-		if !ok || reply.Status != vfs.StatusOK || reply.Size != uint64(chunk) {
-			return written, false
-		}
-		written += uint64(chunk)
-		data = data[chunk:]
-	}
-	return written, true
-}
-
 // announce reports a persistent failure once. Logging from the log service
 // produces records this service will itself try to persist, so repeating a
 // failure every pass would turn a broken volume into a growing ring of
@@ -429,60 +341,6 @@ func announce(message string) {
 	}
 	reported = true
 	syslog.Error(message, syslog.Str("path", logPath))
-}
-
-func callVFS(request vfs.Request) (vfs.Reply, bool) {
-	correlation++
-	message, ok := vfs.EncodeRequest(request, correlation)
-	if !ok {
-		return vfs.Reply{}, false
-	}
-	size, ok := ipc.Encode(message, wire[:])
-	if !ok || sys.IPCSend(vfsHandle, wire[:size]) != 0 {
-		return vfs.Reply{}, false
-	}
-	for attempt := 0; attempt < vfsReplyAttempts; attempt++ {
-		status := sys.IPCWaitReceive(vfsHandle, wire[:], vfsReplyDeadline)
-		if status == ipc.StatusTimeout {
-			continue
-		}
-		if status != 0 {
-			return vfs.Reply{}, false
-		}
-		payloadSize := int(wire[24]) | int(wire[25])<<8
-		received, valid := ipc.Decode(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8])
-		if !valid || received.Correlation != correlation {
-			return vfs.Reply{}, false
-		}
-		reply, valid := vfs.DecodeReply(received)
-		return reply, valid && reply.Operation == request.Operation
-	}
-	return vfs.Reply{}, false
-}
-
-func readUint64(data []byte) uint64 {
-	value := uint64(0)
-	for index := 7; index >= 0; index-- {
-		value = value<<8 | uint64(data[index])
-	}
-	return value
-}
-
-func putUint(target []byte, value uint64) int {
-	var digits [20]byte
-	size := 0
-	for {
-		digits[size] = byte('0' + value%10)
-		size++
-		value /= 10
-		if value == 0 {
-			break
-		}
-	}
-	for index := 0; index < size; index++ {
-		target[index] = digits[size-1-index]
-	}
-	return size
 }
 
 func mark(message string) {

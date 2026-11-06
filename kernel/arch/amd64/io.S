@@ -5,9 +5,14 @@
 .set GOOS_FPU_AREA_SHIFT, 9
 .set GOOS_CR4_SSE, 0x600
 .set GOOS_KERNEL_LOW_BASE, 0xffffc00000000000
-// Slots 0-63 are tasks. Slot 64+n is processor n's idle loop, which has a
-// context, a stack, and an FPU area like a task but is never in a run queue.
-.set GOOS_IDLE_BASE, 64
+// Slots below GOOS_MAX_TASKS (sched.MaxTasks) are tasks. Slot
+// GOOS_IDLE_BASE+n is processor n's idle loop, which has a context, a stack,
+// and an FPU area like a task but is never in a run queue. GOOS_MAX_CPUS is
+// sched.MaxCPUs.
+.set GOOS_MAX_TASKS, 256
+.set GOOS_MAX_CPUS, 64
+.set GOOS_IDLE_BASE, GOOS_MAX_TASKS
+.set GOOS_SLOT_COUNT, GOOS_MAX_TASKS + GOOS_MAX_CPUS
 // Processor n loads task register selector 0x28 + 16n, which names its own
 // TSS descriptor. Entry code reads the selector back to find its processor.
 .set GOOS_TSS_SELECTOR0, 0x28
@@ -2210,7 +2215,7 @@ goos_timer_ticks_read:
 .global goos_task_ticks_read
 goos_task_ticks_read:
     xorq %rax, %rax
-    cmpq $128, %rcx
+    cmpq $GOOS_SLOT_COUNT, %rcx
     jae .task_ticks_done
     leaq goos_task_ticks(%rip), %rdx
     movq (%rdx,%rcx,8), %rax
@@ -2222,7 +2227,7 @@ goos_task_ticks_read:
 .global goos_task_fault_address_take
 goos_task_fault_address_take:
     xorq %rax, %rax
-    cmpq $64, %rcx
+    cmpq $GOOS_MAX_TASKS, %rcx
     jae .task_fault_address_done
     leaq goos_task_fault_addresses(%rip), %rdx
     movq (%rdx,%rcx,8), %rax
@@ -2248,7 +2253,7 @@ goos_user_call_entry_drift:
 // task does not inherit the previous one's time.
 .global goos_task_ticks_clear
 goos_task_ticks_clear:
-    cmpq $128, %rcx
+    cmpq $GOOS_SLOT_COUNT, %rcx
     jae .task_ticks_clear_done
     leaq goos_task_ticks(%rip), %rdx
     movq $0, (%rdx,%rcx,8)
@@ -2272,9 +2277,6 @@ goos_user_call_entries:
     .quad 0
 goos_user_call_rsp_drift:
     .quad 0
-.global goos_user_call_rsp_baselines
-goos_user_call_rsp_baselines:
-    .zero 512
 goos_kernel_root:
     .quad 0
 // goos_cpu_data_base holds the low address of goos_cpu_data, so GOOS_CPU
@@ -2286,33 +2288,6 @@ goos_cpu_data_base:
 .global goos_smp_ready
 goos_smp_ready:
     .quad 0
-// Per-slot state: the 64 task slots, then one idle slot per processor.
-.global goos_task_contexts
-goos_task_contexts:
-    .zero 1024
-.global goos_task_roots
-goos_task_roots:
-    .zero 1024
-.global goos_task_fs_bases
-goos_task_fs_bases:
-	.zero 1024
-.global goos_task_rsp0
-goos_task_rsp0:
-    .zero 1024
-.global goos_task_exit_codes
-goos_task_exit_codes:
-    .zero 512
-// The faulting address of each slot's last user page fault, zero after any
-// other fault.
-.global goos_task_fault_addresses
-goos_task_fault_addresses:
-    .zero 512
-// One tick counter per slot. The timer charges the slot it interrupted, so
-// the count is a sample of who was running rather than an exact duration,
-// which is what a tick-driven scheduler can honestly report. An idle slot's
-// count is its processor's idle time.
-goos_task_ticks:
-    .zero 1024
 goos_irq_11_pending:
     .quad 0
 goos_irq_11_waiter:
@@ -2339,16 +2314,6 @@ goos_ioapic_lock:
     .quad 0
 goos_ps2_keyboard_event_pending:
     .quad 0
-.align 16
-.global goos_task_fpu
-goos_task_fpu:
-    .zero 65536
-// goos_linux_user_fpu holds, per task slot, the x87 and SSE state of a Linux
-// task at its current system call: saved on entry, restored on return.
-.align 16
-.global goos_linux_user_fpu
-goos_linux_user_fpu:
-    .zero 32768
 // goos_cpu_data is one 256-byte block per processor (the GOOS_CPU_ offsets).
 .align 64
 .global goos_cpu_data
@@ -2376,6 +2341,50 @@ goos_keyboard_bytes:
 .global goos_linux_entry_data
 goos_linux_entry_data:
     .zero 2048
+
+.section .bss
+.align 64
+.global goos_user_call_rsp_baselines
+goos_user_call_rsp_baselines:
+    .zero 8 * GOOS_MAX_TASKS
+// Per-slot state: GOOS_MAX_TASKS task slots, then one idle slot per
+// processor. The tables live in .bss, so the image does not carry their zeros.
+.global goos_task_contexts
+goos_task_contexts:
+    .zero 8 * GOOS_SLOT_COUNT
+.global goos_task_roots
+goos_task_roots:
+    .zero 8 * GOOS_SLOT_COUNT
+.global goos_task_fs_bases
+goos_task_fs_bases:
+    .zero 8 * GOOS_SLOT_COUNT
+.global goos_task_rsp0
+goos_task_rsp0:
+    .zero 8 * GOOS_SLOT_COUNT
+.global goos_task_exit_codes
+goos_task_exit_codes:
+    .zero 8 * GOOS_MAX_TASKS
+// The faulting address of each slot's last user page fault, zero after any
+// other fault.
+.global goos_task_fault_addresses
+goos_task_fault_addresses:
+    .zero 8 * GOOS_MAX_TASKS
+// One tick counter per slot. The timer charges the slot it interrupted, so
+// the count is a sample of who was running rather than an exact duration,
+// which is what a tick-driven scheduler can honestly report. An idle slot's
+// count is its processor's idle time.
+goos_task_ticks:
+    .zero 8 * GOOS_SLOT_COUNT
+.align 16
+.global goos_task_fpu
+goos_task_fpu:
+    .zero GOOS_SLOT_COUNT << GOOS_FPU_AREA_SHIFT
+// goos_linux_user_fpu holds, per task slot, the x87 and SSE state of a Linux
+// task at its current system call: saved on entry, restored on return.
+.align 16
+.global goos_linux_user_fpu
+goos_linux_user_fpu:
+    .zero GOOS_MAX_TASKS << GOOS_FPU_AREA_SHIFT
 
 .section .text
 // The processor start-up trampoline. The bootstrap processor copies it to a

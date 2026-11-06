@@ -39,7 +39,9 @@ type linuxExecState struct {
 	brkBase      uint64
 	brkLimit     uint64
 	failure      linuxabi.Errno
-	closeHandles [linuxcompat.LinuxMaxFD]uint64
+	// closeHandles holds the VFS files exec closes, at most what one VFS
+	// session may have open.
+	closeHandles [vfs.MaxOpenPerOwner]uint64
 	closeCount   uint8
 }
 

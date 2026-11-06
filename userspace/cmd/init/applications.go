@@ -23,6 +23,8 @@ import (
 	"goos/userspace/runtime/sys"
 	shellcmd "goos/userspace/shell"
 	"goos/userspace/startup"
+	"goos/userspace/tcpapi"
+	"goos/userspace/udpapi"
 	"goos/userspace/tty"
 	"goos/userspace/utility"
 )
@@ -152,12 +154,20 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	// A UDP session is its own grant: neither ping nor name resolution
 	// carries the authority to send datagrams.
 	var udpSession [3]handle.ID
-	if grantable && grantsRequested&commands.GrantUDP != 0 {
+	switch {
+	case grantable && grantsRequested&commands.GrantUDPRing != 0:
+		udpSession, _ = openUDPSessionQuota(netapi.OrdinarySessionQuota, udpapi.Version3)
+	case grantable && grantsRequested&commands.GrantUDP != 0:
 		udpSession, _ = openUDPSession()
 	}
 	useUDP := udpSession[0] != 0
 	var tcpSession [3]handle.ID
-	if grantable && grantsRequested&commands.GrantTCP != 0 {
+	switch {
+	case grantable && grantsRequested&commands.GrantTCPRing != 0:
+		tcpSession, _ = openTCPSessionQuota(netapi.OrdinarySessionQuota, tcpapi.Layout4)
+	case grantable && grantsRequested&commands.GrantTCPBulk != 0:
+		tcpSession, _ = openTCPSessionQuota(netapi.OrdinarySessionQuota, tcpapi.Layout3)
+	case grantable && grantsRequested&commands.GrantTCP != 0:
 		tcpSession, _ = openTCPSession()
 	}
 	useTCP := tcpSession[0] != 0
@@ -281,6 +291,14 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		sendLinuxGeometry(ttyPair[1], &launchingLinuxTerminal.session.geometry)
 		linuxEntries = [][]byte{linuxTerminalEntry(&launchingLinuxTerminal.session.geometry, &linuxStorage)}
 	}
+	// A Linux launch gets a family session for its sockets while linuxsockd
+	// runs, after vfs and the optional linux-tty; without one its sockets
+	// fail with ENETDOWN.
+	var linuxNet linuxNetSession
+	useLinuxNet := false
+	if linuxProcess {
+		linuxNet, useLinuxNet = openLinuxFamily(true)
+	}
 	addHome := linuxTerminal && !environmentHas(environment, "HOME=")
 	addTermInfo := linuxTerminal && !environmentHas(environment, "TERMINFO=")
 	slot, staging := stagingSlot()
@@ -320,6 +338,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	if linuxTerminal {
 		handles++
+	}
+	if useLinuxNet {
+		handles += 2
 	}
 	// A Linux program searches the Linux fixture directory, never the
 	// native one: its execve refuses native images.
@@ -431,6 +452,10 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if linuxTerminal {
 		writer.Handle([]byte("linux-tty"), 0)
 	}
+	if useLinuxNet {
+		writer.Handle([]byte("linux-net"), 0)
+		writer.Handle([]byte("linux-net-pool"), 0)
+	}
 	// The request was validated when it arrived, so what does not fit is its
 	// size: its strings need more room in the startup object's tables.
 	startupData, ok := writer.Finish()
@@ -445,6 +470,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closePair(launchPair)
 		closePair(resizePair)
 		closePair(ttyPair)
+		closeLinuxFamily(linuxNet)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
 		if useBlockCheck {
@@ -501,6 +527,11 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		// terminal; PID 1 keeps the writer.
 		grants = append(grants, supervisor.Capability{Name: "linux-tty", Handle: handle.ID(ttyPair[0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait, Consume: true})
 	}
+	if useLinuxNet {
+		grants = append(grants,
+			supervisor.Capability{Name: "linux-net", Handle: linuxNet.channel, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			supervisor.Capability{Name: "linux-net-pool", Handle: linuxNet.pool, Type: handle.TypeMemory, Rights: capability.Read | capability.Write, Consume: true})
+	}
 	profile := supervisor.ProfileNormal
 	if linuxProcess {
 		profile = supervisor.ProfileLarge
@@ -508,8 +539,8 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if !linuxProcess && grantable && equalBytes(command, "quota") {
 		profile = supervisor.ProfileTiny
 	}
-	// The concurrency probes exercise eight native tasks, the large
-	// profile's task quota (ADR 0203, ADR 0204).
+	// The concurrency probes exercise up to 64 native tasks, the large
+	// profile's task quota (ADR 0203, ADR 0204, ADR 0122).
 	if !linuxProcess && grantable && (equalBytes(command, "fsck-fat") || equalBytes(command, "vmprobe") || equalBytes(command, "threadprobe") || validation.Enabled && equalBytes(command, "goprobe")) {
 		profile = supervisor.ProfileLarge
 	}
@@ -522,6 +553,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closeOpen(hostnameConfig)
 		closePair(resizePair)
 		closePair(ttyPair)
+		closeLinuxFamily(linuxNet)
 		closeOpen(remoteAdmin)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
@@ -543,6 +575,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	if linuxTerminal {
 		launchingLinuxTerminal.linuxTerminal = ttyPair[1]
+	}
+	if useLinuxNet {
+		linuxFamilyLaunched(linuxNet, event.ProcessHandle)
 	}
 	if useLaunch {
 		launch.server, launch.input = handle.ID(launchPair[0]), streams.Input.ID

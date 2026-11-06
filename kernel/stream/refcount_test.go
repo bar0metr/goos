@@ -243,11 +243,13 @@ func TestCountIsBounded(t *testing.T) {
 	}
 }
 
-// The counter cannot overflow in practice: every handle lives in one of the
-// process tables, so no end can have more than their total.
-func TestTablesCannotReachTheBound(t *testing.T) {
-	if process.MaxProcesses*handle.MaxHandles >= MaxReferences {
-		t.Fatalf("%d handle slots can overflow a %d-reference count", process.MaxProcesses*handle.MaxHandles, MaxReferences)
+// Every handle lives in one of the process tables, so no end can have more
+// than their total. With 256 processes of 256 handles that total passes the
+// 16-bit count by one; Retain refuses at the bound instead of wrapping, so a
+// last handle is refused, never miscounted.
+func TestTablesCannotWrapTheCount(t *testing.T) {
+	if process.MaxProcesses*handle.MaxHandles > MaxReferences+1 {
+		t.Fatalf("%d handle slots exceed a %d-reference count by more than one", process.MaxProcesses*handle.MaxHandles, MaxReferences)
 	}
 }
 

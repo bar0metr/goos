@@ -397,9 +397,13 @@ call, as Linux `getrandom` does, and names no object. The full list is in
 
 A Linux process is a GoOS process with a different call ABI and the same
 authority model (ADR 0134, ADR 0136). The kernel accepts a Linux launch only
-with exactly four grants: `in` with Read and Wait, `stdout` and `stderr` with
-Write and Wait, and one `vfs` channel with Read, Write, and Wait. An extra
-grant, a device, or a smaller resource profile refuses the launch.
+with four grants: `in` with Read and Wait, `stdout` and `stderr` with
+Write and Wait, and one `vfs` channel with Read, Write, and Wait. Two optional
+roles may follow, each only under its name and with exactly its rights: the
+terminal's `linux-tty` stream with Read and Wait (ADR 0206), and the socket
+pair `linux-net`, a channel with Read, Write, and Wait, with `linux-net-pool`,
+a 17-page memory object with Read and Write (ADR 0210). Any other grant, a
+device, or a smaller resource profile refuses the launch.
 
 | Claim | Proof |
 | --- | --- |
@@ -410,14 +414,44 @@ grant, a device, or a smaller resource profile refuses the launch.
 | no device authority | the launch takes four stream and channel grants and refuses a fifth; an I/O port instruction faults and ends the process |
 | no framebuffer, DMA, IRQ, or kernel log | each needs a native call or a device handle, and a Linux process has neither |
 | no PID 1 launch authority | no launch channel is among the four grants |
+| sockets reach only `linuxsockd` | `linux-net` is a family session to `linuxsockd`; the process holds no GTCP, GUDP, `netd` control, or pool of another family, and socket identities from another session answer `Stale` |
 | fork and exec create no authority | a forked child gets the parent's VFS channel capability and nothing else; `execve` loads only a static Linux image, never a native image or manifest (ADR 0157, ADR 0158) |
 | a forked child cannot reach the native gate | `abi-probe hardening` runs the isolation check in a child |
-| `kill` cannot cross families | the target must be the caller or a descendant in the family registry; another family or a native process is `ESRCH` (ADR 0166) |
+| `kill` cannot cross families | the target must be in the caller's family registry; another family or a native process is `ESRCH` (ADR 0166) |
 | a fork bomb stays bounded | 16 processes per family, 48 for all families, 16 native slots reserved; `abi-probe limits` stops at 15 children (ADR 0155) |
 | a forged signal frame cannot escalate | `rt_sigreturn` refuses a return address or stack outside the user half, and every return filters RFLAGS (ADR 0164) |
 
 Linux user and group numbers, mode bits, and PIDs are presentation. No GoOS
 check reads them.
+
+## Linux sockets
+
+`linuxsockd` turns Linux socket objects into native TCP and UDP endpoints
+(ADR 0210). PID 1 starts it in normal mode after `netd` with these grants:
+
+| Object | PID 1 keeps | Moved to `linuxsockd` | Consumed |
+| --- | --- | --- | --- |
+| `GLNXCTL2` control channel, service end | the other end | R W Wait | yes |
+| console device | yes | W | no |
+| TCP session channel, pools, quota 64, in `SetTCP` | - | as for a command | yes |
+| UDP session channel, pools, quota 64, in `SetUDP` | - | as for a command | yes |
+| family channel, service end, in `AddFamily` | - | R W Wait | yes |
+| family pool, 17 pages, in `AddFamily` | - | R W | yes |
+
+It holds no VFS session, configuration session, network administration
+session, device other than the console, IRQ, DMA, or launch channel. Its
+native sessions carry the same rights as a command's; only the endpoint
+quota and the TCP session's GTCP version differ, and PID 1 names both in
+GNETCTL version 6. The GTCP 3 session's pools hold 128 KiB each. A compromised
+`linuxsockd` reaches every Linux socket and the TCP and UDP endpoints it
+backs, and nothing else.
+
+PID 1 makes one family session per Linux launch while the service runs:
+the launch receives `linux-net` and `linux-net-pool`, the service the other
+channel end and a second pool handle. After a `linuxsockd` restart PID 1
+gives each running launch a fresh session with `LinuxNetAttach`, which needs
+PID 1's process handle to the launch root. The kernel checks the handle
+types, the rights, and the pool size before it replaces the old session.
 
 ## Tests
 

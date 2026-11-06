@@ -38,7 +38,8 @@ _start:
 .balign 64
 .global goos_tcbs
 goos_tcbs:
-    .zero 64 * 16
+    // One block per thread slot, kcall.ThreadSlots of them (tls_test.go).
+    .zero 64 * 64
 
 // goos_tcb_install makes the block of the slot in rsi the calling thread's
 // and sets its FS base to it. Only rax, rcx, and rdx change. A kernel that
@@ -791,6 +792,15 @@ goos_thread_hold_cancel:
     ret
 .size goos_thread_hold_cancel, .-goos_thread_hold_cancel
 
+// LinuxNetAttach is PID 1's: it gives a Linux family a network session.
+.global goos_linux_net_attach
+.type goos_linux_net_attach,@function
+goos_linux_net_attach:
+    movl $76, %eax
+    int $0x80
+    ret
+.size goos_linux_net_attach, .-goos_linux_net_attach
+
 // goos_thread_entry is where the kernel starts a thread ThreadCreate made:
 // at its stack top, 16-byte aligned, with the runtime's argument in rdi and
 // the thread's slot in rsi. It calls goos_thread_main, which runs the
@@ -1220,3 +1230,161 @@ goos_log_read_sequence:
     int $0x80
     ret
 .size goos_log_read_sequence, .-goos_log_read_sequence
+
+// memmove, memcpy and memset replace picolibc's, which TinyGo builds for
+// size: they move one byte per loop turn, and every copy() and every
+// cleared buffer ran through them. A link takes these first because
+// runtime.o is an object and libc an archive. Lengths under 32 bytes load
+// the whole source before the first store, so they move overlapping
+// buffers correctly; longer ones use the fast string instructions.
+.section .text.memmove,"ax",@progbits
+.global memmove
+.type memmove,@function
+memmove:
+    movq %rdi, %rax
+    cmpq $32, %rdx
+    jb goos_copy_short
+    // A destination that starts inside the source copies from the end.
+    movq %rdi, %rcx
+    subq %rsi, %rcx
+    cmpq %rdx, %rcx
+    jb 1f
+    movq %rdx, %rcx
+    rep movsb
+    ret
+1:
+    leaq -8(%rsi,%rdx), %rsi
+    leaq -8(%rdi,%rdx), %rdi
+2:
+    movq (%rsi), %rcx
+    movq %rcx, (%rdi)
+    subq $8, %rsi
+    subq $8, %rdi
+    subq $8, %rdx
+    cmpq $8, %rdx
+    jae 2b
+    // The first 0 to 7 bytes are left, rdx of them.
+    testq %rdx, %rdx
+    jz 4f
+    addq $8, %rsi
+    addq $8, %rdi
+    subq %rdx, %rsi
+    subq %rdx, %rdi
+3:
+    movb -1(%rsi,%rdx), %cl
+    movb %cl, -1(%rdi,%rdx)
+    subq $1, %rdx
+    jnz 3b
+4:
+    ret
+.size memmove, .-memmove
+
+.section .text.memcpy,"ax",@progbits
+.global memcpy
+.type memcpy,@function
+memcpy:
+    movq %rdi, %rax
+    cmpq $32, %rdx
+    jb goos_copy_short
+    movq %rdx, %rcx
+    rep movsb
+    ret
+.size memcpy, .-memcpy
+
+// goos_copy_short copies rdx < 32 bytes from rsi to rdi with two loads
+// from each end of the range, and leaves rax alone.
+.section .text.goos_copy_short,"ax",@progbits
+.type goos_copy_short,@function
+goos_copy_short:
+    cmpq $16, %rdx
+    jb 1f
+    movq (%rsi), %rcx
+    movq 8(%rsi), %r8
+    movq -16(%rsi,%rdx), %r9
+    movq -8(%rsi,%rdx), %r10
+    movq %rcx, (%rdi)
+    movq %r8, 8(%rdi)
+    movq %r9, -16(%rdi,%rdx)
+    movq %r10, -8(%rdi,%rdx)
+    ret
+1:
+    cmpq $8, %rdx
+    jb 2f
+    movq (%rsi), %rcx
+    movq -8(%rsi,%rdx), %r8
+    movq %rcx, (%rdi)
+    movq %r8, -8(%rdi,%rdx)
+    ret
+2:
+    cmpq $4, %rdx
+    jb 3f
+    movl (%rsi), %ecx
+    movl -4(%rsi,%rdx), %r8d
+    movl %ecx, (%rdi)
+    movl %r8d, -4(%rdi,%rdx)
+    ret
+3:
+    cmpq $2, %rdx
+    jb 4f
+    movzwl (%rsi), %ecx
+    movzwl -2(%rsi,%rdx), %r8d
+    movw %cx, (%rdi)
+    movw %r8w, -2(%rdi,%rdx)
+    ret
+4:
+    testq %rdx, %rdx
+    jz 5f
+    movb (%rsi), %cl
+    movb %cl, (%rdi)
+5:
+    ret
+.size goos_copy_short, .-goos_copy_short
+
+.section .text.memset,"ax",@progbits
+.global memset
+.type memset,@function
+memset:
+    movq %rdi, %r9
+    movzbl %sil, %eax
+    cmpq $32, %rdx
+    jb 1f
+    movq %rdx, %rcx
+    rep stosb
+    movq %r9, %rax
+    ret
+1:
+    movabsq $0x0101010101010101, %rcx
+    imulq %rcx, %rax
+    cmpq $16, %rdx
+    jb 2f
+    movq %rax, (%rdi)
+    movq %rax, 8(%rdi)
+    movq %rax, -16(%rdi,%rdx)
+    movq %rax, -8(%rdi,%rdx)
+    jmp 6f
+2:
+    cmpq $8, %rdx
+    jb 3f
+    movq %rax, (%rdi)
+    movq %rax, -8(%rdi,%rdx)
+    jmp 6f
+3:
+    cmpq $4, %rdx
+    jb 4f
+    movl %eax, (%rdi)
+    movl %eax, -4(%rdi,%rdx)
+    jmp 6f
+4:
+    cmpq $2, %rdx
+    jb 5f
+    movw %ax, (%rdi)
+    movw %ax, -2(%rdi,%rdx)
+    jmp 6f
+5:
+    testq %rdx, %rdx
+    jz 6f
+    movb %al, (%rdi)
+6:
+    movq %r9, %rax
+    ret
+.size memset, .-memset

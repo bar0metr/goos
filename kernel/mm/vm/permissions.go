@@ -10,8 +10,15 @@ const (
 	// last page, so no user mapping ends at the non-canonical boundary
 	// (ADR 0104).
 	UserAddressLimit = uint64(0x00007ffffffff000)
-	KernelImageBase  = uint64(0x400000)
-	UserProbeAddress = uint64(0x00400000)
+	// KernelLinkBase is the address TinyGo's uefi-amd64 target links the
+	// kernel PE image at. The firmware loads it there only when that range
+	// is free; OVMF reserves memory at 8 MiB, so a larger image is placed
+	// elsewhere and relocated. LoadedImage finds the base the image runs at.
+	KernelLinkBase = uint64(0x400000)
+	// KernelImageMaxSize bounds SizeOfImage. LoadedImage refuses a larger
+	// image and tools/stackframes refuses to build one.
+	KernelImageMaxSize = uint64(16 * 1024 * 1024)
+	UserProbeAddress   = uint64(0x00400000)
 	// UserCodeAddress and UserDataAddress are the fixed base used by the
 	// current native linker. The loader also accepts images at lower addresses.
 	UserCodeAddress = uint64(0x40002000)

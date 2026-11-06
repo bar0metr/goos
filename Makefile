@@ -52,6 +52,8 @@ VIRTIO_NET_IMAGE = $(OUT_DIR)/userspace/virtio-net
 VIRTIO_NET_ELF = $(OUT_DIR)/userspace/virtio-net.elf
 RESOLVED_IMAGE = $(OUT_DIR)/userspace/resolved
 RESOLVED_ELF = $(OUT_DIR)/userspace/resolved.elf
+LINUXSOCKD_IMAGE = $(OUT_DIR)/userspace/linuxsockd
+LINUXSOCKD_ELF = $(OUT_DIR)/userspace/linuxsockd.elf
 REMOTED_IMAGE = $(OUT_DIR)/userspace/remoted
 REMOTED_ELF = $(OUT_DIR)/userspace/remoted.elf
 REMOTED_WORKER_IMAGE = $(OUT_DIR)/userspace/remoted-worker
@@ -115,7 +117,7 @@ QEMU_COMMON_FLAGS = -machine q35 -m $(MEMORY) -smp cpus=$(SMP),sockets=1,cores=$
 QEMU_FLAGS = $(QEMU_COMMON_FLAGS) -display none
 QEMU_GUI_FLAGS = $(QEMU_COMMON_FLAGS) -device VGA -display $(QEMU_DISPLAY)
 SOURCE_DATE_EPOCH ?= 0
-HZ ?= 100
+HZ ?= 250
 ifeq ($(filter $(HZ),100 250 1000),)
 $(error HZ must be 100, 250, or 1000)
 endif
@@ -204,7 +206,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware
+.PHONY: stress-linux-stream FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware bench-pve-linux-network bench-pve-linux-network-diag bench-pve-linux-network-hz
 
 all: iso
 
@@ -224,7 +226,7 @@ $(KERNEL): $(shell find kernel internal -type f) $(filter-out $(CURDIR)/kernel/%
 	@$(STACKFRAMES) $@ || { rm -f $@; exit 1; }
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(dir $@)
@@ -377,6 +379,14 @@ $(RESOLVED_IMAGE): $(RESOLVED_ELF) tools/elf2native/main.go kernel/loader/native
 	@$(STACKFRAMES) $(RESOLVED_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(RESOLVED_ELF) $@
 
+$(LINUXSOCKD_ELF): $(call go_deps,./userspace/cmd/linuxsockd) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/linuxsockd
+
+$(LINUXSOCKD_IMAGE): $(LINUXSOCKD_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(LINUXSOCKD_ELF)
+	$(BUILD_ENV) go run ./tools/elf2native $(LINUXSOCKD_ELF) $@
+
 $(VIRTIO_NET_ELF): $(call go_deps,./userspace/cmd/virtio-net) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/virtio-net
@@ -434,7 +444,7 @@ initramfs: userspace
 # LINUX_APPS_DIR copies a host directory into /apps.
 system-tree: userspace
 	@$(if $(strip $(VALIDATION_CA_BUNDLE)),true,$(BUILD_ENV) go run ./tools/truststore -check security/ca-source.pem security/ca-certificates.pem)
-	@$(BUILD_ENV) SYSTEM_CA_BUNDLE='$(SYSTEM_CA_SOURCE)' SYSTEM_TRUST_UPDATE_KEY='$(SYSTEM_TRUST_KEY_SOURCE)' SYSTEM_TRUST_UPDATE_URL='$(SYSTEM_TRUST_URL)' LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
+	@$(BUILD_ENV) SYSTEM_CA_BUNDLE='$(SYSTEM_CA_SOURCE)' SYSTEM_TRUST_UPDATE_KEY='$(SYSTEM_TRUST_KEY_SOURCE)' SYSTEM_TRUST_UPDATE_URL='$(SYSTEM_TRUST_URL)' LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
 
 system-image: iso system-tree
 	@rm -f $(SYSTEM_IMAGE)
@@ -572,22 +582,24 @@ release-check:
 test-unit:
 	$(BUILD_ENV) go test ./...
 	$(BUILD_ENV) go test -tags goos_diag ./kernel/diag
+	$(BUILD_ENV) go test -tags goos_hz100 ./kernel/clock
 	$(BUILD_ENV) go test -tags goos_hz1000 ./kernel/clock
 	$(BUILD_ENV) go test -tags goos_validation ./kernel/lock
 
 # The concurrency tests under the race detector (ADR 0187, ADR 0189): handle
 # tables, channels, and the Linux tables shared the way processors share
-# them, and the wait tables with the deadline index they keep.
+# them, the wait tables with the deadline index they keep, and the log ring
+# its writers append to at once.
 test-race:
 	$(BUILD_ENV) go test -race -run 'Race|Ways|Busy|Holder|TwoProcesses|ConcurrentFileIO' ./kernel/handle ./kernel/ipc ./kernel/compat/linux
-	$(BUILD_ENV) go test -race ./kernel/deadline ./kernel/sched ./kernel/wait ./kernel/process
+	$(BUILD_ENV) go test -race ./kernel/deadline ./kernel/sched ./kernel/wait ./kernel/process ./kernel/klog
 	$(BUILD_ENV) go test -race -short ./userspace/runtime/arena
 
 test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes ./userspace/cryptosys ./userspace/tlsclient ./userspace/fetch ./tools/truststore ./tools/sysimage ./tools/cryptocompat ./tools/tlscompat ./tools/tlsfixture ./tools/tlspeer ./userspace/truststore ./userspace/truststate ./userspace/trustupdate ./tools/trustfixture ./tools/trustpeer ./tools/trustscan ./userspace/remoteapi ./userspace/remotepolicy ./userspace/remoteservice ./userspace/sftp ./userspace/sshserver ./userspace/runtime/arena ./userspace/tcpdispatch ./tools/sshcompat
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnsstub ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes ./userspace/cryptosys ./userspace/tlsclient ./userspace/fetch ./tools/truststore ./tools/sysimage ./tools/cryptocompat ./tools/tlscompat ./tools/tlsfixture ./tools/tlspeer ./userspace/truststore ./userspace/truststate ./userspace/trustupdate ./tools/trustfixture ./tools/trustpeer ./tools/trustscan ./userspace/remoteapi ./userspace/remotepolicy ./userspace/remoteservice ./userspace/sftp ./userspace/sshserver ./userspace/runtime/arena ./userspace/tcpdispatch ./tools/sshcompat
 
 # The storage stress test (ADR 0102): the model-based FAT32 workload at a
 # larger scale than the default suite, and the host FAT checker over volumes
@@ -742,6 +754,19 @@ test-system-boot:
 test-network:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
 	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) tests/boot/network.sh $(ISO) $(OVMF_CODE)
+
+# The Linux sockets gate (ADR 0210): netprobe, BusyBox nc, wget and httpd,
+# and curl on a validation guest against tools/netpeer, with the network
+# driver, netd and linuxsockd killed under open sockets. The caller supplies
+# the pinned static BusyBox and curl; the gate checks their SHA-256.
+#   make test-linux-network BUSYBOX=/path/to/busybox CURL=/path/to/curl
+test-linux-network:
+	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }
+	@test -n "$(CURL)" && test -f "$(CURL)" || { echo "CURL=/path/to/static/curl is required" >&2; exit 2; }
+	@tools/linuxfixture/check-static.sh "$(BUSYBOX)" "$(CURL)"
+	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX)):$(abspath $(CURL))
+	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) LINUX_NETWORK_SCENARIOS="$(LINUX_NETWORK_SCENARIOS)" STRESS_COUNT="$(STRESS_COUNT)" \
+		tests/boot/linux_network.sh $(ISO) $(OVMF_CODE) $(abspath $(BUSYBOX)) $(abspath $(CURL))
 
 # Crypto feasibility reports stay in ignored build scratch output. A failed dependency
 # does not prevent native execution of the independently built probes.
@@ -1146,6 +1171,18 @@ test-pve-linux: pve-artifacts
 test-pve-network: pve-artifacts
 	@$(PVELAB) run --scenario network $(PVE_RUN_FLAGS)
 
+# Linux IPv4 sockets under KVM on four host cores (ADR 0210): the netprobe
+# loopback groups and benchmarks with net0 on the lab bridge, BusyBox httpd,
+# wget and curl over loopback, and a linuxsockd fault. The validation image
+# carries the fault command.
+#   make test-pve-linux-network BUSYBOX=/path/to/busybox CURL=/path/to/curl
+test-pve-linux-network:
+	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }
+	@test -n "$(CURL)" && test -f "$(CURL)" || { echo "CURL=/path/to/static/curl is required" >&2; exit 2; }
+	@tools/linuxfixture/check-static.sh "$(BUSYBOX)" "$(CURL)"
+	@$(MAKE) --no-print-directory pve-artifacts VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX)):$(abspath $(CURL))
+	@$(PVELAB) run --scenario linux-network --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
+
 # A diagnostic run of a static 7-Zip the caller supplies on four host cores.
 # DIAG=1 gives the guest the diag command, whose DIAG linux line names the
 # refused calls and whose DIAG sched line the parallel peaks.
@@ -1164,6 +1201,69 @@ test-pve-nano:
 	@tools/linuxfixture/check-static.sh "$(NANO)" "$(BUSYBOX)"
 	@$(MAKE) --no-print-directory pve-artifacts DIAG=1 LINUX_EXTRA=$(abspath $(BUSYBOX)):$(abspath $(NANO))
 	@$(PVELAB) run --scenario nano --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
+
+# The network benchmark under KVM on four host cores, in one VM: two warm-up
+# and nine measured rounds of netprobe bench (Linux sockets over loopback),
+# netbench (native GTCP and GUDP over loopback) and netprobe remote against
+# benchpeer.py on the node. The image is a release build: OPT=2, DIAG=0,
+# VALIDATION=0. The report goes to build/reports/linux-network-perf-hzN-optM
+# .json and .md and sets the Linux medians against the targets.
+# BENCH_GATE=1 fails when the hard envelope is not met. BENCH_DIAG=1 adds a
+# DIAG=1 build that reports how each DIAG counter changes per 64 KiB written
+# and per request-reply round. The -hz target repeats the benchmark at HZ=100,
+# 250 and 1000 and compares the medians in linux-network-perf-hz.md; with
+# BENCH_DIAG=1 it adds the counter pass once, at HZ (default 100).
+BENCH_OPT ?= 2
+BENCH_GATE ?= 0
+BENCH_DIAG ?= 0
+BENCH_RUNS ?= 9
+BENCH_WARMUPS ?= 2
+BENCH_STREAM_MIB ?= 32
+BENCH_DIAG_ROUNDS ?= 2000
+BENCH_HZ_VALUES := 100 250 1000
+BENCH_REPORTS := $(abspath $(BUILD_DIR)/reports)
+BENCH_PVE_FLAGS = --cpu host --sockets 1 --cores 4 --bench-hz $(HZ) --bench-opt $(BENCH_OPT) \
+	--bench-runs $(BENCH_RUNS) --bench-warmups $(BENCH_WARMUPS) --bench-stream-mib $(BENCH_STREAM_MIB) \
+	--bench-diag-rounds $(BENCH_DIAG_ROUNDS) --bench-reports $(BENCH_REPORTS) $(if $(filter 1,$(BENCH_GATE)),--bench-gate)
+
+bench-pve-linux-network:
+	@$(MAKE) --no-print-directory pve-artifacts OPT=$(BENCH_OPT) DIAG=0 VALIDATION=0
+	@$(PVELAB) run --scenario linux-network-bench $(BENCH_PVE_FLAGS) --bench-diag 0 $(PVE_RUN_FLAGS)
+ifeq ($(BENCH_DIAG),1)
+	@$(MAKE) --no-print-directory bench-pve-linux-network-diag
+endif
+
+# The counter pass alone: one DIAG=1 run of each workload, for the report's
+# counter deltas.
+bench-pve-linux-network-diag:
+	@$(MAKE) --no-print-directory pve-artifacts OPT=$(BENCH_OPT) DIAG=1 VALIDATION=0
+	@$(PVELAB) run --scenario linux-network-diag $(BENCH_PVE_FLAGS) --bench-diag 1 $(PVE_RUN_FLAGS)
+
+# The Linux stream stress: netprobe's loopback stream again and again, each
+# transfer under a watchdog, then on KVM one 4 GiB transfer. A transfer that
+# stops leaves a snapshot of the rings, linuxsockd's sockets and netd's
+# endpoints. STRESS_MODE picks release KVM, DIAG KVM or DIAG TCG (QEMU
+# here, which needs BUSYBOX and CURL like test-linux-network).
+#   make stress-linux-stream STRESS_MODE=kvm|kvm-diag|tcg STRESS_COUNT=1000
+STRESS_MODE ?= kvm
+STRESS_COUNT ?= 1000
+STRESS_LONG_MIB ?= 4096
+stress-linux-stream:
+ifeq ($(STRESS_MODE),tcg)
+	@$(MAKE) --no-print-directory test-linux-network DIAG=1 LINUX_NETWORK_SCENARIOS=stress STRESS_COUNT=$(or $(filter-out 1000,$(STRESS_COUNT)),200)
+else
+	@$(MAKE) --no-print-directory pve-artifacts OPT=$(BENCH_OPT) DIAG=$(if $(filter kvm-diag,$(STRESS_MODE)),1,0) VALIDATION=0
+	@$(PVELAB) run --scenario linux-stream-stress $(BENCH_PVE_FLAGS) --bench-diag $(if $(filter kvm-diag,$(STRESS_MODE)),1,0) \
+		--stress-count $(STRESS_COUNT) --stress-long-mib $(STRESS_LONG_MIB) $(PVE_RUN_FLAGS)
+endif
+
+bench-pve-linux-network-hz:
+	@for hz in $(BENCH_HZ_VALUES); do \
+		diag=0; [ $$hz = $(HZ) ] && diag=$(BENCH_DIAG); \
+		$(MAKE) --no-print-directory bench-pve-linux-network HZ=$$hz BENCH_DIAG=$$diag || exit $$?; \
+	done
+	@$(PVELAB) bench-compare --out $(BENCH_REPORTS)/linux-network-perf-hz.md \
+		$(foreach hz,$(BENCH_HZ_VALUES),$(BENCH_REPORTS)/linux-network-perf-hz$(hz)-opt$(BENCH_OPT).json)
 
 # Boots the smoke scenario and keeps the VM for debugging; pvelab prints the
 # run ID that pvelab destroy --run takes.
@@ -1204,7 +1304,7 @@ help:
 	  '  QEMU_DISPLAY=x  GUI backend for run-gui (default cocoa; gtk/sdl on other hosts)' \
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
 	  '  test-console-gui validate framebuffer pixels and PS/2 input headlessly' \
-	  '  HZ=100|250|1000 timer rate for any build target (default 100)' \
+	  '  HZ=100|250|1000 timer rate for any build target (default 250)' \
 	  '  DIAG=0|1        normal build (default) or diagnostic build with diag dump' \
 	  '  OPT=2|1|s|z     TinyGo optimisation level (default 2, fastest; z smallest)' \
 	  '  MEMORY=512M     guest RAM for run and the QEMU tests, e.g. MEMORY=4G' \
@@ -1215,6 +1315,7 @@ help:
 	  '  test-linux-kernel-reference KERNEL=path BUSYBOX=path  run the probe on a Linux kernel in QEMU' \
 	  '  test-linux-all  Linux ABI host tests and the Linux end-to-end boot' \
 	  '  test-linux-busybox BUSYBOX=path  run BusyBox applets from a static busybox' \
+	  '  test-linux-network BUSYBOX=path CURL=path  Linux sockets: netprobe, nc, wget, httpd, curl, service faults' \
 	  '  test-linux-7zip LINUX_EXTRA=path  archive, extract, and hash with a static 7zzs on SMP=4' \
 	  '  profile-locks [LINUX_EXTRA=path]  lock acquisitions and contention per workload on SMP=4' \
 	  '  test-race       concurrency tests of handles, channels, Linux tables, waits, and the scheduler under the race detector' \
@@ -1250,7 +1351,9 @@ help:
 	  '  test-pve-threads run native thread checks and the thread allocator benchmark on Proxmox' \
 	  '  test-pve-linux  run the static Linux programs on Proxmox' \
 	  '  test-pve-7zip LINUX_EXTRA=path  run a static 7zzs on Proxmox and report refused calls' \
-	  '  pve-run         boot on Proxmox and keep the VM for debugging'
+	  '  pve-run         boot on Proxmox and keep the VM for debugging' \
+	  '  bench-pve-linux-network [BENCH_GATE=1] [BENCH_DIAG=1]  Linux, native and host-guest network benchmark on Proxmox' \
+	  '  bench-pve-linux-network-hz  the network benchmark at HZ=100, 250 and 1000, compared'
 
 # Explicit maintenance only: local input and optional external signing key.
 TRUST_SOURCE ?= security/ca-source.pem
@@ -1338,3 +1441,11 @@ test-concurrency-audit:
 
 test-userspace-libs:
 	$(BUILD_ENV) go test -race -count=1 $(USERSPACE_LIB_PACKAGES)
+
+# Resource policy (docs/architecture/resource-policy.md, ADR 0215): every
+# Max* bound under kernel/ and userspace/ needs an inventory row. test-unit
+# runs the same check through go test ./...
+.PHONY: test-resource-policy
+test-resource-policy:
+	$(BUILD_ENV) go test -count=1 ./tools/resourcepolicy
+	$(BUILD_ENV) go run ./tools/resourcepolicy

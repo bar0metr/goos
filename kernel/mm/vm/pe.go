@@ -17,9 +17,33 @@ type Section struct {
 }
 
 type Image struct {
+	// Base is the address the image runs at.
+	Base         uint64
 	Size         uint64
 	Sections     [maxSections]Section
 	SectionCount int
+}
+
+// HeaderImageSize returns SizeOfImage when header starts with an MZ stub
+// pointing at a PE32+ header inside it, and that size is nonzero and at most
+// KernelImageMaxSize.
+func HeaderImageSize(header []byte) (uint64, bool) {
+	if len(header) < 0x40 || header[0] != 'M' || header[1] != 'Z' {
+		return 0, false
+	}
+	peOffset := uint64(binary.LittleEndian.Uint32(header[0x3c:]))
+	if peOffset > uint64(len(header)) || uint64(len(header))-peOffset < 24+60 {
+		return 0, false
+	}
+	if binary.LittleEndian.Uint32(header[peOffset:]) != peSignature ||
+		binary.LittleEndian.Uint16(header[peOffset+24:]) != pe32PlusMagic {
+		return 0, false
+	}
+	size := uint64(binary.LittleEndian.Uint32(header[peOffset+24+56:]))
+	if size == 0 || size > KernelImageMaxSize {
+		return 0, false
+	}
+	return size, true
 }
 
 func ParsePE(data []byte, loadedBase uint64) (Image, bool) {
@@ -70,5 +94,6 @@ func ParsePE(data []byte, loadedBase uint64) (Image, bool) {
 		}
 	}
 	image.SectionCount = numberOfSections
+	image.Base = loadedBase
 	return image, true
 }

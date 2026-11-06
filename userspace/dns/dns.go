@@ -20,8 +20,9 @@ const (
 	MaxAddresses    = 8
 	MaxServers      = 8 // 4 from DHCP and 4 configured
 	MaxCacheEntries = 256
-	// MaxClients bounds the client lookups waiting at one time.
-	MaxClients = 16
+	// MaxClients bounds the client lookups waiting at one time: one per
+	// resolver session, 16, and one per request of the local stub, 8.
+	MaxClients = 24
 	// MaxTransactions bounds concurrent upstream resolutions. Each has at
 	// most one datagram or one TCP exchange outstanding.
 	MaxTransactions = 4

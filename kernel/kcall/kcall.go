@@ -133,6 +133,11 @@ const (
 	OperationThreadHoldWait
 	OperationThreadHoldStep
 	OperationThreadHoldCancel
+	// OperationLinuxNetAttach gives a Linux family a new GLNXSOCK3 session
+	// (ADR 0210): Arg0 is a process handle to the family's launch root,
+	// Arg1 and Arg2 the session's channel and pool, which move into that
+	// process's handle table.
+	OperationLinuxNetAttach
 )
 
 // Instruction holds (ADR 0204). A ThreadHoldWait record is HoldRecordSize
@@ -158,9 +163,12 @@ func ValidHoldRange(lo, hi uint64) bool { return hi > lo && hi-lo <= MaxHoldRang
 // Slot 0 is the main task on its own stack; slot k from 1 owns a stack of
 // ThreadStackSize bytes ending at ThreadStackTop(k), above a ThreadGuardSize
 // guard. ThreadAreaTop lies 65 MiB below the top of the main stack, past the
-// largest main stack an image may ask for and its guard.
+// largest main stack an image may ask for and its guard. Slot k's addresses
+// do not depend on ThreadSlots: raising it from 16 to 64 extended the area
+// down to 36 MiB and moved no slot, so a program built for 16 slots runs
+// unchanged and the layout needs no version (ADR 0203).
 const (
-	ThreadSlots     = 16
+	ThreadSlots     = 64
 	ThreadStackSize = uint64(512 << 10)
 	ThreadGuardSize = uint64(64 << 10)
 	ThreadStride    = ThreadStackSize + ThreadGuardSize
@@ -342,6 +350,7 @@ type Handler interface {
 	ThreadHoldWait(thread uint64, address uint64) Status
 	ThreadHoldStep(thread uint64) Status
 	ThreadHoldCancel(thread uint64) Status
+	LinuxNetAttach(process uint64, channel uint64, pool uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -569,6 +578,8 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.ThreadHoldStep(request.Arg0)}
 	case OperationThreadHoldCancel:
 		return Result{Status: handler.ThreadHoldCancel(request.Arg0)}
+	case OperationLinuxNetAttach:
+		return Result{Status: handler.LinuxNetAttach(request.Arg0, request.Arg1, request.Arg2)}
 	default:
 		return Result{Status: StatusUnsupported}
 	}
@@ -758,7 +769,11 @@ const (
 // LogReadSequence returns a fixed snapshot: oldest, total, first (uint64),
 // count (uint32), gap flag (uint32), then count length-prefixed full records.
 // Gap marks First advanced to Oldest using wrapping sequence comparison.
+// Total is the ring's end when the snapshot was taken; a batch holds at most
+// LogReadMax records, so a reader continues at First+count until it reaches
+// Total. LogRingCapacity bounds Total-Oldest.
 const (
+	LogRingCapacity   = 2048
 	LogReadMax        = 64
 	LogReadHeader     = 32
 	LogReadRecordSize = 208

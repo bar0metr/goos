@@ -24,8 +24,14 @@ ADR 0196 adds generic IPv4 TCP, GTCP1 sessions, the `tcp` command and TCP
 status. Its parser, TCBs, stream buffers, reassembly, retransmission,
 congestion control, close states and TIME_WAIT remain in `userspace/network`.
 The resolver now repeats a truncated UDP answer over a GTCP1 session
-(ADR 0194, ADR 0196). IPv6, Linux socket calls and persistent DNS-over-TCP
-connections remain out of scope.
+(ADR 0194, ADR 0196). Linux programs reach TCP and UDP through `linuxsockd`
+(ADR 0210). IPv6 and persistent DNS-over-TCP connections remain out of scope.
+`linuxsockd`'s TCP session speaks GTCP 3 (16 KiB slots, ordered pipelined
+writes, queued reads), which PID 1 selects through GNETCTL version 6; other
+sessions keep GTCP 2. `net status` reports GTCP requests and replies per
+version (GNETAPI version 5). The protocol tests are in
+`userspace/tcpapi/version3_test.go` and `userspace/tcpserve/version3_test.go`;
+see the GTCP 3 section of [the networking architecture](../architecture/networking.md).
 
 ADR 0198 selects native TLS 1.3 above GTCP1, with explicit system roots,
 kernel entropy and REALTIME. TLS and X.509 remain application parsers; network
@@ -352,6 +358,15 @@ address passed validation and conflict detection; `failed` means a device or
 configuration fault requiring a reload or driver restart. It prints no DNS server because DNS is out of
 scope. The command has no hardware or filesystem authority.
 
+Under `tcp:` it also prints use against each limit: `memory` gives the ring
+bytes charged against `memory-bytes`, the per-session budget, handshakes
+refused and ring growths capped; `time-wait` gives the tombstones against
+their two budgets and the connections held as endpoints for want of one;
+`lookups` gives the index probes and the most one segment needed;
+`sessions` gives the command, UDP and TCP sessions `netd` serves against
+8, 8 and 46. The `dropped` line counts SYNs a full listener dropped as
+`backlog`.
+
 ## 7. Client protocol and commands
 
 `GNETAPI1` version 1 uses one PID 1-created channel per client. The network
@@ -454,6 +469,18 @@ It shares the message parser in `userspace/dnswire` and the TCP framing in
 response of any rcode, exit 1 a transport, protocol, timeout or truncation
 failure, exit 2 a usage error. The shell guide documents the options and
 output.
+
+`resolved` also answers DNS itself on `127.0.0.1:53`, UDP and TCP, for
+programs that read `/etc/resolv.conf` (docs/architecture/networking.md,
+"Local DNS server"). The logic lives in `userspace/dnsstub`; its host tests
+run a client session, the stub, the resolver's UDP and TCP clients and an
+upstream server over one real `network.Stack` through `udpserve` and
+`tcpserve`. They cover ID and question preservation, the cache and hosts
+table, truncation and the TCP fallback, rcode mapping for NXDOMAIN,
+SERVFAIL and timeouts, malformed and unsupported queries, the request and
+connection bounds, TCP framing with pipelined queries, the idle timeout,
+session replacement and a datagram path that allocates nothing.
+`dnswire.FuzzParseQuery` fuzzes the query parser and the reply encoder.
 
 ## 8. Restart and failure behavior
 

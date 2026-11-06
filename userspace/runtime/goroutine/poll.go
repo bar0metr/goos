@@ -223,7 +223,7 @@ func pollPending() bool {
 // an idle thread to become the poller.
 func nudgePoller() {
 	if poller := sched.poller.Load(); poller != 0 {
-		wakeThread(&ms[poller-1])
+		wakeThread(mOf(int(poller - 1)))
 		return
 	}
 	wakeIdle()
@@ -434,7 +434,7 @@ func addTimer(entry sleepEntry) {
 func noteDeadline(when int64) {
 	if poller := sched.poller.Load(); poller != 0 {
 		if when < sched.pollUntil.Load() {
-			wakeThread(&ms[poller-1])
+			wakeThread(mOf(int(poller - 1)))
 		}
 		return
 	}

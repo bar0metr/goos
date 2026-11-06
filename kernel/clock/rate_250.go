@@ -1,4 +1,4 @@
-//go:build goos_hz250
+//go:build !goos_hz100 && !goos_hz1000
 
 package clock
 

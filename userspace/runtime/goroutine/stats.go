@@ -50,7 +50,10 @@ func ReadStats(s *Stats) {
 		}
 	}
 	for slot := range ms {
-		m := &ms[slot]
+		m := mOf(slot)
+		if m == nil {
+			continue
+		}
 		if m.kind.Load() == mWorker {
 			s.LocalQueues += uint64(m.queue.length())
 		}

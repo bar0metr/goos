@@ -1,10 +1,13 @@
 package sched
 
-import "math/bits"
+import (
+	"math/bits"
+	"sync/atomic"
+)
 
-// MaxCPUs bounds the processors the scheduler runs on. Run sets are 64-bit
-// masks indexed by task slot, and processor sets are 64-bit masks indexed by
-// processor, so both bounds are one machine word.
+// MaxCPUs bounds the processors the scheduler runs on. Processor sets are
+// 64-bit masks indexed by processor, so the bound is one machine word. Task
+// sets are TaskSets of MaxTasks bits.
 const MaxCPUs = 64
 
 // Housekeeping is the processor that runs the kernel's own tasks: deadline
@@ -35,7 +38,7 @@ const (
 //
 // A task slot is vacant, or holds a task that is live or dead. A live task
 // is runnable or not, and belongs to exactly one processor's run queue, its
-// home. At most one processor runs it: the running mask marks a task from the
+// home. At most one processor runs it: the running set marks a task from the
 // moment a processor picks it until that processor has left its stack, so no
 // other processor can pick a task whose registers are still being saved.
 //
@@ -46,30 +49,30 @@ const (
 type Core struct {
 	generations [MaxTasks]uint32
 	count       int
-	vacant      uint64
-	live        uint64
-	started     uint64
-	runnable    uint64
-	dead        uint64
-	dying       uint64
-	exitPending uint64
-	wakePending uint64
-	killed      uint64
-	held        uint64
+	vacant      TaskSet
+	live        TaskSet
+	started     TaskSet
+	runnable    TaskSet
+	dead        TaskSet
+	dying       TaskSet
+	exitPending TaskSet
+	wakePending TaskSet
+	killed      TaskSet
+	held        TaskSet
 	// stopped are the tasks a job-control stop keeps off every processor.
 	// It is apart from held, which the kernel's own holds set and clear.
-	stopped uint64
-	pinned  uint64
-	running uint64
-	home    [MaxCPUs]uint64
+	stopped TaskSet
+	pinned  TaskSet
+	running TaskSet
+	home    [MaxCPUs]TaskSet
 	online  uint64
-	current [MaxCPUs]int8
-	rotor   [MaxCPUs]int8
+	current [MaxCPUs]int16
+	rotor   [MaxCPUs]int16
 	// affinity is each task's requested processor mask; zero means every
 	// processor. barred has, per processor, the tasks whose affinity leaves
-	// it out, so a steal or a placement tests a task with one AND.
+	// it out, so a steal or a placement tests a task with one bit test.
 	affinity [MaxTasks]uint64
-	barred   [MaxCPUs]uint64
+	barred   [MaxCPUs]TaskSet
 	stats    [MaxCPUs]Stats
 }
 
@@ -83,11 +86,15 @@ type Stats struct {
 	Kills      uint64
 }
 
+// MaxKernelTasks bounds the kernel's own tasks, which Bootstrap names with a
+// one-word mask.
+const MaxKernelTasks = 64
+
 // Bootstrap installs the kernel's own tasks in slots [0, kernelTasks), pinned
 // to the housekeeping processor, with runnable naming those that may run.
 // The caller is task 0, already running on the housekeeping processor.
 func (core *Core) Bootstrap(kernelTasks int, runnable uint64) bool {
-	if kernelTasks < 1 || kernelTasks > MaxTasks || runnable&1 == 0 {
+	if kernelTasks < 1 || kernelTasks > MaxKernelTasks || kernelTasks > MaxTasks || runnable&1 == 0 {
 		return false
 	}
 	*core = Core{}
@@ -95,18 +102,18 @@ func (core *Core) Bootstrap(kernelTasks int, runnable uint64) bool {
 		core.current[cpu] = Idle
 		core.rotor[cpu] = -1
 	}
-	mask := lowMask(kernelTasks)
+	mask := lowTasks(kernelTasks)
 	for slot := 0; slot < kernelTasks; slot++ {
 		core.generations[slot] = 1
 	}
 	core.count = kernelTasks
 	core.live, core.started, core.pinned = mask, mask, mask
-	core.runnable = runnable & mask
+	core.runnable[0] = runnable & mask[0]
 	core.home[Housekeeping] = mask
 	core.online = 1 << Housekeeping
 	core.current[Housekeeping] = 0
 	core.rotor[Housekeeping] = 0
-	core.running = 1
+	core.running.Add(0)
 	return true
 }
 
@@ -117,10 +124,10 @@ func (core *Core) Online(cpu int) bool {
 	}
 	core.current[cpu] = Idle
 	core.online |= bit(cpu)
-	core.barred[cpu] = 0
+	core.barred[cpu] = TaskSet{}
 	for slot := 0; slot < core.count; slot++ {
 		if core.affinity[slot] != 0 && core.affinity[slot]&bit(cpu) == 0 {
-			core.barred[cpu] |= bit(slot)
+			core.barred[cpu].Add(slot)
 		}
 	}
 	return true
@@ -131,12 +138,12 @@ func (core *Core) OnlineMask() uint64 { return core.online }
 
 // Install claims a slot for a new task, live but not yet started, and
 // returns it with its new generation. A dead slot is reused only once its
-// exit has been delivered and its stack reclaimed.
+// exit has been delivered and its stack reclaimed. It fails once all
+// MaxTasks slots hold a task.
 func (core *Core) Install() (int, uint32, bool) {
-	slot := -1
-	if core.vacant != 0 {
-		slot = bits.TrailingZeros64(core.vacant)
-		core.vacant &^= bit(slot)
+	slot := core.vacant.First()
+	if slot >= 0 {
+		core.vacant.Remove(slot)
 	} else if core.count < MaxTasks {
 		slot = core.count
 		core.count++
@@ -147,40 +154,40 @@ func (core *Core) Install() (int, uint32, bool) {
 	if core.generations[slot] == 0 {
 		core.generations[slot] = 1
 	}
-	core.live |= bit(slot)
-	core.started &^= bit(slot)
-	core.runnable &^= bit(slot)
-	core.dead &^= bit(slot)
-	core.wakePending &^= bit(slot)
-	core.killed &^= bit(slot)
-	core.held &^= bit(slot)
-	core.stopped &^= bit(slot)
-	core.pinned &^= bit(slot)
+	core.live.Add(slot)
+	core.started.Remove(slot)
+	core.runnable.Remove(slot)
+	core.dead.Remove(slot)
+	core.wakePending.Remove(slot)
+	core.killed.Remove(slot)
+	core.held.Remove(slot)
+	core.stopped.Remove(slot)
+	core.pinned.Remove(slot)
 	core.affinity[slot] = 0
-	for cpu := range core.barred {
-		core.barred[cpu] &^= bit(slot)
+	for cpu := 0; cpu < MaxCPUs; cpu++ {
+		core.barred[cpu].Remove(slot)
 	}
 	return slot, core.generations[slot], true
 }
 
 // Abandon returns a slot Install claimed whose task never started.
 func (core *Core) Abandon(slot int) bool {
-	if !core.inRange(slot) || core.live&bit(slot) == 0 || core.started&bit(slot) != 0 {
+	if !core.inRange(slot) || !core.live.Has(slot) || core.started.Has(slot) {
 		return false
 	}
-	core.live &^= bit(slot)
-	core.vacant |= bit(slot)
+	core.live.Remove(slot)
+	core.vacant.Add(slot)
 	return true
 }
 
 // Start makes an installed task runnable for the first time. It returns the
 // processor that should run it.
 func (core *Core) Start(slot int, self int) (int, bool) {
-	if !core.inRange(slot) || core.live&bit(slot) == 0 || core.started&bit(slot) != 0 {
+	if !core.inRange(slot) || !core.live.Has(slot) || core.started.Has(slot) {
 		return 0, false
 	}
-	core.started |= bit(slot)
-	core.runnable |= bit(slot)
+	core.started.Add(slot)
+	core.runnable.Add(slot)
 	return core.place(slot, self), true
 }
 
@@ -189,12 +196,12 @@ func (core *Core) Start(slot int, self int) (int, bool) {
 // that should look at its run queue, or Idle when none needs to: a task
 // still on a processor is picked again there.
 func (core *Core) Wake(slot int, self int) (int, bool) {
-	if !core.inRange(slot) || core.live&bit(slot) == 0 || core.started&bit(slot) == 0 || core.dead&bit(slot) != 0 {
+	if !core.inRange(slot) || !core.live.Has(slot) || !core.started.Has(slot) || core.dead.Has(slot) {
 		return Idle, false
 	}
-	core.runnable |= bit(slot)
-	core.wakePending |= bit(slot)
-	if core.running&bit(slot) != 0 {
+	core.runnable.Add(slot)
+	core.wakePending.Add(slot)
+	if core.running.Has(slot) {
 		return Idle, true
 	}
 	return core.place(slot, self), true
@@ -206,8 +213,22 @@ func (core *Core) Wake(slot int, self int) (int, bool) {
 // wake meant for one that already ended.
 func (core *Core) ForgetWake(cpu int) {
 	if slot := int(core.current[cpu]); slot != Idle {
-		core.wakePending &^= bit(slot)
+		core.wakePending.Remove(slot)
 	}
+}
+
+// WakeRecorded reports, without the scheduler lock, whether a wake is
+// recorded for the task cpu runs; cpu itself calls it. A false answer may
+// miss a wake another processor records at the same moment, and that wake
+// came after the call, the same as one recorded once ForgetWake let the
+// lock go. Every system call reads it, so the common entry, with no wake to
+// drop, takes no lock.
+func (core *Core) WakeRecorded(cpu int) bool {
+	slot := int(core.current[cpu])
+	if slot < 0 || slot >= MaxTasks {
+		return false
+	}
+	return atomic.LoadUint64(&core.wakePending[slot>>6])&(uint64(1)<<uint(slot&63)) != 0
 }
 
 // Block parks the task a processor runs unless a wake is pending for it. The
@@ -217,11 +238,11 @@ func (core *Core) Block(cpu int) {
 	if slot == Idle {
 		return
 	}
-	if core.wakePending&bit(slot) != 0 {
-		core.wakePending &^= bit(slot)
+	if core.wakePending.Has(slot) {
+		core.wakePending.Remove(slot)
 		return
 	}
-	core.runnable &^= bit(slot)
+	core.runnable.Remove(slot)
 }
 
 // Terminate ends a task the calling processor does not run. A task off every
@@ -229,38 +250,43 @@ func (core *Core) Block(cpu int) {
 // processor runs is marked killed; that processor ends it at its next
 // scheduling point, and the returned processor is the one to interrupt.
 func (core *Core) Terminate(slot int, self int) (int, bool) {
-	if !core.inRange(slot) || core.live&bit(slot) == 0 || core.dead&bit(slot) != 0 || core.killed&bit(slot) != 0 {
+	if !core.inRange(slot) || !core.live.Has(slot) || core.dead.Has(slot) || core.killed.Has(slot) {
 		return Idle, false
 	}
 	if int(core.current[self]) == slot {
 		return Idle, false
 	}
-	if core.running&bit(slot) != 0 {
-		core.killed |= bit(slot)
+	if core.running.Has(slot) {
+		core.killed.Add(slot)
 		core.stats[self].Kills++
 		return core.runningOn(slot), true
 	}
 	core.retire(slot)
-	core.exitPending |= bit(slot)
+	core.exitPending.Add(slot)
 	return Idle, true
+}
+
+// OnProcessor reports whether a processor runs the task now.
+func (core *Core) OnProcessor(slot int) bool {
+	return core.inRange(slot) && core.running.Has(slot)
 }
 
 // Runnable reports whether a task wants a processor.
 func (core *Core) Runnable(slot int) bool {
-	return core.inRange(slot) && core.runnable&bit(slot) != 0
+	return core.inRange(slot) && core.runnable.Has(slot)
 }
 
 // Killed reports whether the task a processor runs has been terminated.
 func (core *Core) Killed(cpu int) bool {
 	slot := int(core.current[cpu])
-	return slot != Idle && core.killed&bit(slot) != 0
+	return slot != Idle && core.killed.Has(slot)
 }
 
 // MustLeave reports whether the task a processor runs has been terminated or
 // held, so that it should leave the processor at once.
 func (core *Core) MustLeave(cpu int) bool {
 	slot := int(core.current[cpu])
-	return slot != Idle && (core.killed|core.held|core.stopped)&bit(slot) != 0
+	return slot != Idle && (core.killed.Has(slot) || core.held.Has(slot) || core.stopped.Has(slot))
 }
 
 // Hold keeps a live task off every processor until Release: no processor
@@ -268,12 +294,12 @@ func (core *Core) MustLeave(cpu int) bool {
 // it at its next scheduling point; the returned processor is the one to
 // interrupt, or Idle. Kernel tasks cannot be held.
 func (core *Core) Hold(slot int, self int) (int, bool) {
-	if !core.inRange(slot) || core.live&bit(slot) == 0 || core.dead&bit(slot) != 0 ||
-		core.pinned&bit(slot) != 0 || int(core.current[self]) == slot {
+	if !core.inRange(slot) || !core.live.Has(slot) || core.dead.Has(slot) ||
+		core.pinned.Has(slot) || int(core.current[self]) == slot {
 		return Idle, false
 	}
-	core.held |= bit(slot)
-	if core.running&bit(slot) != 0 {
+	core.held.Add(slot)
+	if core.running.Has(slot) {
 		return core.runningOn(slot), true
 	}
 	return Idle, true
@@ -282,11 +308,11 @@ func (core *Core) Hold(slot int, self int) (int, bool) {
 // Release lets a held task run again. A runnable task is placed as a wake
 // would place it; the returned processor is the one to interrupt.
 func (core *Core) Release(slot int, self int) int {
-	if !core.inRange(slot) || core.held&bit(slot) == 0 {
+	if !core.inRange(slot) || !core.held.Has(slot) {
 		return Idle
 	}
-	core.held &^= bit(slot)
-	if core.runnable&bit(slot) == 0 || core.dead&bit(slot) != 0 || core.running&bit(slot) != 0 || core.stopped&bit(slot) != 0 {
+	core.held.Remove(slot)
+	if !core.runnable.Has(slot) || core.dead.Has(slot) || core.running.Has(slot) || core.stopped.Has(slot) {
 		return Idle
 	}
 	return core.place(slot, self)
@@ -297,11 +323,11 @@ func (core *Core) Release(slot int, self int) int {
 // task, which leaves at its next scheduling point; the returned processor is
 // the one to interrupt.
 func (core *Core) Stop(slot int, self int) (int, bool) {
-	if !core.inRange(slot) || core.live&bit(slot) == 0 || core.dead&bit(slot) != 0 || core.pinned&bit(slot) != 0 {
+	if !core.inRange(slot) || !core.live.Has(slot) || core.dead.Has(slot) || core.pinned.Has(slot) {
 		return Idle, false
 	}
-	core.stopped |= bit(slot)
-	if core.running&bit(slot) != 0 {
+	core.stopped.Add(slot)
+	if core.running.Has(slot) {
 		return core.runningOn(slot), true
 	}
 	return Idle, true
@@ -310,11 +336,11 @@ func (core *Core) Stop(slot int, self int) (int, bool) {
 // Continue ends a stop. A runnable task is placed as a wake would place it;
 // a wait that completed while it was stopped is kept.
 func (core *Core) Continue(slot int, self int) int {
-	if !core.inRange(slot) || core.stopped&bit(slot) == 0 {
+	if !core.inRange(slot) || !core.stopped.Has(slot) {
 		return Idle
 	}
-	core.stopped &^= bit(slot)
-	if core.runnable&bit(slot) == 0 || core.dead&bit(slot) != 0 || core.running&bit(slot) != 0 || core.held&bit(slot) != 0 {
+	core.stopped.Remove(slot)
+	if !core.runnable.Has(slot) || core.dead.Has(slot) || core.running.Has(slot) || core.held.Has(slot) {
 		return Idle
 	}
 	return core.place(slot, self)
@@ -322,7 +348,7 @@ func (core *Core) Continue(slot int, self int) int {
 
 // Stopped reports whether a job-control stop holds a task.
 func (core *Core) Stopped(slot int) bool {
-	return core.inRange(slot) && core.stopped&bit(slot) != 0
+	return core.inRange(slot) && core.stopped.Has(slot)
 }
 
 // Switch leaves the task cpu runs for the given reason and picks the next one,
@@ -330,18 +356,18 @@ func (core *Core) Stopped(slot int) bool {
 func (core *Core) Switch(cpu int, action Action) int {
 	previous := int(core.current[cpu])
 	if previous != Idle {
-		if core.killed&bit(previous) != 0 {
+		if core.killed.Has(previous) {
 			action = Exit
 		}
 		switch action {
 		case Exit:
 			core.retire(previous)
-			core.dying |= bit(previous)
+			core.dying.Add(previous)
 		case Block:
-			if core.wakePending&bit(previous) != 0 {
-				core.wakePending &^= bit(previous)
+			if core.wakePending.Has(previous) {
+				core.wakePending.Remove(previous)
 			} else {
-				core.runnable &^= bit(previous)
+				core.runnable.Remove(previous)
 			}
 		}
 	}
@@ -349,10 +375,10 @@ func (core *Core) Switch(cpu int, action Action) int {
 	if next != previous {
 		core.stats[cpu].Switches++
 		if next != Idle {
-			core.running |= bit(next)
-			core.wakePending &^= bit(next)
+			core.running.Add(next)
+			core.wakePending.Remove(next)
 		}
-		core.current[cpu] = int8(next)
+		core.current[cpu] = int16(next)
 	}
 	return next
 }
@@ -365,18 +391,18 @@ func (core *Core) Finish(cpu int, previous int) int {
 	if previous == Idle || !core.inRange(previous) || int(core.current[cpu]) == previous {
 		return Idle
 	}
-	core.running &^= bit(previous)
-	if core.dying&bit(previous) != 0 {
-		core.dying &^= bit(previous)
-		core.exitPending |= bit(previous)
-		core.runnable |= 1
-		core.wakePending |= 1
+	core.running.Remove(previous)
+	if core.dying.Has(previous) {
+		core.dying.Remove(previous)
+		core.exitPending.Add(previous)
+		core.runnable.Add(0)
+		core.wakePending.Add(0)
 		if core.current[Housekeeping] == 0 {
 			return Idle
 		}
 		return Housekeeping
 	}
-	if core.runnable&bit(previous) == 0 || (core.pinned|core.held|core.stopped)&bit(previous) != 0 {
+	if !core.runnable.Has(previous) || core.pinned.Has(previous) || core.held.Has(previous) || core.stopped.Has(previous) {
 		return Idle
 	}
 	if home := core.homeOf(previous); home != cpu && home >= 0 {
@@ -402,25 +428,25 @@ func (core *Core) Finish(cpu int, previous int) int {
 // Tick is the housekeeping processor's timer tick: it wakes task 0, which
 // expires deadlines and delivers exits.
 func (core *Core) Tick() {
-	core.runnable |= 1
-	core.wakePending |= 1
+	core.runnable.Add(0)
+	core.wakePending.Add(0)
 }
 
 // TakeExited returns the lowest task whose exit is pending and clears it.
 func (core *Core) TakeExited() (int, bool) {
-	if core.exitPending == 0 {
+	slot := core.exitPending.First()
+	if slot < 0 {
 		return 0, false
 	}
-	slot := bits.TrailingZeros64(core.exitPending)
-	core.exitPending &^= bit(slot)
+	core.exitPending.Remove(slot)
 	return slot, true
 }
 
 // Reclaimable reports whether a dead task has left every processor and had
 // its exit delivered, so its stack can be freed.
 func (core *Core) Reclaimable(slot int) bool {
-	return core.inRange(slot) && core.live&bit(slot) != 0 && core.dead&bit(slot) != 0 &&
-		(core.exitPending|core.dying|core.running)&bit(slot) == 0
+	return core.inRange(slot) && core.live.Has(slot) && core.dead.Has(slot) &&
+		!core.exitPending.Has(slot) && !core.dying.Has(slot) && !core.running.Has(slot)
 }
 
 // Vacate frees a reclaimed slot for Install.
@@ -428,8 +454,8 @@ func (core *Core) Vacate(slot int) bool {
 	if !core.Reclaimable(slot) {
 		return false
 	}
-	core.live &^= bit(slot)
-	core.vacant |= bit(slot)
+	core.live.Remove(slot)
+	core.vacant.Add(slot)
 	return true
 }
 
@@ -443,7 +469,7 @@ func (core *Core) Current(cpu int) int {
 
 // RunningOn returns the processor that runs slot, or Idle.
 func (core *Core) RunningOn(slot int) int {
-	if !core.inRange(slot) || core.running&bit(slot) == 0 {
+	if !core.inRange(slot) || !core.running.Has(slot) {
 		return Idle
 	}
 	return core.runningOn(slot)
@@ -462,7 +488,7 @@ func (core *Core) TaskID(slot int) TaskID {
 // Resolve returns the slot of a task that is still installed, dead or alive.
 func (core *Core) Resolve(id TaskID) (int, bool) {
 	slot, generation, valid := id.Parts()
-	if !valid || int(slot) >= core.count || core.generations[slot] != generation || core.live&bit(int(slot)) == 0 {
+	if !valid || int(slot) >= core.count || core.generations[slot] != generation || !core.live.Has(int(slot)) {
 		return 0, false
 	}
 	return int(slot), true
@@ -471,7 +497,7 @@ func (core *Core) Resolve(id TaskID) (int, bool) {
 // Alive returns the slot of a task that is installed and not dead.
 func (core *Core) Alive(id TaskID) (int, bool) {
 	slot, ok := core.Resolve(id)
-	if !ok || core.dead&bit(slot) != 0 {
+	if !ok || core.dead.Has(slot) {
 		return 0, false
 	}
 	return slot, true
@@ -484,18 +510,18 @@ func (core *Core) Alive(id TaskID) (int, bool) {
 // the one that runs the task and must now leave it, or the idle one the task
 // moved to, or Idle.
 func (core *Core) SetAffinity(slot int, mask uint64, self int) (int, bool) {
-	if !core.inRange(slot) || core.live&bit(slot) == 0 || core.dead&bit(slot) != 0 || mask&core.online == 0 {
+	if !core.inRange(slot) || !core.live.Has(slot) || core.dead.Has(slot) || mask&core.online == 0 {
 		return Idle, false
 	}
-	if core.pinned&bit(slot) != 0 {
+	if core.pinned.Has(slot) {
 		return Idle, mask&bit(Housekeeping) != 0
 	}
 	core.affinity[slot] = mask
 	for cpu := 0; cpu < MaxCPUs; cpu++ {
 		if mask&bit(cpu) == 0 {
-			core.barred[cpu] |= bit(slot)
+			core.barred[cpu].Add(slot)
 		} else {
-			core.barred[cpu] &^= bit(slot)
+			core.barred[cpu].Remove(slot)
 		}
 	}
 	kick := Idle
@@ -505,11 +531,11 @@ func (core *Core) SetAffinity(slot int, mask uint64, self int) (int, bool) {
 			target = core.leastLoaded(slot)
 		}
 		core.move(slot, target)
-		if core.runnable&bit(slot) != 0 && (core.held|core.stopped)&bit(slot) == 0 {
+		if core.runnable.Has(slot) && !core.held.Has(slot) && !core.stopped.Has(slot) {
 			kick = target
 		}
 	}
-	if core.running&bit(slot) != 0 {
+	if core.running.Has(slot) {
 		if cpu := core.runningOn(slot); cpu != Idle && !core.allows(slot, cpu) {
 			return cpu, true
 		}
@@ -521,10 +547,10 @@ func (core *Core) SetAffinity(slot int, mask uint64, self int) (int, bool) {
 // Affinity returns the online processors a task may run on, or zero for a
 // slot that holds no live task.
 func (core *Core) Affinity(slot int) uint64 {
-	if !core.inRange(slot) || core.live&bit(slot) == 0 {
+	if !core.inRange(slot) || !core.live.Has(slot) {
 		return 0
 	}
-	if core.pinned&bit(slot) != 0 {
+	if core.pinned.Has(slot) {
 		return bit(Housekeeping)
 	}
 	mask := core.affinity[slot]
@@ -537,21 +563,29 @@ func (core *Core) Affinity(slot int) uint64 {
 // Snapshot is a view of the run state for diagnostics. Its Stats sum every
 // processor's.
 type Snapshot struct {
-	Runnable, Dead, Running, Vacant, Online uint64
-	Count                                   int
-	Stats                                   Stats
+	Runnable, Dead, Running, Vacant TaskSet
+	Online                          uint64
+	Count                           int
+	Stats                           Stats
 }
 
-func (core *Core) Snapshot() Snapshot {
+// Snapshot fills view with the run state. The caller owns view, so the
+// sets need not live on a stack.
+func (core *Core) Snapshot(view *Snapshot) {
 	var total Stats
-	for cpu := range core.stats {
+	for cpu := 0; cpu < MaxCPUs; cpu++ {
 		total.Switches += core.stats[cpu].Switches
 		total.Steals += core.stats[cpu].Steals
 		total.Migrations += core.stats[cpu].Migrations
 		total.Kills += core.stats[cpu].Kills
 	}
-	return Snapshot{Runnable: core.runnable, Dead: core.dead, Running: core.running, Vacant: core.vacant,
-		Online: core.online, Count: core.count, Stats: total}
+	view.Runnable, view.Dead, view.Running, view.Vacant = core.runnable, core.dead, core.running, core.vacant
+	view.Online, view.Count, view.Stats = core.online, core.count, total
+}
+
+// FreeSlots counts the slots Install can still claim.
+func (core *Core) FreeSlots() int {
+	return MaxTasks - core.count + core.vacant.Count()
 }
 
 // CPUStats returns one processor's counters.
@@ -565,39 +599,51 @@ func (core *Core) CPUStats(cpu int) Stats {
 // Check verifies the invariants that make two processors running one task
 // impossible. Validation builds call it after every switch.
 func (core *Core) Check() bool {
-	var homes, running uint64
+	var homes, running TaskSet
 	for cpu := 0; cpu < MaxCPUs; cpu++ {
-		if core.home[cpu]&homes != 0 || core.home[cpu]&core.barred[cpu] != 0 {
+		if core.home[cpu].Intersects(&homes) || core.home[cpu].Intersects(&core.barred[cpu]) {
 			return false
 		}
-		homes |= core.home[cpu]
+		homes.Union(&core.home[cpu])
 		if core.online&bit(cpu) == 0 {
-			if core.home[cpu] != 0 || core.current[cpu] != Idle {
+			if !core.home[cpu].Empty() || core.current[cpu] != Idle {
 				return false
 			}
 			continue
 		}
 		if slot := int(core.current[cpu]); slot != Idle {
-			if running&bit(slot) != 0 || core.running&bit(slot) == 0 {
+			if running.Has(slot) || !core.running.Has(slot) {
 				return false
 			}
-			running |= bit(slot)
+			running.Add(slot)
 		}
 	}
-	live := core.live &^ core.dead
-	return homes&^live == 0 && core.runnable&^homes == 0 && core.running&^core.live == 0 &&
-		core.vacant&core.live == 0 && core.pinned&^core.home[Housekeeping]&live == 0
+	for word := 0; word < TaskWords; word++ {
+		live := core.live[word] &^ core.dead[word]
+		if homes[word]&^live != 0 || core.runnable[word]&^homes[word] != 0 || core.running[word]&^core.live[word] != 0 ||
+			core.vacant[word]&core.live[word] != 0 || core.pinned[word]&^core.home[Housekeeping][word]&live != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (core *Core) pick(cpu int, previous int) int {
-	queue := core.runnable & core.home[cpu] &^ core.running
-	if previous != Idle {
-		queue |= core.runnable & core.home[cpu] & bit(previous)
+	// queue is what this processor may take from its own run queue:
+	// runnable, at home, on no processor or the task it just left, and
+	// neither held nor stopped.
+	var queue TaskSet
+	for word := 0; word < TaskWords; word++ {
+		queue[word] = core.runnable[word] & core.home[cpu][word] &^ core.running[word]
 	}
-	queue &^= core.held | core.stopped
-	if queue != 0 {
-		next := nextAfter(queue, int(core.rotor[cpu]))
-		core.rotor[cpu] = int8(next)
+	if previous != Idle && core.runnable.Has(previous) && core.home[cpu].Has(previous) {
+		queue.Add(previous)
+	}
+	for word := 0; word < TaskWords; word++ {
+		queue[word] &^= core.held[word] | core.stopped[word]
+	}
+	if next := queue.NextAfter(int(core.rotor[cpu])); next >= 0 {
+		core.rotor[cpu] = int16(next)
 		return next
 	}
 	// Nothing at home: take one task from another processor's queue. A
@@ -607,14 +653,18 @@ func (core *Core) pick(cpu int, previous int) int {
 		if core.online&bit(other) == 0 {
 			continue
 		}
-		candidates := core.runnable & core.home[other] &^ core.running &^ core.pinned &^ core.held &^ core.stopped &^ core.barred[cpu]
-		if candidates == 0 {
+		var candidates TaskSet
+		for word := 0; word < TaskWords; word++ {
+			candidates[word] = core.runnable[word] & core.home[other][word] &^ (core.running[word] | core.pinned[word] |
+				core.held[word] | core.stopped[word] | core.barred[cpu][word])
+		}
+		next := candidates.NextAfter(int(core.rotor[other]))
+		if next < 0 {
 			continue
 		}
-		next := nextAfter(candidates, int(core.rotor[other]))
 		core.move(next, cpu)
 		core.stats[cpu].Steals++
-		core.rotor[cpu] = int8(next)
+		core.rotor[cpu] = int16(next)
 		return next
 	}
 	return Idle
@@ -625,7 +675,7 @@ func (core *Core) pick(cpu int, previous int) int {
 // last ran when that processor idles, then goes to an idle processor, then
 // to the least loaded one, each among the processors its affinity allows.
 func (core *Core) place(slot int, self int) int {
-	if core.pinned&bit(slot) != 0 {
+	if core.pinned.Has(slot) {
 		return Housekeeping
 	}
 	home := core.homeOf(slot)
@@ -634,7 +684,7 @@ func (core *Core) place(slot int, self int) int {
 		if !core.allows(slot, home) {
 			home = core.leastLoaded(slot)
 		}
-		core.home[home] |= bit(slot)
+		core.home[home].Add(slot)
 	}
 	if core.idle(home, slot) {
 		return home
@@ -660,10 +710,10 @@ func (core *Core) place(slot int, self int) int {
 
 // allows reports whether slot may run on cpu.
 func (core *Core) allows(slot int, cpu int) bool {
-	if core.pinned&bit(slot) != 0 {
+	if core.pinned.Has(slot) {
 		return cpu == Housekeeping
 	}
-	return cpu >= 0 && cpu < MaxCPUs && core.online&bit(cpu) != 0 && core.barred[cpu]&bit(slot) == 0
+	return cpu >= 0 && cpu < MaxCPUs && core.online&bit(cpu) != 0 && !core.barred[cpu].Has(slot)
 }
 
 // leastLoaded returns the allowed processor with the least to run, the
@@ -681,10 +731,22 @@ func (core *Core) leastLoaded(slot int) int {
 	return target
 }
 
-// idle reports whether cpu runs its idle loop with nothing else queued.
+// idle reports whether cpu runs its idle loop with nothing queued but
+// except, which may be -1.
 func (core *Core) idle(cpu int, except int) bool {
-	return core.online&bit(cpu) != 0 && core.current[cpu] == Idle &&
-		core.runnable&core.home[cpu]&^core.held&^core.stopped&^bit(except) == 0
+	if core.online&bit(cpu) == 0 || core.current[cpu] != Idle {
+		return false
+	}
+	for word := 0; word < TaskWords; word++ {
+		queued := core.runnable[word] & core.home[cpu][word] &^ (core.held[word] | core.stopped[word])
+		if except >= 0 && except>>6 == word {
+			queued &^= uint64(1) << uint(except&63)
+		}
+		if queued != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // idleCPUFor returns an idle processor slot may run on, searching from
@@ -702,22 +764,28 @@ func (core *Core) idleCPUFor(start int, slot int) int {
 // load counts what cpu has to run besides slot: its queue and its current
 // task.
 func (core *Core) load(cpu int, slot int) int {
-	load := bits.OnesCount64(core.runnable & core.home[cpu] &^ bit(slot))
-	if current := int(core.current[cpu]); current != Idle && current != slot && core.runnable&bit(current) == 0 {
+	load := 0
+	for word := 0; word < TaskWords; word++ {
+		load += bits.OnesCount64(core.runnable[word] & core.home[cpu][word])
+	}
+	if core.runnable.Has(slot) && core.home[cpu].Has(slot) {
+		load--
+	}
+	if current := int(core.current[cpu]); current != Idle && current != slot && !core.runnable.Has(current) {
 		load++
 	}
 	return load
 }
 
 func (core *Core) retire(slot int) {
-	core.runnable &^= bit(slot)
-	core.wakePending &^= bit(slot)
-	core.killed &^= bit(slot)
-	core.held &^= bit(slot)
-	core.stopped &^= bit(slot)
-	core.dead |= bit(slot)
+	core.runnable.Remove(slot)
+	core.wakePending.Remove(slot)
+	core.killed.Remove(slot)
+	core.held.Remove(slot)
+	core.stopped.Remove(slot)
+	core.dead.Add(slot)
 	if home := core.homeOf(slot); home >= 0 {
-		core.home[home] &^= bit(slot)
+		core.home[home].Remove(slot)
 	}
 }
 
@@ -726,15 +794,15 @@ func (core *Core) move(slot int, target int) {
 		if home == target {
 			return
 		}
-		core.home[home] &^= bit(slot)
+		core.home[home].Remove(slot)
 	}
-	core.home[target] |= bit(slot)
+	core.home[target].Add(slot)
 	core.stats[target].Migrations++
 }
 
 func (core *Core) homeOf(slot int) int {
 	for cpu := 0; cpu < MaxCPUs; cpu++ {
-		if core.home[cpu]&bit(slot) != 0 {
+		if core.home[cpu].Has(slot) {
 			return cpu
 		}
 	}
@@ -752,19 +820,10 @@ func (core *Core) runningOn(slot int) int {
 
 func (core *Core) inRange(slot int) bool { return slot >= 0 && slot < core.count }
 
-// nextAfter returns the lowest set bit of mask above position after,
-// wrapping to the lowest set bit.
-func nextAfter(mask uint64, after int) int {
-	if after >= 0 && after < 63 {
-		if above := mask &^ lowMask(after+1); above != 0 {
-			return bits.TrailingZeros64(above)
-		}
-	}
-	return bits.TrailingZeros64(mask)
-}
+// bit returns the one-processor mask of cpu.
+func bit(cpu int) uint64 { return uint64(1) << uint(cpu) }
 
-func bit(slot int) uint64 { return uint64(1) << uint(slot) }
-
+// lowMask returns the processor mask of [0, count).
 func lowMask(count int) uint64 {
 	if count >= 64 {
 		return ^uint64(0)

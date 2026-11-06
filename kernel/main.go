@@ -13,6 +13,7 @@ import (
 	"goos/kernel/boot"
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/clock"
+	linuxcompat "goos/kernel/compat/linux"
 	kernelconsole "goos/kernel/console"
 	"goos/kernel/deadline"
 	"goos/kernel/device"
@@ -342,7 +343,19 @@ func main() {
 	// where MapLoaderMemory keeps it reachable.
 	stack := amd64.StackPointer()
 	if !validImage || stack < 1024*1024 || (stack >= vm.IdentityMapLimit && !inLoaderMemory(stack)) {
-		console.WriteString("PANIC: unsafe virtual-memory bootstrap state\n")
+		console.WriteString("PANIC: unsafe virtual-memory bootstrap state: image-valid=")
+		if validImage {
+			console.WriteString("yes")
+		} else {
+			console.WriteString("no")
+		}
+		console.WriteString(" image-base=")
+		console.WriteHex(image.Base)
+		console.WriteString(" image-size=")
+		console.WriteHex(image.Size)
+		console.WriteString(" stack=")
+		console.WriteHex(stack)
+		console.WriteString("\n")
 		for {
 			amd64.Halt()
 		}
@@ -386,9 +399,14 @@ func main() {
 	streamWaitSet.UseDeadlines(&deadlines, deadline.SourceStream)
 	processWaitSet.UseDeadlines(&deadlines, deadline.SourceProcess)
 	waitAnyTable.UseDeadlines(&deadlines, deadline.SourceWaitAny)
+	waitAnyTable.SetStorage(pageObjects[kernelwait.Operation]{})
 	streamRegistry.SetStorage(pageObjects[stream.Stream]{})
 	sharedObjects.SetStorage(pageObjects[shmem.Object]{})
 	executables.SetStorage(pageObjects[executable.Object]{})
+	linuxcompat.SetFDStorage(pageObjects[linuxcompat.FDChunk]{})
+	linuxcompat.SetProcessStorage(pageObjects[linuxcompat.ProcessState]{})
+	linuxcompat.SetVFSContextStorage(pageObjects[linuxcompat.LinuxVFSContext]{})
+	linuxcompat.SyscallContinuations.SetStorage(pageObjects[linuxcompat.Continuation]{})
 	if !built {
 		console.WriteString("PANIC: page-table construction failed\n")
 		for {

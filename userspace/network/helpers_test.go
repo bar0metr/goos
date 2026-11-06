@@ -52,6 +52,7 @@ func (h *harness) advance(delay uint64) {
 
 func (h *harness) checkDeadline() {
 	h.t.Helper()
+	checkTCPMarks(h.t, h.stack)
 	if deadline, ok := h.stack.Deadline(); ok && deadline <= h.now {
 		h.t.Fatalf("deadline %d not after now %d", deadline, h.now)
 	}
@@ -254,4 +255,39 @@ func checkCounters(t testing.TB, stack *Stack, rx, drop, malformed uint64) {
 		t.Fatalf("counters rx %d drop %d malformed %d, want %d %d %d",
 			snapshot.RX, snapshot.Drop, snapshot.Malformed, rx, drop, malformed)
 	}
+}
+
+// checkTCPMarks fails when the registry marks, indexes, timers or budgets
+// disagree with the endpoints they describe.
+func checkTCPMarks(t testing.TB, stack *Stack) {
+	t.Helper()
+	if mismatch := stack.checkTCP(); mismatch != "" {
+		t.Fatalf("TCP state: %s", mismatch)
+	}
+}
+
+// listenerChildren counts a listener's children not yet accepted.
+func (stack *Stack) listenerChildren(id TCPEndpointID) int {
+	if id.slot() >= len(stack.tcp) || stack.tcp[id.slot()] == nil {
+		return 0
+	}
+	return stack.tcp[id.slot()].children.count
+}
+
+// testStream is the contiguous received bytes not yet read.
+func (entry *tcpEndpoint) testStream() string {
+	out := make([]byte, entry.recvLen)
+	ringLoad(out, entry.recvRing, int(entry.recvHead), int(entry.recvLen))
+	return string(out)
+}
+
+// adoptTCP files a control block a test built by hand in the registry, as
+// owner's, and returns its ID.
+func (stack *Stack) adoptTCP(entry *tcpEndpoint, owner int) TCPEndpointID {
+	fresh := stack.allocateTCP(owner)
+	slot, generation, members, links := fresh.slot, fresh.generation, fresh.members, fresh.links
+	*fresh = *entry
+	fresh.slot, fresh.generation, fresh.owner, fresh.members, fresh.links = slot, generation, uint8(owner), members, links
+	stack.rearmTCP(fresh)
+	return tcpID(fresh)
 }

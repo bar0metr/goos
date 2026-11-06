@@ -13,6 +13,8 @@ import (
 // testSystemImage builds the shape the real boot archive has: a system
 // directory, its message of the day, and one program reachable under several
 // names in system/bin.
+const testResolvConf = "nameserver 127.0.0.1\n"
+
 func testSystemImage(t testing.TB) []byte {
 	t.Helper()
 	buffer := &bytes.Buffer{}
@@ -26,12 +28,18 @@ func testSystemImage(t testing.TB) []byte {
 		{Name: "system/motd", Mode: 0o444, Size: int64(len(motd)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/bin/coreutils", Mode: 0o555, Size: int64(len(program)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/bin/ls", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
+		{Name: "system/etc/", Mode: 0o755, Typeflag: tar.TypeDir, ModTime: epoch, Format: tar.FormatUSTAR},
+		{Name: "system/etc/resolv.conf", Mode: 0o444, Size: int64(len(testResolvConf)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 	}
 	for index := range headers {
 		if err := writer.WriteHeader(&headers[index]); err != nil {
 			t.Fatalf("header %s: %v", headers[index].Name, err)
 		}
-		if headers[index].Name == "system/motd" {
+		if headers[index].Name == "system/etc/resolv.conf" {
+			if _, err := writer.Write([]byte(testResolvConf)); err != nil {
+				t.Fatalf("resolv.conf: %v", err)
+			}
+		} else if headers[index].Name == "system/motd" {
 			if _, err := writer.Write(motd); err != nil {
 				t.Fatalf("motd: %v", err)
 			}

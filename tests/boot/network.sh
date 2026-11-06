@@ -572,7 +572,7 @@ require_after left.udp-own 'udp self 192.0.2.10 9102 own' '^3 bytes from 192\.0\
 require_after left.udp-zero-local 'udp self -s 0 127.0.0.1 9103' '^0 bytes from 127\.0\.0\.1:[0-9]* to 127\.0\.0\.1$' "$left"
 require_after left.udp-zero 'udp listen -c 1 -W 8000 9004' '^0 bytes from 192\.0\.2\.53:4004 to 192\.0\.2\.10$' "$left"
 require_after left.udp-largest 'udp send -s 1472 -r 192.0.2.53 7' '^1472 bytes from 192\.0\.2\.53:7 to 192\.0\.2\.10$' "$left"
-require_after left.udp-too-large 'udp send -s 1473 192.0.2.53 7' '^udp: send: invalid argument$' "$left"
+require_after left.udp-too-large 'udp send -s 1473 192.0.2.53 7' '^udp: send: message too long$' "$left"
 require_after left.udp-checksum 'udp listen -c 1 -W 8000 9005' '^4 bytes from 192\.0\.2\.53:4005 to 192\.0\.2\.10: good$' "$left"
 forbid_after left.udp-corrupt 'udp listen -c 1 -W 8000 9005' ': bad$' "$left"
 require_after left.udp-counters 'net status ' '^  dropped: no-endpoint [1-9][0-9]* queue-full 0 checksum 1 too-long 0$' "$left"
@@ -599,7 +599,8 @@ require_after left.tcp-own 'tcp self 192.0.2.10 9302 own' '^3 bytes: own$' "$lef
 require_after left.tcp-listener 'tcp listen -W 8000 -c 1 -b 192.0.2.10 9303' '^12 bytes: guest stream$' "$left"
 require_after right.tcp-client 'tcp connect -W 8000 192.0.2.10 9303 guest stream' '^12 bytes: guest stream$' "$right"
 require_after left.tcp-status 'net status  ' '^tcp:$' "$left"
-require_after left.tcp-limits 'net status  ' '^  limits: ports 49152-65535 backlog 8 buffers 16384/16384$' "$left"
+require_after left.tcp-limits 'net status  ' '^  limits: ports 49152-65535 backlog 128 buffers 262144/262144$' "$left"
+require_after left.tcp-gtcp 'net status  ' '^  gtcp: v2 requests [1-9][0-9]* replies [1-9][0-9]* v3 requests [0-9][0-9]* replies [0-9][0-9]*$' "$left"
 require_after left.dns-fallback 'resolve fallback.test' '^fallback\.test: 192\.0\.2\.12 (dns, ttl 60 s)$' "$left"
 [ "$(queried fallback.test)" = 2 ] || fail left.edns-fallback "two queries for fallback.test, one with EDNS and one without" "$queries"
 checks=$((checks + 1))
@@ -617,8 +618,8 @@ require peer.dns-tcp-reset '^dns-tcp-reset tcp-fallback-reset\.test ' "$queries"
 require_after left.dns-tcp-counters 'resolve status ' '^tcp: fallbacks 2 answers 1$' "$left"
 require_after left.dns-tcp-errors 'resolve status ' '^tcp-errors: failures 1 timeouts 0$' "$left"
 # The fallback connections are gone once the lookups end.
-before=$(window "$left" 'net status   ' | grep '^  endpoints: [0-9]*/32 listeners')
-after=$(window "$left" 'net status    ' | grep '^  endpoints: [0-9]*/32 listeners')
+before=$(window "$left" 'net status   ' | grep '^  endpoints: [0-9]*/[0-9]* listeners' || true)
+after=$(window "$left" 'net status    ' | grep '^  endpoints: [0-9]*/[0-9]* listeners' || true)
 [ -n "$before" ] && [ "$before" = "$after" ] || fail left.dns-tcp-endpoints "TCP endpoints after the fallbacks as before, '$before' then '$after'" "$left"
 checks=$((checks + 1))
 require_after right.dnsq-udp 'dnsq @192.0.2.53 dnsq.test' '^;; transport: UDP$' "$right"
@@ -667,7 +668,7 @@ checks=$((checks + 1))
 [ "$(grep -c '^dhcp REQUEST 52:54:00:00:02:10 ' "$queries" || true)" -ge 2 ] || fail left.dhcp-renew 'a lease renewal REQUEST' "$queries"
 checks=$((checks + 1))
 require_after left.udp-reload 'net reload  ' '^network configuration applied$' "$left"
-require_after left.udp-payload-limit 'udp self -s 1301 127.0.0.1 9200' '^udp: send: invalid argument$' "$left"
+require_after left.udp-payload-limit 'udp self -s 1301 127.0.0.1 9200' '^udp: send: message too long$' "$left"
 require_after left.udp-payload-kept 'udp self -s 1300 127.0.0.1 9201' '^1300 bytes from 127\.0\.0\.1:' "$left"
 require_after left.udp-cross-field 'net reload   ' 'invalid setting system\.net\.udp\.ephemeral-port-max; previous configuration kept' "$left"
 require_after left.tcp-reload 'net reload    ' '^network configuration applied$' "$left"

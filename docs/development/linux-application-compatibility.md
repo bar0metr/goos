@@ -23,6 +23,8 @@ GoOS interface is missing. `Untested` means the repository has no run result.
 | BusyBox `sh` from that same static binary | Scoped pass in the [QEMU gate](../../tests/boot/linux_busybox.sh) | Non-interactive commands, child programs, exit status, two- and three-stage pipelines, redirection, a script, background job and `wait` | Start scripts explicitly with `busybox sh /path/script`; Linux `execve` does not interpret a `#!` line. |
 | Interactive BusyBox `sh`, BusyBox v1.38.0 (2026-09-01), SHA-256 `9209cc9efa5840f06e0e61f78c1ca4b9a374eb6508ac0bd831cf53181a86f2db` | Scoped pass in the [terminal gate](../../tests/boot/linux_tty.sh), `make test-linux-nano` | Line editing, a command, a foreground child in its own process group, Ctrl-C ending it and the rest of the list with status 130, the shell taking the terminal back, `cd`, launching nano, nano's suspend, the `Stopped` report, `fg`, `exit` | Applets run as `busybox name`: `/system/linux` holds no applet links. `tty` prints nothing, since it reads `/proc`. Run alone in the foreground; in a pipeline or with a redirection the shell has no terminal. |
 | GNU nano 9.2, static musl with ncursesw, SHA-256 `fee997775e4c63ebc6ab687ddf1d51175f7d5523b1c1f7075901db99dc318d2d`, built `--disable-libmagic --disable-nls --enable-utf8` | Scoped pass in the [terminal gate](../../tests/boot/linux_tty.sh) under QEMU and in `make test-pve-nano` under KVM | `nano -I FILE` from the native shell and from BusyBox `sh`: draw on the serial console, type, save with ^O, exit with ^X, `fsync` before the save is reported, reopen and show the saved text; ^T^Z suspends and `fg` redraws | TERM is `goos` on the local console, from `/system/linux/terminfo`. Nano's redraw after a serial resize is gated; a remote SSH session is not. Launched from the native shell, nano treats ^T^Z as a suspend and an immediate continue: nothing could continue a stopped root. |
+| BusyBox v1.38.0, SHA-256 `9209cc9efa5840f06e0e61f78c1ca4b9a374eb6508ac0bd831cf53181a86f2db`: `nc`, `wget`, `httpd` | Scoped pass in the [network gate](../../tests/boot/linux_network.sh), `make test-linux-network` | `nc` TCP client, UDP client and listener; `wget -O -` by hostname through `/etc/resolv.conf`, checked by SHA-256, and a resolver failure as `bad address`; `httpd -f -p 8080` serving the host two connections in turn and two at once, ended by Ctrl-C in `accept` | IPv4 only. Names resolve through the local DNS server on `127.0.0.1:53`. |
+| curl 8.22.0, static musl with OpenSSL 3.3.7, SHA-256 `5f8fa1c76781b051939f808bee042bdfb3998fff9dbee060a27d8c4613c8c692` | Scoped pass in the same gate | `curl -sS -o FILE http://NAME:PORT/PATH` by hostname, body checked by SHA-256, exit 0; exit 6 for a name that does not resolve | HTTPS through curl is not gated. Its resolver thread wakes the transfer through `eventfd2`. |
 | Static glibc 7-Zip `7zzs`; 26.03 appears in the [Proxmox findings](proxmox-lab.md#findings), current supplied binary unpinned | Scoped pass reported in [0.2.4](../releases/0.2.4.md); the [QEMU gate](../../tests/boot/linux_7zip.sh) verifies file hashes and concurrent execution | Show formats, create an archive, test it, extract it and compare SHA-256 hashes of extracted files | This proves the tested archive workflow, not every codec or option. The [Proxmox scenario](proxmox-lab.md#7-zip-workflow) also checks the round trip, but treats a stalled workload as an expected diagnostic result unless `PVE_FLAGS='--require-pass'` is set. |
 
 The table records repository tests and prior release results. This document
@@ -34,7 +36,6 @@ before adding a passing result here.
 
 | Program or feature | What happens | Workaround |
 | --- | --- | --- |
-| Static network clients such as `curl` or BusyBox `wget` | Linux socket syscalls return `ENOSYS`. An offline option may run, but HTTP or DNS through Linux sockets cannot. No specific client binary is certified here. | Use native `fetch`, `dnsq`, `udp` or `tcp` commands for those operations. There is no socket compatibility layer for the same Linux binary. |
 | Programs requiring `/proc`, `/sys`, symbolic links, file-backed `mmap`, `epoll`, or PTY pairs | Those interfaces are absent or limited in the [ABI matrix](../architecture/linux-x86_64-abi.md). A successful ELF load does not imply the program can complete its workload. | Use a mode that avoids the missing interface if the program provides one. Otherwise the application needs ABI work; no general workaround exists. |
 
 ## Reproduce and report a result
@@ -44,6 +45,7 @@ make test-linux-busybox BUSYBOX=/absolute/path/to/static/busybox
 make test-linux-tty
 make test-linux-nano BUSYBOX=/absolute/path/to/static/busybox NANO=/absolute/path/to/static/nano
 make test-linux-7zip LINUX_EXTRA=/absolute/path/to/static/7zzs SMP=4
+make test-linux-network BUSYBOX=/absolute/path/to/static/busybox CURL=/absolute/path/to/static/curl
 make test-pve-7zip LINUX_EXTRA=/absolute/path/to/static/7zzs PVE_FLAGS='--require-pass'
 ```
 

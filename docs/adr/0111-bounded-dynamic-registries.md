@@ -48,12 +48,12 @@ for later processes; the table still costs only the slots ever used.
 | --- | --- | --- | --- |
 | IPC channels | 24, static | 256 | 3 pages, on creation |
 | streams | 64, static | 256 | 1 page (ring of 4080 bytes) |
-| processes | 32, static | 64 (`sched.MaxTasks`) | 4 pages, on first use of the slot |
+| processes | 32, static | 64 | 4 pages, on first use of the slot |
 | handles per process | 128 | 256 | in the process record |
 | shared-memory objects | 64, static | 256, 16 per process | 1 page |
 | executable objects | 16, static | 64 | 1 page |
 | `WaitAny` objects | 16 | 64 (64-bit ready mask) | per task slot |
-| wait registrations | 64 | `sched.MaxTasks` | per task slot |
+| wait registrations | 64 | `sched.MaxTasks` (256) | 1 page, on the slot's first wait |
 | exec slots (shell) | 4 | 8 | 64 KiB of the exec area |
 | VFS sessions | 12 | 63 (`WaitAny` − 1) | |
 | VFS open files | 64, 16 per session | 256, 64 per session | |
@@ -64,11 +64,68 @@ may hold every channel, since only it creates them, and 64 streams, four for
 each job slot and the terminal's. Every charge is still returned on release,
 and teardown releases a process's whole account.
 
-**Tasks stay at 64, deliberately.** The scheduler's run, dead, and
-exit-pending sets are single 64-bit masks the assembly scans with one
-instruction, and its per-slot tables are sized by them. Processes follow, since
-each needs a task. Raising it means multi-word masks in the scheduler, which
-the SMP scheduler will need anyway; it is recorded as that work's, not hidden.
+**Tasks stayed at 64 at first, deliberately.** The scheduler's run, dead,
+and exit-pending sets were single 64-bit masks scanned with one instruction,
+and its per-slot tables were sized by them. Processes followed, since each
+needs a task. Raising the bound meant multi-word masks in the scheduler, and
+this ADR left that to the SMP scheduler work.
+
+**Revision: 256 tasks in four-word task sets.** Threads share the task table
+with processes, so with 64 slots a process allowed 64 tasks (the new
+`MaxTasksPerProcess`) could take every slot, and a handful of threaded
+programs filled the table while the process table still had room.
+`sched.MaxTasks` is now 256, and every task set in `sched.Core` is a
+`sched.TaskSet`, four 64-bit words. A pick ANDs
+the queue's words and counts trailing zeros in the first nonzero one, so
+selection stays a handful of word operations. Processor sets stay one word
+(`sched.MaxCPUs` is 64). No native call or diagnostic carries a task set as
+one word: `diag` prints each set as one hexadecimal number of any length.
+
+The process bound stays at 64 and no longer follows tasks; the slots past it
+go to threads. Two per-slot tables grew too large to keep static at 256 slots,
+so they now take pages the way registries do: a Linux call's continuation
+record (over 8 KiB, three pages) and a `WaitAny` operation (one page) come
+from the page allocator on the slot's first use and stay with the slot. The
+futex buckets and the `WaitAny` table index waits by slot and walk a task set
+of the waiting slots, not the whole table. The assembly's per-slot tables
+(contexts, roots, FS bases, entry stack tops, exit codes, FPU areas) are
+sized by `GOOS_MAX_TASKS` and live in `.bss`, so the image does not carry
+their zeros.
+Task kernel stacks were already allocated per task. Measured on the default
+build, the kernel image's memory went from 3,624 KiB to 3,484 KiB and its file
+from 1,306 KiB to 1,209 KiB.
+
+**Revision: TCP in `netd`.** The stack's TCP endpoints were the last large
+static table in userspace: 96 entries of about 45 KiB each, 16 KiB send and
+receive arrays and eight reassembly slots included, whether connections
+existed or not. Those sizes were historical, the prototype's, and ADR 0213
+replaces them with this ADR's rule. The registry is a slice of control
+block pointers that grows to the highest slot in use; rings and reassembly
+spans come with the connection and go with it; TIME_WAIT four-tuples live
+in tombstones outside the endpoint quota. The capacity policy is the
+tuning's endpoint limit (1024 by default, 4096 at most), the session
+grants (512 at most), and the ring and tombstone budgets, which bound what
+the live connections may take. As with the kernel registries, memory in use
+is what is live, and the limits are decisions about how much may be.
+
+**Revision: 256 processes.** `process.MaxProcesses` now equals
+`sched.MaxTasks`, 256. The static Linux state that held it at 64 is gone: a
+`linux.ProcessState` is 7136 bytes (two pages) and a family's VFS context one
+page, its waiter queue now sized for every task rather than one per process.
+Both sit in tables of pointers (`linux.lazyTable`) and take their pages the
+first time a slot is used. A slot keeps its pages for the next process, as
+process records do: kernel code holds a state pointer past the lock it found
+it under, and the per-task caller cache is one such holder, so a freed page
+could be read after another owner took it. Pages track the most Linux
+processes that ever ran at once, not the bound. `MaxExitEvents` and
+`executable.MaxObjects` follow at 256, and the registry's count and ring
+cursor are 16-bit. The kernel image's memory went from 4,380 KiB to
+3,940 KiB, its data and BSS from 3,368 KiB to 2,940 KiB: the process states
+alone were 446 KiB.
+
+Linux processes may hold 224 of the slots (`NativeProcessReserve` is 32) and
+one family 64. `NativeTaskReserve` equals the process reserve, so each
+process the reserve keeps for native code still finds a task.
 
 ## Alternatives
 

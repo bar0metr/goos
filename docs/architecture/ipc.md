@@ -71,8 +71,11 @@ and receives a 16-bit ready mask. The kernel validates every handle generation,
 object type, event mask, endpoint direction, and required capability rights
 before registering the complete generation-safe Task ID. Current interests cover
 channels, streams, processes, console input, and the network function's
-interrupt line, whose readiness `IRQTake` consumes (ADR 0190). Existing
-one-object receive, stream, process, and IRQ waits remain available.
+interrupt line, whose readiness `IRQTake` consumes (ADR 0190). A channel
+interest may also ask for writable: a sender holding Write waits until its
+peer's queue has room, which every receive on the peer's side announces
+(ADR 0210). Existing one-object receive, stream, process, and IRQ waits remain
+available.
 
 The network service's protocols, `GNETDRV1` with its driver, `GNETCTL1`
 version 2 with PID 1, `GNETAPI1` version 3 with commands and `GUDP1` with

@@ -72,6 +72,9 @@ func threadHoldStep(thread uint64) uint64
 //go:linkname threadHoldCancel goos_thread_hold_cancel
 func threadHoldCancel(thread uint64) uint64
 
+//go:linkname linuxNetAttach goos_linux_net_attach
+func linuxNetAttach(process, channel, pool uint64) uint64
+
 //go:linkname ipcSend goos_ipc_send
 func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
 

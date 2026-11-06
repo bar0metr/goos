@@ -234,7 +234,7 @@ func (w *world) tcpWait(correlation uint64) tcpapi.Reply {
 			}
 		}
 		w.pump()
-		if fault := w.tcpServer.Deliver(w.stack, w.now, tcpBack{w, &w.tcpReplies}); fault != tcpserve.FaultNone {
+		if fault, _ := w.tcpServer.Deliver(w.stack, w.now, tcpBack{w, &w.tcpReplies}); fault != tcpserve.FaultNone {
 			w.t.Fatal(fault)
 		}
 	}
@@ -251,10 +251,10 @@ func (w *world) pump() {
 			w.t.Fatal("client could not send")
 		}
 		if len(w.toUDP)+len(w.fromUDP)+len(w.toTCP)+len(w.fromTCP) == 0 {
-			if fault := w.udpServe.Deliver(w.stack, udpBack{w, &w.fromUDP}); fault != udpserve.FaultNone {
+			if fault, _ := w.udpServe.Deliver(w.stack, udpBack{w, &w.fromUDP}); fault != udpserve.FaultNone {
 				w.t.Fatal(fault)
 			}
-			if fault := w.tcpServe.Deliver(w.stack, w.now, tcpBack{w, &w.fromTCP}); fault != tcpserve.FaultNone {
+			if fault, _ := w.tcpServe.Deliver(w.stack, w.now, tcpBack{w, &w.fromTCP}); fault != tcpserve.FaultNone {
 				w.t.Fatal(fault)
 			}
 			if len(w.fromUDP)+len(w.fromTCP) == 0 {

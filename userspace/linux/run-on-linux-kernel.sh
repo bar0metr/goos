@@ -10,6 +10,11 @@
 #
 #   https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/netboot/vmlinuz-virt
 #
+# With the netprobe fixture the guest brings loopback up and runs every
+# socket group, then the client and server modes over loopback against each
+# other and against BusyBox httpd, wget, and nc. CURL names a static curl to
+# fetch over loopback as well.
+#
 # usage: userspace/linux/run-on-linux-kernel.sh KERNEL BUSYBOX [fixture]
 set -eu
 
@@ -33,7 +38,67 @@ mkdir -p "$root/bin" "$root/dev" "$root/tmp" "$root/system/linux"
 cp "$busybox" "$root/bin/busybox"
 cp "$here/prebuilt/$fixture" "$root/system/linux/$fixture"
 chmod 755 "$root/bin/busybox" "$root/system/linux/$fixture"
-if [ "$fixture" = tty-probe ]; then
+if [ "$fixture" = netprobe ]; then
+	mkdir -p "$root/etc" "$root/proc"
+	printf '127.0.0.1 localhost\n' >"$root/etc/hosts"
+	printf 'nameserver 127.0.0.1\n' >"$root/etc/resolv.conf"
+	if [ -n "${CURL:-}" ]; then
+		cp "$CURL" "$root/system/linux/curl"
+		chmod 755 "$root/system/linux/curl"
+	fi
+	cat > "$root/init" <<'INIT'
+#!/bin/busybox sh
+bb=/bin/busybox
+$bb mount -t devtmpfs devtmpfs /dev
+$bb mount -t proc proc /proc
+$bb ip link set lo up
+cd /system/linux
+probe=/system/linux/netprobe
+echo "== default"
+$probe < /dev/null | $bb cat
+echo "== bench"
+$probe bench < /dev/null | $bb cat
+echo "== clients"
+$bb uname -r
+$bb --list | $bb grep -x -e nc -e wget -e httpd -e sha256sum | $bb tr '\n' ' '; echo
+$bb sha256sum $probe
+$probe serve 8081 $probe 3 > /tmp/serve.out &
+$bb sleep 1
+$probe fetch 127.0.0.1 8081 /a
+$probe fetch -n localhost 8081 /b
+$probe resolve localhost
+$probe resolve 127.0.0.9
+$bb wget -q -O - http://127.0.0.1:8081/c | $bb sha256sum
+wait
+$bb cat /tmp/serve.out
+$probe connect 127.0.0.1 9 1000
+$bb httpd -p 127.0.0.1:8082 -h /system/linux
+$bb sleep 1
+$probe fetch 127.0.0.1 8082 /netprobe
+$bb wget -q -O - http://localhost:8082/netprobe | $bb sha256sum
+echo nc-says-hi | $bb nc -l -p 8083 > /tmp/nc.out &
+$bb sleep 1
+echo from-client | $bb nc -w 2 127.0.0.1 8083
+wait
+echo "nc listener got: $($bb cat /tmp/nc.out)"
+$bb nc -l -p 7007 -e /bin/busybox cat &
+$bb sleep 1
+$probe inherit 127.0.0.1 7007
+wait
+$bb nc -l -p 7008 -e /bin/busybox cat &
+$bb sleep 1
+$probe hold 127.0.0.1 7008 survive 2
+wait
+if [ -x /system/linux/curl ]; then
+	/system/linux/curl --version | $bb head -n 1
+	/system/linux/curl -sS -o /tmp/curl.out http://localhost:8082/netprobe; echo "curl-exit=$?"
+	$bb sha256sum /tmp/curl.out
+	/system/linux/curl -sS -o /dev/null http://127.0.0.1:9/; echo "curl-refused-exit=$?"
+fi
+echo "== done"
+$bb poweroff -f
+INIT
+elif [ "$fixture" = tty-probe ]; then
 	# The probe needs a terminal: it runs as a session leader with the
 	# serial console as its controlling terminal, as an interactive GoOS
 	# launch runs on its own.
@@ -68,6 +133,7 @@ echo "== process"
 /system/linux/$fixture eintr < /dev/null | /bin/busybox cat
 /system/linux/$fixture poll < /dev/null | /bin/busybox cat
 /system/linux/$fixture ppoll < /dev/null | /bin/busybox cat
+/system/linux/$fixture select < /dev/null | /bin/busybox cat
 /system/linux/$fixture hardening < /dev/null | /bin/busybox cat
 /system/linux/$fixture fpstate < /dev/null | /bin/busybox cat
 /system/linux/$fixture libc < /dev/null | /bin/busybox cat
@@ -99,7 +165,11 @@ done
 
 tr -d '\r' < "$log" | sed -n '/^== default/,/^== done/p'
 status=0
-if [ "$fixture" = tty-probe ]; then
+if [ "$fixture" = netprobe ]; then
+	tr -d '\r' < "$log" | grep -q '^netprobe ok$' || { echo "FAIL netprobe groups" >&2; status=1; }
+	tr -d '\r' < "$log" | grep -q '^bench ok$' || { echo "FAIL netprobe bench" >&2; status=1; }
+	tr -d '\r' < "$log" | grep -q '^serve done 3 of 3$' || { echo "FAIL netprobe serve" >&2; status=1; }
+elif [ "$fixture" = tty-probe ]; then
 	tr -d '\r' < "$log" | grep -q '^tty identity ok$' || { echo "FAIL tty-probe identity" >&2; status=1; }
 else
 	tr -d '\r' < "$log" | grep -q '^abi-probe ok$' || { echo "FAIL default mode" >&2; status=1; }
@@ -107,7 +177,7 @@ else
 fi
 if [ "$fixture" = abi-probe ]; then
 	tr -d '\r' < "$log" | grep -q '^exec ok pid [0-9]*$' || { echo "FAIL process mode: no exec ok" >&2; status=1; }
-	for line in 'fork parent ok' 'vfork ok' 'clone ok' 'orphan ok' 'wait ok' 'pipe ok' 'signal ok' 'kill ok' 'eintr ok' 'poll ok' 'ppoll ok' 'hardening ok' 'fpstate ok' 'libc ok' 'threads ok'; do
+	for line in 'fork parent ok' 'vfork ok' 'clone ok' 'orphan ok' 'wait ok' 'pipe ok' 'signal ok' 'kill ok' 'eintr ok' 'poll ok' 'ppoll ok' 'select ok' 'hardening ok' 'fpstate ok' 'libc ok' 'threads ok'; do
 		tr -d '\r' < "$log" | grep -q "^$line\$" || { echo "FAIL process mode: no $line" >&2; status=1; }
 	done
 fi

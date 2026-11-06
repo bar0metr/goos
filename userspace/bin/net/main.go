@@ -15,7 +15,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "net status|reload",
+	Usage:   "net status|reload|endpoints",
 	Summary: "network status/reload",
 	MinArgs: 1,
 	MaxArgs: 1,
@@ -36,6 +36,11 @@ func run(data startup.Data) {
 		status()
 	case utility.Equal(argument, "reload"):
 		reload()
+	case utility.Equal(argument, "endpoints"):
+		// The service writes the endpoints to its log.
+		if reply, ok := utility.CallNetwork(netapi.Request{Opcode: netapi.OpTCPDump}); !ok || reply.Result != netapi.ResultOK {
+			utility.Fail(nil, "network service unavailable")
+		}
 	default:
 		utility.Usage()
 	}
@@ -181,7 +186,9 @@ func tcp(reply *netapi.Reply) {
 	dropped = append(dropped, " no-tcb "...)
 	dropped = appendDecimal(dropped, reply.TCPDropNoTCB)
 	dropped = append(dropped, " window "...)
-	field("dropped", appendDecimal(dropped, reply.TCPDropWindow))
+	dropped = appendDecimal(dropped, reply.TCPDropWindow)
+	dropped = append(dropped, " backlog "...)
+	field("dropped", appendDecimal(dropped, reply.Capacity.DropBacklog))
 	limits := append(text[:0], "ports "...)
 	limits = appendDecimal(limits, uint64(reply.TCPEphemeralMin))
 	limits = append(limits, '-')
@@ -192,6 +199,18 @@ func tcp(reply *netapi.Reply) {
 	limits = appendDecimal(limits, uint64(reply.TCPSendBuffer))
 	limits = append(limits, '/')
 	field("limits", appendDecimal(limits, uint64(reply.TCPReceiveBuffer)))
+	messages := append(text[:0], "v2 requests "...)
+	messages = appendDecimal(messages, reply.GTCP2Requests)
+	messages = append(messages, " replies "...)
+	messages = appendDecimal(messages, reply.GTCP2Replies)
+	messages = append(messages, " v3 requests "...)
+	messages = appendDecimal(messages, reply.GTCP3Requests)
+	messages = append(messages, " replies "...)
+	field("gtcp", appendDecimal(messages, reply.GTCP3Replies))
+	field("memory", appendMemory(text[:0], &reply.Capacity))
+	field("time-wait", appendTimeWait(text[:0], &reply.Capacity))
+	field("lookups", appendLookups(text[:0], &reply.Capacity))
+	field("sessions", appendSessions(text[:0], &reply.Capacity))
 }
 
 func reload() {
@@ -219,11 +238,4 @@ func field(name string, value []byte) {
 	utility.PrintText(": ")
 	utility.Print(value)
 	utility.EndLine()
-}
-
-func appendDecimal(target []byte, value uint64) []byte {
-	if value >= 10 {
-		target = appendDecimal(target, value/10)
-	}
-	return append(target, byte('0'+value%10))
 }

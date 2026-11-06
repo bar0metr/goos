@@ -324,14 +324,14 @@ CA-0318	goos/userspace/cmd/logd	configWire	process	owned	none
 CA-0319	goos/userspace/cmd/logd	consoleHandle	process	owned	none
 CA-0320	goos/userspace/cmd/logd	controlHandle	process	owned	none
 CA-0321	goos/userspace/cmd/logd	correlation	process	owned	none
-CA-0322	goos/userspace/cmd/logd	cursor	process	owned	none
-CA-0323	goos/userspace/cmd/logd	descriptor	process	owned	none
+CA-0322	goos/userspace/cmd/logd	failing	process	owned	none
+CA-0323	goos/userspace/cmd/logd	files	process	owned	none
 CA-0324	goos/userspace/cmd/logd	logHandle	process	owned	none
-CA-0325	goos/userspace/cmd/logd	logLine	process	owned	none
-CA-0326	goos/userspace/cmd/logd	lostLine	process	owned	none
+CA-0325	goos/userspace/cmd/logd	interests	process	owned	none
+CA-0326	goos/userspace/cmd/logd	lastReport	process	owned	none
 CA-0327	goos/userspace/cmd/logd	persisting	process	owned	none
 CA-0328	goos/userspace/cmd/logd	reported	process	owned	none
-CA-0329	goos/userspace/cmd/logd	tail	process	owned	none
+CA-0329	goos/userspace/cmd/logd	persister	process	owned	none
 CA-0330	goos/userspace/cmd/logd	vfsHandle	process	owned	none
 CA-0331	goos/userspace/cmd/logd	wire	process	owned	none
 CA-0332	goos/userspace/cmd/netd	answer	process	owned	none
@@ -685,12 +685,16 @@ CA-0686	goos/userspace/runtime/arena	suspendFailures	process	atomic	runtime/aren
 CA-0687	goos/userspace/runtime/arena	suspensions	process	atomic	runtime/arena tests
 CA-0688	goos/userspace/runtime/arena	threadCaches	process	runtime	runtime/arena tests
 CA-0689	goos/userspace/runtime/arena	threaded	process	atomic	runtime/arena tests
-CA-0690	goos/userspace/runtime/arena	threads	process	runtime	runtime/arena tests
+CA-1136	goos/userspace/runtime/arena	mainThread	thread	per-thread	runtime/arena tests
+CA-1137	goos/userspace/runtime/arena	threadStates	thread	per-thread	runtime/arena tests
+CA-1138	goos/userspace/runtime/arena	threadHigh	process	atomic	runtime/arena tests
+CA-1144	goos/userspace/runtime/arena	snapshotsWide	process	runtime	runtime/arena tests
 CA-0691	goos/userspace/runtime/arena	totalPause	process	runtime	runtime/arena tests
 CA-0692	goos/userspace/runtime/arena	totalRendezvous	process	runtime	runtime/arena tests
 CA-0693	goos/userspace/runtime/arena	windowPause	process	immutable	runtime/arena tests
 CA-0694	goos/userspace/runtime/arena	zeroSized	process	immutable	runtime/arena tests
-CA-0695	goos/userspace/runtime/sys	scratch	thread	per-thread	none
+CA-1142	goos/userspace/runtime/sys	mainScratch	thread	per-thread	none
+CA-1143	goos/userspace/runtime/sys	threadScratch	thread	per-thread	none
 CA-0696	goos/userspace/runtime/thread	starting	process	lock	none
 CA-0697	goos/userspace/runtime/thread	starts	process	lock	none
 CA-0698	goos/userspace/shell	Commands	process	immutable	none
@@ -741,6 +745,9 @@ CA-0742	goos/userspace/runtime/arena	planFailures	process	runtime	none
 CA-0743	goos/userspace/runtime/arena	stackRoots	process	runtime	goprobe gc
 CA-0744	goos/userspace/runtime/goroutine	gs	process	runtime	TestReadyRacesParkWithExactlyOneEnqueue
 CA-0745	goos/userspace/runtime/goroutine	ms	process	runtime	TestRunQueueConcurrentStealers
+CA-1139	goos/userspace/runtime/goroutine	m0	thread	runtime	TestRunQueueConcurrentStealers
+CA-1140	goos/userspace/runtime/goroutine	mRecords	process	runtime	TestOnlyStartedSlotsHaveMs
+CA-1141	goos/userspace/runtime/goroutine	planHeld	process	runtime	none
 CA-0746	goos/userspace/runtime/goroutine	nativeReceiveHandler	process	immutable	goprobe io
 CA-0747	goos/userspace/runtime/goroutine	nativeWaitHandler	process	immutable	goprobe io
 CA-0748	goos/userspace/runtime/goroutine	plan	process	runtime	goprobe gc
@@ -850,3 +857,73 @@ CA-1065	goos/userspace/sftp	ErrFilesystem	process	immutable	none
 CA-1066	goos/userspace/sftp	ErrFraming	process	immutable	none
 CA-1067	goos/userspace/cmd/init	remoteStopDeadline	process	owned	none
 CA-1068	goos/userspace/cmd/init	remoteStopPending	process	owned	none
+CA-1069	goos/userspace/cmd/init	linuxSockControl	process	owned	none
+CA-1070	goos/userspace/cmd/init	linuxSockStarted	process	owned	none
+CA-1071	goos/userspace/cmd/init	linuxSockProcess	process	owned	none
+CA-1072	goos/userspace/cmd/init	linuxSockGeneration	process	owned	none
+CA-1073	goos/userspace/cmd/init	linuxSockSession	process	owned	none
+CA-1074	goos/userspace/cmd/init	linuxSockToken	process	owned	none
+CA-1075	goos/userspace/cmd/init	linuxFamilies	process	owned	none
+CA-1076	goos/userspace/cmd/linuxsockd	consoleHandle	process	owned	none
+CA-1077	goos/userspace/cmd/linuxsockd	controlHandle	process	owned	none
+CA-1078	goos/userspace/cmd/linuxsockd	core	process	owned	none
+CA-1079	goos/userspace/cmd/linuxsockd	families	process	owned	none
+CA-1080	goos/userspace/cmd/linuxsockd	interests	process	owned	none
+CA-1081	goos/userspace/cmd/linuxsockd	interestOwner	process	owned	none
+CA-1082	goos/userspace/cmd/linuxsockd	wire	process	owned	none
+CA-1083	goos/userspace/cmd/linuxsockd	message	process	owned	none
+CA-1084	goos/userspace/cmd/linuxsockd	reply	process	owned	none
+CA-1085	goos/userspace/cmd/linuxsockd	control	process	owned	none
+CA-1086	goos/userspace/cmd/linuxsockd	controlReply	process	owned	none
+CA-1087	goos/userspace/linuxsock	tcpBits	process	immutable	none
+CA-1088	goos/userspace/cmd/linuxsockd	links	process	owned	none
+CA-1089	goos/userspace/cmd/linuxsockd	nativeWire	process	owned	none
+CA-1091	goos/userspace/cmd/linuxsockd	nativeIn	process	owned	none
+CA-1097	goos/userspace/cmd/resolved	stub	process	owned	none
+CA-1098	goos/userspace/dnsstub	Address	process	immutable	none
+CA-1099	goos/userspace/linux	netprobe	process	immutable	none
+CA-1100	goos/userspace/linuxsockapi	noAddress	process	immutable	none
+CA-1101	goos/userspace/cmd/init	linuxSockLaunching	process	owned	none
+CA-1102	goos/userspace/bin/netbench	manifest	process	immutable	none
+CA-1103	goos/userspace/netbench	loopback	process	immutable	none
+CA-1104	goos/userspace/netbench	line	process	owned	none
+CA-1105	goos/userspace/netbench	sink	process	owned	none
+CA-1106	goos/userspace/netbench	early	process	owned	none
+CA-1107	goos/userspace/netbench	heldN	process	owned	none
+CA-1108	goos/userspace/cmd/linuxsockd	tcpLayout	process	immutable	none
+CA-1109	goos/userspace/cmd/netd	gtcpMessages	process	owned	none
+CA-1110	goos/userspace/tcpapi	Layout2	process	immutable	none
+CA-1111	goos/userspace/tcpapi	Layout3	process	immutable	none
+CA-1112	goos/userspace/bin/netbench3	manifest	process	immutable	none
+CA-1113	goos/userspace/netbench	noOffset	process	owned	none
+CA-1114	goos/userspace/netbench	offsets	process	owned	none
+CA-1115	goos/userspace/netbench	prefix	process	owned	none
+CA-1150	goos/userspace/netbench	ringClient	process	owned	none
+CA-1116	goos/userspace/utility	tcpLayout	session	immutable	none
+CA-1117	goos/userspace/netbench	waiting	process	owned	none
+CA-1118	goos/userspace/cmd/netd	servedAt	process	owned	none
+CA-1119	goos/userspace/cmd/netd	stageNanos	process	owned	none
+CA-1120	goos/userspace/cmd/netd	stageLoops	process	owned	none
+CA-1121	goos/userspace/cmd/netd	stageLast	process	owned	none
+CA-1122	goos/userspace/cmd/logd	policyRefused	process	owned	none
+CA-1123	goos/userspace/cmd/logd	ring	process	owned	none
+CA-1124	goos/userspace/cmd/logd	rounds	process	owned	none
+CA-1125	goos/userspace/cmd/logd	vfsClosed	process	owned	none
+CA-1126	goos/userspace/bin/netbench4	manifest	process	immutable	none
+CA-1127	goos/userspace/cmd/netd	gtcpDoorbells	process	owned	none
+CA-1128	goos/userspace/tcpapi	Layout4	process	immutable	none
+CA-1129	goos/userspace/tcpapi	doorbell	process	immutable	none
+CA-1130	goos/userspace/tcpapi	txKinds	process	immutable	none
+CA-1131	goos/userspace/tcpapi	releaseKinds	process	immutable	none
+CA-1132	goos/userspace/tcpapi	txDoneKinds	process	immutable	none
+CA-1133	goos/userspace/tcpapi	rxKinds	process	immutable	none
+CA-1134	goos/userspace/utility	ringSession	session	owned	none
+CA-1135	goos/userspace/cmd/linuxsockd	tcpRing	process	owned	none
+CA-1145	goos/userspace/cmd/logd	written	process	owned	none
+CA-1146	goos/userspace/cmd/logd	writtenPolicy	process	owned	none
+CA-1147	goos/userspace/cmd/logd	statusWritten	process	owned	none
+CA-1148	goos/userspace/cmd/logd	statusText	process	owned	none
+CA-1149	goos/userspace/cmd/shell	logStatus	process	owned	none
+CA-1151	goos/userspace/cmd/linuxsockd	udpRing	process	owned	none
+CA-1152	goos/userspace/cmd/netd	udpDoorbells	process	owned	none
+CA-1153	goos/userspace/runtime/sys	HostVMMap	process	owned	TestVMReserveBytesRoundsToPages

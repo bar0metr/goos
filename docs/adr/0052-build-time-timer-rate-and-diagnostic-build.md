@@ -64,3 +64,14 @@ without source edits. Normal builds carry no diagnostic code and print only
 
 The dump exposes other processes' handle tables, so it exists only in builds
 made for diagnosis.
+
+## Amendment: 250 Hz default
+
+The default rate is now 250 Hz, the common Linux distribution choice. Sleeps,
+`poll` timeouts, and tick-aligned wakeups round to 4 ms instead of 10 ms. The
+network benchmark across 100, 250, and 1000 Hz (ADR 0210) found no throughput
+or request latency that depends on the rate, and poll-wake latency dropped from
+191 to 139 µs at 250 Hz. 1000 Hz gave no further network gain and quadruples
+the timer interrupts on an idle machine. The untagged build matches the make
+default, so `go test` on the host and the image agree on `TicksPerSecond`;
+`goos_hz100` selects the old rate.

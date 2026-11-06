@@ -26,8 +26,11 @@ profiles and maps each identifier to constants compiled into the kernel:
 | Profile | Channels | Streams | Tasks | Pages |
 | --- | ---: | ---: | ---: | ---: |
 | `tiny` | 2 | 8 | 1 | 2048 |
-| `normal` | 4 | 16 | 4 | 8192 |
-| `large` | 8 | 32 | 8 | 16384 |
+| `normal` | 4 | 16 | 16 | 8192 |
+| `large` | 8 | 32 | 64 | 16384 |
+
+The task column is the revised one; it was 1, 4 and 8. See the revision
+below.
 
 Pages are 4 KiB, so the page limits are 8 MiB, 32 MiB, and 64 MiB. The limits
 count resident process pages and page tables. Reserved virtual memory costs no
@@ -55,9 +58,25 @@ exhausted`.
 The `quota` command therefore reports the applied profile's limits without
 adding a second diagnostics interface.
 
-PID 1 keeps its separate system quota: 256 channels, 64 streams, eight tasks,
-and 16384 pages. `GrantSystemQuota` still accepts PID 1 only and grants a limit,
-not an exemption.
+PID 1 keeps its separate system quota: 256 channels, 64 streams, 16 tasks
+(eight before the revision), and 16384 pages. `GrantSystemQuota` still accepts
+PID 1 only and grants a limit, not an exemption.
+
+**Revision: task quotas of 64, 16 and 1.** A task is a thread, and a quota of
+eight left a Go or Linux program at eight threads on a machine with 256 task
+slots. The large profile now allows `process.MaxTasksPerProcess`, 64 tasks,
+the normal one 16, and the tiny one keeps its single task. Memory, not the
+count, bounds a thread: each task past a process's first holds
+`process.TaskPages`, six pages, of the page quota for its kernel stack and
+guard, charged when `ThreadCreate` or `clone` reserves the task and returned
+when the task ends or the creation fails. 64 tasks cost a large process 378
+of its 16384 pages. The first task binds after the launch has charged the
+address space and before it runs, where a refusal could not be undone, so it
+pays nothing and a single-threaded process pays what it paid before. A
+thread past either quota gets `StatusResourceExhausted` natively and `EAGAIN`
+from `clone`. GoOS implements no `RLIMIT_NPROC`: `getrlimit` reports it
+unlimited, and the task quota, the family's 64 processes and the scheduler's
+native reserve answer `EAGAIN` where Linux would.
 
 ## Consequences
 

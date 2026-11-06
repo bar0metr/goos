@@ -155,6 +155,10 @@ Syscalls map onto native primitives:
 
 `pipe` and `pipe2` create a native stream whose two ends become open-file
 descriptions (ADR 0162). `poll` sleeps on the native wait-any table (ADR 0168).
+`select` and `pselect6` share its per-descriptor readiness and its sleep;
+they differ in reading three descriptor sets, failing with `EBADF` for a
+descriptor that is not open, and reporting an exceptional set that no GoOS
+descriptor fills.
 
 Translation runs in a separate kernel compatibility subsystem. It
 may access caller memory after the ordinary address-space checks, but authority
@@ -180,7 +184,10 @@ entries. An fd is never a native handle. Descriptors 0, 1, and 2 bind to the
 supplied `in`, `stdout`, and `stderr` streams. Files are reached only through
 the process's explicit VFS authority (ADR 0135).
 
-The table has 64 entries. Its entries point to bounded, family-owned open-file
+The table keeps 64 entries inline and takes a page of 1024 more from the page
+allocator each time a descriptor lands past them, charged to the owning
+process's page quota, up to 4096. `RLIMIT_NOFILE` starts at 1024 soft and 4096
+hard (ADR 0212). Its entries point to bounded, family-owned open-file
 descriptions carrying kind, status flags, offset, object reference, and
 reference count. Inheritance and `dup` retain the same description, so file
 position, `O_APPEND`, stream endpoint, directory cursor, and device state stay
@@ -274,6 +281,35 @@ is `EBUSY`, and a directory moves only onto a free name.
 
 `ftruncate` and `fsync` are not implemented.
 
+### Sockets
+
+`socket`, `bind`, `listen`, `accept`, `accept4`, `connect`, the send and
+receive calls, `shutdown`, the name calls and the option calls serve
+`AF_INET` stream and datagram sockets (ADR 0210). A socket is an open-file
+description of kind `FDSocket`; `dup`, `fork` and `execve` treat it like any
+other description, and the last reference closes it.
+
+The kernel holds no TCP or UDP state. Each family has one session to
+`linuxsockd`: a channel and a 66-page pool that PID 1 grants at launch as
+`linux-net` and `linux-net-pool`. Payload moves through the pool's 16 KiB
+slots: a send copies into TX slots and returns once they are committed on
+the pool's submit ring, and a read copies from the RX slots `linuxsockd`
+filled ahead from `netd`. The channel carries requests, their replies and
+the two rings' doorbells. A request never waits in the service.
+When a socket is not ready, the calling task sleeps through its
+continuation on the family channel, with a timer for `SO_RCVTIMEO` or
+`SO_SNDTIMEO`, and reads the socket's state again from the pool's readiness
+page when it wakes. `poll`, `ppoll`, `select` and `pselect6` read the same
+page. A signal with a handler interrupts that sleep; a reply wait is bounded
+at eight seconds and no signal interrupts it.
+
+When `linuxsockd` dies, the family's sockets fail with `ENETRESET`, and PID 1
+gives each running launch a new session through `LinuxNetAttach`. A launch
+made while the service is down has no session, and `socket` is `ENETDOWN`.
+
+Name lookup needs no GoOS interface: `/etc/resolv.conf` names
+`127.0.0.1`, where `resolved` answers DNS over UDP and TCP.
+
 ### Devices
 
 The kernel compares a resolved path with `/dev/null`, `/dev/zero`, and
@@ -295,8 +331,8 @@ Child exit raises `SIGCHLD` in the Linux parent and a failed pipe write raises
 call returns: it discards, ends the process, or builds an `rt_sigframe` and
 enters the handler, and `rt_sigreturn` restores the saved context
 (ADR 0163, ADR 0164). `rt_sigaction` refuses flags GoOS cannot honor
-(ADR 0165). `kill`, `tkill`, and `tgkill` reach the caller and its
-descendants through the family registry, never by Linux UID (ADR 0166).
+(ADR 0165). `kill`, `tkill`, and `tgkill` reach any process of the caller's family
+through the family registry, never by Linux UID (ADR 0166, ADR 0210).
 
 Image replacement resets caught dispositions to default and preserves ignored
 dispositions, the blocked mask, and pending signals. Fork copies dispositions
@@ -360,8 +396,14 @@ the VFS with the request, as native clients do.
 
 ### Namespace view
 
-A Linux process sees the GoOS VFS namespace: `/system`, `/tmp`, `/persist`,
-`/home`, `/state`, and whatever else is mounted. GoOS has no general `/proc`
+A Linux process sees the GoOS VFS namespace: `/system`, `/etc`, `/tmp`,
+`/persist`, `/home`, `/state`, and whatever else is mounted. `/etc` is the
+boot archive's read-only `etc` directory with `resolv.conf`
+(`nameserver 127.0.0.1`), `hosts` and `nsswitch.conf`, so a static C
+library resolves names through the resolver's local DNS server with ordinary
+socket traffic ([networking.md](networking.md), "Local DNS server"). The
+kernel treats these as plain VFS files: `open`, `read` and `stat` work, and
+a writable open or a create there fails with `EROFS`. GoOS has no general `/proc`
 or `/sys` filesystem. The kernel serves a few synthetic names that supported
 programs need: `/dev/null`, `/dev/zero`, and `/dev/tty`, and the processor
 lists `/sys/devices/system/cpu/online` and `/sys/devices/system/cpu/possible`,
@@ -464,8 +506,8 @@ launch root ends every other member of its family with `SIGKILL` (ADR 0170).
 GoOS runs static x86_64 programs, musl or glibc, position-independent
 or not, with threads (ADR 0176, ADR 0177). A thread has its own TID, TLS, and
 signal mask and shares the process's pending signals; all threads share one
-CPU, and a process holds at most 8 tasks. Dynamic linking, `select`,
-nonblocking pipes, networking, `/proc`, file-backed `mmap`, and
+CPU, and a process holds at most 8 tasks. Dynamic linking,
+nonblocking pipes, IPv6 and other socket families, `/proc`, file-backed `mmap`, and
 address-space randomization are outside it. BusyBox `sh` runs programs,
 pipelines, redirections, scripts, and background jobs without a terminal
 (ADR 0172), and interactively with job control on one, where GNU nano runs
@@ -473,6 +515,6 @@ too (ADR 0206). `fork`, `vfork`, and two process forms of `clone` create a child
 a private copy of the caller (ADR 0158, ADR 0159), the thread form of `clone`
 a thread in the caller's address space (ADR 0177), and `wait4` reaps it
 (ADR 0161). Pipes connect them (ADR 0162), and `SIGCHLD` and `SIGPIPE`
-reach handlers (ADR 0163, ADR 0164). `kill` signals descendants (ADR 0166),
-a handled signal interrupts a blocked call (ADR 0167), and `poll` waits on
-several descriptors (ADR 0168).
+reach handlers (ADR 0163, ADR 0164). `kill` signals the family (ADR 0166),
+a handled signal interrupts a blocked call (ADR 0167), and `poll` and
+`select` wait on several descriptors (ADR 0168).

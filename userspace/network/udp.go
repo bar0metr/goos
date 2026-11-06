@@ -6,41 +6,60 @@ package network
 // session, and every call checks it: one owner can neither see nor touch
 // another's endpoints.
 //
-// Every table is a fixed array sized by the constants below. UDPTuning sets
-// how much of each one is in use at run time and never resizes anything.
-// Received payloads wait in a pool of buffers shared by all endpoints; each
-// endpoint's queue holds indexes into it.
+// The endpoint registry and the receive buffer pool grow on demand up to
+// the capacities below (udp_registry.go); UDPTuning bounds how much of
+// them is in use. Received payloads wait in the pool, shared by all
+// endpoints, and each endpoint's queue holds indexes into it. The stack
+// counts each owner's endpoints and queued buffers, so neither the quota
+// nor the buffer share check walks the registry.
 //
 // Delivery is unambiguous by construction. Bind refuses a port another
 // endpoint holds on the same address or on the wildcard, and a wildcard bind
-// refuses a port held on any address, so a datagram matches at most one
-// endpoint: the one bound to its destination address, or else the one bound
-// to the wildcard. A connected endpoint then takes it only from its peer.
+// refuses a port held on any address, unless both endpoints carry
+// SO_REUSEADDR. A datagram goes to one endpoint: among those bound to its
+// destination address, or else among those bound to the wildcard, the one
+// bound last, as Linux does; the others receive nothing while it stays. A
+// connected endpoint then takes it only from its peer.
 
 const (
 	// MaxUDPSessions bounds the owners, one per client session.
 	MaxUDPSessions = 8
-	// MaxUDPEndpoints and MaxUDPSessionEndpoints are the capacities behind
-	// the max-endpoints and max-endpoints-per-session settings.
-	MaxUDPEndpoints        = 32
+	// MaxUDPEndpoints is the ceiling of max-endpoints and
+	// DefaultUDPEndpoints its default. MaxUDPSessionEndpoints is the ceiling
+	// of max-endpoints-per-session, the ordinary session quota.
+	// MaxUDPSessionQuota is the largest quota a session can be granted
+	// explicitly, the same as TCP's so one control field serves both;
+	// max-endpoints still bounds what a session holds.
+	MaxUDPEndpoints        = 4096
+	DefaultUDPEndpoints    = 1024
 	MaxUDPSessionEndpoints = 8
+	MaxUDPSessionQuota     = 512
 	// UDPQueueCapacity is the capacity behind recv-queue-depth.
 	UDPQueueCapacity = 16
 	// UDPPayloadCapacity is the capacity behind max-payload and the size of
 	// each receive buffer.
 	UDPPayloadCapacity = 4096
-	// UDPReceiveBuffers holds the datagrams queued on all endpoints, and
-	// UDPSessionBuffers bounds one owner's share of them, so one session
-	// flooded with datagrams leaves half the pool to the others.
-	UDPReceiveBuffers = 32
+	// UDPReceiveBuffers bounds the datagrams queued on all endpoints, and
+	// UDPSessionBuffers one owner's share of them, so one session flooded
+	// with datagrams leaves half the pool to the others. The pool allocates
+	// a 4 KiB buffer when no free one is left and keeps it for reuse: 512
+	// buffers take at most 2 MiB.
+	UDPReceiveBuffers = 512
 	UDPSessionBuffers = UDPReceiveBuffers / 2
 	// UDPPendingSends holds datagrams waiting for ARP to resolve their next
 	// hop.
 	UDPPendingSends = 8
 
 	udpWirePayload = MaxFrame - HeaderSize - ipv4HeaderSize - udpHeaderSize
-	udpSlotBits    = 8
+	udpSlotBits    = 12
 	udpGenerations = 1 << (32 - udpSlotBits)
+)
+
+// The slot field of an ID must address every endpoint the registry holds,
+// and a queue entry every buffer.
+var (
+	_ [1<<udpSlotBits - MaxUDPEndpoints]struct{}
+	_ [1<<16 - UDPReceiveBuffers]struct{}
 )
 
 // EndpointID names one endpoint: a generation above the table slot. A
@@ -71,9 +90,18 @@ type udpEndpoint struct {
 	port       uint16
 	remote     IPv4
 	remotePort uint16
-	queue      [UDPQueueCapacity]uint8
-	head       uint8
-	count      uint8
+	// reuse is SO_REUSEADDR as given at bind, and bound orders binds for
+	// delivery among endpoints that share a port by reuse.
+	reuse bool
+	bound uint32
+	queue [UDPQueueCapacity]uint16
+	head  uint8
+	count uint8
+	// indexed marks an endpoint filed in udpPorts under hash, and portPrev
+	// and portNext link its bucket.
+	indexed            bool
+	hash               uint32
+	portPrev, portNext *udpEndpoint
 }
 
 type udpBuffer struct {
@@ -95,7 +123,11 @@ type UDPStats struct {
 	DropChecksum   uint64
 	DropTooLong    uint64
 	BindFail       uint64
-	Endpoints      int
+	// LookupProbes counts the endpoints delivery looked at, and
+	// MaxLookupProbes is the most one datagram needed.
+	LookupProbes    uint64
+	MaxLookupProbes uint64
+	Endpoints       int
 }
 
 // UDPReceived describes one datagram UDPReceive took off a queue.
@@ -107,26 +139,53 @@ type UDPReceived struct {
 }
 
 func (stack *Stack) resetUDP() {
-	for index := range stack.udp[:] {
-		stack.udp[index] = udpEndpoint{}
-	}
-	for index := range stack.udpBuffers[:] {
-		stack.udpBuffers[index].used = false
-	}
+	stack.udp, stack.udpUsed, stack.udpLive = nil, nil, 0
+	stack.udpPorts = udpPortIndex{}
+	stack.udpBuffers, stack.udpFree = nil, nil
+	stack.udpOwnerBuffers = [MaxUDPSessions]int{}
+	stack.udpOwnerEndpoints = [MaxUDPSessions]int{}
+	// The seed derives from the random state without drawing from it.
+	stack.udpSeed = mix64(stack.random ^ 0x3f84d5b5b5470917)
 	for index := range stack.udpPending[:] {
 		stack.udpPending[index].used = false
 	}
+	for index := range stack.udpQuota[:] {
+		stack.udpQuota[index] = 0
+	}
 	stack.udpGeneration = 0
+	stack.udpBinds = 0
 	stack.udpStats = UDPStats{}
+}
+
+// SetUDPQuota sets how many endpoints owner may hold, as SetTCPQuota does
+// for TCP.
+func (stack *Stack) SetUDPQuota(owner, quota int) bool {
+	if owner < 0 || owner >= MaxUDPSessions || quota < 0 || quota > MaxUDPSessionQuota {
+		return false
+	}
+	stack.udpQuota[owner] = uint16(quota)
+	return true
+}
+
+func (stack *Stack) udpOwnerQuota(owner int) int {
+	tuned := int(stack.tuning.UDP.SessionEndpoints)
+	quota := int(stack.udpQuota[owner])
+	switch {
+	case quota == 0:
+		return tuned
+	case quota > MaxUDPSessionEndpoints:
+		return quota
+	}
+	return min(quota, tuned)
 }
 
 // endpoint returns owner's endpoint id names, or nil.
 func (stack *Stack) endpoint(owner int, id EndpointID) (*udpEndpoint, int) {
 	slot := id.slot()
-	if owner < 0 || owner >= MaxUDPSessions || slot >= MaxUDPEndpoints {
+	if owner < 0 || owner >= MaxUDPSessions || slot >= len(stack.udp) {
 		return nil, -1
 	}
-	entry := &stack.udp[slot]
+	entry := stack.udp[slot]
 	if entry.state == UDPFree || entry.generation != id.generation() || int(entry.owner) != owner {
 		return nil, -1
 	}
@@ -139,58 +198,57 @@ func (stack *Stack) UDPOpen(owner int) (EndpointID, Result) {
 	if owner < 0 || owner >= MaxUDPSessions {
 		return 0, ResultInvalidArgument
 	}
-	total, mine, free := 0, 0, -1
-	for index := range stack.udp[:] {
-		entry := &stack.udp[index]
-		if entry.state == UDPFree {
-			if free < 0 {
-				free = index
-			}
-			continue
-		}
-		total++
-		if int(entry.owner) == owner {
-			mine++
-		}
+	if stack.udpLive >= int(stack.tuning.UDP.MaxEndpoints) || stack.udpOwnerEndpoints[owner] >= stack.udpOwnerQuota(owner) {
+		return 0, ResultBusy
 	}
-	if free < 0 || total >= int(stack.tuning.UDP.MaxEndpoints) || mine >= int(stack.tuning.UDP.SessionEndpoints) {
+	free := stack.allocateUDP()
+	if free < 0 {
 		return 0, ResultBusy
 	}
 	stack.udpGeneration++
 	if stack.udpGeneration == udpGenerations {
 		stack.udpGeneration = 1
 	}
-	entry := &stack.udp[free]
+	entry := stack.udp[free]
 	*entry = udpEndpoint{state: UDPOpen, owner: uint8(owner), generation: stack.udpGeneration}
+	stack.udpUsed[free/64] |= 1 << (free % 64)
+	stack.udpLive++
+	stack.udpOwnerEndpoints[owner]++
 	return EndpointID(stack.udpGeneration<<udpSlotBits | uint32(free)), ResultOK
 }
 
 // UDPClose frees an endpoint and the datagrams queued on it.
 func (stack *Stack) UDPClose(owner int, id EndpointID) Result {
-	entry, _ := stack.endpoint(owner, id)
+	entry, slot := stack.endpoint(owner, id)
 	if entry == nil {
 		return ResultInvalidArgument
 	}
-	stack.closeEndpoint(entry)
+	stack.closeEndpoint(entry, slot)
 	return ResultOK
 }
 
 // UDPCloseOwner closes every endpoint of an owner whose session ended.
 func (stack *Stack) UDPCloseOwner(owner int) {
-	for index := range stack.udp[:] {
-		entry := &stack.udp[index]
-		if entry.state != UDPFree && int(entry.owner) == owner {
-			stack.closeEndpoint(entry)
+	if owner < 0 || owner >= MaxUDPSessions || stack.udpOwnerEndpoints[owner] == 0 {
+		return
+	}
+	for index := stack.nextUDP(0); index >= 0; index = stack.nextUDP(index + 1) {
+		if int(stack.udp[index].owner) == owner {
+			stack.closeEndpoint(stack.udp[index], index)
 		}
 	}
 }
 
-func (stack *Stack) closeEndpoint(entry *udpEndpoint) {
+func (stack *Stack) closeEndpoint(entry *udpEndpoint, slot int) {
 	for entry.count > 0 {
-		stack.udpBuffers[entry.queue[entry.head]].used = false
+		stack.releaseBuffer(entry.owner, entry.queue[entry.head])
 		entry.head = (entry.head + 1) % UDPQueueCapacity
 		entry.count--
 	}
+	stack.udpPorts.remove(entry)
+	stack.udpOwnerEndpoints[entry.owner]--
+	stack.udpLive--
+	stack.udpUsed[slot/64] &^= 1 << (slot % 64)
 	generation := entry.generation
 	*entry = udpEndpoint{generation: generation}
 }
@@ -200,13 +258,19 @@ func (stack *Stack) closeEndpoint(entry *udpEndpoint) {
 // port 0 picks a free ephemeral port. A port that would make delivery
 // ambiguous is AddressInUse.
 func (stack *Stack) UDPBind(owner int, id EndpointID, address IPv4, port uint16) (IPv4, uint16, Result) {
-	entry, slot := stack.endpoint(owner, id)
+	return stack.UDPBindReuse(owner, id, address, port, false)
+}
+
+// UDPBindReuse binds with SO_REUSEADDR when reuse is set: a bind that would
+// conflict succeeds when every endpoint it overlaps carries reuse too.
+func (stack *Stack) UDPBindReuse(owner int, id EndpointID, address IPv4, port uint16, reuse bool) (IPv4, uint16, Result) {
+	entry, _ := stack.endpoint(owner, id)
 	if entry == nil || entry.state != UDPOpen {
 		return IPv4{}, 0, ResultInvalidArgument
 	}
 	if !stack.localAddress(address) {
 		increment(&stack.udpStats.BindFail)
-		return IPv4{}, 0, ResultInvalidArgument
+		return IPv4{}, 0, ResultNoAddress
 	}
 	if port == 0 {
 		port = stack.ephemeralPort()
@@ -214,11 +278,12 @@ func (stack *Stack) UDPBind(owner int, id EndpointID, address IPv4, port uint16)
 			increment(&stack.udpStats.BindFail)
 			return IPv4{}, 0, ResultBusy
 		}
-	} else if stack.portConflict(slot, address, port) {
+	} else if stack.portConflict(entry, address, port, reuse) {
 		increment(&stack.udpStats.BindFail)
 		return IPv4{}, 0, ResultAddressInUse
 	}
-	entry.local, entry.port, entry.state = address, port, UDPBound
+	entry.local, entry.port, entry.state, entry.reuse = address, port, UDPBound, reuse
+	stack.markBound(entry)
 	return address, port, ResultOK
 }
 
@@ -246,6 +311,7 @@ func (stack *Stack) UDPConnect(owner int, id EndpointID, remote IPv4, port uint1
 			return IPv4{}, 0, ResultBusy
 		}
 		entry.local, entry.port = route.source, local
+		stack.markBound(entry)
 	}
 	entry.remote, entry.remotePort, entry.state = remote, port, UDPConnected
 	return route.source, entry.port, ResultOK
@@ -257,27 +323,35 @@ func (stack *Stack) localAddress(address IPv4) bool {
 }
 
 // portConflict reports a bound endpoint other than skip on port whose
-// address overlaps address: equal to it, or either one the wildcard. Port 68
-// belongs to the DHCP client while the interface runs DHCP.
-func (stack *Stack) portConflict(skip int, address IPv4, port uint16) bool {
+// address overlaps address, equal to it or either one the wildcard, unless
+// reuse and the endpoint's reuse are both set. Port 68 belongs to the DHCP
+// client while the interface runs DHCP.
+func (stack *Stack) portConflict(skip *udpEndpoint, address IPv4, port uint16, reuse bool) bool {
 	if port == portClient && stack.config.Mode == ModeDHCP {
 		return true
 	}
-	for index := range stack.udp[:] {
-		entry := &stack.udp[index]
-		if index == skip || entry.state < UDPBound || entry.port != port {
+	for entry := stack.udpBucket(port); entry != nil; entry = entry.portNext {
+		if entry == skip || entry.port != port {
 			continue
 		}
-		if entry.local == zeroIPv4 || address == zeroIPv4 || entry.local == address {
+		if (entry.local == zeroIPv4 || address == zeroIPv4 || entry.local == address) && (!reuse || !entry.reuse) {
 			return true
 		}
 	}
 	return false
 }
 
+// markBound stamps an endpoint that just got its port with the bind order
+// delivery uses and files it under the port.
+func (stack *Stack) markBound(entry *udpEndpoint) {
+	stack.udpBinds++
+	entry.bound = stack.udpBinds
+	stack.udpPorts.insert(entry, stack.udpPortHash(entry.port))
+}
+
 func (stack *Stack) portBound(port uint16) bool {
-	for index := range stack.udp[:] {
-		if stack.udp[index].state >= UDPBound && stack.udp[index].port == port {
+	for entry := stack.udpBucket(port); entry != nil; entry = entry.portNext {
+		if entry.port == port {
 			return true
 		}
 	}
@@ -288,7 +362,8 @@ func (stack *Stack) portBound(port uint16) bool {
 // endpoint holds, or returns 0 when there is none. After four random draws
 // it walks the range from the last one, and at most MaxUDPEndpoints ports
 // are taken, so the walk ends within MaxUDPEndpoints+1 steps unless the
-// range is that small, and then within the range.
+// range is that small, and then within the range. Each step reads one
+// bucket of the port index.
 func (stack *Stack) ephemeralPort() uint16 {
 	first, last := uint32(stack.tuning.UDP.EphemeralMin), uint32(stack.tuning.UDP.EphemeralMax)
 	if first == 0 || last < first {
@@ -329,16 +404,66 @@ func (stack *Stack) UDPReceive(owner int, id EndpointID, dst []byte) (UDPReceive
 	if entry == nil || entry.count == 0 {
 		return UDPReceived{}, false
 	}
-	buffer := &stack.udpBuffers[entry.queue[entry.head]]
+	buffer := stack.udpBuffers[entry.queue[entry.head]]
 	if len(dst) < int(buffer.length) {
 		return UDPReceived{}, false
 	}
 	received := UDPReceived{Source: buffer.source, SourcePort: buffer.sourcePort, Destination: buffer.destination,
 		Length: copy(dst, buffer.data[:buffer.length])}
-	buffer.used = false
+	stack.releaseBuffer(entry.owner, entry.queue[entry.head])
 	entry.head = (entry.head + 1) % UDPQueueCapacity
 	entry.count--
 	return received, true
+}
+
+// UDPReady is an endpoint's readiness mask.
+type UDPReady uint8
+
+const (
+	// UDPReadyReadable: a datagram is queued, perhaps an empty one.
+	UDPReadyReadable UDPReady = 1 << iota
+	// UDPReadyWritable: a send is not refused for lack of local resources
+	// the endpoint holds. A UDP endpoint holds none, so it is always set.
+	UDPReadyWritable
+
+	UDPReadyAll = UDPReadyWritable<<1 - 1
+)
+
+// UDPReadiness is the mask, the length of the next datagram and the number
+// queued.
+type UDPReadiness struct {
+	Mask   UDPReady
+	Next   uint32
+	Queued uint32
+}
+
+// UDPReadiness reports owner's endpoint's readiness. It changes nothing.
+func (stack *Stack) UDPReadiness(owner int, id EndpointID) (UDPReadiness, Result) {
+	entry, _ := stack.endpoint(owner, id)
+	if entry == nil {
+		return UDPReadiness{}, ResultInvalidArgument
+	}
+	ready := UDPReadiness{Mask: UDPReadyWritable, Queued: uint32(entry.count)}
+	if entry.count > 0 {
+		ready.Mask |= UDPReadyReadable
+		ready.Next = uint32(stack.udpBuffers[entry.queue[entry.head]].length)
+	}
+	return ready, ResultOK
+}
+
+// UDPPeek copies the oldest datagram queued on an endpoint into dst and
+// leaves it queued. It reports false as UDPReceive does.
+func (stack *Stack) UDPPeek(owner int, id EndpointID, dst []byte) (UDPReceived, bool) {
+	entry, _ := stack.endpoint(owner, id)
+	if entry == nil || entry.count == 0 {
+		return UDPReceived{}, false
+	}
+	buffer := stack.udpBuffers[entry.queue[entry.head]]
+	if len(dst) < int(buffer.length) {
+		return UDPReceived{}, false
+	}
+	return UDPReceived{Source: buffer.source, SourcePort: buffer.sourcePort, Destination: buffer.destination,
+		Length: copy(dst, buffer.data[:buffer.length])}, true
 }
 
 // deliverUDP queues one checked datagram on the endpoint it belongs to, or
@@ -346,12 +471,11 @@ func (stack *Stack) UDPReceive(owner int, id EndpointID, dst []byte) (UDPReceive
 // address all arrive here. A full queue or buffer pool drops the newcomer
 // and keeps what is queued.
 func (stack *Stack) deliverUDP(source IPv4, sourcePort uint16, destination IPv4, destinationPort uint16, payload []byte) {
-	slot := stack.udpMatch(destination, destinationPort)
-	if slot < 0 {
+	entry := stack.udpMatch(destination, destinationPort)
+	if entry == nil {
 		increment(&stack.udpStats.DropNoEndpoint)
 		return
 	}
-	entry := &stack.udp[slot]
 	if entry.state == UDPConnected && (entry.remote != source || entry.remotePort != sourcePort) {
 		increment(&stack.udpStats.DropNoEndpoint)
 		return
@@ -361,65 +485,81 @@ func (stack *Stack) deliverUDP(source IPv4, sourcePort uint16, destination IPv4,
 		return
 	}
 	if entry.count >= stack.tuning.UDP.ReceiveQueue || entry.count >= UDPQueueCapacity ||
-		stack.ownerBuffers(entry.owner) >= UDPSessionBuffers {
+		stack.udpOwnerBuffers[entry.owner] >= UDPSessionBuffers {
 		increment(&stack.udpStats.DropQueueFull)
 		return
 	}
-	free := -1
-	for index := range stack.udpBuffers[:] {
-		if !stack.udpBuffers[index].used {
-			free = index
-			break
-		}
-	}
+	free := stack.takeBuffer()
 	if free < 0 {
 		increment(&stack.udpStats.DropQueueFull)
 		return
 	}
-	buffer := &stack.udpBuffers[free]
+	buffer := stack.udpBuffers[free]
 	buffer.used, buffer.source, buffer.sourcePort, buffer.destination = true, source, sourcePort, destination
 	buffer.length = uint16(copy(buffer.data[:], payload))
-	entry.queue[(entry.head+entry.count)%UDPQueueCapacity] = uint8(free)
+	entry.queue[(entry.head+entry.count)%UDPQueueCapacity] = uint16(free)
 	entry.count++
+	stack.udpOwnerBuffers[entry.owner]++
 	increment(&stack.udpStats.RX)
 }
 
-func (stack *Stack) ownerBuffers(owner uint8) int {
-	held := 0
-	for index := range stack.udp[:] {
-		if stack.udp[index].state != UDPFree && stack.udp[index].owner == owner {
-			held += int(stack.udp[index].count)
+// udpMatch finds the endpoint bound to destination and port, or else the one
+// bound to the wildcard on port, or returns nil. Among endpoints that share
+// the binding by reuse, the one bound last wins. It reads the port's bucket
+// and counts the endpoints it looked at.
+func (stack *Stack) udpMatch(destination IPv4, port uint16) *udpEndpoint {
+	var exact, wildcard *udpEndpoint
+	probes := uint64(0)
+	for entry := stack.udpBucket(port); entry != nil; entry = entry.portNext {
+		probes++
+		if entry.port != port {
+			continue
+		}
+		if entry.local == destination && (exact == nil || later(entry.bound, exact.bound)) {
+			exact = entry
+		}
+		if entry.local == zeroIPv4 && (wildcard == nil || later(entry.bound, wildcard.bound)) {
+			wildcard = entry
 		}
 	}
-	return held
+	stack.udpStats.LookupProbes += probes
+	stack.udpStats.MaxLookupProbes = max(stack.udpStats.MaxLookupProbes, probes)
+	if exact == nil {
+		exact = wildcard
+	}
+	if udpCrossCheck && exact != stack.slowUDPMatch(destination, port) {
+		panic("udp: port index disagrees with the endpoints")
+	}
+	return exact
 }
 
-// udpMatch finds the endpoint bound to destination and port, or else the one
-// bound to the wildcard on port, or returns -1.
-func (stack *Stack) udpMatch(destination IPv4, port uint16) int {
-	wildcard := -1
-	for index := range stack.udp[:] {
-		entry := &stack.udp[index]
+// slowUDPMatch is udpMatch by a walk of every endpoint, for the cross-check.
+func (stack *Stack) slowUDPMatch(destination IPv4, port uint16) *udpEndpoint {
+	var exact, wildcard *udpEndpoint
+	for index := stack.nextUDP(0); index >= 0; index = stack.nextUDP(index + 1) {
+		entry := stack.udp[index]
 		if entry.state < UDPBound || entry.port != port {
 			continue
 		}
-		if entry.local == destination {
-			return index
+		if entry.local == destination && (exact == nil || later(entry.bound, exact.bound)) {
+			exact = entry
 		}
-		if entry.local == zeroIPv4 && wildcard < 0 {
-			wildcard = index
+		if entry.local == zeroIPv4 && (wildcard == nil || later(entry.bound, wildcard.bound)) {
+			wildcard = entry
 		}
 	}
-	return wildcard
+	if exact == nil {
+		exact = wildcard
+	}
+	return exact
 }
+
+// later compares bind stamps across the wrap of the counter.
+func later(a, b uint32) bool { return int32(a-b) > 0 }
 
 // UDPStats reports the UDP counters and the endpoints open now.
 func (stack *Stack) UDPStats() UDPStats {
 	stats := stack.udpStats
-	for index := range stack.udp[:] {
-		if stack.udp[index].state != UDPFree {
-			stats.Endpoints++
-		}
-	}
+	stats.Endpoints = stack.udpLive
 	return stats
 }

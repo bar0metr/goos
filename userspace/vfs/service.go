@@ -13,6 +13,9 @@ type Service struct {
 	namespace vfs.Namespace
 	readData  [vfs.MaxReplyData]byte
 	image     initramfs.Archive
+	// imageMounts has a bit for each mount slot of the archive: /bootstrap
+	// and /etc, which are never unmounted.
+	imageMounts uint16
 	// persistent is the volume the FAT32 filesystem service serves (ADR
 	// 0096). The VFS holds no filesystem code and no block endpoint for it.
 	persistent Remote
@@ -48,13 +51,56 @@ func (service *Service) MountBootstrap(archive []byte) bool {
 	if status != ramfs.StatusOK {
 		return false
 	}
-	return service.namespace.Mount([]byte(BootstrapPath), &service.image, root) == vfs.StatusOK
+	if service.namespace.Mount([]byte(BootstrapPath), &service.image, root) != vfs.StatusOK {
+		return false
+	}
+	service.imageMounts = 1 << service.mountIndex(BootstrapPath)
+	return service.mountEtc(root)
+}
+
+func (service *Service) mountIndex(path string) uint8 {
+	index, _, _ := service.namespace.Resolve([]byte(path))
+	return index
+}
+
+// onImage reports a path on a mount of the boot archive. The archive takes
+// no write, so a write open there is refused at once, as one below the
+// protected system directory is, rather than with the first write.
+func (service *Service) onImage(path []byte) bool {
+	index, _, status := service.namespace.Resolve(path)
+	return status == vfs.StatusOK && service.imageMounts&(1<<index) != 0
+}
+
+// mountEtc mounts the archive's etc directory at /etc, when it has one: the
+// static configuration a C library reads, such as resolv.conf and hosts.
+// The archive refuses every change, so /etc is read-only under both its
+// names, and it is there with or without a volume.
+func (service *Service) mountEtc(root ramfs.NodeID) bool {
+	name, _ := ramfs.MakeName([]byte(etcDirectory))
+	etc, status := service.image.OpenName(root, name)
+	if status == ramfs.StatusNotFound {
+		return true
+	}
+	if status != ramfs.StatusOK {
+		return false
+	}
+	if stat, status := service.image.Stat(etc); status != ramfs.StatusOK || stat.Kind != ramfs.KindDirectory {
+		return false
+	}
+	if service.namespace.Mount([]byte(EtcPath), &service.image, etc) != vfs.StatusOK {
+		return false
+	}
+	service.imageMounts |= 1 << service.mountIndex(EtcPath)
+	return true
 }
 
 const (
-	// archiveDirectory is the archive directory mounted at BootstrapPath.
+	// archiveDirectory is the archive directory mounted at BootstrapPath,
+	// and etcDirectory the directory inside it mounted at EtcPath.
 	archiveDirectory = "system"
 	BootstrapPath    = "/bootstrap"
+	etcDirectory     = "etc"
+	EtcPath          = "/etc"
 	// systemDirectory and appsDirectory are the volume directories
 	// published at SystemPath and AppsPath.
 	systemDirectory = "system"
@@ -290,8 +336,8 @@ func (service *Service) SetRAMFSClock(clock func() (ramfs.Timestamp, bool)) {
 // RAMFSUsage reports what the volatile root holds against its limits.
 func (service *Service) RAMFSUsage() ramfs.Usage { return service.fs.Usage() }
 
-// Init builds the volatile root with its /tmp and /run. /bootstrap, /system
-// and /apps are not created here: they are mount points, and the namespace
+// Init builds the volatile root with its /tmp and /run. /bootstrap, /etc,
+// /system and /apps are not created here: they are mount points, and the namespace
 // lists a mount in its parent directory without needing a placeholder to
 // stand in for it.
 func (service *Service) Init() bool {
@@ -304,7 +350,7 @@ func (service *Service) Init() bool {
 	// The mount points of the system are kept free while nothing is mounted
 	// there: a /system a client made in the volatile root is never mistaken
 	// for the installed one (ADR 0175).
-	for _, path := range [...]string{BootstrapPath, SystemPath, AppsPath} {
+	for _, path := range [...]string{BootstrapPath, SystemPath, AppsPath, EtcPath} {
 		if service.namespace.Reserve([]byte(path)) != vfs.StatusOK {
 			return false
 		}
@@ -419,6 +465,10 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 	}
 	switch request.Operation {
 	case vfs.OperationOpen:
+		if request.Rights&vfs.Write != 0 && service.onImage(request.Path) {
+			reply.Status = vfs.StatusPermissionDenied
+			break
+		}
 		reply.Handle, reply.Status = service.namespace.Open(owner, request.Path, request.Rights)
 	case vfs.OperationClose:
 		reply.Status = service.namespace.Close(owner, request.Handle)
@@ -473,6 +523,10 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 		switch {
 		case !valid:
 			reply.Status = vfs.StatusInvalidArgument
+		case len(request.Path) != 0 && service.onImage(request.Path):
+			// The archive keeps no times or attributes to change; this is
+			// the refusal a write open gets, which reads as read-only.
+			reply.Status = vfs.StatusPermissionDenied
 		case len(request.Path) == 0 && request.Handle != 0:
 			reply.Status = service.namespace.SetMetadataOpen(owner, request.Handle, change)
 		default:

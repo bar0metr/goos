@@ -5,6 +5,7 @@ package main
 import (
 	"goos/internal/logfmt"
 	"goos/kernel/kcall"
+	"goos/userspace/logpersist"
 	"goos/userspace/runtime/sys"
 	shellcmd "goos/userspace/shell"
 	terminal "goos/userspace/tty"
@@ -17,9 +18,13 @@ var (
 	logSelection [kcall.LogReadMax]uint8
 	logInterests [kcall.WaitAnyMaxObjects]sys.CursorInterest
 	logText      [logfmt.MaxText]byte
+	logStatus    [logpersist.MaxStatus]byte
 )
 
 func printLog(invocation shellcmd.Invocation) uint64 {
+	if shellcmd.IsLogStatus(invocation) {
+		return printLogStatus()
+	}
 	options, valid := shellcmd.ParseLog(invocation)
 	if !valid {
 		writeError("usage: " + shellcmd.LogUsage + "\n")
@@ -40,13 +45,30 @@ func printLog(invocation shellcmd.Invocation) uint64 {
 	return status
 }
 
+// printLogStatus prints the counters the log service last wrote: records
+// persisted and lost, write failures and rotations.
+func printLogStatus() uint64 {
+	size, complete := readWholeFile([]byte(shellcmd.LogStatusPath), logStatus[:])
+	if !complete {
+		writeError("log: no status in " + shellcmd.LogStatusPath + "; the log service writes it while persisting\n")
+		return 1
+	}
+	flushOutput()
+	if !writeStream(outputHandle, logStatus[:size], outputDeadline) {
+		writeError("log: output failed\n")
+		return 1
+	}
+	return 0
+}
+
 func readLogSnapshot(cursor uint64, snapshot bool) (sys.LogBatch, bool) {
 	if snapshot {
-		oldest, _, status := sys.LogBounds(logHandle)
+		oldest, total, status := sys.LogBounds(logHandle)
 		if status != kcall.StatusOK {
 			return sys.LogBatch{}, false
 		}
-		cursor = oldest
+		// The ring retains more than one batch; a snapshot shows the newest.
+		cursor = total - min(total-oldest, kcall.LogReadMax)
 	}
 	batch, status := sys.LogReadSequence(logHandle, cursor, &logSnapshot)
 	return batch, status == kcall.StatusOK

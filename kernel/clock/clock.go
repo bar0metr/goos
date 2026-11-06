@@ -3,8 +3,8 @@
 //
 // The legacy PIT divides a fixed 1.193182 MHz input and is independent of CPU
 // frequency, so the tick rate is a deliberate choice rather than a property of
-// the machine. The rate is selected at build time with the goos_hz250 or
-// goos_hz1000 tag (make HZ=250, make HZ=1000); without either tag it is 100 Hz.
+// the machine. The rate is selected at build time with the goos_hz100 or
+// goos_hz1000 tag (make HZ=100, make HZ=1000); without either tag it is 250 Hz.
 package clock
 
 const (

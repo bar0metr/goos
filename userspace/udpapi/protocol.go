@@ -1,4 +1,4 @@
-// Package udpapi defines GUDP1, the protocol between a program that uses UDP
+// Package udpapi defines GUDP, the protocol between a program that uses UDP
 // and the network service (ADR 0195).
 //
 // PID 1 gives a program a UDP session: one channel and two shared pools. The
@@ -13,7 +13,43 @@
 // Every operation except Release is a request answered by exactly one reply
 // with the request's correlation. A RecvFrom waits in the service until a
 // datagram arrives or its endpoint closes; each endpoint takes one waiting
-// RecvFrom at a time.
+// RecvFrom at a time. With FlagNoWait it answers ResultWouldBlock instead
+// of waiting.
+//
+// Version 2 adds the flags byte, OpReady, OpWaitReady, OpOption, Peek on
+// RecvFrom and ResultMessageSize for a datagram larger than its path
+// carries; a send is never truncated. A RecvFrom reply's Length is always
+// the whole datagram: the slot holds up to MaxPayload bytes, the most any
+// datagram can have.
+//
+// Request body, 24 bytes:
+//
+//	0      opcode
+//	1      slot
+//	2      flags    Flag* bits the opcode allows
+//	3      option   Option: Option* selector
+//	4..7   endpoint
+//	8..11  address  Bind, Connect, SendTo; Option MaxPayload: destination
+//	12..13 port
+//	14..15 length
+//	16..17 mask     WaitReady: the mask the client last saw
+//	18..23 reserved
+//
+// Reply body, 32 bytes:
+//
+//	0      opcode
+//	1      result
+//	2      slot
+//	3      reserved
+//	4..7   endpoint
+//	8..11  address
+//	12..13 port
+//	14..15 length
+//	16..19 local
+//	20..21 local port
+//	22..23 mask     Ready, WaitReady OK: Ready* bits
+//	24..27 value    Ready, WaitReady OK: next datagram length; Option OK: value
+//	28..31 count    Ready, WaitReady OK: datagrams queued
 package udpapi
 
 import (
@@ -23,9 +59,9 @@ import (
 
 const (
 	ProtocolID  = uint64(0x474e455455445031)
-	Version     = uint16(1)
-	RequestSize = 16
-	ReplySize   = 24
+	Version     = uint16(2)
+	RequestSize = 24
+	ReplySize   = 32
 
 	// MaxPayload is the largest datagram either way and the slot size. The
 	// service's max-payload setting may lower the limit it applies, never
@@ -41,11 +77,15 @@ const (
 
 	requestOpcode   = 0
 	requestSlot     = 1
-	requestReserved = 2
+	requestFlags    = 2
+	requestOption   = 3
 	requestEndpoint = 4
 	requestAddress  = 8
 	requestPort     = 12
 	requestLength   = 14
+	requestMask     = 16
+	requestRelease  = 18
+	requestReserved = 19
 
 	replyOpcode    = 0
 	replyResult    = 1
@@ -57,7 +97,9 @@ const (
 	replyLength    = 14
 	replyLocal     = 16
 	replyLocalPort = 20
-	replyTail      = 22
+	replyMask      = 22
+	replyValue     = 24
+	replyCount     = 28
 
 	addressSize = 4
 )
@@ -87,10 +129,18 @@ const (
 	// OpRelease returns RX Slot to the service. It is a notification and
 	// gets no reply.
 	OpRelease
-	// OpClose closes Endpoint. A RecvFrom waiting on it is answered first,
-	// with ResultClosed.
+	// OpClose closes Endpoint. A RecvFrom or WaitReady waiting on it is
+	// answered first, with ResultClosed.
 	OpClose
-	lastOpcode = OpClose
+	// OpReady answers at once with Endpoint's mask, the length of the next
+	// datagram and the number queued.
+	OpReady
+	// OpWaitReady answers when Endpoint's mask differs from Mask, at once
+	// if it already does. An endpoint holds one.
+	OpWaitReady
+	// OpOption reads the effective value Option selects.
+	OpOption
+	lastOpcode = OpOption
 )
 
 // Result is a GUDP1 result code.
@@ -107,10 +157,40 @@ const (
 	ResultReconfigured
 	ResultAddressInUse
 	ResultDriverFault
-	// ResultClosed answers a RecvFrom whose endpoint was closed while it
-	// waited.
+	// ResultClosed answers a RecvFrom or WaitReady whose endpoint was
+	// closed while it waited.
 	ResultClosed
-	lastResult = ResultClosed
+	// ResultWouldBlock answers a NoWait RecvFrom with nothing queued.
+	ResultWouldBlock
+	// ResultMessageSize answers a Send or SendTo larger than its path
+	// carries: max-payload, and the link MTU less 28 on the wire.
+	ResultMessageSize
+	lastResult = ResultMessageSize
+)
+
+// Flags select request behavior. Each opcode allows only its own.
+const (
+	// FlagNoWait: RecvFrom answers at once.
+	FlagNoWait uint8 = 1 << iota
+	// FlagPeek: RecvFrom copies the datagram and leaves it queued.
+	FlagPeek
+	// FlagReuseAddr: Bind with SO_REUSEADDR.
+	FlagReuseAddr
+)
+
+// Ready bits of a mask.
+const (
+	ReadyReadable uint16 = 1 << iota // a datagram is queued, perhaps empty
+	ReadyWritable                    // a send is not refused for lack of endpoint resources
+	ReadyAll      = ReadyWritable<<1 - 1
+)
+
+// Option selectors. OptionMaxPayload names a destination in Address and
+// reads the largest datagram the path to it carries.
+const (
+	OptionTTL uint8 = iota + 1
+	OptionMaxPayload
+	lastOption = OptionMaxPayload
 )
 
 // Request is one decoded request body. Which fields an opcode uses is fixed;
@@ -121,16 +201,25 @@ const (
 //	Connect:  Endpoint, Address and Port (both nonzero)
 //	Send:     Endpoint, Slot, Length
 //	SendTo:   Endpoint, Slot, Length, Address and Port (both nonzero)
-//	RecvFrom: Endpoint
+//	RecvFrom: Endpoint, Flags NoWait and Peek
 //	Release:  Slot
 //	Close:    Endpoint
+//	Ready:    Endpoint
+//	WaitReady: Endpoint, Mask
+//	Option:   Endpoint, Option, Address for OptionMaxPayload
 type Request struct {
 	Opcode   Opcode
 	Slot     uint8
+	Flags    uint8
+	Option   uint8
 	Endpoint uint32
 	Address  [addressSize]byte
 	Port     uint16
 	Length   uint16
+	Mask     uint16
+	// Release names RX slots the client returns before netd handles the
+	// request, as one Release each would.
+	Release uint8
 }
 
 // Reply is one decoded reply body:
@@ -140,6 +229,8 @@ type Request struct {
 //	Connect, OK:  Endpoint, Address, Port, Local, LocalPort
 //	Send, SendTo: Endpoint, Slot (the TX slot returned), for every result
 //	RecvFrom, OK: Endpoint, Slot, Address, Port, Length, Local
+//	Ready, WaitReady, OK: Endpoint, Mask, Value, Count
+//	Option, OK:   Endpoint, Value
 //	any other:    Endpoint, as the request named it, and nothing else
 type Reply struct {
 	Opcode    Opcode
@@ -151,12 +242,29 @@ type Reply struct {
 	Length    uint16
 	Local     [addressSize]byte
 	LocalPort uint16
+	Mask      uint16
+	Value     uint32
+	Count     uint32
 }
 
 var noAddress [addressSize]byte
 
+func allowedFlags(opcode Opcode) uint8 {
+	switch opcode {
+	case OpRecvFrom:
+		return FlagNoWait | FlagPeek
+	case OpBind:
+		return FlagReuseAddr
+	}
+	return 0
+}
+
 func validRequest(r *Request) bool {
 	none := r.Address == noAddress && r.Port == 0
+	if r.Flags&^allowedFlags(r.Opcode) != 0 || (r.Mask != 0 && r.Opcode != OpWaitReady) || (r.Option != 0) != (r.Opcode == OpOption) ||
+		r.Release != 0 && r.Opcode == OpRelease {
+		return false
+	}
 	switch r.Opcode {
 	case OpOpen:
 		return r.Endpoint == 0 && r.Slot == 0 && r.Length == 0 && none
@@ -168,8 +276,15 @@ func validRequest(r *Request) bool {
 		return r.Endpoint != 0 && r.Slot < TXSlots && r.Length <= MaxPayload && none
 	case OpSendTo:
 		return r.Endpoint != 0 && r.Slot < TXSlots && r.Length <= MaxPayload && r.Address != noAddress && r.Port != 0
-	case OpRecvFrom, OpClose:
+	case OpRecvFrom, OpClose, OpReady:
 		return r.Endpoint != 0 && r.Slot == 0 && r.Length == 0 && none
+	case OpWaitReady:
+		return r.Endpoint != 0 && r.Slot == 0 && r.Length == 0 && none && r.Mask&^ReadyAll == 0
+	case OpOption:
+		if r.Option == OptionMaxPayload {
+			return r.Endpoint != 0 && r.Slot == 0 && r.Length == 0 && r.Address != noAddress && r.Port == 0
+		}
+		return r.Endpoint != 0 && r.Slot == 0 && r.Length == 0 && none && r.Option <= lastOption
 	case OpRelease:
 		return r.Endpoint == 0 && r.Slot < RXSlots && r.Length == 0 && none
 	}
@@ -191,10 +306,14 @@ func EncodeRequest(r *Request, correlation uint64, out *ipc.Message) bool {
 	payload := out.Payload[:RequestSize]
 	payload[requestOpcode] = byte(r.Opcode)
 	payload[requestSlot] = r.Slot
+	payload[requestFlags] = r.Flags
+	payload[requestOption] = r.Option
 	binary.LittleEndian.PutUint32(payload[requestEndpoint:], r.Endpoint)
 	copy(payload[requestAddress:], r.Address[:])
 	binary.LittleEndian.PutUint16(payload[requestPort:], r.Port)
 	binary.LittleEndian.PutUint16(payload[requestLength:], r.Length)
+	binary.LittleEndian.PutUint16(payload[requestMask:], r.Mask)
+	payload[requestRelease] = r.Release
 	return true
 }
 
@@ -205,15 +324,19 @@ func DecodeRequest(in *ipc.Message, out *Request) (uint64, bool) {
 		return 0, false
 	}
 	payload := in.Payload[:RequestSize]
-	if !zero(payload[requestReserved:requestEndpoint]) {
+	if !zero(payload[requestReserved:RequestSize]) {
 		return 0, false
 	}
 	r := Request{
 		Opcode:   Opcode(payload[requestOpcode]),
 		Slot:     payload[requestSlot],
+		Flags:    payload[requestFlags],
+		Option:   payload[requestOption],
+		Mask:     binary.LittleEndian.Uint16(payload[requestMask:]),
 		Endpoint: binary.LittleEndian.Uint32(payload[requestEndpoint:]),
 		Port:     binary.LittleEndian.Uint16(payload[requestPort:]),
 		Length:   binary.LittleEndian.Uint16(payload[requestLength:]),
+		Release:  payload[requestRelease],
 	}
 	copy(r.Address[:], payload[requestAddress:])
 	if !validRequest(&r) {
@@ -236,26 +359,37 @@ func validReply(r *Reply) bool {
 	}
 	addressed := r.Address != noAddress || r.Port != 0
 	local := r.Local != noAddress || r.LocalPort != 0
+	readiness := r.Mask != 0 || r.Value != 0 || r.Count != 0
 	ok := r.Result == ResultOK
 	switch {
+	case readiness && (!ok || (r.Opcode != OpReady && r.Opcode != OpWaitReady && r.Opcode != OpOption && r.Opcode != OpRecvFrom)),
+		r.Result == ResultWouldBlock && r.Opcode != OpRecvFrom,
+		r.Result == ResultMessageSize && r.Opcode != OpSend && r.Opcode != OpSendTo:
+		return false
 	case r.Opcode == OpSend || r.Opcode == OpSendTo:
 		return r.Endpoint != 0 && r.Slot < TXSlots && !addressed && r.Length == 0 && !local
 	case !ok:
 		return (r.Endpoint != 0 || r.Opcode == OpOpen) && r.Slot == 0 && !addressed && r.Length == 0 && !local &&
-			(r.Result != ResultClosed || r.Opcode == OpRecvFrom)
+			(r.Result != ResultClosed || r.Opcode == OpRecvFrom || r.Opcode == OpWaitReady)
 	}
 	if r.Endpoint == 0 {
 		return false
 	}
 	switch r.Opcode {
 	case OpOpen, OpClose:
-		return r.Slot == 0 && !addressed && r.Length == 0 && !local
+		return r.Slot == 0 && !addressed && r.Length == 0 && !local && !readiness
+	case OpReady, OpWaitReady:
+		return r.Slot == 0 && !addressed && r.Length == 0 && !local && r.Mask&^ReadyAll == 0
+	case OpOption:
+		return r.Slot == 0 && !addressed && r.Length == 0 && !local && r.Mask == 0 && r.Count == 0
 	case OpBind:
-		return r.Slot == 0 && r.Port != 0 && r.Length == 0 && !local
+		return r.Slot == 0 && r.Port != 0 && r.Length == 0 && !local && !readiness
 	case OpConnect:
-		return r.Slot == 0 && r.Address != noAddress && r.Port != 0 && r.Length == 0 && r.Local != noAddress && r.LocalPort != 0
+		return r.Slot == 0 && r.Address != noAddress && r.Port != 0 && r.Length == 0 && r.Local != noAddress && r.LocalPort != 0 && !readiness
 	case OpRecvFrom:
-		return r.Slot < RXSlots && r.Address != noAddress && r.Length <= MaxPayload && r.Local != noAddress && r.LocalPort == 0
+		// The readiness is the endpoint's after the datagram left its queue.
+		return r.Slot < RXSlots && r.Address != noAddress && r.Length <= MaxPayload && r.Local != noAddress && r.LocalPort == 0 &&
+			r.Mask&^ReadyAll == 0
 	}
 	return false
 }
@@ -277,6 +411,9 @@ func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
 	binary.LittleEndian.PutUint16(payload[replyLength:], r.Length)
 	copy(payload[replyLocal:], r.Local[:])
 	binary.LittleEndian.PutUint16(payload[replyLocalPort:], r.LocalPort)
+	binary.LittleEndian.PutUint16(payload[replyMask:], r.Mask)
+	binary.LittleEndian.PutUint32(payload[replyValue:], r.Value)
+	binary.LittleEndian.PutUint32(payload[replyCount:], r.Count)
 	return true
 }
 
@@ -288,7 +425,7 @@ func DecodeReply(in *ipc.Message, out *Reply) (uint64, bool) {
 		return 0, false
 	}
 	payload := in.Payload[:ReplySize]
-	if payload[replyReserved] != 0 || !zero(payload[replyTail:ReplySize]) {
+	if payload[replyReserved] != 0 {
 		return 0, false
 	}
 	r := Reply{
@@ -299,6 +436,9 @@ func DecodeReply(in *ipc.Message, out *Reply) (uint64, bool) {
 		Port:      binary.LittleEndian.Uint16(payload[replyPort:]),
 		Length:    binary.LittleEndian.Uint16(payload[replyLength:]),
 		LocalPort: binary.LittleEndian.Uint16(payload[replyLocalPort:]),
+		Mask:      binary.LittleEndian.Uint16(payload[replyMask:]),
+		Value:     binary.LittleEndian.Uint32(payload[replyValue:]),
+		Count:     binary.LittleEndian.Uint32(payload[replyCount:]),
 	}
 	copy(r.Address[:], payload[replyAddress:])
 	copy(r.Local[:], payload[replyLocal:])
@@ -334,6 +474,10 @@ func (r Result) Text() string {
 		return "driver fault"
 	case ResultClosed:
 		return "closed"
+	case ResultWouldBlock:
+		return "would block"
+	case ResultMessageSize:
+		return "message too long"
 	}
 	return ""
 }

@@ -71,7 +71,9 @@ const (
 	FieldTCPRTOMin
 	FieldTCPRTOMax
 	FieldTCPTimeWait
-	lastField = FieldTCPTimeWait
+	FieldTCPMemoryBudget
+	FieldTCPOwnerMemoryBudget
+	lastField = FieldTCPOwnerMemoryBudget
 )
 
 // Result values are the GNETAPI1 wire values.
@@ -99,6 +101,9 @@ const (
 	ResultReset
 	ResultClosed
 	ResultEOF
+	// ResultMessageSize is a datagram larger than its path carries. GNETAPI
+	// never carries it.
+	ResultMessageSize
 )
 
 const (

@@ -196,15 +196,24 @@ memory in binary units.
 ## Log
 
 `log [-f] [-n N] [--level debug|info|warn|error] [--component NAME]` reads the
-64-record system ring. Options may be ordered freely but may occur only once.
+2048-record system ring. Options may be ordered freely but may occur only once.
 `--level` and `--component` are exact structured-field filters, not text
 searches; a component name is 1 through 16 ASCII letters, digits, hyphens,
 underscores, or dots. `-n N` is a decimal count, clamped to the ring capacity.
-Without `-n`, `log` selects all retained matching records. It selects the newest
-matches from one snapshot, then emits those selected records in chronological
-order.
+Without `-n`, `log` prints all retained matching records. Up to 64, it selects
+the newest matches from one snapshot; a larger count walks the ring from the
+oldest record of the newest `N` to the snapshot's end, 64 records per read, and
+prints a gap line for records the ring overwrote during the walk. Either way
+the output is in chronological order.
+
+`log status` prints `/state/system.log.status`, the counters the log service
+rewrites at its five-second maintenance round when they changed: records appended, overwritten,
+persisted and lost, write failures, rotations and refused rotations, repairs,
+and the rotation policy in force. The file is missing until the service first
+writes it, and goes stale while persistence is off or storage fails.
 
 ```text
+goos> log status
 goos> log --component remoted --level warn -n 20
 goos> log --component remoted -f
 goos> log --component remoted
@@ -489,6 +498,25 @@ listen backlog. Reads print `N bytes` and printable contents, then `eof` after
 a FIN. Errors use `tcp: OPERATION: REASON`, including `connection refused`,
 `reset`, `address in use` and `timeout`. The command receives only `tcp`,
 `tcp-tx` and `tcp-rx`; it has no direct network stack or device authority.
+
+`netbench [MiB]` times its own TCP and UDP sessions over 127.0.0.1: a stream
+of MiB (1 to 4096, default 32), one-byte request-reply, connect and close
+with each step timed, 64-byte UDP request-reply, and a WaitReady woken by a
+write. It prints `bench native-NAME key=value` lines and `bench native ok`.
+`make bench-pve-linux-network` sets them beside the Linux socket numbers.
+
+`netbench3 [MiB]` measures the same TCP steps on a GTCP 3 session, the
+protocol `linuxsockd` speaks: 16 KiB slots, four writes in flight that each
+name their stream offset, and four reads parked on the receiving end. Its
+lines start with `native-v3-`; those of `netbench` start with `native-v2-`,
+apart from the UDP line, which only `netbench` prints.
+
+`netbench4 [MiB]` runs the stream, a one-byte request-reply and a
+connect-accept-close loop on a GTCP 4 session (ADR 0214), where stream data
+moves through shared rings. The loop dials with one `OpOpenConnect`, takes
+children netd accepted ahead, and closes without waiting; it ends once netd
+reported every connection gone. Its lines start with `native-v4-` and add the
+channel messages and doorbells each step cost, times 100.
 
 The validation build's `fault net-driver` kills the network driver once;
 PID 1 starts a new one with a new binding, and storage and the shell carry on.

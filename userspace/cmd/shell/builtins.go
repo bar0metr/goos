@@ -45,8 +45,12 @@ func injectFault(target []byte) {
 		service = execproto.FaultRemoteSigner
 	} else if argumentIs(target, "remote-worker") {
 		service = execproto.FaultRemoteWorker
+	} else if argumentIs(target, "netd") {
+		service = execproto.FaultNetService
+	} else if argumentIs(target, "linuxsockd") {
+		service = execproto.FaultLinuxSockets
 	} else if !argumentIs(target, "tty") {
-		writeError("fault: tty, shell, fat32, vfs, config, log, block, driver, storage, net-driver, remote-signer, remote-worker or kernel-stack\n")
+		writeError("fault: tty, shell, fat32, vfs, config, log, block, driver, storage, net-driver, netd, linuxsockd, remote-signer, remote-worker or kernel-stack\n")
 		return
 	}
 	reply, ok := controlExchange(execproto.ControlFault, service)

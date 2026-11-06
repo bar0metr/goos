@@ -12,6 +12,9 @@ import (
 // ThreadCreate starts a thread of the calling process at the runtime's
 // thread trampoline with argument, and returns its ID and slot.
 func ThreadCreate(argument uintptr) (uint64, uint64, kcall.Status) {
+	if !reserveThreadScratch() {
+		return 0, 0, kcall.StatusResourceExhausted
+	}
 	w := current()
 	defer tls.Unpin()
 	w.threadWire = [2]uint64{}
@@ -83,6 +86,9 @@ func ThreadResume() kcall.Status { return status(threadResume()) }
 // WorkerCreate starts a thread at the goroutine runtime's worker entry with
 // argument and returns its ID and slot (ADR 0204).
 func WorkerCreate(argument uintptr) (uint64, uint64, kcall.Status) {
+	if !reserveThreadScratch() {
+		return 0, 0, kcall.StatusResourceExhausted
+	}
 	w := current()
 	defer tls.Unpin()
 	w.threadWire = [2]uint64{}

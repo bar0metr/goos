@@ -154,7 +154,7 @@ func (w *world) pump() {
 			w.t.Fatal("client could not send")
 		}
 		if len(w.toService) == 0 && len(w.toClient) == 0 {
-			if fault := w.session.Deliver(w.stack, replies{w, &w.toClient}); fault != udpserve.FaultNone {
+			if fault, _ := w.session.Deliver(w.stack, replies{w, &w.toClient}); fault != udpserve.FaultNone {
 				w.t.Fatal(fault)
 			}
 			if len(w.toClient) == 0 {

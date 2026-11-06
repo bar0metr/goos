@@ -29,7 +29,7 @@ const (
 	// limit: one per process that can run, since only PID 1 creates them and
 	// each process started from a file holds one. A record takes a page when
 	// the object is reserved and returns it when the object goes (ADR 0111).
-	MaxObjects = 64
+	MaxObjects = 256
 	// MaxWrite bounds the bytes one Write copies.
 	MaxWrite = kcall.MaxExecutableWrite
 

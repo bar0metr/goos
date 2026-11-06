@@ -32,8 +32,14 @@ func TestLogOptionsAndExactFilters(t *testing.T) {
 		}
 	}
 	options, _ := parseLogText(t, "log -n 999 --level info --component test")
-	if options.Limit != kcall.LogReadMax || options.Level != logfmt.Info {
-		t.Fatal("count clamp or level")
+	if options.Limit != 999 || options.Level != logfmt.Info {
+		t.Fatal("count or level")
+	}
+	if clamped, _ := parseLogText(t, "log -n 99999"); clamped.Limit != kcall.LogRingCapacity {
+		t.Fatalf("count clamp: %d", clamped.Limit)
+	}
+	if plain, _ := parseLogText(t, "log"); plain.Limit != kcall.LogRingCapacity {
+		t.Fatalf("default count: %d", plain.Limit)
 	}
 	for _, level := range []logfmt.Level{logfmt.Debug, logfmt.Info, logfmt.Warn, logfmt.Error} {
 		if options.Matches(logfmt.Record{Level: level, Component: []byte("test")}) != (level == logfmt.Info) {
@@ -238,5 +244,62 @@ func TestFollowInitialSnapshotAndCursorCrossSequenceWrap(t *testing.T) {
 		if written[i] != expected[i] {
 			t.Fatalf("wrapped chronology %v", written)
 		}
+	}
+}
+
+// retainedRing is a fake ring holding records [oldest, total) whose reads
+// return at most kcall.LogReadMax records, like LogReadSequence.
+type retainedRing struct {
+	t             *testing.T
+	wire          [kcall.LogReadSize]byte
+	oldest, total uint64
+	overwriteAt   int
+	reads         int
+}
+
+func (ring *retainedRing) read(cursor uint64, snapshot bool) (sys.LogBatch, bool) {
+	ring.reads++
+	if ring.overwriteAt != 0 && ring.reads == ring.overwriteAt {
+		ring.oldest += 100
+	}
+	if snapshot {
+		cursor = ring.total - min(ring.total-ring.oldest, kcall.LogReadMax)
+	}
+	first := max(cursor, ring.oldest)
+	return logFixture(ring.t, &ring.wire, ring.oldest, min(ring.total, first+kcall.LogReadMax), cursor), true
+}
+
+func TestRunLogPrintsTheWholeRetainedRing(t *testing.T) {
+	ring := &retainedRing{t: t, oldest: 100, total: 400}
+	var seen []uint64
+	var selected [kcall.LogReadMax]uint8
+	hooks := LogHooks{Read: ring.read, Write: func(record logfmt.Record) bool {
+		seen = append(seen, record.Process)
+		return true
+	}, Gap: func(uint64) bool { t.Fatal("gap without overwrite"); return false }}
+	if status := RunLog(LogOptions{Limit: kcall.LogRingCapacity}, hooks, &selected); status != 0 {
+		t.Fatalf("status %d", status)
+	}
+	if len(seen) != 300 || seen[0] != 100 || seen[299] != 399 {
+		t.Fatalf("printed %d records", len(seen))
+	}
+	seen = seen[:0]
+	if status := RunLog(LogOptions{Limit: 130}, hooks, &selected); status != 0 || len(seen) != 130 || seen[0] != 270 {
+		t.Fatalf("limit 130: status %d, %d records", status, len(seen))
+	}
+}
+
+func TestRunLogReportsRecordsOverwrittenDuringTheWalk(t *testing.T) {
+	ring := &retainedRing{t: t, oldest: 0, total: 200, overwriteAt: 3}
+	lost := uint64(0)
+	printed := 0
+	var selected [kcall.LogReadMax]uint8
+	hooks := LogHooks{Read: ring.read, Write: func(logfmt.Record) bool { printed++; return true },
+		Gap: func(count uint64) bool { lost += count; return true }}
+	if status := RunLog(LogOptions{Limit: kcall.LogRingCapacity}, hooks, &selected); status != 0 {
+		t.Fatalf("status %d", status)
+	}
+	if printed+int(lost) != 200 || lost == 0 {
+		t.Fatalf("printed %d, lost %d", printed, lost)
 	}
 }

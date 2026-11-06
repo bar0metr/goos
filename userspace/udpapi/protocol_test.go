@@ -35,6 +35,12 @@ func validRequests() []Request {
 		{Opcode: OpRecvFrom, Endpoint: 0x101},
 		{Opcode: OpRelease, Slot: RXSlots - 1},
 		{Opcode: OpClose, Endpoint: 0x101},
+		{Opcode: OpBind, Endpoint: 0x101, Port: 9000, Flags: FlagReuseAddr},
+		{Opcode: OpRecvFrom, Endpoint: 0x101, Flags: FlagNoWait | FlagPeek},
+		{Opcode: OpReady, Endpoint: 0x101},
+		{Opcode: OpWaitReady, Endpoint: 0x101, Mask: ReadyWritable},
+		{Opcode: OpOption, Endpoint: 0x101, Option: OptionTTL},
+		{Opcode: OpOption, Endpoint: 0x101, Option: OptionMaxPayload, Address: peer},
 	}
 }
 
@@ -75,6 +81,18 @@ func TestRequestRefusesUnusedFields(t *testing.T) {
 		{Opcode: OpRelease, Slot: RXSlots},
 		{Opcode: OpRelease, Endpoint: 1},
 		{Opcode: OpClose, Endpoint: 1, Slot: 1},
+		{Opcode: OpSend, Endpoint: 1, Flags: FlagNoWait},
+		{Opcode: OpBind, Endpoint: 1, Flags: FlagPeek},
+		{Opcode: OpRecvFrom, Endpoint: 1, Flags: FlagReuseAddr},
+		{Opcode: OpRecvFrom, Endpoint: 1, Flags: 1 << 6},
+		{Opcode: OpReady, Endpoint: 1, Mask: 1},
+		{Opcode: OpReady},
+		{Opcode: OpWaitReady, Endpoint: 1, Mask: ReadyAll + 1},
+		{Opcode: OpOption, Endpoint: 1},
+		{Opcode: OpOption, Endpoint: 1, Option: lastOption + 1},
+		{Opcode: OpOption, Endpoint: 1, Option: OptionMaxPayload},
+		{Opcode: OpOption, Endpoint: 1, Option: OptionTTL, Address: peer},
+		{Opcode: OpClose, Endpoint: 1, Option: OptionTTL},
 	} {
 		var message ipc.Message
 		if EncodeRequest(&request, 1, &message) || EncodeRequest(&request, 0, &message) {
@@ -103,7 +121,8 @@ func TestRequestEnvelope(t *testing.T) {
 		"size":          func(m *ipc.Message) { m.PayloadSize++ },
 		"handles":       func(m *ipc.Message) { m.HandleCount, m.Handles[0] = 1, 5 },
 		"reserved":      func(m *ipc.Message) { m.Payload[requestReserved] = 1 },
-		"reserved high": func(m *ipc.Message) { m.Payload[requestReserved+1] = 1 },
+		"reserved high": func(m *ipc.Message) { m.Payload[RequestSize-1] = 1 },
+		"old size":      func(m *ipc.Message) { m.PayloadSize = 16 },
 	} {
 		copied := message
 		mutate(&copied)
@@ -130,8 +149,15 @@ func validReplies() []Reply {
 		{Opcode: OpSend, Endpoint: 0x101, Slot: 2},
 		{Opcode: OpSendTo, Endpoint: 0x101, Slot: 3, Result: ResultNoRoute},
 		{Opcode: OpRecvFrom, Endpoint: 0x101, Slot: 7, Address: peer, Port: 53, Length: 0, Local: local},
+		{Opcode: OpRecvFrom, Endpoint: 0x101, Slot: 6, Address: peer, Port: 53, Length: 9, Local: local, Mask: ReadyAll, Value: 12, Count: 2},
 		{Opcode: OpRecvFrom, Endpoint: 0x101, Result: ResultClosed},
 		{Opcode: OpClose, Endpoint: 0x101},
+		{Opcode: OpRecvFrom, Endpoint: 0x101, Result: ResultWouldBlock},
+		{Opcode: OpSendTo, Endpoint: 0x101, Slot: 1, Result: ResultMessageSize},
+		{Opcode: OpReady, Endpoint: 0x101, Mask: ReadyReadable | ReadyWritable, Value: 4096, Count: 16},
+		{Opcode: OpWaitReady, Endpoint: 0x101, Mask: ReadyWritable},
+		{Opcode: OpWaitReady, Endpoint: 0x101, Result: ResultClosed},
+		{Opcode: OpOption, Endpoint: 0x101, Value: 1472},
 	}
 }
 
@@ -165,6 +191,15 @@ func TestReplyRefusesUnusedFields(t *testing.T) {
 		{Opcode: OpRecvFrom, Endpoint: 1, Result: ResultClosed, Slot: 1},
 		{Opcode: OpClose, Endpoint: 1, Result: ResultClosed},
 		{Opcode: OpClose, Endpoint: 1, Result: lastResult + 1},
+		{Opcode: OpSend, Endpoint: 1, Result: ResultWouldBlock},
+		{Opcode: OpRecvFrom, Endpoint: 1, Result: ResultMessageSize},
+		{Opcode: OpReady, Endpoint: 1, Mask: ReadyAll + 1},
+		{Opcode: OpReady, Endpoint: 1, Result: ResultBusy, Mask: 1},
+		{Opcode: OpOption, Endpoint: 1, Count: 1},
+		{Opcode: OpRecvFrom, Endpoint: 1, Address: peer, Local: peer, Mask: ReadyAll + 1},
+		{Opcode: OpRecvFrom, Endpoint: 1, Result: ResultWouldBlock, Value: 1},
+		{Opcode: OpClose, Endpoint: 1, Mask: 1},
+		{Opcode: OpReady, Endpoint: 1, Address: peer},
 	} {
 		var message ipc.Message
 		if EncodeReply(&reply, 1, &message) {
@@ -177,10 +212,15 @@ func TestReplyRefusesUnusedFields(t *testing.T) {
 		t.Fatal("reply without a correlation")
 	}
 	EncodeReply(&good, 5, &message)
-	message.Payload[replyTail] = 1
+	message.Payload[replyReserved] = 1
 	var decoded Reply
 	if _, ok := DecodeReply(&message, &decoded); ok {
-		t.Fatal("nonzero tail accepted")
+		t.Fatal("nonzero reserved byte accepted")
+	}
+	EncodeReply(&good, 5, &message)
+	message.Version = 1
+	if _, ok := DecodeReply(&message, &decoded); ok {
+		t.Fatal("version 1 reply accepted")
 	}
 }
 
@@ -216,5 +256,24 @@ func TestPoolGeometry(t *testing.T) {
 	}
 	if Offset(RXSlots-1)+SlotSize != RXPoolPages*pageSize {
 		t.Fatal("last slot past the pool")
+	}
+}
+
+func TestRequestReturnsRXSlots(t *testing.T) {
+	request := Request{Opcode: OpRecvFrom, Endpoint: 3, Release: 0x05}
+	var message ipc.Message
+	if !EncodeRequest(&request, 7, &message) {
+		t.Fatal("a read returning slots refused")
+	}
+	var decoded Request
+	if _, ok := DecodeRequest(&message, &decoded); !ok || decoded != request {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	message.Payload[requestReserved] = 1
+	if _, ok := DecodeRequest(&message, &decoded); ok {
+		t.Fatal("a reserved byte decoded")
+	}
+	if EncodeRequest(&Request{Opcode: OpRelease, Slot: 1, Release: 1}, 0, &message) {
+		t.Fatal("a Release that returns more slots encoded")
 	}
 }

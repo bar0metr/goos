@@ -49,31 +49,45 @@ type cpuScratch struct {
 	imageWire            [16]byte
 	// linuxStackRandom holds the AT_RANDOM bytes of the launch in progress. The
 	// launch clears it once the stack image has its copy.
-	linuxStackRandom    [linuxabi.RandomSize]byte
-	linuxExecPointer    [8]byte
-	linuxStat           [linuxcompat.StatSize]byte
-	linuxStatx          [linuxcompat.StatxSize]byte
-	linuxDirent         [linuxcompat.MaxDirentSize]byte
-	linuxTerminator     [1]byte
-	linuxFutexWord      [4]byte
-	linuxFutexTimeout   [linuxcompat.TimespecSize]byte
-	linuxFSBaseResult   [8]byte
-	linuxTimes          [32]byte
-	linuxPipeWire       [8]byte
-	linuxPollWire       [linuxcompat.LinuxMaxPollFD * linuxcompat.PollFDSize]byte
-	linuxPollEntries    [linuxcompat.LinuxMaxPollFD]kernelwait.Entry
-	linuxFamilyRoots    [linuxcompat.LinuxFamilyMaxProcesses]uint64
-	linuxSignalFrame    [linuxcompat.SignalFrameSize]byte
-	linuxSignalUContext [linuxcompat.UContextSize]byte
-	linuxSignalFPU      [linuxcompat.FPUStateSize]byte
-	linuxHandler        linuxCallHandler
-	linuxIOBuffer       [stream.AtomicWrite]byte
-	linuxTerminal       linuxTerminalScratch
-	linuxIOVecWire      [linuxcompat.MaxIOVec * linuxabi.IOVecSize]byte
-	linuxProbe          [1]byte
-	linuxTimespec       [linuxcompat.TimespecSize]byte
-	linuxUname          [linuxcompat.UnameSize]byte
-	linuxRlimit         [linuxcompat.RlimitSize]byte
+	linuxStackRandom  [linuxabi.RandomSize]byte
+	linuxExecPointer  [8]byte
+	linuxStat         [linuxcompat.StatSize]byte
+	linuxStatx        [linuxcompat.StatxSize]byte
+	linuxDirent       [linuxcompat.MaxDirentSize]byte
+	linuxTerminator   [1]byte
+	linuxFutexWord    [4]byte
+	linuxFutexTimeout [linuxcompat.TimespecSize]byte
+	linuxFSBaseResult [8]byte
+	linuxTimes        [32]byte
+	linuxPipeWire     [8]byte
+	// linuxPollWire holds one window of a poll array, and linuxPollEntries
+	// the native waits a sleeping poll or select names, as many as one wait
+	// may.
+	linuxPollWire    [linuxcompat.PollWindow * linuxcompat.PollFDSize]byte
+	linuxPollEntries [kernelwait.MaxObjects]kernelwait.Entry
+	// linuxPollEpochs holds, for a socket entry of linuxPollEntries, the
+	// socket's wake epoch when the scan looked at it.
+	linuxPollEpochs [kernelwait.MaxObjects]uint32
+	// linuxSelectWire holds one window of the read, write, and exceptional
+	// fd_sets of a select, and linuxSelectSets the window of the sets it
+	// asked about and then of the sets it reports.
+	linuxSelectWire      [3 * linuxcompat.FDSetSize]byte
+	linuxSelectSets      [6]linuxcompat.FDSet
+	linuxSelectArguments [linuxcompat.SelectArgumentsSize]byte
+	linuxFamilyRoots     [linuxcompat.LinuxFamilyMaxProcesses]uint64
+	linuxSignalFrame     [linuxcompat.SignalFrameSize]byte
+	linuxSignalUContext  [linuxcompat.UContextSize]byte
+	linuxSignalFPU       [linuxcompat.FPUStateSize]byte
+	linuxHandler         linuxCallHandler
+	linuxIOBuffer        [stream.AtomicWrite]byte
+	linuxTerminal        linuxTerminalScratch
+	linuxSocket          linuxSocketScratch
+	linuxSocketTransfer  socketTransfer
+	linuxIOVecWire       [linuxcompat.MaxIOVec * linuxabi.IOVecSize]byte
+	linuxProbe           [1]byte
+	linuxTimespec        [linuxcompat.TimespecSize]byte
+	linuxUname           [linuxcompat.UnameSize]byte
+	linuxRlimit          [linuxcompat.RlimitSize]byte
 	// linuxSignalAction and linuxSignalPrevious hold the new and the old
 	// disposition of one rt_sigaction call.
 	linuxSignalAction   [linuxcompat.SignalActionSize]byte
@@ -117,7 +131,7 @@ type cpuScratch struct {
 	logFields       [logfmt.MaxFields]byte
 	logGrant        [logfmt.MaxFields]byte
 	logCopy         klog.Copy
-	logReadCopies   [klog.Capacity]klog.Copy
+	logReadCopies   [kcall.LogReadMax]klog.Copy
 	logReadWire     [kcall.LogReadSize]byte
 	kernelCallData  [kcall.MaxConsoleWrite]byte
 	ipcWireData     [ipc.WireMaxSize]byte
@@ -162,6 +176,9 @@ type cpuScratch struct {
 	linuxCall     heldLocks
 	peerWanted    process.ID
 	streamsWanted bool
+	// linuxWiden: a Linux call under linuxSockets found it needs
+	// linuxFiles and changed nothing.
+	linuxWiden bool
 	// call names the call the processor runs, for a panic report: 'n' and
 	// the native operation, 'l' and the Linux number, or zero.
 	callKind   byte

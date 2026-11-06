@@ -9,11 +9,14 @@ import (
 
 const (
 	ProtocolID = uint64(0x474e455441504931)
-	// Version 4 adds a separate bounded TCP diagnostics reply. A
-	// message of an older version is not this protocol and fails decoding.
-	Version          = uint16(4)
+	// Version 4 adds a separate bounded TCP diagnostics reply, version 5
+	// its GTCP message counters, version 6 OpTCPDump, version 7 wider
+	// limits: TCP and UDP endpoints and the backlog in 16 bits, buffers in
+	// 32, version 8 the TCP capacity block and a 256-byte reply. A message
+	// of an older version is not this protocol and fails decoding.
+	Version          = uint16(8)
 	RequestSize      = 24
-	ReplySize        = 248
+	ReplySize        = 256
 	MaxServers       = 4
 	MinEchoTimeoutMS = 100
 	MaxEchoTimeoutMS = 5000
@@ -58,19 +61,34 @@ const (
 	replyPortMax   = 212
 	replyPayload   = 214
 	replyQueue     = 216
-	replyMaxEP     = 217
+	// replyReserved1 held max-endpoints while it fit a byte; it stays zero.
+	replyReserved1 = 217
 	replySessionEP = 218
 	replyServerN   = 219
-	replyReserved2 = 220
+	replyMaxEP     = 220
+	replyReserved2 = 222
 	replyServerGen = 224
 	replyServers   = 232
+	replyStatusEnd = replyServers + addressSize*MaxServers
+
+	// replyTCPSessions holds the session counts and limits, two bytes per
+	// kind; the status reply's state, mode and address use these bytes.
+	replyTCPSessions = 2
 
 	replyTCPCounters    = 8
 	replyTCPEndpoints   = 80
 	replyTCPListeners   = 82
 	replyTCPConnections = 84
 	replyTCPStates      = 88
-	replyTCPLimits      = 120
+	// replyTCPSessionEP follows the state counts; the limits block holds
+	// the wider limits.
+	replyTCPSessionEP = 116
+	replyTCPLimits    = 120
+	replyTCPMessages  = 152
+	// replyTCPCapacity is the TCPCapacity block: six 64-bit values, three
+	// 32-bit and three 16-bit.
+	replyTCPCapacity    = 184
+	replyTCPCapacityEnd = replyTCPCapacity + 66
 
 	// flagRateLimited is the only flag: the next address claim waits for
 	// the conflict rate limit.
@@ -79,6 +97,8 @@ const (
 	udpCounterCount = 7
 	tcpCounterCount = 9
 	tcpStateCount   = 14
+	// gtcpCounterCount: requests and replies of GTCP 2, then of GTCP 3.
+	gtcpCounterCount = 4
 
 	addressSize = 4
 	macSize     = 6
@@ -98,7 +118,11 @@ const (
 	OpServers
 	// OpTCPStatus returns transport counters, state counts, and active limits.
 	OpTCPStatus
-	lastOpcode = OpTCPStatus
+	// OpTCPDump has the service write every TCP endpoint's transport state
+	// to its log, for a stuck connection's diagnosis. The reply carries
+	// only the result.
+	OpTCPDump
+	lastOpcode = OpTCPDump
 )
 
 type Result uint8
@@ -181,7 +205,9 @@ const (
 	FieldTCPRTOMin
 	FieldTCPRTOMax
 	FieldTCPTimeWait
-	lastField = FieldTCPTimeWait
+	FieldTCPMemoryBudget
+	FieldTCPOwnerMemoryBudget
+	lastField = FieldTCPOwnerMemoryBudget
 )
 
 type Link uint8
@@ -269,7 +295,7 @@ type Reply struct {
 	UDPEphemeralMax     uint16
 	UDPMaxPayload       uint16
 	UDPReceiveQueue     uint8
-	UDPMaxEndpoints     uint8
+	UDPMaxEndpoints     uint16
 	UDPSessionEndpoints uint8
 	// ServerCount, Servers and Generation answer Servers.
 	ServerCount uint8
@@ -281,9 +307,101 @@ type Reply struct {
 	TCPEndpoints, TCPListeners, TCPConnections                     uint16
 	TCPStates                                                      [tcpStateCount]uint16
 	TCPEphemeralMin, TCPEphemeralMax                               uint16
-	TCPMaxEndpoints, TCPSessionEndpoints, TCPListenBacklog         uint8
-	TCPSendBuffer, TCPReceiveBuffer                                uint16
+	TCPMaxEndpoints, TCPListenBacklog                              uint16
+	TCPSessionEndpoints                                            uint8
+	TCPSendBuffer, TCPReceiveBuffer                                uint32
 	TCPConnectTimeoutMS, TCPRTOMinMS, TCPRTOMaxMS, TCPTimeWaitMS   uint32
+	// GTCP2Requests and the rest count the client messages netd decoded and
+	// the replies it sent, per GTCP version, over every session.
+	GTCP2Requests, GTCP2Replies, GTCP3Requests, GTCP3Replies uint64
+	// Capacity answers OpTCPStatus only.
+	Capacity TCPCapacity
+}
+
+// TCPCapacity is how much of each TCP and session limit is in use. A
+// lowered budget takes nothing back, so a use can exceed its budget until
+// connections close.
+type TCPCapacity struct {
+	// MemoryBytes is the ring bytes charged against MemoryBudget, and per
+	// session against OwnerMemoryBudget.
+	MemoryBytes                     uint64
+	MemoryBudget, OwnerMemoryBudget uint32
+	// TimeWait counts tombstones against TimeWaitBudget, and per session
+	// against OwnerTimeWaitBudget. TimeWaitHeld counts connections that
+	// stayed endpoints because no tombstone was free.
+	TimeWait, TimeWaitBudget, OwnerTimeWaitBudget uint16
+	TimeWaitHeld                                  uint64
+	// DropMemory counts handshakes and segments refused for want of
+	// memory, DropBacklog SYNs a full listener dropped, MemoryCapped ring
+	// growths the budgets cut short.
+	DropMemory, DropBacklog, MemoryCapped uint64
+	// LookupProbes counts index entries received segments looked at;
+	// MaxSegmentProbes is the most one segment needed.
+	LookupProbes     uint64
+	MaxSegmentProbes uint32
+	// The command, UDP and TCP sessions netd serves, and how many of each
+	// it can serve.
+	CommandSessions, CommandSessionLimit uint8
+	UDPSessions, UDPSessionLimit         uint8
+	TCPSessions, TCPSessionLimit         uint8
+}
+
+func (c *TCPCapacity) wide() [6]*uint64 {
+	return [6]*uint64{&c.MemoryBytes, &c.DropMemory, &c.DropBacklog, &c.MemoryCapped, &c.LookupProbes, &c.TimeWaitHeld}
+}
+
+func (c *TCPCapacity) words() [3]*uint32 {
+	return [3]*uint32{&c.MemoryBudget, &c.OwnerMemoryBudget, &c.MaxSegmentProbes}
+}
+
+func (c *TCPCapacity) halves() [3]*uint16 {
+	return [3]*uint16{&c.TimeWait, &c.TimeWaitBudget, &c.OwnerTimeWaitBudget}
+}
+
+func (c *TCPCapacity) sessions() [6]*uint8 {
+	return [6]*uint8{&c.CommandSessions, &c.CommandSessionLimit, &c.UDPSessions, &c.UDPSessionLimit, &c.TCPSessions, &c.TCPSessionLimit}
+}
+
+func (c *TCPCapacity) encode(payload []byte) {
+	for index, value := range c.sessions() {
+		payload[replyTCPSessions+index] = *value
+	}
+	offset := replyTCPCapacity
+	for _, value := range c.wide() {
+		binary.LittleEndian.PutUint64(payload[offset:], *value)
+		offset += 8
+	}
+	for _, value := range c.words() {
+		binary.LittleEndian.PutUint32(payload[offset:], *value)
+		offset += 4
+	}
+	for _, value := range c.halves() {
+		binary.LittleEndian.PutUint16(payload[offset:], *value)
+		offset += 2
+	}
+}
+
+func (c *TCPCapacity) decode(payload []byte) {
+	for index, value := range c.sessions() {
+		*value = payload[replyTCPSessions+index]
+	}
+	offset := replyTCPCapacity
+	for _, value := range c.wide() {
+		*value = binary.LittleEndian.Uint64(payload[offset:])
+		offset += 8
+	}
+	for _, value := range c.words() {
+		*value = binary.LittleEndian.Uint32(payload[offset:])
+		offset += 4
+	}
+	for _, value := range c.halves() {
+		*value = binary.LittleEndian.Uint16(payload[offset:])
+		offset += 2
+	}
+}
+
+func (c *TCPCapacity) valid() bool {
+	return c.CommandSessions <= c.CommandSessionLimit && c.UDPSessions <= c.UDPSessionLimit && c.TCPSessions <= c.TCPSessionLimit
 }
 
 func (r *Reply) udpCounters() [udpCounterCount]*uint64 {
@@ -296,6 +414,10 @@ func (r *Reply) tcpCounters() [tcpCounterCount]*uint64 {
 		&r.TCPDropChecksum, &r.TCPDropNoTCB, &r.TCPDropWindow, &r.TCPDropMalformed}
 }
 
+func (r *Reply) gtcpCounters() [gtcpCounterCount]*uint64 {
+	return [gtcpCounterCount]*uint64{&r.GTCP2Requests, &r.GTCP2Replies, &r.GTCP3Requests, &r.GTCP3Replies}
+}
+
 func (r *Reply) tcpEmpty() bool {
 	copy := *r
 	copy.TCPRX, copy.TCPTX, copy.TCPRetransmits, copy.TCPRXReset, copy.TCPTXReset = 0, 0, 0, 0, 0
@@ -306,6 +428,8 @@ func (r *Reply) tcpEmpty() bool {
 	copy.TCPMaxEndpoints, copy.TCPSessionEndpoints, copy.TCPListenBacklog = 0, 0, 0
 	copy.TCPSendBuffer, copy.TCPReceiveBuffer = 0, 0
 	copy.TCPConnectTimeoutMS, copy.TCPRTOMinMS, copy.TCPRTOMaxMS, copy.TCPTimeWaitMS = 0, 0, 0, 0
+	copy.GTCP2Requests, copy.GTCP2Replies, copy.GTCP3Requests, copy.GTCP3Replies = 0, 0, 0, 0
+	copy.Capacity = TCPCapacity{}
 	return copy == *r
 }
 
@@ -374,7 +498,7 @@ func requestEnvelope(in *ipc.Message) bool {
 
 func validRequest(r *Request) bool {
 	switch r.Opcode {
-	case OpStatus, OpReload, OpTCPStatus:
+	case OpStatus, OpReload, OpTCPStatus, OpTCPDump:
 		return r.Destination == [addressSize]byte{} && r.Sequence == 0 && r.TimeoutMS == 0 && r.Generation == 0
 	case OpEcho:
 		return r.Destination != [addressSize]byte{} && r.TimeoutMS >= MinEchoTimeoutMS && r.TimeoutMS <= MaxEchoTimeoutMS &&
@@ -408,13 +532,19 @@ func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
 		}
 		binary.LittleEndian.PutUint16(payload[replyTCPLimits:], r.TCPEphemeralMin)
 		binary.LittleEndian.PutUint16(payload[replyTCPLimits+2:], r.TCPEphemeralMax)
-		payload[replyTCPLimits+4], payload[replyTCPLimits+5], payload[replyTCPLimits+6] = r.TCPMaxEndpoints, r.TCPSessionEndpoints, r.TCPListenBacklog
-		binary.LittleEndian.PutUint16(payload[replyTCPLimits+8:], r.TCPSendBuffer)
-		binary.LittleEndian.PutUint16(payload[replyTCPLimits+10:], r.TCPReceiveBuffer)
-		binary.LittleEndian.PutUint32(payload[replyTCPLimits+12:], r.TCPConnectTimeoutMS)
-		binary.LittleEndian.PutUint32(payload[replyTCPLimits+16:], r.TCPRTOMinMS)
-		binary.LittleEndian.PutUint32(payload[replyTCPLimits+20:], r.TCPRTOMaxMS)
-		binary.LittleEndian.PutUint32(payload[replyTCPLimits+24:], r.TCPTimeWaitMS)
+		binary.LittleEndian.PutUint16(payload[replyTCPLimits+4:], r.TCPMaxEndpoints)
+		binary.LittleEndian.PutUint16(payload[replyTCPLimits+6:], r.TCPListenBacklog)
+		payload[replyTCPSessionEP] = r.TCPSessionEndpoints
+		binary.LittleEndian.PutUint32(payload[replyTCPLimits+8:], r.TCPSendBuffer)
+		binary.LittleEndian.PutUint32(payload[replyTCPLimits+12:], r.TCPReceiveBuffer)
+		binary.LittleEndian.PutUint32(payload[replyTCPLimits+16:], r.TCPConnectTimeoutMS)
+		binary.LittleEndian.PutUint32(payload[replyTCPLimits+20:], r.TCPRTOMinMS)
+		binary.LittleEndian.PutUint32(payload[replyTCPLimits+24:], r.TCPRTOMaxMS)
+		binary.LittleEndian.PutUint32(payload[replyTCPLimits+28:], r.TCPTimeWaitMS)
+		for index, counter := range r.gtcpCounters() {
+			binary.LittleEndian.PutUint64(payload[replyTCPMessages+8*index:], *counter)
+		}
+		r.Capacity.encode(payload)
 		return true
 	}
 	payload[replyState] = byte(r.State)
@@ -451,7 +581,8 @@ func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
 	binary.LittleEndian.PutUint16(payload[replyPortMin:], r.UDPEphemeralMin)
 	binary.LittleEndian.PutUint16(payload[replyPortMax:], r.UDPEphemeralMax)
 	binary.LittleEndian.PutUint16(payload[replyPayload:], r.UDPMaxPayload)
-	payload[replyQueue], payload[replyMaxEP], payload[replySessionEP] = r.UDPReceiveQueue, r.UDPMaxEndpoints, r.UDPSessionEndpoints
+	payload[replyQueue], payload[replySessionEP] = r.UDPReceiveQueue, r.UDPSessionEndpoints
+	binary.LittleEndian.PutUint16(payload[replyMaxEP:], r.UDPMaxEndpoints)
 	payload[replyServerN] = r.ServerCount
 	binary.LittleEndian.PutUint64(payload[replyServerGen:], r.Generation)
 	for index := range r.Servers {
@@ -469,9 +600,9 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 	}
 	payload := in.Payload[:ReplySize]
 	if Opcode(payload[replyOpcode]) == OpTCPStatus {
-		if opcode != OpTCPStatus || !zero(payload[2:replyTCPCounters]) || !zero(payload[replyTCPConnections+2:replyTCPStates]) ||
-			!zero(payload[replyTCPStates+2*tcpStateCount:replyTCPLimits]) || payload[replyTCPLimits+7] != 0 ||
-			!zero(payload[replyTCPLimits+28:ReplySize]) {
+		if opcode != OpTCPStatus || !zero(payload[replyTCPSessions+6:replyTCPCounters]) || !zero(payload[replyTCPConnections+2:replyTCPStates]) ||
+			!zero(payload[replyTCPStates+2*tcpStateCount:replyTCPSessionEP]) || !zero(payload[replyTCPSessionEP+1:replyTCPLimits]) ||
+			!zero(payload[replyTCPCapacityEnd:ReplySize]) {
 			return false
 		}
 		r := Reply{Opcode: OpTCPStatus, Result: Result(payload[replyResult]),
@@ -480,16 +611,21 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 			TCPConnections:  binary.LittleEndian.Uint16(payload[replyTCPConnections:]),
 			TCPEphemeralMin: binary.LittleEndian.Uint16(payload[replyTCPLimits:]),
 			TCPEphemeralMax: binary.LittleEndian.Uint16(payload[replyTCPLimits+2:]),
-			TCPMaxEndpoints: payload[replyTCPLimits+4], TCPSessionEndpoints: payload[replyTCPLimits+5], TCPListenBacklog: payload[replyTCPLimits+6],
-			TCPSendBuffer: binary.LittleEndian.Uint16(payload[replyTCPLimits+8:]), TCPReceiveBuffer: binary.LittleEndian.Uint16(payload[replyTCPLimits+10:]),
-			TCPConnectTimeoutMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+12:]), TCPRTOMinMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+16:]),
-			TCPRTOMaxMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+20:]), TCPTimeWaitMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+24:])}
+			TCPMaxEndpoints: binary.LittleEndian.Uint16(payload[replyTCPLimits+4:]), TCPSessionEndpoints: payload[replyTCPSessionEP],
+			TCPListenBacklog: binary.LittleEndian.Uint16(payload[replyTCPLimits+6:]),
+			TCPSendBuffer:    binary.LittleEndian.Uint32(payload[replyTCPLimits+8:]), TCPReceiveBuffer: binary.LittleEndian.Uint32(payload[replyTCPLimits+12:]),
+			TCPConnectTimeoutMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+16:]), TCPRTOMinMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+20:]),
+			TCPRTOMaxMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+24:]), TCPTimeWaitMS: binary.LittleEndian.Uint32(payload[replyTCPLimits+28:])}
 		for index, counter := range r.tcpCounters() {
 			*counter = binary.LittleEndian.Uint64(payload[replyTCPCounters+8*index:])
 		}
 		for index := range r.TCPStates {
 			r.TCPStates[index] = binary.LittleEndian.Uint16(payload[replyTCPStates+2*index:])
 		}
+		for index, counter := range r.gtcpCounters() {
+			*counter = binary.LittleEndian.Uint64(payload[replyTCPMessages+8*index:])
+		}
+		r.Capacity.decode(payload)
 		if !validReply(&r) {
 			return false
 		}
@@ -498,7 +634,8 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 	}
 	field := binary.LittleEndian.Uint16(payload[replyField:])
 	if Opcode(payload[replyOpcode]) != opcode || !zero(payload[replyReserved:replyUDP]) ||
-		!zero(payload[replyReserved2:replyServerGen]) || field > uint16(lastField) ||
+		payload[replyReserved1] != 0 || !zero(payload[replyReserved2:replyServerGen]) || !zero(payload[replyStatusEnd:ReplySize]) ||
+		field > uint16(lastField) ||
 		payload[replyFallback] > 1 || payload[replyFlags]&^flagRateLimited != 0 {
 		return false
 	}
@@ -528,7 +665,7 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 		UDPEphemeralMax:     binary.LittleEndian.Uint16(payload[replyPortMax:]),
 		UDPMaxPayload:       binary.LittleEndian.Uint16(payload[replyPayload:]),
 		UDPReceiveQueue:     payload[replyQueue],
-		UDPMaxEndpoints:     payload[replyMaxEP],
+		UDPMaxEndpoints:     binary.LittleEndian.Uint16(payload[replyMaxEP:]),
 		UDPSessionEndpoints: payload[replySessionEP],
 		ServerCount:         payload[replyServerN],
 		Generation:          binary.LittleEndian.Uint64(payload[replyServerGen:]),
@@ -568,6 +705,8 @@ func validReply(r *Reply) bool {
 		base.TCPMaxEndpoints, base.TCPSessionEndpoints, base.TCPListenBacklog = 0, 0, 0
 		base.TCPSendBuffer, base.TCPReceiveBuffer = 0, 0
 		base.TCPConnectTimeoutMS, base.TCPRTOMinMS, base.TCPRTOMaxMS, base.TCPTimeWaitMS = 0, 0, 0, 0
+		base.GTCP2Requests, base.GTCP2Replies, base.GTCP3Requests, base.GTCP3Replies = 0, 0, 0, 0
+		base.Capacity = TCPCapacity{}
 		if base != (Reply{Opcode: OpTCPStatus, Result: r.Result}) {
 			return false
 		}
@@ -575,7 +714,7 @@ func validReply(r *Reply) bool {
 			return *r == base
 		}
 		return r.TCPListeners <= r.TCPEndpoints && r.TCPConnections <= r.TCPEndpoints &&
-			r.TCPSessionEndpoints <= r.TCPMaxEndpoints && r.TCPListenBacklog != 0
+			uint16(r.TCPSessionEndpoints) <= r.TCPMaxEndpoints && r.TCPListenBacklog != 0 && r.Capacity.valid()
 	}
 	noAddress := [addressSize]byte{}
 	snapshot := r.State == StateDown && r.Mode == ModeDHCP && r.Local == noAddress && r.Gateway == noAddress &&
@@ -607,7 +746,7 @@ func validReply(r *Reply) bool {
 	switch r.Opcode {
 	case OpStatus:
 		if r.Result == ResultOK {
-			return echo && r.Field == FieldNone
+			return echo && r.Field == FieldNone && r.tcpEmpty()
 		}
 		return snapshot && echo && r.Field == FieldNone
 	case OpEcho:
@@ -623,6 +762,8 @@ func validReply(r *Reply) bool {
 		return r.Responder == noAddress && r.RTT == 0
 	case OpReload:
 		return snapshot && echo && (r.Result == ResultConfigInvalid || r.Field == FieldNone)
+	case OpTCPDump:
+		return snapshot && echo && r.Field == FieldNone
 	}
 	return false
 }

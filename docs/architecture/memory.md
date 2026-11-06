@@ -286,7 +286,7 @@ decided so far is in the way.
 
 | Region | Address | Fixed by |
 | --- | --- | --- |
-| Kernel PE image | `0x400000` | TinyGo's `uefi-amd64` target links with `--image-base 0x400000 --no-dynamicbase`; `vm.KernelImageBase` reads the PE header there |
+| Kernel PE image | linked at `0x400000`, runs where the firmware loaded it | TinyGo's `uefi-amd64` target links with `--image-base 0x400000 --no-dynamicbase` and keeps base relocations. OVMF reserves memory at 8 MiB, so an image over 4 MiB lands elsewhere and the firmware relocates it. `vm.LoadedImage` walks down from one of the image's own variables to the header page and records that base in `Image.Base`; `tools/stackframes` refuses an image over `vm.KernelImageMaxSize` (16 MiB) |
 | Kernel identity map | physical = virtual for `[1 MiB, 1 GiB)` | `vm.BuildIdentity`; linked kernel code, the heap arena, page tables, stack backing, and the boot archive remain addressable at their physical address |
 | Loader memory above 1 GiB | physical = virtual, supervisor-only | `vm.MapLoaderMemory`; where OVMF puts the heap arena on machines with more than about a GiB |
 | Direct map | `0xffff800000000000` + physical | `vm.DirectMapBase`; every managed page, shared by all address spaces |
@@ -325,10 +325,9 @@ base, marked non-relocatable (the PE has a `.reloc` section but not
 mapping. Process roots map only the fixed high transition subset. Randomizing
 it needs:
 
-- a relocatable kernel: keep base relocations and set `DYNAMIC_BASE`, or have
-  the kernel apply its own relocations, and stop reading its header at the
-  constant `vm.KernelImageBase` (the loaded-image protocol reports the real
-  base);
+- a kernel loaded at a random base: set `DYNAMIC_BASE` so the firmware
+  relocates every boot. The kernel already finds its header wherever the
+  firmware put it;
 - a higher-half kernel mapped at a random slide, replacing the fixed transition
   alias and the low-linked execution model, so kernel pointers stop being
   physical addresses;

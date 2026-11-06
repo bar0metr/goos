@@ -155,11 +155,11 @@ func TestDeferredRecvFromCompletesItsOwnRequest(t *testing.T) {
 	if replies := listener.out.take(); len(replies) != 0 || listener.session.Waiting() != 1 {
 		t.Fatalf("RecvFrom with nothing queued answered at once: %+v", replies)
 	}
-	if fault := listener.session.Deliver(stack, &listener.out); fault != FaultNone || len(listener.out.take()) != 0 {
+	if fault, _ := listener.session.Deliver(stack, &listener.out); fault != FaultNone || len(listener.out.take()) != 0 {
 		t.Fatal("Deliver answered without a datagram")
 	}
 	sender.sendTo(from, 7000, "late")
-	if fault := listener.session.Deliver(stack, &listener.out); fault != FaultNone {
+	if fault, _ := listener.session.Deliver(stack, &listener.out); fault != FaultNone {
 		t.Fatal(fault)
 	}
 	replies := listener.out.take()
@@ -170,7 +170,7 @@ func TestDeferredRecvFromCompletesItsOwnRequest(t *testing.T) {
 	if listener.session.Waiting() != 0 || !listener.session.RXLent(replies[0].reply.Slot) {
 		t.Fatal("completed receive still held, or its slot not lent")
 	}
-	if fault := listener.session.Deliver(stack, &listener.out); fault != FaultNone || len(listener.out.take()) != 0 {
+	if fault, _ := listener.session.Deliver(stack, &listener.out); fault != FaultNone || len(listener.out.take()) != 0 {
 		t.Fatal("one datagram answered twice")
 	}
 	listener.send(udpapi.Request{Opcode: udpapi.OpRelease, Slot: replies[0].reply.Slot})
@@ -216,7 +216,7 @@ func TestCloseAnswersTheWaitingReceiveFirst(t *testing.T) {
 		t.Fatal("closed endpoint still waits")
 	}
 	sender.sendTo(from, 7003, "too late")
-	if fault := listener.session.Deliver(stack, &listener.out); fault != FaultNone || len(listener.out.take()) != 0 {
+	if fault, _ := listener.session.Deliver(stack, &listener.out); fault != FaultNone || len(listener.out.take()) != 0 {
 		t.Fatal("datagram after Close reached the client")
 	}
 	if stats := stack.UDPStats(); stats.DropNoEndpoint != 1 || stats.Endpoints != 1 {
@@ -315,7 +315,7 @@ func TestUnreachableClientFaults(t *testing.T) {
 	listener.send(udpapi.Request{Opcode: udpapi.OpRecvFrom, Endpoint: bound})
 	sender.sendTo(from, 7009, "x")
 	listener.out.broken = true
-	if fault := listener.session.Deliver(stack, &listener.out); fault != FaultUnreachable {
+	if fault, _ := listener.session.Deliver(stack, &listener.out); fault != FaultUnreachable {
 		t.Fatalf("fault %q", fault)
 	}
 }
@@ -331,6 +331,48 @@ func TestOpenRespectsTheSessionShare(t *testing.T) {
 	}
 	other := newClient(t, stack, 1)
 	other.open()
+}
+
+// TestTableWalksOnlyOpenedEntries opens endpoints under a 512 quota, closes
+// the last three, and checks that the walk stops after the highest entry in
+// use and that a reopened endpoint takes the lowest free entry and still
+// receives.
+func TestTableWalksOnlyOpenedEntries(t *testing.T) {
+	stack := newStack()
+	c := &client{t: t, stack: stack, out: recorder{t: t}, now: 1_000_000_000,
+		tx: make([]byte, udpapi.TXSlots*udpapi.SlotSize), rx: make([]byte, udpapi.RXSlots*udpapi.SlotSize)}
+	if !c.session.StartQuota(stack, 0, network.MaxUDPSessionQuota, c.tx, c.rx) {
+		t.Fatal("start")
+	}
+	var opened [4]uint32
+	for index := range opened {
+		opened[index] = c.open()
+	}
+	if c.session.limit != 4 || len(c.session.endpoints) != network.MaxUDPSessionQuota {
+		t.Fatalf("limit %d of %d", c.session.limit, len(c.session.endpoints))
+	}
+	for _, endpoint := range opened[1:] {
+		if reply := c.call(udpapi.Request{Opcode: udpapi.OpClose, Endpoint: endpoint}); reply.Result != udpapi.ResultOK {
+			t.Fatalf("close %d", reply.Result)
+		}
+	}
+	if c.session.limit != 1 {
+		t.Fatalf("limit %d after closing the last three", c.session.limit)
+	}
+	reopened := c.open()
+	c.bind(reopened, 7100)
+	if c.session.limit != 2 || c.session.endpoints[1].id != network.EndpointID(reopened) {
+		t.Fatalf("reopened endpoint not in the lowest free entry: limit %d", c.session.limit)
+	}
+	waiting := c.send(udpapi.Request{Opcode: udpapi.OpRecvFrom, Endpoint: reopened})
+	length := copy(c.tx, "ping")
+	sent := c.send(udpapi.Request{Opcode: udpapi.OpSendTo, Endpoint: opened[0], Address: loopback, Port: 7100, Length: uint16(length)})
+	// The parked receive answers before the send that filled it.
+	replies := c.out.take()
+	if len(replies) != 2 || replies[0].correlation != waiting || c.payload(replies[0].reply) != "ping" ||
+		replies[1].correlation != sent || replies[1].reply.Result != udpapi.ResultOK {
+		t.Fatalf("replies %+v", replies)
+	}
 }
 
 func TestStackResultsMap(t *testing.T) {

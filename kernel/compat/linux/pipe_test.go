@@ -38,8 +38,8 @@ func TestInstallPipeTakesBothDescriptorsOrNeither(t *testing.T) {
 	if closeOnExec, _ := state.FDs.CloseOnExec(writeFD); !closeOnExec {
 		t.Fatal("pipe2 O_CLOEXEC was not applied")
 	}
-	for fd := 5; fd < LinuxMaxFD-1; fd++ {
-		if _, ok := state.FDs.Allocate(FileDescription{Kind: FDSynthetic, Object: 1}, false); !ok {
+	for fd := 5; fd < DefaultFDSoftLimit-1; fd++ {
+		if _, errno := state.FDs.Allocate(FileDescription{Kind: FDSynthetic, Object: 1}, false); errno != 0 {
 			t.Fatalf("fill %d failed", fd)
 		}
 	}

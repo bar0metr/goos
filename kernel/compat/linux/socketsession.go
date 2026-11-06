@@ -1,0 +1,940 @@
+package linux
+
+import (
+	"goos/kernel/handle"
+	"goos/kernel/ipc"
+	"goos/kernel/process"
+	"goos/kernel/sched"
+	"goos/userspace/linuxsockapi"
+)
+
+// The family network context (ADR 0210). One Linux family has at most one
+// GLNXSOCK3 session: a channel and a pool PID 1 granted its launch, or gave
+// it later with LinuxNetAttach. Their handles live in the handle table of
+// the process that received them, the launch root; every process and thread
+// of the family uses the session through this context, which caches the
+// channel's identity and the pool object's and checks both on every use.
+//
+// The context also holds what the session's exchanges share: the
+// correlation counter, the requests in flight with the replies that came
+// for them, the TX and RX slots of the data plane (socketdata.go), the
+// Close requests still to send, and the family's socket table. Each function here is one step under
+// the tables lock; the kernel sends and receives messages between steps,
+// with the lock released.
+
+const (
+	// MaxSocketRequests bounds the control requests one family has in
+	// flight.
+	MaxSocketRequests = 8
+	// MaxSockets bounds the sockets of one family: the protocol's bound,
+	// which the service's family quota never exceeds.
+	MaxSockets = linuxsockapi.MaxSockets
+	// socketWaiterSlots bounds the tasks that wait for a request slot.
+	socketWaiterSlots = 16
+	// pendingCloseSlots holds the Close requests a full queue deferred: one
+	// per socket and one per request whose reply named a socket nobody
+	// installs.
+	pendingCloseSlots = MaxSockets + MaxSocketRequests
+	// SocketSleepCorrelation marks the continuation of a socket call that
+	// sleeps on readiness. Only such a sleep is interrupted by a signal.
+	// Request correlations start above it.
+	SocketSleepCorrelation = uint64(1)
+	firstSocketCorrelation = uint64(2)
+)
+
+// NetSocket is one Linux socket of a family: the service's identity of it
+// and the state Linux semantics keep in the kernel.
+type NetSocket struct {
+	Identity   uint64
+	Session    uint32
+	Datagram   bool
+	Listening  bool
+	ReuseAddr  bool
+	ShutRead   bool
+	ShutWrite  bool
+	Connecting bool
+	// Connected: a stream connect returned success to the program; a later
+	// one is EISCONN.
+	Connected bool
+	// RecvTimeout and SendTimeout are SO_RCVTIMEO and SO_SNDTIMEO in
+	// nanoseconds; zero waits without limit.
+	RecvTimeout uint64
+	SendTimeout uint64
+	generation  uint32
+	used        bool
+	// seen is the readiness entry's sequence at the last wake scan, and
+	// touched holds what the ring entries for the socket since that scan
+	// can make it ready for (socketwake.go).
+	seen    uint32
+	touched WakeEvents
+	// wakes counts the wake scans that listed the socket, so a poll that
+	// registers after its scan sees whether a wake went out in between.
+	wakes uint32
+}
+
+// WakeEpoch is the count of wake scans that listed the socket.
+func (socket NetSocket) WakeEpoch() uint32 { return socket.wakes }
+
+type requestState uint8
+
+const (
+	requestFree requestState = iota
+	// requestSent is in flight with an owner waiting for it.
+	requestSent
+	// requestReplied holds a reply its owner has yet to take.
+	requestReplied
+	// requestAbandoned is in flight with nobody waiting; its reply is
+	// applied when it comes.
+	requestAbandoned
+)
+
+type socketRequest struct {
+	correlation uint64
+	task        sched.TaskID
+	socket      uint64
+	deadline    uint64
+	opcode      linuxsockapi.Opcode
+	flags       uint8
+	state       requestState
+	reply       linuxsockapi.Reply
+}
+
+// NetEndpoint is what one exchange needs of the session.
+type NetEndpoint struct {
+	Session    uint32
+	Holder     process.ID
+	Channel    uint64
+	Side       uint8
+	PoolObject uint64
+}
+
+// NetContext is one family's network context.
+type NetContext struct {
+	familyID     uint64
+	endpoint     NetEndpoint
+	channelGrant handle.ID
+	poolGrant    handle.ID
+	attached     bool
+	failed       bool
+	correlation  uint64
+	requests     [MaxSocketRequests]socketRequest
+	sockets      [MaxSockets]NetSocket
+	// freeSlots stacks the free slots of sockets, freeCount of them.
+	// byIndex maps the service's family index of a live session socket to
+	// its slot plus one, so a reply's identity resolves without a scan.
+	freeSlots    [MaxSockets]uint16
+	freeCount    uint16
+	byIndex      [MaxSockets]uint16
+	data         dataPlane
+	closes       [pendingCloseSlots]uint64
+	closeCount   uint16
+	waiters      [socketWaiterSlots]sched.TaskID
+	waiterCount  uint8
+	nextSocketGn uint32
+	// pumping marks a drain of the session in progress, and pumpAgain a
+	// drain another processor asked for meanwhile (socketwake.go).
+	pumping   bool
+	pumpAgain bool
+	// rescan marks a change the wake scan has yet to look at: a
+	// ReadyChanged taken or a ring entry drained.
+	rescan bool
+}
+
+// MaxNetFamilies bounds the families that hold a socket session at once:
+// linuxsockd serves 16 families, and PID 1 grants no more.
+const MaxNetFamilies = 16
+
+var netContexts [MaxNetFamilies]NetContext
+
+// SocketObject is the Object of an FDSocket description: the context, the
+// socket's slot in the low 12 bits, and the slot's generation, so a reused
+// slot never matches an old description.
+func socketObject(context int, slot int, generation uint32) uint64 {
+	return 1<<63 | uint64(generation&0xffffff)<<20 | uint64(context&0xff)<<12 | uint64(slot&0xfff)
+}
+
+func splitSocketObject(object uint64) (context int, slot int, generation uint32, ok bool) {
+	context, slot, generation = int(object>>12&0xff), int(object&0xfff), uint32(object>>20&0xffffff)
+	return context, slot, generation, object>>63 == 1 && context < len(netContexts) && slot < MaxSockets
+}
+
+// The object's slot field holds every slot.
+var _ [0x1000 - MaxSockets]byte
+
+func (context *NetContext) reset(familyID uint64) {
+	context.familyID = familyID
+	context.endpoint = NetEndpoint{}
+	context.channelGrant, context.poolGrant = 0, 0
+	context.attached, context.failed = false, false
+	context.correlation = firstSocketCorrelation - 1
+	clear(context.requests[:])
+	clear(context.sockets[:])
+	for slot := 0; slot < MaxSockets; slot++ {
+		context.freeSlots[slot] = uint16(MaxSockets - 1 - slot)
+	}
+	context.freeCount = MaxSockets
+	clear(context.byIndex[:])
+	context.data = dataPlane{}
+	clear(context.closes[:])
+	context.closeCount = 0
+	clear(context.waiters[:])
+	context.waiterCount = 0
+	context.pumping, context.pumpAgain, context.rescan = false, false, false
+	context.mirrorChannel()
+}
+
+func netContextHeld(familyID uint64) (*NetContext, int, bool) {
+	guard.Check()
+	if familyID != 0 {
+		for index := 0; index < len(netContexts); index++ {
+			if netContexts[index].familyID == familyID {
+				return &netContexts[index], index, true
+			}
+		}
+	}
+	return nil, 0, false
+}
+
+// installNetContextHeld gives a new family its context, without a session.
+// A context whose family no longer has a VFS context is left over and is
+// taken as free; the family's own VFS context exists already.
+func installNetContextHeld(familyID uint64) bool {
+	guard.Check()
+	if familyID == 0 {
+		return false
+	}
+	for index := 0; index < len(netContexts); index++ {
+		context := &netContexts[index]
+		if context.familyID == familyID {
+			context.reset(familyID)
+			return true
+		}
+	}
+	for index := 0; index < len(netContexts); index++ {
+		context := &netContexts[index]
+		if _, live := vFSContextHeld(context.familyID); context.familyID == 0 || !live {
+			context.reset(familyID)
+			return true
+		}
+	}
+	return false
+}
+
+// releaseNetContextHeld forgets a family that ended. Its handles went with
+// the processes that held them.
+func releaseNetContextHeld(familyID uint64) {
+	if context, _, found := netContextHeld(familyID); found {
+		context.reset(0)
+	}
+}
+
+// NetGrant is a session as the kernel resolved it from two handles.
+type NetGrant struct {
+	Holder        process.ID
+	ChannelHandle handle.ID
+	PoolHandle    handle.ID
+	Channel       uint64
+	Side          uint8
+	PoolObject    uint64
+}
+
+// AttachNet installs a session in a family's context and returns the
+// handles of the session it replaces, which the caller closes in holder's
+// table. A session that has not failed is not replaced. Everything of the
+// old session goes: its sockets fail, its requests and held slots are
+// forgotten, since the service that knew them is gone with its channel.
+func AttachNet(familyID uint64, grant NetGrant, replaceLive bool) (old NetGrant, replaced bool, ok bool) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	if grant.Channel == 0 || grant.PoolObject == 0 || grant.Holder == 0 {
+		return NetGrant{}, false, false
+	}
+	context, _, found := netContextHeld(familyID)
+	if !found && installNetContextHeld(familyID) {
+		context, _, found = netContextHeld(familyID)
+	}
+	if !found {
+		return NetGrant{}, false, false
+	}
+	if context.attached && !context.failed && !replaceLive {
+		return NetGrant{}, false, false
+	}
+	if context.attached {
+		old = NetGrant{Holder: context.endpoint.Holder, ChannelHandle: context.channelGrant, PoolHandle: context.poolGrant,
+			Channel: context.endpoint.Channel, Side: context.endpoint.Side, PoolObject: context.endpoint.PoolObject}
+		replaced = true
+	}
+	session := context.endpoint.Session + 1
+	if session == 0 {
+		session = 1
+	}
+	context.endpoint = NetEndpoint{Session: session, Holder: grant.Holder, Channel: grant.Channel, Side: grant.Side, PoolObject: grant.PoolObject}
+	context.channelGrant, context.poolGrant = grant.ChannelHandle, grant.PoolHandle
+	context.attached, context.failed = true, false
+	clear(context.requests[:])
+	// The new service numbers its sockets afresh; the old session's keep
+	// their slots until their descriptions close.
+	clear(context.byIndex[:])
+	context.data = dataPlane{}
+	clear(context.closes[:])
+	context.closeCount = 0
+	context.mirrorChannel()
+	noteNetHeld(&netDiagnostics.Attaches)
+	return old, replaced, true
+}
+
+// NetSession returns the live session of a family. failed reports a session
+// that existed and failed; neither means the family never had one.
+func NetSession(familyID uint64) (endpoint NetEndpoint, live bool, failed bool) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found || !context.attached {
+		return NetEndpoint{}, false, false
+	}
+	if context.failed {
+		return context.endpoint, false, true
+	}
+	return context.endpoint, true, false
+}
+
+// NetHolder reports the handles a family's session lives in.
+func NetHolder(familyID uint64) (NetGrant, bool) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found || !context.attached {
+		return NetGrant{}, false
+	}
+	return NetGrant{Holder: context.endpoint.Holder, ChannelHandle: context.channelGrant, PoolHandle: context.poolGrant,
+		Channel: context.endpoint.Channel, Side: context.endpoint.Side, PoolObject: context.endpoint.PoolObject}, true
+}
+
+// FailNet marks a family's session failed: every socket of it fails and no
+// new exchange starts. It reports whether this call failed it, so the
+// caller wakes the session's waiters once, and returns the waiters for a
+// request slot, who must wake to see the failure.
+func FailNet(familyID uint64, session uint32, waiters []sched.TaskID) (NetEndpoint, int, bool) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found || !context.attached || context.failed || context.endpoint.Session != session {
+		return NetEndpoint{}, 0, false
+	}
+	context.failed = true
+	context.mirrorChannel()
+	noteNetHeld(&netDiagnostics.SessionFailures)
+	return context.endpoint, context.takeWaitersHeld(waiters), true
+}
+
+// NewSocket takes a slot in the family's socket table for a socket the
+// service opened or accepted and returns the description object for it.
+func NewSocket(familyID uint64, session uint32, identity uint64, datagram bool) (uint64, bool) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, contextIndex, found := netContextHeld(familyID)
+	index, valid := linuxsockapi.SocketIndex(identity)
+	if !found || !context.attached || context.failed || context.endpoint.Session != session || !valid || context.freeCount == 0 {
+		return 0, false
+	}
+	context.freeCount--
+	slot := int(context.freeSlots[context.freeCount])
+	socket := &context.sockets[slot]
+	generation := socket.generation + 1
+	if generation&0xffffff == 0 {
+		generation = 1
+	}
+	*socket = NetSocket{Identity: identity, Session: session, Datagram: datagram, generation: generation, used: true}
+	context.byIndex[index] = uint16(slot + 1)
+	context.data.forgetAccepted(identity)
+	noteNetHeld(&netDiagnostics.Opens)
+	return socketObject(contextIndex, slot, generation), true
+}
+
+// HasSocketRoom reports whether NewSocket would find a slot.
+func HasSocketRoom(familyID uint64) bool {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	return found && context.freeCount != 0
+}
+
+// liveSocketHeld finds a socket of the live session by identity through
+// the service's family index it carries.
+func (context *NetContext) liveSocketHeld(identity uint64) (*NetSocket, bool) {
+	index, valid := linuxsockapi.SocketIndex(identity)
+	if !valid || context.byIndex[index] == 0 {
+		return nil, false
+	}
+	socket := &context.sockets[context.byIndex[index]-1]
+	if !socket.used || socket.Identity != identity || socket.Session != context.endpoint.Session {
+		return nil, false
+	}
+	return socket, true
+}
+
+func socketHeld(object uint64) (*NetContext, *NetSocket, bool) {
+	guard.Check()
+	contextIndex, slot, generation, ok := splitSocketObject(object)
+	if !ok || contextIndex < 0 || contextIndex >= len(netContexts) || slot < 0 || slot >= MaxSockets {
+		return nil, nil, false
+	}
+	context := &netContexts[contextIndex]
+	socket := &context.sockets[slot]
+	if context.familyID == 0 || !socket.used || socket.generation != generation {
+		return nil, nil, false
+	}
+	return context, socket, true
+}
+
+// SocketOf returns the socket a description names. live reports that it
+// belongs to the family's current session, which has not failed.
+func SocketOf(object uint64) (socket NetSocket, familyID uint64, live bool, found bool) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, entry, ok := socketHeld(object)
+	if !ok {
+		return NetSocket{}, 0, false, false
+	}
+	return *entry, context.familyID, context.attached && !context.failed && entry.Session == context.endpoint.Session, true
+}
+
+// StoreSocket writes back the Linux state of the socket a description
+// names, when it is still there. Its identity and session stay.
+func StoreSocket(object uint64, socket NetSocket) bool {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	_, entry, ok := socketHeld(object)
+	if !ok {
+		return false
+	}
+	entry.Listening, entry.ReuseAddr, entry.ShutRead, entry.ShutWrite = socket.Listening, socket.ReuseAddr, socket.ShutRead, socket.ShutWrite
+	entry.Connecting, entry.RecvTimeout, entry.SendTimeout = socket.Connecting, socket.RecvTimeout, socket.SendTimeout
+	entry.Connected = socket.Connected
+	return true
+}
+
+// CloseSocket forgets the socket of a description whose last reference
+// went and reports the identity the service must close, when its session is
+// the live one. A socket of a dead session needs nothing sent.
+func CloseSocket(object uint64) (identity uint64, familyID uint64, send bool) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, entry, ok := socketHeld(object)
+	if !ok {
+		return 0, 0, false
+	}
+	identity, familyID = entry.Identity, context.familyID
+	send = context.attached && !context.failed && entry.Session == context.endpoint.Session
+	_, slot, _, _ := splitSocketObject(object)
+	if index, valid := linuxsockapi.SocketIndex(identity); valid && int(context.byIndex[index]) == slot+1 {
+		context.byIndex[index] = 0
+	}
+	generation := entry.generation
+	*entry = NetSocket{generation: generation}
+	context.freeSlots[context.freeCount] = uint16(slot)
+	context.freeCount++
+	noteNetHeld(&netDiagnostics.Closes)
+	return identity, familyID, send
+}
+
+// RequestStatus is the outcome of BeginRequest.
+type RequestStatus uint8
+
+const (
+	RequestStarted RequestStatus = iota + 1
+	// RequestBusy means every request slot is in use; the caller waits
+	// for one.
+	RequestBusy
+	// RequestFailed means the session is gone or never existed.
+	RequestFailed
+)
+
+// BeginRequest reserves a request slot and a correlation for one request of
+// task, owner zero for a request nobody waits for. The slot's index is the
+// TX slot a Write or SendTo uses. A busy table queues task to be woken when
+// a slot frees, unless queue is false.
+func BeginRequest(familyID uint64, session uint32, task sched.TaskID, message *linuxsockapi.Request, deadline uint64, queue bool) (index int, correlation uint64, status RequestStatus) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found || !context.attached || context.failed || context.endpoint.Session != session {
+		return 0, 0, RequestFailed
+	}
+	for index = 0; index < MaxSocketRequests; index++ {
+		request := &context.requests[index]
+		if request.state != requestFree {
+			continue
+		}
+		context.correlation++
+		if context.correlation < firstSocketCorrelation {
+			context.correlation = firstSocketCorrelation
+		}
+		state := requestSent
+		if task == 0 {
+			state = requestAbandoned
+		}
+		request.correlation, request.task, request.socket, request.deadline = context.correlation, task, message.Socket, deadline
+		request.opcode, request.flags, request.state, request.reply = message.Opcode, message.Flags, state, linuxsockapi.Reply{}
+		return index, context.correlation, RequestStarted
+	}
+	if queue && task != 0 {
+		context.addWaiterHeld(task)
+	}
+	return 0, 0, RequestBusy
+}
+
+func (context *NetContext) addWaiterHeld(task sched.TaskID) {
+	for index := 0; index < int(context.waiterCount) && index < len(context.waiters); index++ {
+		if context.waiters[index] == task {
+			return
+		}
+	}
+	if int(context.waiterCount) < len(context.waiters) {
+		context.waiters[context.waiterCount] = task
+		context.waiterCount++
+	}
+}
+
+func (context *NetContext) takeWaitersHeld(target []sched.TaskID) int {
+	// Waiters beyond target stay queued for the next slot that frees.
+	count := min(int(context.waiterCount), len(target), len(context.waiters))
+	copy(target, context.waiters[:count])
+	remaining := int(context.waiterCount) - count
+	copy(context.waiters[:], context.waiters[count:int(context.waiterCount)])
+	clear(context.waiters[remaining:])
+	context.waiterCount = uint8(remaining)
+	return count
+}
+
+// RemoveSocketWaiter takes a task that gives up out of the queue for a
+// request slot.
+func RemoveSocketWaiter(task sched.TaskID) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	for contextIndex := 0; contextIndex < len(netContexts); contextIndex++ {
+		context := &netContexts[contextIndex]
+		for index := 0; index < int(context.waiterCount) && index < len(context.waiters); index++ {
+			if context.waiters[index] != task {
+				continue
+			}
+			copy(context.waiters[index:], context.waiters[index+1:int(context.waiterCount)])
+			context.waiterCount--
+			context.waiters[context.waiterCount] = 0
+			return
+		}
+	}
+}
+
+func (context *NetContext) requestHeld(correlation uint64) (*socketRequest, bool) {
+	if correlation < firstSocketCorrelation {
+		return nil, false
+	}
+	for index := 0; index < MaxSocketRequests; index++ {
+		request := &context.requests[index]
+		if request.state != requestFree && request.correlation == correlation {
+			return request, true
+		}
+	}
+	return nil, false
+}
+
+// freeHeld ends a request and hands the queued waiters to the caller to wake.
+func (context *NetContext) freeHeld(request *socketRequest, waiters []sched.TaskID) int {
+	*request = socketRequest{}
+	return context.takeWaitersHeld(waiters)
+}
+
+// CancelRequest ends a request that was never queued.
+func CancelRequest(familyID uint64, correlation uint64, waiters []sched.TaskID) int {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found {
+		return 0
+	}
+	request, ok := context.requestHeld(correlation)
+	if !ok {
+		return 0
+	}
+	return context.freeHeld(request, waiters)
+}
+
+// SocketCleanup is what a reply nobody takes leaves to do: close a socket
+// the service opened or accepted for nobody.
+type SocketCleanup struct {
+	Close uint64
+}
+
+// MessageVerdict classifies one message from the session channel.
+type MessageVerdict uint8
+
+const (
+	// MessageReadyChanged is the service's notification.
+	MessageReadyChanged MessageVerdict = iota + 1
+	// MessageReply answers a request; Owner and Correlation name it.
+	MessageReply
+	// MessageMalformed fails the session.
+	MessageMalformed
+)
+
+// ClassifySocketMessage checks one message against the session's requests.
+// A reply must answer a request in flight with the request's opcode and
+// socket, use the slots the protocol gives it, and name no socket the
+// family already holds as a new one. It changes nothing; DeliverReply or
+// AbandonReply applies the reply.
+func ClassifySocketMessage(familyID uint64, session uint32, message *ipc.Message, reply *linuxsockapi.Reply) (verdict MessageVerdict, owner sched.TaskID, correlation uint64) {
+	if message.HandleCount != 0 {
+		return MessageMalformed, 0, 0
+	}
+	if message.Kind == ipc.KindNotification {
+		var notification linuxsockapi.Request
+		if _, ok := linuxsockapi.DecodeRequest(message, &notification); ok && notification.Opcode == linuxsockapi.OpReadyChanged {
+			return MessageReadyChanged, 0, 0
+		}
+		return MessageMalformed, 0, 0
+	}
+	correlation, ok := linuxsockapi.DecodeReply(message, reply)
+	if !ok {
+		return MessageMalformed, 0, 0
+	}
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found || !context.attached || context.endpoint.Session != session {
+		return MessageMalformed, 0, 0
+	}
+	request, ok := context.requestHeld(correlation)
+	if !ok || request.state != requestSent && request.state != requestAbandoned || reply.Opcode != request.opcode {
+		return MessageMalformed, 0, 0
+	}
+	switch reply.Opcode {
+	case linuxsockapi.OpOpen:
+		if reply.Result == linuxsockapi.ResultOK && context.knownIdentityHeld(reply.Socket) {
+			return MessageMalformed, 0, 0
+		}
+	case linuxsockapi.OpCancel:
+	default:
+		if reply.Socket != request.socket {
+			return MessageMalformed, 0, 0
+		}
+	}
+	switch reply.Opcode {
+	case linuxsockapi.OpAccept:
+		if reply.Result == linuxsockapi.ResultOK && (reply.Value == reply.Socket || context.knownIdentityHeld(reply.Value)) {
+			return MessageMalformed, 0, 0
+		}
+	}
+	if request.state == requestAbandoned {
+		return MessageReply, 0, correlation
+	}
+	return MessageReply, request.task, correlation
+}
+
+func (context *NetContext) knownIdentityHeld(identity uint64) bool {
+	_, found := context.liveSocketHeld(identity)
+	return found
+}
+
+// DeliverReply stores a classified reply for its owner, which takes it with
+// TakeReply.
+func DeliverReply(familyID uint64, correlation uint64, reply *linuxsockapi.Reply) bool {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found {
+		return false
+	}
+	request, ok := context.requestHeld(correlation)
+	if !ok || request.state != requestSent {
+		return false
+	}
+	request.reply, request.state = *reply, requestReplied
+	if reply.Opcode == linuxsockapi.OpAccept && reply.Result == linuxsockapi.ResultOK {
+		context.data.noteAccepted(reply.Value)
+	}
+	return true
+}
+
+// AbandonReply applies a classified reply whose owner is gone and frees its
+// request. cleanup says what to send: a socket the reply created for nobody
+// is closed.
+func AbandonReply(familyID uint64, correlation uint64, reply *linuxsockapi.Reply, waiters []sched.TaskID) (cleanup SocketCleanup, woken int) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found {
+		return SocketCleanup{}, 0
+	}
+	request, ok := context.requestHeld(correlation)
+	if !ok {
+		return SocketCleanup{}, 0
+	}
+	cleanup = abandonedCleanup(reply)
+	noteNetHeld(&netDiagnostics.Abandoned)
+	return cleanup, context.freeHeld(request, waiters)
+}
+
+func abandonedCleanup(reply *linuxsockapi.Reply) SocketCleanup {
+	if reply.Result != linuxsockapi.ResultOK {
+		return SocketCleanup{}
+	}
+	switch reply.Opcode {
+	case linuxsockapi.OpOpen:
+		return SocketCleanup{Close: reply.Socket}
+	case linuxsockapi.OpAccept:
+		return SocketCleanup{Close: reply.Value}
+	}
+	return SocketCleanup{}
+}
+
+// ReplyWait is what TakeReply finds for a request.
+type ReplyWait uint8
+
+const (
+	ReplyTaken ReplyWait = iota + 1
+	// ReplyPending is still in flight; the owner waits until Deadline.
+	ReplyPending
+	// ReplyGone names no request of the live session.
+	ReplyGone
+)
+
+// TakeReply hands a request's reply to its owner and frees the request.
+func TakeReply(familyID uint64, session uint32, correlation uint64, reply *linuxsockapi.Reply, waiters []sched.TaskID) (wait ReplyWait, deadline uint64, woken int) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found || !context.attached || context.failed || context.endpoint.Session != session {
+		return ReplyGone, 0, 0
+	}
+	request, ok := context.requestHeld(correlation)
+	if !ok || request.state == requestAbandoned {
+		return ReplyGone, 0, 0
+	}
+	if request.state == requestSent {
+		return ReplyPending, request.deadline, 0
+	}
+	*reply = request.reply
+	return ReplyTaken, 0, context.freeHeld(request, waiters)
+}
+
+// AbandonRequest gives up waiting for a request: its reply, now or later,
+// is applied as one nobody takes.
+func AbandonRequest(familyID uint64, correlation uint64, waiters []sched.TaskID) (cleanup SocketCleanup, woken int) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found {
+		return SocketCleanup{}, 0
+	}
+	request, ok := context.requestHeld(correlation)
+	if !ok {
+		return SocketCleanup{}, 0
+	}
+	if request.state == requestSent {
+		request.state, request.task = requestAbandoned, 0
+		noteNetHeld(&netDiagnostics.Abandoned)
+		return SocketCleanup{}, 0
+	}
+	if request.state != requestReplied {
+		return SocketCleanup{}, 0
+	}
+	cleanup = abandonedCleanup(&request.reply)
+	noteNetHeld(&netDiagnostics.Abandoned)
+	return cleanup, context.freeHeld(request, waiters)
+}
+
+// AbandonTask gives up every request task has in flight in any family, for
+// a task that ends. Their replies are applied as ones nobody takes.
+func AbandonTask(task sched.TaskID) {
+	if task == 0 {
+		return
+	}
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	for contextIndex := 0; contextIndex < len(netContexts); contextIndex++ {
+		context := &netContexts[contextIndex]
+		for index := 0; index < MaxSocketRequests; index++ {
+			request := &context.requests[index]
+			if request.task == task && request.state == requestSent {
+				request.state, request.task = requestAbandoned, 0
+			}
+		}
+	}
+}
+
+// DeferClose records a Close the kernel could not send now.
+func DeferClose(familyID uint64, identity uint64) bool {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found || identity == 0 || !context.attached || context.failed || int(context.closeCount) >= len(context.closes) {
+		return false
+	}
+	context.closes[context.closeCount] = identity
+	context.closeCount++
+	return true
+}
+
+// TakeDeferredClose removes one deferred Close for sending.
+func TakeDeferredClose(familyID uint64) (uint64, bool) {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found || context.closeCount == 0 || int(context.closeCount) > len(context.closes) {
+		return 0, false
+	}
+	context.closeCount--
+	identity := context.closes[context.closeCount]
+	context.closes[context.closeCount] = 0
+	return identity, true
+}
+
+// NetDiagnostics counts Linux socket traffic. The counters saturate; no
+// payload is ever recorded.
+type NetDiagnostics struct {
+	Attaches        uint64
+	Opens           uint64
+	Closes          uint64
+	Connects        uint64
+	Accepts         uint64
+	BytesSent       uint64
+	BytesReceived   uint64
+	DatagramsSent   uint64
+	DatagramsRecv   uint64
+	WouldBlock      uint64
+	PollWakeups     uint64
+	Interrupted     uint64
+	SessionFailures uint64
+	Abandoned       uint64
+	Requests        uint64
+	ReplyTimeouts   uint64
+	// The data plane: TX slots committed, RX slots received, Doorbell
+	// notifications sent, bytes copied between Linux buffers and the pool.
+	RingTX        uint64
+	RingRX        uint64
+	Doorbells     uint64
+	BytesToPool   uint64
+	BytesFromPool uint64
+}
+
+var netDiagnostics NetDiagnostics
+
+// noteNetHeld counts one event of a counter the tables' steps keep.
+func noteNetHeld(counter *uint64) {
+	diagnosticsLock.Lock()
+	addNet(counter, 1)
+	diagnosticsLock.Unlock()
+}
+
+func addNet(counter *uint64, amount uint64) {
+	if ^uint64(0)-*counter < amount {
+		*counter = ^uint64(0)
+		return
+	}
+	*counter += amount
+}
+
+// NetCounter names one counter for NoteNet.
+type NetCounter uint8
+
+const (
+	NetConnects NetCounter = iota + 1
+	NetAccepts
+	NetBytesSent
+	NetBytesReceived
+	NetDatagramsSent
+	NetDatagramsReceived
+	NetWouldBlock
+	NetPollWakeups
+	NetInterrupted
+	NetRequests
+	NetReplyTimeouts
+	NetDoorbells
+	NetBytesToPool
+	NetBytesFromPool
+)
+
+// NoteNet adds amount to one counter.
+func NoteNet(counter NetCounter, amount uint64) {
+	diagnosticsLock.Lock()
+	target := (*uint64)(nil)
+	switch counter {
+	case NetConnects:
+		target = &netDiagnostics.Connects
+	case NetAccepts:
+		target = &netDiagnostics.Accepts
+	case NetBytesSent:
+		target = &netDiagnostics.BytesSent
+	case NetBytesReceived:
+		target = &netDiagnostics.BytesReceived
+	case NetDatagramsSent:
+		target = &netDiagnostics.DatagramsSent
+	case NetDatagramsReceived:
+		target = &netDiagnostics.DatagramsRecv
+	case NetWouldBlock:
+		target = &netDiagnostics.WouldBlock
+	case NetPollWakeups:
+		target = &netDiagnostics.PollWakeups
+	case NetInterrupted:
+		target = &netDiagnostics.Interrupted
+	case NetRequests:
+		target = &netDiagnostics.Requests
+	case NetReplyTimeouts:
+		target = &netDiagnostics.ReplyTimeouts
+	case NetDoorbells:
+		target = &netDiagnostics.Doorbells
+	case NetBytesToPool:
+		target = &netDiagnostics.BytesToPool
+	case NetBytesFromPool:
+		target = &netDiagnostics.BytesFromPool
+	}
+	if target != nil {
+		addNet(target, amount)
+	}
+	diagnosticsLock.Unlock()
+}
+
+// NetStatistics returns a copy of the counters.
+func NetStatistics() NetDiagnostics {
+	diagnosticsLock.Lock()
+	result := netDiagnostics
+	diagnosticsLock.Unlock()
+	return result
+}
+
+// SocketRequestCorrelation reports whether a continuation's correlation
+// names a request in flight rather than a readiness sleep.
+func SocketRequestCorrelation(correlation uint64) bool { return correlation >= firstSocketCorrelation }
+
+// RequestSlotFree reports whether BeginRequest would find a request slot.
+func RequestSlotFree(familyID uint64) bool {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found {
+		return false
+	}
+	for index := 0; index < MaxSocketRequests; index++ {
+		if context.requests[index].state == requestFree {
+			return true
+		}
+	}
+	return false
+}
+
+// RequestDeadline returns the reply deadline of a request its owner still
+// waits for, or zero.
+func RequestDeadline(familyID uint64, session uint32, correlation uint64) uint64 {
+	tablesLock.Lock()
+	defer tablesLock.Unlock()
+	context, _, found := netContextHeld(familyID)
+	if !found || !context.attached || context.failed || context.endpoint.Session != session {
+		return 0
+	}
+	request, ok := context.requestHeld(correlation)
+	if !ok || request.state != requestSent && request.state != requestReplied {
+		return 0
+	}
+	return request.deadline
+}

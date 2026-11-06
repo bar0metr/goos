@@ -371,9 +371,9 @@ long_name=$(awk 'BEGIN { for (i = 0; i < 255; i++) printf "n" }')
 too_long_name=$(awk 'BEGIN { for (i = 0; i < 1025; i++) printf "n" }')
 long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 ( await_ready "$log"
-  # Capture startup grants before the bounded kernel log ring overwrites them.
-  printf 'log\n'
-  sleep 1
+  # log prints every record the ring retains, a few hundred at boot; the
+  # next command waits until the listing ends.
+  send_after_done 'log' 'INFO  kernel\[0\]: kernel initialized'
   printf 'help\n'
   sleep 1
 	printf 'echo "hello structured world"\n'
@@ -474,6 +474,8 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	printf 'ls system\n'
 	sleep 1
 	printf 'ls /system/bin\n'
+	sleep 1
+	printf 'ls /etc\n'
 	sleep 1
 	printf 'mount\n'
 	sleep 1
@@ -677,8 +679,7 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'handles\n'
 	sleep 1
-	printf 'log\n'
-	sleep 1
+	send_after_done 'log' 'INFO  kernel\[0\]: kernel initialized'
 	printf 'write /persist/startup.txt "a startup block larger than the former 128-byte limit"\n'
 	sleep 2
 	printf 'cat /persist/startup.txt\n'
@@ -992,7 +993,9 @@ require_marker storage.file-cache FILE_CACHE_OK "$log"
 # given the whole disk (ADR 0115). A restarted filesystem service has the
 # volume chosen again from the table.
 require_min_count storage.whole-disk-volume '^BLOCK_VOLUME_WHOLE_OK$' 2 "$log" BLOCK_VOLUME_WHOLE_OK
-count_window storage.vfs-not-restarted '^VFS_SERVICE_OK$' 0 "$log" 'goos> fault fat32' 'goos> fault vfs'
+# The window ends at the echoed command, not at its prompt: VFS diagnostics
+# such as VFS_MEMORY may land between the prompt and the echo.
+count_window storage.vfs-not-restarted '^VFS_SERVICE_OK$' 0 "$log" 'goos> fault fat32' 'fault vfs'
 pass_group storage
 
 for marker in RAMFS_PROTOCOL_OK RAMFS_METADATA_OK RAMFS_IO_OK RAMFS_BOUNDS_OK VFS_NAMESPACE_OK VFS_MOUNT_OK VFS_PATH_OK VFS_CACHE_OK VFS_PROTOCOL_OK VFS_SERVICE_OK FAT32_MOUNT_OK; do
@@ -1002,12 +1005,16 @@ require_marker filesystem.persisted-content 'Welcome to GoOS' "$log" 'cat /persi
 require_marker filesystem.system-image-mounted SYSTEM_IMAGE_MOUNT_OK "$log"
 # The namespace must name every mount, so the layout is discoverable by walking
 # it rather than only by knowing a path in advance.
-for entry in system tmp persist home state; do
+for entry in system etc tmp persist home state; do
 	require_regex "filesystem.root-lists-$entry" "^$entry/\$" "$entry/ in the root listing" "$log" 'ls /'
 done
 # /system is the boot image itself: the executables the launch path resolves are
 # the ones a listing shows, and nothing can write to them.
 require_regex filesystem.system-lists-bin '^bin/$' 'bin/ under /system' "$log" 'ls system'
+# /etc is the boot archive's etc directory, for the static C library.
+for entry in hosts nsswitch.conf resolv.conf; do
+	require_regex "filesystem.etc-lists-$entry" "^$entry\$" "$entry in /etc" "$log" 'ls /etc'
+done
 for entry in ls cat write gview edit gfm; do
 	require_regex "filesystem.system-bin-lists-$entry" "^$entry\$" "$entry in /system/bin" "$log" 'ls /system/bin'
 done
@@ -1505,6 +1512,7 @@ forbid_regex corrupt.no-mount-marker '^FAT32_MOUNT_OK$' 'no mount claimed for a 
 # the archive (ADR 0175).
 require_regex corrupt.recovery '^\[MODE\] recovery: stage=storage' 'recovery mode for a refused volume' "$corrupt_log" 'Starting services'
 require_window corrupt.root-listed '^bootstrap/$' 'the boot archive still mounted' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
+require_window corrupt.etc-listed '^etc/$' '/etc comes with the boot archive' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
 forbid_window corrupt.persist-absent '^persist/$' 'no persistent mounts listed' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
 forbid_window corrupt.system-absent '^system/$' 'no installed system listed' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
 require_regex corrupt.usable '^volatile-root-still-works$' 'the system usable without storage' "$corrupt_log" 'goos> echo volatile-root-still-works'

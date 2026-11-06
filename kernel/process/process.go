@@ -10,15 +10,30 @@ import (
 )
 
 // MaxProcesses is the system-wide process limit. A process needs at least one
-// of the scheduler's sched.MaxTasks task slots, so more processes than slots
-// could never run; the kernel allocates a process record's pages the first
-// time a slot is used (ADR 0111). MaxExitEvents keeps one exit report per
-// process until PID 1 collects it.
+// of the scheduler's sched.MaxTasks task slots, so MaxProcesses may not exceed
+// it. It equals MaxTasks: the kernel allocates a process record's pages, and
+// the Linux layer its per-process state, the first time a slot is used, so a
+// slot nobody used costs one pointer (ADR 0111). MaxExitEvents keeps one exit
+// report per process until PID 1 collects it. MaxTasksPerProcess is the
+// structural bound of one process's task table and equals the large launch
+// profile's task quota.
 const (
-	MaxTasksPerProcess = 32
+	MaxTasksPerProcess = 64
 	MaxProcesses       = sched.MaxTasks
 	MaxExitEvents      = MaxProcesses
 )
+
+// TaskPages is what one task beyond a process's first holds of its page
+// quota: the kernel stack and its guard (arch/amd64 TaskStackPages). The
+// first task binds after the launch has charged the address space and before
+// it runs, where a refusal could not be undone, so it is not charged, and a
+// single-threaded process pays what it paid before threads were charged. A
+// thread is charged in ReserveTask, before its task exists; ThreadCreate
+// and clone refuse it when the pages are not there.
+const TaskPages = 6
+
+// A process needs a task, so more processes than task slots could never run.
+var _ = [sched.MaxTasks - MaxProcesses]struct{}{}
 
 type ID uint64
 
@@ -176,14 +191,32 @@ func (process *Process) AddTask(id sched.TaskID) bool {
 }
 
 // ReserveTask charges one task slot before architecture state becomes
-// runnable. The caller either commits the returned slot or cancels it.
+// runnable, and TaskPages of the page quota when the process already has a
+// task. The caller either commits the returned slot or cancels it.
 func (process *Process) ReserveTask() bool {
 	guard.CheckWriter()
-	if process == nil || process.taskCount+int(process.taskReserved) == len(process.tasks) || !process.Charge(ResourceTasks, 1) {
+	if process == nil || process.heldTasks() == len(process.tasks) || !process.Charge(ResourceTasks, 1) {
+		return false
+	}
+	if process.heldTasks() != 0 && !process.Charge(ResourcePages, TaskPages) {
+		process.Release(ResourceTasks, 1)
 		return false
 	}
 	process.taskReserved++
 	return true
+}
+
+// heldTasks counts the tasks bound and reserved. Each one past the first
+// holds TaskPages of the page quota.
+func (process *Process) heldTasks() int { return process.taskCount + int(process.taskReserved) }
+
+// releaseTask returns the charges of one task once the held count has
+// dropped.
+func (process *Process) releaseTask() {
+	process.Release(ResourceTasks, 1)
+	if process.heldTasks() != 0 {
+		process.Release(ResourcePages, TaskPages)
+	}
 }
 
 // CommitReservedTask binds a prepared architecture task without another
@@ -214,7 +247,7 @@ func (process *Process) CancelReservedTask() bool {
 		return false
 	}
 	process.taskReserved--
-	process.Release(ResourceTasks, 1)
+	process.releaseTask()
 	return true
 }
 
@@ -245,7 +278,7 @@ func (process *Process) removeTask(id sched.TaskID) bool {
 		process.taskCount--
 		process.tasks[index] = process.tasks[process.taskCount]
 		process.tasks[process.taskCount] = 0
-		process.Release(ResourceTasks, 1)
+		process.releaseTask()
 		return true
 	}
 	return false
@@ -280,9 +313,9 @@ const (
 
 type Registry struct {
 	processes     [MaxProcesses]*Process
-	count         uint8
+	count         uint16
 	completed     [MaxExitEvents]ExitEvent
-	completedNext uint8
+	completedNext uint16
 	// owners maps each task slot to the process its task runs in. Entries
 	// change under the registry's lock, and a slot's entry only while its
 	// task is not running, so a task reads its own entry with no lock.

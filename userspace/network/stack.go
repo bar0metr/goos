@@ -81,16 +81,45 @@ type Stack struct {
 	announcer   announcer
 	dhcp        dhcpClient
 
-	udp           [MaxUDPEndpoints]udpEndpoint
-	udpBuffers    [UDPReceiveBuffers]udpBuffer
-	udpPending    [UDPPendingSends]udpPending
-	udpGeneration uint32
-	udpStats      UDPStats
+	// udp is the endpoint registry and udpUsed its slots in use; udpPorts
+	// files the bound endpoints by port (udp_registry.go). udpBuffers is
+	// the receive pool and udpFree its free buffers.
+	udp               []*udpEndpoint
+	udpUsed           []uint64
+	udpLive           int
+	udpPorts          udpPortIndex
+	udpSeed           uint64
+	udpBuffers        []*udpBuffer
+	udpFree           []uint16
+	udpOwnerBuffers   [MaxUDPSessions]int
+	udpOwnerEndpoints [MaxUDPSessions]int
+	udpPending        [UDPPendingSends]udpPending
+	udpGeneration     uint32
+	udpStats          UDPStats
+	udpQuota          [MaxUDPSessions]uint16
+	udpBinds          uint32
 
-	tcp           [MaxTCPEndpoints]tcpEndpoint
-	tcpTombstones [tcpTombstoneSlots]tcpTombstone
-	tcpGeneration uint32
-	tcpStats      TCPStats
+	// tcp is the endpoint registry, nil in a free slot; it grows to the
+	// highest slot in use, up to MaxTCPEndpoints. tcpUsed marks the slots in
+	// use, so the paths that walk every endpoint read a mark per 64 slots.
+	tcp                               []*tcpEndpoint
+	tcpUsed                           []uint64
+	tcpLive                           int
+	tcpSeed                           uint64
+	tcpTuples, tcpPorts, tcpListeners tcpIndex
+	tcpOwnerLists                     [tcpOwners]tcpList
+	tcpTimers                         tcpTimers
+	// tcpAckPending holds the endpoints with an ACK the full transmit
+	// queue held back; tcpAckSpare is the other buffer flushPendingACKs
+	// swaps in.
+	tcpAckPending, tcpAckSpare []*tcpEndpoint
+	tcpTombstones              tcpTombstones
+	tcpQuota                   [MaxTCPSessions]uint16
+	tcpOwnerBytes              [tcpOwners]int
+	tcpBytes                   int
+	tcpBudget                  tcpBudget
+	tcpGeneration              uint32
+	tcpStats                   TCPStats
 
 	// defended and defendedAt record the last defence of the live address.
 	defended   bool
@@ -103,6 +132,9 @@ type Stack struct {
 	rateLimited   bool
 	counters      Conflicts
 	loopback      uint64
+	// localWire, set only by tests, sends local TCP segments as packets
+	// through this buffer and the parser instead of handing them over.
+	localWire []byte
 
 	frames  [TxQueueFrames][MaxFrame]byte
 	lengths [TxQueueFrames]uint16
@@ -231,6 +263,16 @@ func (stack *Stack) Apply(config Config, tuning Tuning, now uint64) Field {
 	}
 	stack.tuning = tuning
 	return stack.Configure(config, now)
+}
+
+// SetTuning validates a tuning and applies it alone, or returns the first
+// field out of range and changes nothing.
+func (stack *Stack) SetTuning(tuning Tuning) Field {
+	if field := tuning.Validate(); field != FieldNone {
+		return field
+	}
+	stack.tuning = tuning
+	return FieldNone
 }
 
 // Tuning returns the policy in use.

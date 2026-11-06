@@ -125,6 +125,16 @@ policy one. At the time of this ADR every native process had one task, so the
 task quota did not constrain native programs yet. ADR 0203 later made that
 quota relevant to native sibling threads.
 
+**Revision: tasks also charge pages.** ADR 0122's revision raised the large
+profile's task quota to `MaxTasksPerProcess`, 64, where the quota and the
+table bound together, and the normal one to 16. A count alone would let a
+process hold 64 kernel stacks whatever its page share, so every task past the
+first now holds `TaskPages` (six) of `ResourcePages` as well, charged in
+`ReserveTask` and returned when the reservation is cancelled or the task is
+removed. The account keeps one invariant: a process with n bound or reserved
+tasks holds max(n-1, 0) × `TaskPages` for them. Teardown still releases the
+whole account, and the counts have reached zero by the time it does.
+
 `ProcessInfo` records grew from 32 bytes to 80. The native ABI is not stable
 until it is declared so, and the record's layout is documented with the constant.
 

@@ -31,11 +31,12 @@ func goosStart(t *Task, fn uintptr, args unsafe.Pointer, stackSize uintptr)
 func OnSystemStack() bool { return Current() == nil }
 
 // goosTasks are the tasks of code that does not run as a started
-// goroutine: index k below 16 is the scheduler stack of thread slot k, 16
-// is the main function, and 17+k the thread.Start function of slot k. They
-// exist from the start, so TinyGo's defer frames and channel operations
-// have a task before the GoOS runtime has set anything up.
-var goosTasks [33]Task
+// goroutine: index k below 64 (kcall.ThreadSlots) is the scheduler stack of
+// thread slot k, 64 is the main function, and 65+k the thread.Start
+// function of slot k. They exist from the start, so TinyGo's defer frames
+// and channel operations have a task before the GoOS runtime has set
+// anything up.
+var goosTasks [129]Task
 
 //export goos_task_static
 func goosTaskStatic(index int) *Task { return &goosTasks[index] }

@@ -4,6 +4,7 @@ package amd64
 
 import (
 	"goos/internal/validation"
+	"goos/kernel/diag"
 	"goos/kernel/lock"
 	"goos/kernel/sched"
 	"math/bits"
@@ -13,7 +14,9 @@ import (
 // MaxCPUs bounds the processors the kernel runs on.
 const MaxCPUs = sched.MaxCPUs
 
-// Slots 0-63 are tasks; slot idleBase+n is processor n's idle loop.
+// Slots below sched.MaxTasks are tasks; slot idleBase+n is processor n's idle
+// loop. io.S sizes its per-slot tables with the same bounds
+// (GOOS_MAX_TASKS, GOOS_SLOT_COUNT).
 const (
 	idleBase  = sched.MaxTasks
 	slotCount = idleBase + MaxCPUs
@@ -178,6 +181,12 @@ func schedSwitch(action uint64) uint64 {
 		taskExitCodes[previous] = killCodes[previous]
 	}
 	next := runState.Switch(cpu, sched.Action(action))
+	if diag.Enabled {
+		noteRunSwitch(cpu, previous)
+	}
+	if diag.Enabled && next != sched.Idle && next != previous {
+		noteWakeRun(next)
+	}
 	if next != sched.Idle && next >= kernelTasks {
 		noteParallel(taskRoots[next])
 	}
@@ -268,9 +277,11 @@ func kernelEnter() uint64 {
 	if atomic.LoadUint64(&cpuData[cpu][cpuKill]) != 0 {
 		return 0
 	}
-	schedulerLock.Lock()
-	runState.ForgetWake(cpu)
-	schedulerLock.Unlock()
+	if runState.WakeRecorded(cpu) {
+		schedulerLock.Lock()
+		runState.ForgetWake(cpu)
+		schedulerLock.Unlock()
+	}
 	noteKernelEntry()
 	return 1
 }
@@ -407,6 +418,9 @@ func wakeSlotFromInterrupt(slot uint64) {
 func wakeSlot(slot int) bool {
 	cpu := CPUIndex()
 	flags := lockScheduler()
+	if diag.Enabled && !runState.OnProcessor(slot) {
+		noteWakeStart(slot)
+	}
 	target, ok := runState.Wake(slot, cpu)
 	schedulerLock.Unlock()
 	if target != sched.Idle {
@@ -423,6 +437,9 @@ func WakeTaskID(task uint64) bool {
 	slot, ok := runState.Alive(sched.TaskID(task))
 	target := sched.Idle
 	if ok {
+		if diag.Enabled && !runState.OnProcessor(slot) {
+			noteWakeStart(slot)
+		}
 		target, ok = runState.Wake(slot, cpu)
 	}
 	schedulerLock.Unlock()
@@ -750,19 +767,20 @@ func ReplaceTaskAddressSpace(task sched.TaskID, pageTable uint64) bool {
 // SchedulerState is a snapshot of the run state. Current is the calling
 // processor's slot.
 type SchedulerState struct {
-	Runnable uint64
-	Dead     uint64
+	Runnable sched.TaskSet
+	Dead     sched.TaskSet
 	Count    uint64
 	Current  uint64
-	Running  uint64
+	Running  sched.TaskSet
 	Online   uint64
 	Stats    sched.Stats
 }
 
 func ReadSchedulerState() SchedulerState {
 	cpu := CPUIndex()
+	var snapshot sched.Snapshot
 	flags := lockScheduler()
-	snapshot := runState.Snapshot()
+	runState.Snapshot(&snapshot)
 	current := asmSlot(runState.Current(cpu), cpu)
 	unlockScheduler(flags)
 	return SchedulerState{Runnable: snapshot.Runnable, Dead: snapshot.Dead, Count: uint64(snapshot.Count),
@@ -780,14 +798,9 @@ func TaskStackTop(slot uint64) uint64 {
 
 // FreeTaskSlots counts the slots a new task can take.
 func FreeTaskSlots() int {
-	snapshot := ReadSchedulerState()
 	flags := lockScheduler()
-	vacant := runState.Snapshot().Vacant
+	free := runState.FreeSlots()
 	unlockScheduler(flags)
-	free := sched.MaxTasks - int(snapshot.Count)
-	for ; vacant != 0; vacant &= vacant - 1 {
-		free++
-	}
 	return free
 }
 

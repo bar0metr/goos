@@ -44,6 +44,9 @@ func (handler *linuxCallHandler) Readv(request linuxcompat.Request) linuxcompat.
 // kernel itself for a device, and the stream code below for everything else.
 func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) linuxcompat.Result {
 	local := thisCPU()
+	if handler.widenUnlessSocket(request.Arguments[0]) {
+		return linuxcompat.Result{}
+	}
 	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
 		switch description.Kind {
 		case linuxcompat.FDVFSFile:
@@ -54,6 +57,10 @@ func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) 
 			return handler.deviceRead(request, description, vector)
 		case linuxcompat.FDTerminal:
 			return handler.terminalRead(request, description, vector)
+		case linuxcompat.FDSocket:
+			return handler.socketRead(request, description, vector)
+		case linuxcompat.FDEvent:
+			return handler.eventTransfer(request, description, false, vector)
 		}
 	}
 	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {
@@ -142,8 +149,9 @@ func (handler *linuxCallHandler) readLimit(request linuxcompat.Request, vector b
 		writable := handler.accessible(base, length, true)
 		total += writable
 		if writable < length {
-			// The read ends where the destination does.
-			if total == 0 {
+			// The read ends where the destination does, unless an image page
+			// stopped it.
+			if total == 0 || writable == 0 && executablePageWanted(handler.task) {
 				return 0, nil, linuxabi.EFAULT
 			}
 			break
@@ -184,6 +192,15 @@ func (handler *linuxCallHandler) accessible(address uint64, length uint64, write
 			break
 		}
 		reached += chunk
+	}
+	if reached < length && executablePageWanted(handler.task) {
+		// The range stopped at a page of the program's image that an
+		// executable object holds. That page is not the end of the buffer:
+		// the call fails before any effect, and the dispatcher brings the
+		// page in and runs it again. A short count instead would leave the
+		// page out, and every later call through the same buffer would stop
+		// there too.
+		return 0
 	}
 	return reached
 }
@@ -239,6 +256,9 @@ func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.
 	if request.Number == linuxabi.SysPwrite64 {
 		return handler.positioned(request, true)
 	}
+	if handler.widenUnlessSocket(request.Arguments[0]) {
+		return linuxcompat.Result{}
+	}
 	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
 		switch description.Kind {
 		case linuxcompat.FDVFSFile:
@@ -249,6 +269,10 @@ func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.
 			return handler.deviceWrite(request, *description, false)
 		case linuxcompat.FDTerminal:
 			return handler.terminalWrite(request, description, false)
+		case linuxcompat.FDSocket:
+			return handler.socketWrite(request, description, false)
+		case linuxcompat.FDEvent:
+			return handler.eventTransfer(request, description, true, false)
 		}
 	}
 	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {
@@ -328,6 +352,9 @@ func (handler *linuxCallHandler) writeRange(request linuxcompat.Request, endpoin
 // from there.
 func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat.Result {
 	local := thisCPU()
+	if handler.widenUnlessSocket(request.Arguments[0]) {
+		return linuxcompat.Result{}
+	}
 	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
 		switch description.Kind {
 		case linuxcompat.FDVFSFile:
@@ -338,6 +365,10 @@ func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat
 			return handler.deviceWrite(request, *description, true)
 		case linuxcompat.FDTerminal:
 			return handler.terminalWrite(request, description, true)
+		case linuxcompat.FDSocket:
+			return handler.socketWrite(request, description, true)
+		case linuxcompat.FDEvent:
+			return handler.eventTransfer(request, description, true, true)
 		}
 	}
 	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {
@@ -439,7 +470,7 @@ func (handler *linuxCallHandler) Exit(request linuxcompat.Request, group bool) l
 }
 
 func (handler *linuxCallHandler) endpoint(fd int64, writer bool) (*stream.Stream, uint64, linuxabi.Errno) {
-	if fd < 0 || fd >= linuxcompat.LinuxMaxFD {
+	if fd < 0 || fd >= linuxcompat.LinuxFDCeiling {
 		return nil, 0, linuxabi.EBADF
 	}
 	description, found := linuxcompat.LookupFD(handler.root, int(fd))
@@ -509,4 +540,20 @@ func min64(value uint64, bound int) int {
 		return bound
 	}
 	return int(value)
+}
+
+// widenUnlessSocket reports whether a read or write that runs under
+// linuxSockets names something other than a socket. It then asks the
+// dispatcher for linuxFiles, and the call returns at once, before it
+// changes anything.
+func (handler *linuxCallHandler) widenUnlessSocket(fd uint64) bool {
+	local := thisCPU()
+	if local.linuxCall.set != linuxSockets {
+		return false
+	}
+	if description, found := linuxcompat.DescriptionOf(handler.root, fd); found && description.Kind == linuxcompat.FDSocket {
+		return false
+	}
+	local.linuxWiden = true
+	return true
 }

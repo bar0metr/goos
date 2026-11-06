@@ -351,7 +351,7 @@ func reloadCandidate(expected []byte, expectedRevision uint64, expectedPath stri
 				return errors.New("remote listener allocation failed")
 			}
 			replacement = opened.Endpoint
-			bound, ok := tcpCall(tcpapi.Request{Opcode: tcpapi.OpBind, Endpoint: replacement, Address: policy.ListenAddress, Port: policy.Port})
+			bound, ok := tcpCall(tcpapi.Request{Opcode: tcpapi.OpBind, Endpoint: replacement, Address: policy.ListenAddress, Port: policy.Port, Flags: tcpapi.FlagReuseAddr})
 			if !ok || bound.Port != policy.Port {
 				closeEndpoint(replacement)
 				return errors.New("remote listener bind failed")

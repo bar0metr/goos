@@ -42,10 +42,22 @@ type remote struct {
 	buffer  [network.MaxFrame]byte
 }
 
+// smallBuffers caps both TCP buffers at 16 KiB, so a test fills them with
+// a few slots.
+func smallBuffers(t *testing.T, stack *network.Stack) {
+	t.Helper()
+	tuning := stack.Tuning()
+	tuning.TCP.SendBuffer, tuning.TCP.ReceiveBuffer = 16384, 16384
+	if field := stack.SetTuning(tuning); field != network.FieldNone {
+		t.Fatalf("tuning field %d", field)
+	}
+}
+
 func newRemote(t *testing.T) *remote {
 	t.Helper()
 	r := &remote{t: t, stack: new(network.Stack), now: 1_000_000_000_000, address: hostIP}
 	r.stack.Init(1234)
+	smallBuffers(t, r.stack)
 	r.stack.Configure(network.Config{Mode: network.ModeStatic, Address: hostIP, Prefix: 24, Gateway: gateway}, r.now)
 	r.stack.LinkUp(hostMAC, network.MTU, r.now)
 	for step := 0; r.stack.Snapshot(r.now).State != network.StateReady; step++ {

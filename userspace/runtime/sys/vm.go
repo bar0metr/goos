@@ -33,6 +33,21 @@ func VMReserve(length uint64, protection uint64) (uint64, kcall.Status) {
 	return w.vmDescriptor[0], kcall.StatusOK
 }
 
+// VMReserveBytes is VMReserve for a size in bytes. The kernel refuses a
+// length that is not a whole number of pages, so it rounds bytes up and
+// returns the length it reserved with the address.
+func VMReserveBytes(bytes uint64, protection uint64) (uint64, uint64, kcall.Status) {
+	length := PageBytes(bytes)
+	if length < bytes {
+		return 0, 0, kcall.StatusInvalidArgument
+	}
+	base, result := VMReserve(length, protection)
+	return base, length, result
+}
+
+// PageBytes rounds bytes up to whole pages.
+func PageBytes(bytes uint64) uint64 { return (bytes + pageSize - 1) &^ (pageSize - 1) }
+
 // VMReserveStacks reserves slots guarded stacks in one region. Each slot
 // starts with a 64 KiB guard followed by 256 KiB of demand-zero stack.
 // Callers may discard individual stacks, but must unmap the batch whole.

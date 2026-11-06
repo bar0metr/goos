@@ -105,6 +105,13 @@ func StatusOfReply(reply *vfs.Reply) (FileStatus, abi.Errno) {
 
 // StreamStatus describes a stream: a FIFO only its holders may use. The
 // stream identity is the inode, so both ends of a pipe report the same one.
+// SocketStatus describes a socket as fstat reports it: a synthetic inode on
+// the stream device, mode S_IFSOCK with owner read and write, as Linux
+// gives a socket.
+func SocketStatus(object uint64) FileStatus {
+	return FileStatus{Device: StreamDevice, Inode: object &^ (1 << 63), Mode: abi.ModeSocket | 0o777}
+}
+
 func StreamStatus(identity uint64) FileStatus {
 	return FileStatus{Device: StreamDevice, Inode: identity, Mode: abi.ModeFIFO | 0o600}
 }

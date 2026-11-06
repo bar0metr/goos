@@ -385,6 +385,7 @@ type RunOptions struct {
 	RequirePass     bool
 	RequireClean    bool
 	WorkloadTimeout time.Duration
+	Bench           *BenchOptions
 }
 
 // Run performs one disposable run and returns the exit status. Whatever
@@ -577,6 +578,7 @@ func (l *Lab) execute(ctx context.Context, st *State, report *Report, opts RunOp
 			return s.Status, err
 		},
 		EvidenceDir: st.Dir(), HostRunner: runHostCommand, OpenTerminal: openGuestTerminal,
+		Bench: opts.Bench, Node: &labNode{ssh: l.ssh, st: st},
 		ReconnectSerial: func(ctx context.Context) error {
 			if err := console.Close(); err != nil {
 				return err
@@ -635,7 +637,7 @@ func (l *Lab) execute(ctx context.Context, st *State, report *Report, opts RunOp
 			}
 			return guest.WaitBoot(ctx, l.cfg.Timeout)
 		},
-		logf: l.log.Debugf,
+		logf: l.log.Debugf, infof: l.log.Infof,
 	}
 	result, err = scenario.Run(ctx, session)
 	if ctx.Err() != nil && err != nil {
