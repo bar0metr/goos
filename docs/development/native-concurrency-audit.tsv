@@ -688,6 +688,7 @@ CA-0689	goos/userspace/runtime/arena	threaded	process	atomic	runtime/arena tests
 CA-1136	goos/userspace/runtime/arena	mainThread	thread	per-thread	runtime/arena tests
 CA-1137	goos/userspace/runtime/arena	threadStates	thread	per-thread	runtime/arena tests
 CA-1138	goos/userspace/runtime/arena	threadHigh	process	atomic	runtime/arena tests
+CA-1144	goos/userspace/runtime/arena	snapshotsWide	process	runtime	runtime/arena tests
 CA-0691	goos/userspace/runtime/arena	totalPause	process	runtime	runtime/arena tests
 CA-0692	goos/userspace/runtime/arena	totalRendezvous	process	runtime	runtime/arena tests
 CA-0693	goos/userspace/runtime/arena	windowPause	process	immutable	runtime/arena tests

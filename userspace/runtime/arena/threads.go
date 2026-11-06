@@ -50,9 +50,9 @@ var (
 	// gcEpoch counts completed collections; gcFlag is in window.go.
 	gcEpoch atomic.Uint64
 	// snapshots receives the held threads' state for the collection that
-	// runs. EnableThreads reserves it outside the globals, so a collection
-	// touches only the records of the threads it holds; markThreads scans
-	// their registers, and releaseHeld clears them.
+	// runs. EnableThreads reserves it outside the globals, and a collection
+	// touches only the records snapshotRoom offers; markThreads scans the
+	// held threads' registers, and releaseHeld clears them.
 	snapshots     []byte
 	snapshotCount int
 	// suspendFailures counts collections given up because the other
@@ -375,6 +375,21 @@ func IdleLeave() {
 // threads before it gives up.
 const suspendAttempts = 4
 
+// snapshotsWide is set once the kernel refused the room snapshotRoom
+// offered; every later collection offers a record for every slot.
+var snapshotsWide bool
+
+// snapshotRoom is how many snapshot records a collection offers the kernel:
+// one for each slot below threadSpan, so the room's pages are touched by
+// the threads that ran, or every slot once that proved too few. sys.ThreadSuspend
+// touches every page it is given.
+func snapshotRoom() int {
+	if snapshotsWide {
+		return int(kcall.MaxThreadSnapshots)
+	}
+	return min(threadSpan(), int(kcall.MaxThreadSnapshots))
+}
+
 // suspendOthers holds every other thread and records their snapshots. A
 // thread caught inside an allocation or region-transition window is let
 // go to finish it before another hold. The raised gcFlag keeps allocation
@@ -382,7 +397,14 @@ const suspendAttempts = 4
 func suspendOthers() bool {
 	started := nativeTicks()
 	for attempt := 0; attempt < suspendAttempts; attempt++ {
-		count, status := sys.ThreadSuspend(snapshots[:])
+		room := snapshotRoom()
+		count, status := sys.ThreadSuspend(snapshots[:room*int(kcall.ThreadSnapshotSize)])
+		if status == kcall.StatusInvalidArgument && room < int(kcall.MaxThreadSnapshots) {
+			// More threads live than have started: one is between its
+			// creation and ThreadStarted. Offer every slot from now on.
+			snapshotsWide = true
+			continue
+		}
 		if status == kcall.StatusOK {
 			switch heldWindow(count) {
 			case windowNone:
