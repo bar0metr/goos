@@ -198,10 +198,32 @@ type mCounters struct {
 	dispatches, steals, stolen, parks, preemptVisits, preemptions, polls atomic.Uint64
 }
 
-var (
-	gs [MaxGoroutines]G
-	ms [tls.Slots]M
+// The static tasks (tinygo/goroutines/task_stack.go.txt): one per thread
+// slot for its scheduler stack, the main function's, and one per slot for a
+// thread.Start function, staticTasks in all.
+const (
+	taskMain    = tls.Slots
+	taskPinned  = tls.Slots + 1
+	staticTasks = 2*tls.Slots + 1
 )
+
+// m0 is the main thread's M. The others' lie in mRecords, which the runtime
+// reserves before it starts a second thread, so an M costs memory once a
+// thread runs in its slot. ms names each slot's M from the first time its
+// thread ran the scheduler; walks over the threads skip a nil one and touch
+// no page of a slot that never ran.
+var (
+	gs       [MaxGoroutines]G
+	m0       M
+	mRecords sys.SlotRecords
+	ms       [tls.Slots]atomic.Pointer[M]
+)
+
+// mOf returns slot's M, or nil before its thread first ran the scheduler.
+func mOf(slot int) *M { return ms[slot].Load() }
+
+// reserveMs makes room for the Ms of every thread the runtime may start.
+func reserveMs() bool { return mRecords.Reserve(unsafe.Sizeof(m0)) }
 
 // indexOf returns g's index in the table.
 func indexOf(g *G) uint32 {

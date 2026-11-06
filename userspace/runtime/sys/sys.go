@@ -47,13 +47,29 @@ type wires struct {
 	touched byte
 }
 
-var scratch [tls.Slots]wires
+// mainScratch is the main thread's descriptors. Every other thread's lie in
+// threadScratch, which the thread calls reserve before the second thread
+// starts.
+var (
+	mainScratch   wires
+	threadScratch SlotRecords
+)
 
 // current returns the calling thread's descriptors and pins the caller to
 // the thread: a goroutine preempted between filling a descriptor and the
 // call could otherwise resume on another thread while a goroutine on this
 // one reuses the descriptor (ADR 0204). Every caller unpins when it returns.
-func current() *wires { return &scratch[tls.Pin()] }
+func current() *wires {
+	slot := tls.Pin()
+	if slot == 0 {
+		return &mainScratch
+	}
+	return (*wires)(threadScratch.At(slot, unsafe.Sizeof(mainScratch)))
+}
+
+// reserveThreadScratch makes room for the descriptors of every thread a
+// creation may start.
+func reserveThreadScratch() bool { return threadScratch.Reserve(unsafe.Sizeof(mainScratch)) }
 
 type ConsoleInfo struct {
 	Columns uint32

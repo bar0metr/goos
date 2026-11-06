@@ -245,9 +245,14 @@ func currentStack() (uintptr, uintptr) {
 	return arena.NativeStack(slot)
 }
 
+// planHeld is planCollection's copy of the held threads. It is a global: a
+// collection holds every other thread and runs one plan at a time, and 64
+// entries would take 1 KiB of the collecting goroutine's stack.
+var planHeld [tls.Slots]HeldThread
+
 // planCollection is the collector's Plan hook (roots.go).
 func planCollection(self arena.HeldThread, held []arena.HeldThread) bool {
-	var others [tls.Slots]HeldThread
+	others := &planHeld
 	count := 0
 	for index := range held {
 		if count < len(others) {

@@ -114,6 +114,10 @@ if wants native; then
 	run 'threadprobe lifecycle'
 	require '^THREADPROBE_LIFECYCLE_OK$' 'thread lifecycle'
 	grep '^THREADPROBE_LIFECYCLE ' "$work/output" >>"$work/summary"
+	# A large process has 64 thread slots and a task quota of 64; the
+	# runtime's own workers may hold a few of them.
+	quota_threads=$(field quota_threads '^THREADPROBE_LIFECYCLE ')
+	[ "${quota_threads:-0}" -ge 56 ] || fail "a large process started ${quota_threads:-0} threads, expected at least 56"
 
 	# A fault in a worker ends its whole process and nothing else.
 	for mode in fault:'user fault: no mapping' overflow:'user fault: guard page'; do

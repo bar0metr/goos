@@ -535,8 +535,8 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if !linuxProcess && grantable && equalBytes(command, "quota") {
 		profile = supervisor.ProfileTiny
 	}
-	// The concurrency probes exercise eight native tasks, the large
-	// profile's task quota (ADR 0203, ADR 0204).
+	// The concurrency probes exercise up to 64 native tasks, the large
+	// profile's task quota (ADR 0203, ADR 0204, ADR 0122).
 	if !linuxProcess && grantable && (equalBytes(command, "fsck-fat") || equalBytes(command, "vmprobe") || equalBytes(command, "threadprobe") || validation.Enabled && equalBytes(command, "goprobe")) {
 		profile = supervisor.ProfileLarge
 	}

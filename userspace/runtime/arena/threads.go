@@ -32,7 +32,14 @@ type threadState struct {
 }
 
 var (
-	threads [tls.Slots]threadState
+	// mainThread is slot 0's state. The other slots' states lie in
+	// threadStates, which EnableThreads reserves; a slot's page costs
+	// memory once a thread runs in it. threadHigh is one past the highest
+	// slot a thread started in, so walks over the states touch no page a
+	// thread never used.
+	mainThread   threadState
+	threadStates sys.SlotRecords
+	threadHigh   atomic.Int32
 	// threaded is set once, before the second thread starts.
 	threaded atomic.Bool
 	// heapLock guards the heap, the regions list, and the counters of
@@ -43,8 +50,10 @@ var (
 	// gcEpoch counts completed collections; gcFlag is in window.go.
 	gcEpoch atomic.Uint64
 	// snapshots receives the held threads' state for the collection that
-	// runs; it is a global, so marking scans it, and it is cleared after.
-	snapshots     [kcall.MaxThreadSnapshots * kcall.ThreadSnapshotSize]byte
+	// runs. EnableThreads reserves it outside the globals, so a collection
+	// touches only the records of the threads it holds; markThreads scans
+	// their registers, and releaseHeld clears them.
+	snapshots     []byte
 	snapshotCount int
 	// suspendFailures counts collections given up because the other
 	// threads could not all be held.
@@ -68,10 +77,26 @@ var (
 // self returns the calling thread's state.
 func self() *threadState {
 	if !threaded.Load() {
-		return &threads[0]
+		return &mainThread
 	}
-	return &threads[tls.Slot()]
+	return stateOf(tls.Slot())
 }
+
+// stateOf returns slot's state. Only a slot below threadSpan, or the
+// caller's own, may be passed once threads exist.
+func stateOf(slot int) *threadState {
+	if slot == 0 {
+		return &mainThread
+	}
+	return (*threadState)(threadStates.At(slot, unsafe.Sizeof(mainThread)))
+}
+
+// threadSpan is one past the highest slot a thread started in.
+func threadSpan() int { return max(int(threadHigh.Load()), 1) }
+
+// snapshotBytes is the room a collection gives ThreadSuspend: one record for
+// every slot but the collector's.
+const snapshotBytes = kcall.MaxThreadSnapshots * kcall.ThreadSnapshotSize
 
 // selfSlot returns the calling thread's slot.
 func selfSlot() int {
@@ -83,16 +108,30 @@ func selfSlot() int {
 
 // EnableThreads sets the runtime up for a second thread. The thread package
 // calls it before it starts one; it is the only change of mode, and only one
-// thread exists when it runs.
-func EnableThreads() {
+// thread exists when it runs. It reserves the other threads' states and the
+// collector's snapshot room, and reports false, staying single-threaded,
+// when the kernel refuses either.
+func EnableThreads() bool {
 	if !ready {
 		Init()
 	}
 	if threaded.Load() {
-		return
+		return true
 	}
-	threads[0].live = true
+	if snapshots == nil {
+		base, status := sys.VMReserve(uint64(snapshotBytes), kcall.VMRead|kcall.VMWrite)
+		if status != kcall.StatusOK || base == 0 {
+			return false
+		}
+		// SAFETY: the reservation is snapshotBytes long and never unmapped.
+		snapshots = unsafe.Slice((*byte)(pointerAt(uintptr(base))), snapshotBytes)
+	}
+	if !threadStates.Reserve(unsafe.Sizeof(mainThread)) {
+		return false
+	}
+	mainThread.live = true
 	threaded.Store(true)
+	return true
 }
 
 // UseThreadCaches turns thread-owned slabs on or off. It takes effect only
@@ -112,8 +151,14 @@ func ThreadStarted(slot int) {
 	if slot <= 0 || slot >= tls.Slots {
 		panic("arena: thread started in an invalid slot")
 	}
-	t := &threads[slot]
+	t := stateOf(slot)
+	if t == nil {
+		panic("arena: thread started before EnableThreads")
+	}
 	lockHeap()
+	if int32(slot) >= threadHigh.Load() {
+		threadHigh.Store(int32(slot) + 1)
+	}
 	t.regions, t.cursor, t.innermost = regionStack{}, allocatorPosition{}, nil
 	native.returnCache(&t.cache, &t.counts)
 	t.fold(&native)
@@ -121,8 +166,8 @@ func ThreadStarted(slot int) {
 	t.idle.Store(0)
 	t.live = true
 	live := uint32(0)
-	for index := range threads {
-		if threads[index].live {
+	for index := 0; index < threadSpan(); index++ {
+		if stateOf(index).live {
 			live++
 		}
 	}
@@ -239,9 +284,10 @@ func collectThreaded(slot int, reason collectionReason) bool {
 			base, _ := currentStack()
 			scrubStack(base)
 			collect(reason)
-			for index := range threads {
-				native.checkCache(&threads[index].cache, uint32(index+1))
-				threads[index].allocated = false
+			for index := 0; index < threadSpan(); index++ {
+				t := stateOf(index)
+				native.checkCache(&t.cache, uint32(index+1))
+				t.allocated = false
 			}
 		}
 		collecting = false
@@ -273,8 +319,8 @@ func collectThreaded(slot int, reason collectionReason) bool {
 // leaves a heap the next one can start from.
 func prepareThreads(reason collectionReason) uint32 {
 	allocators := uint32(0)
-	for index := range threads {
-		t := &threads[index]
+	for index := 0; index < threadSpan(); index++ {
+		t := stateOf(index)
 		active := t.live && (t.allocated || t.counts.allocs != 0)
 		if active {
 			allocators++
@@ -293,7 +339,7 @@ func prepareThreads(reason collectionReason) uint32 {
 // othersIdle reports whether every live thread but slot waits in an idle
 // wait.
 func othersIdle(slot int) bool {
-	return idleQuorum(slot, len(threads), func(index int) *threadAlloc { return &threads[index].threadAlloc })
+	return idleQuorum(slot, threadSpan(), func(index int) *threadAlloc { return &stateOf(index).threadAlloc })
 }
 
 // releaseHeld lets the held threads go.
@@ -377,8 +423,8 @@ func heldWindow(count int) int {
 	found := windowNone
 	for index := 0; index < count; index++ {
 		slot := int(snapshotWord(index, 1))
-		if slot >= 0 && slot < tls.Slots {
-			found = max(found, threads[slot].window())
+		if slot >= 0 && slot < threadSpan() {
+			found = max(found, stateOf(slot).window())
 		}
 	}
 	return found
@@ -470,8 +516,8 @@ func allocCached(t *threadState, size uintptr, noPointers bool) uintptr {
 // anyUnfolded reports whether some thread counted what it has not folded:
 // allocations or frees since its last refill.
 func anyUnfolded() bool {
-	for index := range threads {
-		if threads[index].unfolded.Load() != 0 {
+	for index := 0; index < threadSpan(); index++ {
+		if stateOf(index).unfolded.Load() != 0 {
 			return true
 		}
 	}
@@ -512,8 +558,8 @@ func freeThreaded(t *threadState, address uintptr) {
 // lock. The thread counters in d are the folded ones (foldThread).
 func threadDiagnostics(d *Diagnostics) {
 	d.ThreadsLive, d.ThreadsPeak = 0, peakThreads
-	for index := range threads {
-		if threads[index].live {
+	for index := 0; index < threadSpan(); index++ {
+		if stateOf(index).live {
 			d.ThreadsLive++
 		}
 	}
@@ -524,8 +570,8 @@ func threadDiagnostics(d *Diagnostics) {
 	d.RendezvousLast, d.RendezvousMax, d.RendezvousTotal = lastRendezvous, maxRendezvous, totalRendezvous
 	d.PauseLast, d.PauseMax, d.PauseTotal = lastPause, maxPause, totalPause
 	d.UnfoldedThreads = 0
-	for index := range threads {
-		if threads[index].unfolded.Load() != 0 {
+	for index := 0; index < threadSpan(); index++ {
+		if stateOf(index).unfolded.Load() != 0 {
 			d.UnfoldedThreads++
 		}
 	}

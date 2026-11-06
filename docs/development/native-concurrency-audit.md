@@ -356,8 +356,10 @@ and does not modify it. Tests: `TestLocateImageNamesTheBytesOfAnExecutable`,
 runtime and are maintained with ADR 0203 and its successors; their rows are
 listed for inventory coverage, not re-audited by the utility changes.
 
-- `runtime/sys`: `scratch` (CA-0695) is per-M scratch: the descriptors one
-  wrapper call fills and passes to the kernel. A wrapper pins its G while
+- `runtime/sys`: `mainScratch` and `threadScratch` (CA-1142, CA-1143) are
+  per-M scratch: the descriptors one wrapper call fills and passes to the
+  kernel. The main thread's are a global; the others' lie in a reservation
+  the thread calls make before the second thread starts. A wrapper pins its G while
   it uses M-local descriptors; kernel task preemption remains possible.
   Ordinary I/O wrappers require caller-owned buffers and kernel-managed
   handle lifetimes. Runtime controls such as `ThreadSetBase`, preemption

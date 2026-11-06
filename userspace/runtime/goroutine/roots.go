@@ -58,8 +58,7 @@ func locate(slot int, sp uintptr, native func(int) (uintptr, uintptr)) (uintptr,
 	if slot < 0 || slot >= tls.Slots {
 		return 0, 0, -1, false
 	}
-	m := &ms[slot]
-	if m.kind.Load() != mNone && sp >= m.sysLo && sp <= m.sysHi {
+	if m := mOf(slot); m != nil && m.kind.Load() != mNone && sp >= m.sysLo && sp <= m.sysHi {
 		return m.sysLo, m.sysHi, -1, true
 	}
 	for index := range gs {
@@ -113,8 +112,8 @@ func planStacks(self HeldThread, held []HeldThread, native func(int) (uintptr, u
 		}
 	}
 	for slot := range ms {
-		m := &ms[slot]
-		if m.kind.Load() == mNone || m.curG == nil {
+		m := mOf(slot)
+		if m == nil || m.kind.Load() == mNone || m.curG == nil {
 			continue
 		}
 		// The thread runs a goroutine: its scheduler stack keeps the

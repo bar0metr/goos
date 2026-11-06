@@ -185,8 +185,8 @@ func (r *Region) Used() uint64 {
 // position is where the region allocates now: the cursor of the thread
 // that has it as its innermost entered region, or its record.
 func (r *Region) position() allocatorPosition {
-	if slot := int(r.enteredBy.Load()) - 1; slot >= 0 && threads[slot].innermost == r {
-		return threads[slot].cursor
+	if slot := int(r.enteredBy.Load()) - 1; slot >= 0 && slot < threadSpan() && stateOf(slot).innermost == r {
+		return stateOf(slot).cursor
 	}
 	return r.state.position
 }

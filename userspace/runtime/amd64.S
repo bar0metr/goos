@@ -38,7 +38,8 @@ _start:
 .balign 64
 .global goos_tcbs
 goos_tcbs:
-    .zero 64 * 16
+    // One block per thread slot, kcall.ThreadSlots of them (tls_test.go).
+    .zero 64 * 64
 
 // goos_tcb_install makes the block of the slot in rsi the calling thread's
 // and sets its FS base to it. Only rax, rcx, and rdx change. A kernel that
