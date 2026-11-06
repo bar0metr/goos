@@ -72,7 +72,7 @@ func (handler nativeCallHandler) LinuxNetAttach(processHandle uint64, channelHan
 		closeLinuxNetHandles(target, linuxcompat.NetGrant{ChannelHandle: movedChannel, PoolHandle: movedPool})
 		return kcall.StatusInvalidArgument
 	}
-	if !cacheLinuxPool(grant.PoolObject) {
+	if !cacheLinuxPool(grant.PoolObject, familyID) {
 		closeLinuxNetHandles(target, grant)
 		return kcall.StatusResourceExhausted
 	}

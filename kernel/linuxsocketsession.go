@@ -316,25 +316,25 @@ func socketPoolPage(endpoint linuxcompat.NetEndpoint, index uint32) ([]byte, boo
 }
 
 // linuxPool holds the pages of one session pool. The kernel fills it, and
-// retains the pool object, before the session goes live, so the pages stay
-// while any call can reach them through the session.
+// retains the pool object, before the session goes live, and lets both go
+// when the session's holder exits: that exit holds the family's lock and
+// the shared memory lock, so no socket call of the family and no drain in
+// a service's send can be using the pages then.
 type linuxPool struct {
 	object atomic.Uint64
+	family uint64
 	pages  [linuxsockapi.PoolPages][]byte
 }
 
-// linuxPools caches the pools of the live sessions, and of a session
-// replaced since, until a later attach needs the entry. Attaches write it
-// under the shared memory lock; calls read it without a lock.
-var (
-	linuxPools    [2 * linuxcompat.MaxNetFamilies]linuxPool
-	linuxPoolNext int
-)
+// linuxPools caches the pools of the sessions whose holder still runs: a
+// live session's, and those of sessions replaced since. Attaches and exits
+// write it under the shared memory lock; calls read it without a lock.
+var linuxPools [2 * linuxcompat.MaxNetFamilies]linuxPool
 
-// cacheLinuxPool puts a session pool in linuxPools before its session goes
-// live. The caller holds the shared memory lock. It evicts the oldest entry
-// no live session uses, which drops the reference the entry held.
-func cacheLinuxPool(objectID uint64) bool {
+// cacheLinuxPool puts family's session pool in linuxPools before the
+// session goes live. The caller holds the shared memory lock. With no entry
+// free it takes the oldest one no live session uses.
+func cacheLinuxPool(objectID uint64, family uint64) bool {
 	for slot := range linuxPools {
 		if linuxPools[slot].object.Load() == objectID {
 			return true
@@ -344,37 +344,61 @@ func cacheLinuxPool(objectID uint64) bool {
 	if !found || object.PageCount() != linuxsockapi.PoolPages {
 		return false
 	}
+	pool := freeLinuxPool()
+	if pool == nil {
+		return false
+	}
+	for index := range pool.pages {
+		frame, present := object.Frame(vm.PhysicalPage, uint32(index))
+		page, mapped := vm.PhysicalPage(frame)
+		if !present || !mapped || len(page) < int(vm.PageSize) {
+			return false
+		}
+		pool.pages[index] = page[:vm.PageSize]
+	}
+	object.Retain()
+	pool.family = family
+	pool.object.Store(objectID)
+	return true
+}
+
+// freeLinuxPool returns an empty entry of linuxPools, emptying one whose
+// pool no live session uses when none is.
+func freeLinuxPool() *linuxPool {
+	for slot := range linuxPools {
+		if linuxPools[slot].object.Load() == 0 {
+			return &linuxPools[slot]
+		}
+	}
 	var families [linuxcompat.MaxNetFamilies]uint64
 	var endpoints [linuxcompat.MaxNetFamilies]linuxcompat.NetEndpoint
 	live := linuxcompat.LiveSessions(&families, &endpoints)
-	for attempt := 0; attempt < len(linuxPools); attempt++ {
-		pool := &linuxPools[linuxPoolNext]
-		linuxPoolNext = (linuxPoolNext + 1) % len(linuxPools)
-		old := pool.object.Load()
-		inUse := false
+	for slot := range linuxPools {
+		pool := &linuxPools[slot]
+		old, inUse := pool.object.Load(), false
 		for index := 0; index < live; index++ {
-			inUse = inUse || old != 0 && endpoints[index].PoolObject == old
+			inUse = inUse || endpoints[index].PoolObject == old
 		}
-		if inUse {
-			continue
+		if !inUse {
+			pool.object.Store(0)
+			dropShared(old)
+			return pool
 		}
-		for index := range pool.pages {
-			frame, present := object.Frame(vm.PhysicalPage, uint32(index))
-			page, mapped := vm.PhysicalPage(frame)
-			if !present || !mapped || len(page) < int(vm.PageSize) {
-				return false
-			}
-			if index == 0 && old != 0 {
-				pool.object.Store(0)
-				dropShared(old)
-			}
-			pool.pages[index] = page[:vm.PageSize]
-		}
-		object.Retain()
-		pool.object.Store(objectID)
-		return true
 	}
-	return false
+	return nil
+}
+
+// releaseLinuxPools lets go of every pool family's sessions used, when the
+// holder of its session exits.
+func releaseLinuxPools(family uint64) {
+	for slot := range linuxPools {
+		pool := &linuxPools[slot]
+		if old := pool.object.Load(); old != 0 && pool.family == family {
+			pool.object.Store(0)
+			pool.family = 0
+			dropShared(old)
+		}
+	}
 }
 
 // socketReadiness reads a socket's entry in the readiness pages. live false
@@ -676,6 +700,7 @@ func endLinuxNetHolder(exited *process.Process, familyID uint64) {
 	if endpoint, live, _ := linuxcompat.NetSession(familyID); live {
 		failSocketSession(familyID, endpoint, socketFailedHolder)
 	}
+	releaseLinuxPools(familyID)
 }
 
 // resolveLinuxNet checks the two session handles a process holds and
@@ -711,7 +736,7 @@ func attachLaunchNet(spawned *process.Process, root uint64, channelHandle handle
 	if !found || !valid {
 		return false
 	}
-	if !cacheLinuxPool(grant.PoolObject) {
+	if !cacheLinuxPool(grant.PoolObject, state.FamilyID) {
 		return false
 	}
 	_, _, attached := linuxcompat.AttachNet(state.FamilyID, grant, false)
