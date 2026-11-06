@@ -26,3 +26,7 @@ const (
 	// reported instead of resetting the machine.
 	faultStackPages = uint64(1)
 )
+
+// TaskStackPages is the allocation behind one task's kernel stack: the stack
+// and its guard. process.TaskPages charges it to the task's process.
+const TaskStackPages = kernelStackPages + KernelStackGuardSize/4096

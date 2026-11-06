@@ -16,10 +16,10 @@ const Capacity = 8176
 // cannot interleave inside one call. It equals the largest native stream call.
 const AtomicWrite = 256
 
-// MaxReferences bounds the handles one endpoint may have. The structural bound
-// is lower: every handle lives in one of process.MaxProcesses tables of
-// handle.MaxHandles slots, and a test holds that product below this. The check
-// keeps the counter from wrapping even if that stops being true.
+// MaxReferences bounds the handles one endpoint may have. Every handle lives
+// in one of process.MaxProcesses tables of handle.MaxHandles slots, 65536 at
+// 256 processes, one past this bound. Retain refuses at the bound, so the
+// 65536th handle of one end is refused and the counter never wraps.
 const MaxReferences = 1<<16 - 1
 
 type Status uint8

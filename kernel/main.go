@@ -404,6 +404,8 @@ func main() {
 	sharedObjects.SetStorage(pageObjects[shmem.Object]{})
 	executables.SetStorage(pageObjects[executable.Object]{})
 	linuxcompat.SetFDStorage(pageObjects[linuxcompat.FDChunk]{})
+	linuxcompat.SetProcessStorage(pageObjects[linuxcompat.ProcessState]{})
+	linuxcompat.SetVFSContextStorage(pageObjects[linuxcompat.LinuxVFSContext]{})
 	linuxcompat.SyscallContinuations.SetStorage(pageObjects[linuxcompat.Continuation]{})
 	if !built {
 		console.WriteString("PANIC: page-table construction failed\n")

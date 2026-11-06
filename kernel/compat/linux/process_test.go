@@ -46,12 +46,12 @@ func TestProcessStateRetainsLaunchAuthority(t *testing.T) {
 func TestProcessStateIsBounded(t *testing.T) {
 	resetCompatibilityProcesses()
 	data := linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4})
-	for index := range processStates {
+	for index := range processStates.entries {
 		if !InstallProcess(uint64(index+1), process.ID(index+1), data, StandardStreams{Input: 1, Output: 2, Error: 3}, 0x600000, 0x4600000) {
 			t.Fatalf("install %d failed", index)
 		}
 	}
-	if InstallProcess(uint64(len(processStates)+1), process.ID(len(processStates)+1), data, StandardStreams{Input: 1, Output: 2, Error: 3}, 0x600000, 0x4600000) {
+	if InstallProcess(uint64(len(processStates.entries)+1), process.ID(len(processStates.entries)+1), data, StandardStreams{Input: 1, Output: 2, Error: 3}, 0x600000, 0x4600000) {
 		t.Fatal("over-capacity state installed")
 	}
 }
@@ -454,10 +454,10 @@ func TestForkProcessSharesDescriptionsAndCopiesState(t *testing.T) {
 }
 
 func resetCompatibilityProcesses() {
-	processStates = [process.MaxProcesses]ProcessState{}
+	processStates = lazyTable[ProcessState]{}
 	processRecords = [process.MaxProcesses]ProcessRecord{}
 	openDescriptions = [MaxOpenDescriptions]descriptionSlot{}
-	vfsContexts = [process.MaxProcesses]LinuxVFSContext{}
+	vfsContexts = lazyTable[LinuxVFSContext]{}
 	threads = [len(threads)]Thread{}
 	terminals = [MaxTerminals]terminalRecord{}
 	nextPID = firstPID

@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"goos/kernel/ipc"
-	"goos/kernel/process"
 	"goos/kernel/sched"
 	"goos/kernel/vfs"
 )
@@ -91,7 +90,7 @@ func TestVFSCountersSaturate(t *testing.T) {
 }
 
 func TestVFSContextSerializesAndCancelsWaiters(t *testing.T) {
-	vfsContexts = [process.MaxProcesses]LinuxVFSContext{}
+	vfsContexts = lazyTable[LinuxVFSContext]{}
 	if !installVFSContext(41) || !RetainVFSContext(41) {
 		t.Fatal("context setup failed")
 	}
@@ -122,7 +121,7 @@ func TestVFSContextSerializesAndCancelsWaiters(t *testing.T) {
 }
 
 func TestVFSContextFailureAppliesToFamily(t *testing.T) {
-	vfsContexts = [process.MaxProcesses]LinuxVFSContext{}
+	vfsContexts = lazyTable[LinuxVFSContext]{}
 	if !installVFSContext(42) {
 		t.Fatal("context setup failed")
 	}
@@ -148,7 +147,7 @@ func vfsWaiters(context *LinuxVFSContext) []sched.TaskID {
 }
 
 func TestVFSContextHandsOwnershipOnInFIFOOrder(t *testing.T) {
-	vfsContexts = [process.MaxProcesses]LinuxVFSContext{}
+	vfsContexts = lazyTable[LinuxVFSContext]{}
 	if !installVFSContext(51) {
 		t.Fatal("context setup failed")
 	}
@@ -177,7 +176,7 @@ func TestVFSContextHandsOwnershipOnInFIFOOrder(t *testing.T) {
 }
 
 func TestVFSContextCancelsAQueuedWaiter(t *testing.T) {
-	vfsContexts = [process.MaxProcesses]LinuxVFSContext{}
+	vfsContexts = lazyTable[LinuxVFSContext]{}
 	installVFSContext(52)
 	context, _ := VFSContext(52)
 	task := vfsTasks(t, 3)
@@ -199,7 +198,7 @@ func TestVFSContextCancelsAQueuedWaiter(t *testing.T) {
 }
 
 func TestVFSContextCancelsItsOwner(t *testing.T) {
-	vfsContexts = [process.MaxProcesses]LinuxVFSContext{}
+	vfsContexts = lazyTable[LinuxVFSContext]{}
 	installVFSContext(53)
 	context, _ := VFSContext(53)
 	task := vfsTasks(t, 3)
@@ -215,7 +214,7 @@ func TestVFSContextCancelsItsOwner(t *testing.T) {
 }
 
 func TestVFSContextPeerDeathDrainsWaiters(t *testing.T) {
-	vfsContexts = [process.MaxProcesses]LinuxVFSContext{}
+	vfsContexts = lazyTable[LinuxVFSContext]{}
 	if !installVFSContext(54) || !RetainVFSContext(54) || !RetainVFSContext(54) {
 		t.Fatal("context setup failed")
 	}
