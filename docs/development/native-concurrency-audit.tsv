@@ -898,6 +898,7 @@ CA-1112	goos/userspace/bin/netbench3	manifest	process	immutable	none
 CA-1113	goos/userspace/netbench	noOffset	process	owned	none
 CA-1114	goos/userspace/netbench	offsets	process	owned	none
 CA-1115	goos/userspace/netbench	prefix	process	owned	none
+CA-1150	goos/userspace/netbench	ringClient	process	owned	none
 CA-1116	goos/userspace/utility	tcpLayout	session	immutable	none
 CA-1117	goos/userspace/netbench	waiting	process	owned	none
 CA-1118	goos/userspace/cmd/netd	servedAt	process	owned	none

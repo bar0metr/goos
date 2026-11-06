@@ -46,7 +46,11 @@ type Session struct {
 	tx, rx    []byte
 	rxSlots   udpapi.Slots
 	endpoints []waiter
-	reply     udpapi.Reply
+	// limit bounds the entries in use: every entry from limit on is free,
+	// so the passes and lookups walk the endpoints the client opened, not
+	// the whole quota.
+	limit int
+	reply udpapi.Reply
 	// answered counts the answers of the Deliver pass under way.
 	answered int
 }
@@ -77,6 +81,7 @@ func (s *Session) StartQuota(stack *network.Stack, owner, quota int, tx, rx []by
 	for index := range s.endpoints {
 		s.endpoints[index] = waiter{}
 	}
+	s.limit = 0
 	return true
 }
 
@@ -90,12 +95,13 @@ func (s *Session) End(stack *network.Stack) {
 	for index := range s.endpoints {
 		s.endpoints[index] = waiter{}
 	}
+	s.limit = 0
 }
 
 // Waiting counts the receives the session holds.
 func (s *Session) Waiting() int {
 	count := 0
-	for index := range s.endpoints {
+	for index := range s.endpoints[:s.limit] {
 		if s.endpoints[index].recv != 0 {
 			count++
 		}
@@ -125,14 +131,15 @@ func (s *Session) Handle(stack *network.Stack, request *udpapi.Request, correlat
 	switch request.Opcode {
 	case udpapi.OpOpen:
 		opened, result := stack.UDPOpen(s.owner)
-		free := s.find(0)
-		if result == network.ResultOK && free == nil {
+		free := s.free()
+		if result == network.ResultOK && free < 0 {
 			stack.UDPClose(s.owner, opened)
 			result = network.ResultBusy
 		}
 		reply.Result = Result(result)
 		if result == network.ResultOK {
-			*free = waiter{id: opened}
+			s.endpoints[free] = waiter{id: opened}
+			s.limit = max(s.limit, free+1)
 			reply.Endpoint = uint32(opened)
 		}
 	case udpapi.OpBind:
@@ -158,6 +165,14 @@ func (s *Session) Handle(stack *network.Stack, request *udpapi.Request, correlat
 			result = stack.UDPSendTo(s.owner, id, network.IPv4(request.Address), request.Port, payload, now)
 		}
 		reply.Result, reply.Slot = Result(result), request.Slot
+		if result == network.ResultOK {
+			// A loopback datagram is queued already. The receive parked on
+			// it is what the peer waits for, so its answer goes before this
+			// reply and the client takes both on one wake.
+			if fault, _ := s.Deliver(stack, out); fault != FaultNone {
+				return fault
+			}
+		}
 	case udpapi.OpRecvFrom:
 		_, result := stack.UDPQueued(s.owner, id)
 		held := s.find(id)
@@ -242,6 +257,9 @@ func (s *Session) Handle(stack *network.Stack, request *udpapi.Request, correlat
 				}
 			}
 			*held = waiter{}
+			for s.limit > 0 && s.endpoints[s.limit-1].id == 0 {
+				s.limit--
+			}
 		}
 		*reply = udpapi.Reply{Opcode: udpapi.OpClose, Endpoint: request.Endpoint, Result: Result(result)}
 	}
@@ -261,7 +279,7 @@ func (s *Session) Handle(stack *network.Stack, request *udpapi.Request, correlat
 func (s *Session) Deliver(stack *network.Stack, out Replier) (fault Fault, more bool) {
 	for pass := 0; pass < maxDeliverPasses; pass++ {
 		s.answered = 0
-		for index := range s.endpoints {
+		for index := range s.endpoints[:s.limit] {
 			if fault := s.deliver(stack, &s.endpoints[index], out); fault != FaultNone {
 				return fault, false
 			}
@@ -285,7 +303,7 @@ const maxDeliverPasses = 16
 // a Deliver call that reported no more work.
 func (s *Session) Runnable(stack *network.Stack) (endpoint uint32, op string, found bool) {
 	_, free := s.rxSlots.Free()
-	for index := range s.endpoints {
+	for index := range s.endpoints[:s.limit] {
 		held := &s.endpoints[index]
 		if held.recv == 0 && held.ready == 0 {
 			continue
@@ -363,14 +381,27 @@ func (s *Session) deliver(stack *network.Stack, held *waiter, out Replier) Fault
 	return FaultNone
 }
 
-// find returns the entry for id, or a free entry for id 0.
+// find returns the entry for id, or nil. id 0 finds nothing.
 func (s *Session) find(id network.EndpointID) *waiter {
-	for index := range s.endpoints {
+	if id == 0 {
+		return nil
+	}
+	for index := range s.endpoints[:s.limit] {
 		if s.endpoints[index].id == id {
 			return &s.endpoints[index]
 		}
 	}
 	return nil
+}
+
+// free returns the lowest free entry, or -1 when the table is full.
+func (s *Session) free() int {
+	for index := range s.endpoints {
+		if s.endpoints[index].id == 0 {
+			return index
+		}
+	}
+	return -1
 }
 
 // Result maps a stack result to its GUDP1 code.

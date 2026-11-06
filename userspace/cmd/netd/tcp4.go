@@ -76,7 +76,8 @@ func (s *tcpSession) progressed() bool {
 
 func (s *tcpSession) runnable() (uint32, string, bool) {
 	if s.four {
-		return s.ring.Runnable(&stack)
+		// The loop checks only after armTCP found every session idle.
+		return s.ring.RunnableArmed(&stack)
 	}
 	return s.state.Runnable(&stack)
 }

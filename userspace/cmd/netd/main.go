@@ -148,11 +148,15 @@ func userspaceMain() {
 // servedAt is the clock after the loop's wait. The requests and frames
 // served after it take it as their time: they run within microseconds of
 // it, and one read per loop costs a call where one per message cost many.
+// The next lap's timers take it too, late by what the lap served: a busy
+// loop laps every few tens of microseconds, and a second read would cost
+// each lap another system call.
 var servedAt uint64
 
 func serve() {
+	servedAt = clockNanos()
 	for {
-		now := clockNanos()
+		now := servedAt
 		stack.Advance(now)
 		stage(stageAdvance, now)
 		deliverCompletions()
@@ -259,14 +263,16 @@ var (
 )
 
 // stage charges the time since the last mark to which. The top of the
-// loop passes the clock it read already and starts a new lap.
+// loop starts a new lap; the first lap starts at the clock it passes.
 func stage(which int, start uint64) {
 	if !diag.Enabled {
 		return
 	}
 	if which == stageAdvance {
 		stageLoops++
-		stageLast = start
+		if stageLast == 0 {
+			stageLast = start
+		}
 	}
 	now := clockNanos()
 	if now > stageLast {

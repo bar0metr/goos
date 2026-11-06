@@ -139,7 +139,7 @@ Linker flags:
 | `prebuilt/dirprobe` | `4a068a52296fca685abc2a6236f66006b6040f80335b7a3e67deadb849e9f0e6` |
 | `prebuilt/abi-probe` | `1f18f949dc3e19d0dd592666da5db68932debda42ab435d951f84d10e5805121` |
 | `prebuilt/tty-probe` | `5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957` |
-| `prebuilt/netprobe` | `d9fca1d98a8afa826872a48c689c396b954914802e8ca68dc56190a5e0502923` |
+| `prebuilt/netprobe` | `dca2339b9c61ea9f190613aa58b6289e6166a58463e1a4441bfd8ba661d742cb` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF
@@ -266,8 +266,9 @@ close-on-exec across `execve`, `EINTR` and `SA_RESTART`, options, and the
 file calls on a socket. The source header lists what each group checks.
 The other modes (`resolve`, `fetch`, `connect`, `reset`, `silent`,
 `udp-echo`, `inherit`, `serve`, `hold`) serve `make test-linux-network`.
-`bench`, `bench-stream`, `bench-rr`, `remote` and `remote-serve` print
-`bench NAME key=value` lines for `make bench-pve-linux-network`.
+`bench`, `bench-stream`, `bench-rr`, `bench-connect`, `bench-udp`, `remote` and
+`remote-serve` print `bench NAME key=value` lines for
+`make bench-pve-linux-network`.
 
 The bundled musl has no `network`, `select` or `stat` sources, so the probe
 makes those calls through `syscall()`. For the same reason it has no

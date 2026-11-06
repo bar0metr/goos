@@ -991,9 +991,10 @@ stream size; the report records the branch and SHA, HZ, OPT, DIAG, vCPUs, VM
 memory, QEMU version and host CPU.
 
 `BENCH_DIAG=1` adds a second VM on a DIAG=1 build. It reads `diag` before and
-after one `netprobe bench-stream` and one `netprobe bench-rr` and reports the
-change of every decimal field on every `DIAG` line, per 64 KiB written and per
-request-reply round, in `linux-network-perf-<variant>-diag.md`. The pass
+around one `netprobe bench-stream`, `bench-rr`, `bench-connect` and
+`bench-udp` each and reports the change of every decimal field on every
+`DIAG` line, per 64 KiB written, per request-reply round and per connection,
+in `linux-network-perf-<variant>-diag.md`. The pass
 parses the lines without a list of field names, so a counter added to a DIAG
 line appears in the next report. Its timings include the counters' cost and
 are not primary results.

@@ -77,3 +77,34 @@ table entry only after that, so an entry naming the old endpoint comes back
   draws no doorbell, so the link holds an `OpWaitReady` in netd only while
   a connect runs or while a stream has no credit posted and the kernel
   holds none of its bytes.
+
+## Measurements
+
+`netbench4` failed its lifecycle phase on KVM twice, both in
+`tcpring`'s client. OpAcceptAhead grants a fixed number of children, and
+netd stops at zero; the client never asked again, so its fifth accept
+waited 35 s and reported `interface down`. `Accept` now asks for more once
+every child it was granted arrived. The second failure was a race: netd
+closes an endpoint and publishes `EntryClosed` right after it sends the
+`OpClose` reply, and a doorbell queued ahead of that reply made the client
+take the rings before it read the reply, so the entry found the endpoint
+still open. The endpoint now counts as closing from its request on. Host
+tests reproduce both (`TestAcceptAheadKeepsChildrenComing`,
+`TestCloseTakesEntryClosedBeforeItsReply`), and a broken session now names
+the rule it broke.
+
+Release build, HZ 250, one warm-up and five measured rounds on the lab's
+four-core KVM guest (run 20261106T124643Z), medians:
+
+| Measurement | GTCP 4 | GTCP 3 |
+| --- | --- | --- |
+| Stream, 32 MiB | 382 MiB/s | 316 MiB/s |
+| One-byte request and reply | 17 us | 77 us |
+| Connect, accept and close | 125 us | 178 us |
+| Channel messages per 64 KiB of stream | 2.1 to 3.1, all doorbells | |
+| Channel messages per request and reply round | 0.24 to 0.93 | |
+| Channel messages per connection | 8.7 | |
+
+`netbench4` drives both ends of each connection from one goroutine, so a
+request and reply round seldom waits for a doorbell; a GTCP 3 round waits
+for netd's replies twice.

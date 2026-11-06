@@ -52,6 +52,8 @@
  *                             and reply, connect and close, UDP, poll wake
  *   bench-stream MiB          the loopback stream alone
  *   bench-rr ROUNDS           the loopback request and reply alone
+ *   bench-connect COUNT       the loopback connect and close alone
+ *   bench-udp ROUNDS          the loopback UDP request and reply alone
  *   stress-stream MiB COUNT   the loopback stream COUNT times, one
  *                             "stress N ok" line each, for a watchdog
  *   long-stream MiB           one connection carrying MiB, every byte
@@ -2706,21 +2708,23 @@ static int bench_poll(int count)
 /* bench measures loopback sockets: stream throughput between two processes,
  * one-byte request and reply, connect and close with each call timed apart,
  * UDP request and reply, and the time from a write to a poll waiter's
- * return. It prints numbers, not verdicts; the lab records them. bench-stream
- * and bench-rr run one measurement alone, for a diagnostic counter pass. */
+ * return. It prints numbers, not verdicts; the lab records them. bench-stream,
+ * bench-rr, bench-connect and bench-udp run one measurement alone, for a
+ * diagnostic counter pass. */
 static int bench_mode(int argc, char **argv)
 {
 	long total = 32L << 20;
 	int rounds;
 
 	group = "bench";
-	if (!strcmp(argv[1], "bench-rr")) {
+	if (!strcmp(argv[1], "bench-rr") || !strcmp(argv[1], "bench-connect") || !strcmp(argv[1], "bench-udp")) {
 		rounds = argc == 3 ? atoi(argv[2]) : 0;
 		if (rounds <= 0 || rounds > 1000000) {
-			printf("usage: netprobe bench-rr ROUNDS\n");
+			printf("usage: netprobe %s COUNT\n", argv[1]);
 			return 2;
 		}
-		if (bench_request_reply(rounds) != 0)
+		if (!strcmp(argv[1], "bench-rr") ? bench_request_reply(rounds) :
+		    !strcmp(argv[1], "bench-connect") ? bench_connect(rounds) : bench_udp(rounds))
 			return 1;
 		printf("bench ok\n");
 		return 0;
@@ -3004,7 +3008,8 @@ int main(int argc, char **argv)
 		return stress_stream(mebibytes(argv[2]), atol(argv[3]));
 	if (argc == 3 && !strcmp(argv[1], "long-stream"))
 		return long_stream(mebibytes(argv[2]));
-	if ((argc == 2 || argc == 3) && (!strcmp(argv[1], "bench") || !strcmp(argv[1], "bench-stream") || !strcmp(argv[1], "bench-rr")))
+	if ((argc == 2 || argc == 3) && (!strcmp(argv[1], "bench") || !strcmp(argv[1], "bench-stream") || !strcmp(argv[1], "bench-rr") ||
+	                                  !strcmp(argv[1], "bench-connect") || !strcmp(argv[1], "bench-udp")))
 		return bench_mode(argc, argv);
 	if (argc > 1 && !strcmp(argv[1], "remote"))
 		return remote_mode(argc, argv);

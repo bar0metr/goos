@@ -885,6 +885,13 @@ func (s *Session4) Runnable(stack *network.Stack) (endpoint uint32, op string, f
 	if s.control.ServicePending() {
 		return 0, "rings", true
 	}
+	return s.RunnableArmed(stack)
+}
+
+// RunnableArmed is Runnable for a session Idle found idle: entries the
+// client published after that were published after the arm, and the
+// client rings for them, so they do not count.
+func (s *Session4) RunnableArmed(stack *network.Stack) (endpoint uint32, op string, found bool) {
 	if s.txDone != 0 && s.control.TXDoneRoom() != 0 {
 		return 0, "write-done", true
 	}

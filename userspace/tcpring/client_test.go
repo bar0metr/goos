@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 
+	"goos/kernel/ipc"
 	"goos/userspace/tcpapi"
 )
 
@@ -181,5 +182,166 @@ func TestCloseDrainsQueuedWrites(t *testing.T) {
 	<-done
 	if !bytes.Equal(got, pattern(0, total)) {
 		t.Fatalf("got %d of %d bytes", len(got), total)
+	}
+}
+
+// TestAcceptAheadKeepsChildrenComing accepts more children than one
+// OpAcceptAhead grants, on one session, as netbench4 does. netd stops after
+// the grant, so Accept has to ask again or it waits until the session dies.
+func TestAcceptAheadKeepsChildrenComing(t *testing.T) {
+	n := newNetd(t)
+	_, c := n.session()
+	listener, result := c.Listen(loopback, 7009, 8)
+	if result != tcpapi.ResultOK {
+		t.Fatalf("listen %d", result)
+	}
+	if result := listener.AcceptAhead(2); result != tcpapi.ResultOK {
+		t.Fatalf("accept ahead %d", result)
+	}
+	conns := make([]*Conn, 0, 20)
+	for index := 0; index < 10; index++ {
+		client, result := c.Dial(loopback, 7009, false)
+		if result != tcpapi.ResultOK {
+			t.Fatalf("dial %d: %d", index, result)
+		}
+		server, result := listener.Accept(true)
+		if result != tcpapi.ResultOK || server.RemotePort != client.LocalPort {
+			t.Fatalf("accept %d: %d", index, result)
+		}
+		for _, conn := range [...]*Conn{client, server} {
+			if result := conn.Close(); result != tcpapi.ResultOK {
+				t.Fatalf("close %d: %d", index, result)
+			}
+		}
+		conns = append(conns, client, server)
+	}
+	if !c.Settle() {
+		t.Fatal("settle")
+	}
+	for _, conn := range conns {
+		if !conn.Gone() {
+			t.Fatal("endpoint not released")
+		}
+	}
+}
+
+// stepping is a session's transport whose every receive first lets netd
+// run a pass, as netd on another processor does while the client still
+// reads older messages.
+type stepping struct{ *wire }
+
+func (s stepping) Receive(wait bool, out *ipc.Message) (bool, bool) {
+	s.n.mu.Lock()
+	s.n.step()
+	s.n.mu.Unlock()
+	return s.wire.Receive(wait, out)
+}
+
+// TestCloseTakesEntryClosedBeforeItsReply closes an endpoint while a
+// doorbell waits ahead of the reply. netd closes the endpoint and publishes
+// EntryClosed before the client reads the reply; the doorbell makes Call
+// take the rings first, and the entry must find the endpoint closing.
+func TestCloseTakesEntryClosedBeforeItsReply(t *testing.T) {
+	n := newNetd(t)
+	w, _ := n.session()
+	c, ok := New(stepping{w}, w.tx, w.rx)
+	if !ok {
+		t.Fatal("client")
+	}
+	listener, result := c.Listen(loopback, 7011, 4)
+	if result != tcpapi.ResultOK || listener.AcceptAhead(1) != tcpapi.ResultOK {
+		t.Fatalf("listen %d", result)
+	}
+	client, result := c.Dial(loopback, 7011, false)
+	if result != tcpapi.ResultOK {
+		t.Fatalf("dial %d", result)
+	}
+	if _, result := listener.Accept(true); result != tcpapi.ResultOK {
+		t.Fatalf("accept %d", result)
+	}
+	var bell ipc.Message
+	if !tcpapi.EncodeDoorbell4(&bell) {
+		t.Fatal("doorbell")
+	}
+	n.mu.Lock()
+	w.inbox = append(w.inbox, bell)
+	n.mu.Unlock()
+	if result := client.Close(); result != tcpapi.ResultOK {
+		t.Fatalf("close %d: %s", result, c.Why())
+	}
+	if !c.Settle() || !client.Gone() {
+		t.Fatalf("closed endpoint not released: %s", c.Why())
+	}
+}
+
+// TestBenchSequenceOnOneSession runs netbench4's steps on one session: a
+// stream both ends drive, one-byte request and reply rounds, the closes,
+// then connections opened, accepted ahead and closed without waiting.
+func TestBenchSequenceOnOneSession(t *testing.T) {
+	n := newNetd(t)
+	w, c := n.session()
+	check := func(what string, result tcpapi.Result) {
+		t.Helper()
+		if result != tcpapi.ResultOK {
+			t.Fatalf("%s: %d (fault %q)", what, result, w.fault())
+		}
+	}
+	listener, result := c.Listen(loopback, 0, 8)
+	check("listen", result)
+	check("accept ahead", listener.AcceptAhead(4))
+	client, result := c.Dial(loopback, listener.LocalPort, false)
+	check("dial", result)
+	server, result := listener.Accept(true)
+	check("accept", result)
+	const total = 1 << 20
+	data := pattern(0, 1<<16)
+	buffer := make([]byte, 1<<16)
+	for sent, received := 0, 0; received < total; {
+		moved := false
+		if sent < total {
+			written, result := client.TryWrite(data[:min(total-sent, len(data))])
+			if result != tcpapi.ResultOK && result != tcpapi.ResultWouldBlock {
+				t.Fatalf("stream write %d", result)
+			}
+			sent += written
+			moved = written != 0
+		}
+		read, result := server.TryRead(buffer)
+		if result != tcpapi.ResultOK && result != tcpapi.ResultWouldBlock {
+			t.Fatalf("stream read %d", result)
+		}
+		received += read
+		if !moved && read == 0 && !c.Wait() {
+			t.Fatal("stream wait")
+		}
+	}
+	check("flush", client.Flush())
+	one := []byte{'x'}
+	for round := 0; round < 200; round++ {
+		for _, pair := range [...][2]*Conn{{client, server}, {server, client}} {
+			if written, result := pair[0].Write(one); written != 1 || result != tcpapi.ResultOK {
+				t.Fatalf("round %d write %d", round, result)
+			}
+			if read, result := pair[1].Read(buffer); read != 1 || result != tcpapi.ResultOK {
+				t.Fatalf("round %d read %d", round, result)
+			}
+		}
+	}
+	check("close client", client.Close())
+	check("close server", server.Close())
+	for index := 0; index < 50; index++ {
+		client, result := c.Dial(loopback, listener.LocalPort, false)
+		check("loop dial", result)
+		server, result := listener.Accept(true)
+		check("loop accept", result)
+		check("loop close client", client.Close())
+		check("loop close server", server.Close())
+	}
+	if !c.Settle() {
+		t.Fatal("settle")
+	}
+	check("close listener", listener.Close())
+	if !c.Settle() {
+		t.Fatal("settle listener")
 	}
 }

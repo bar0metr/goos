@@ -43,6 +43,6 @@ func All() []Fixture {
 		{"dirprobe", dirprobe, "4a068a52296fca685abc2a6236f66006b6040f80335b7a3e67deadb849e9f0e6"},
 		{"abi-probe", abiProbe, "1f18f949dc3e19d0dd592666da5db68932debda42ab435d951f84d10e5805121"},
 		{"tty-probe", ttyProbe, "5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957"},
-		{"netprobe", netprobe, "d9fca1d98a8afa826872a48c689c396b954914802e8ca68dc56190a5e0502923"},
+		{"netprobe", netprobe, "dca2339b9c61ea9f190613aa58b6289e6166a58463e1a4441bfd8ba661d742cb"},
 	}
 }
