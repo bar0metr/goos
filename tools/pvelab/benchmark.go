@@ -814,6 +814,8 @@ func (linuxNetworkDiagScenario) Run(ctx context.Context, s *Session) (Result, er
 	}{
 		{"stream", fmt.Sprintf("/system/linux/netprobe bench-stream %d", o.StreamMiB), "64 KiB written", float64(o.StreamMiB) * 16},
 		{"request-reply", fmt.Sprintf("/system/linux/netprobe bench-rr %d", o.DiagRounds), "request-reply round", float64(o.DiagRounds)},
+		{"connect-close", "/system/linux/netprobe bench-connect 200", "connection", 200},
+		{"udp-request-reply", fmt.Sprintf("/system/linux/netprobe bench-udp %d", o.DiagRounds), "UDP request-reply round", float64(o.DiagRounds)},
 	}
 	pass := &DiagPass{}
 	var lines []string
