@@ -172,6 +172,7 @@ func (w *world) exchange(flows []*flow) {
 		if idle++; idle > 1 {
 			w.now += 100_000_000
 			w.timers = true
+			w.idleSteps++
 		}
 		if idle > 500 {
 			complete, readable, pages := 0, 0, map[uint16]int{}
@@ -239,17 +240,35 @@ func TestWorldMegabyteStreamNeedsNoChannelRequests(t *testing.T) {
 		stats.Credits-before.Credits, stats.LocalCompletions-before.LocalCompletions)
 }
 
-// 300 sockets stream at once through one listener and one family.
+// 300 sockets stream 32 KiB or more each at once through one listener and
+// one family. Every socket belongs to linuxsockd's one session, so the
+// session's ring budget is the limit: at the default, and at a quarter of
+// the old 8 MiB default, every flow completes and none waits for the clock.
 func TestWorldThreeHundredSockets(t *testing.T) {
-	w := newWorld(t)
+	for _, budget := range []int{0, 4 << 20} {
+		w := newWorld(t)
+		w.stack.SetTCPMemoryBudget(budget, budget)
+		w.threeHundredSockets(32 << 10)
+		stats := w.stack.TCPStats()
+		t.Logf("budget %d: ring bytes %d, capped growths %d, refusals %d", budget, stats.MemoryBytes, stats.MemoryCapped, stats.DropMemory)
+		if w.idleSteps != 0 || stats.DropMemory != 0 || stats.Retransmits != 0 {
+			t.Fatalf("budget %d: %d idle clock steps, %d refusals, %d retransmissions", budget, w.idleSteps, stats.DropMemory, stats.Retransmits)
+		}
+		if budget != 0 && stats.MemoryCapped == 0 {
+			t.Fatalf("budget %d never capped a ring", budget)
+		}
+	}
+}
+
+func (w *world) threeHundredSockets(perFlow int) {
+	t := w.t
+	t.Helper()
 	listener, port := w.listen(128)
-	// Small streams: 300 connections with tens of KiB each in flight fill
-	// the stack's TCP memory, which is the stack's limit, not linuxsockd's.
 	const pairs = 150
 	flows := make([]*flow, pairs)
 	w.mark()
 	for index := range flows {
-		flows[index] = &flow{client: w.dial(port), total: 3000 + index*37, seed: byte(index)}
+		flows[index] = &flow{client: w.dial(port), total: perFlow + index*37, seed: byte(index)}
 		flows[index].server = w.accept(listener)
 	}
 	w.exchange(flows)

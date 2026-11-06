@@ -35,9 +35,12 @@ type world struct {
 	held         []ipc.Message
 	doorbellHeld bool
 	queue        int
-	// timers: simulated time moved, so netd's timers run once.
-	timers bool
-	in     tcpapi.Request
+	// timers: simulated time moved, so netd's timers run once. idleSteps
+	// counts the times exchange moved the clock because nothing else could
+	// run.
+	timers    bool
+	idleSteps int
+	in        tcpapi.Request
 	// The kernel's TX slots: committed or free, with their generations.
 	txBusy [linuxsockapi.TXSlots]bool
 	txGen  uint32
