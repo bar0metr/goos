@@ -398,10 +398,44 @@ func TestTCPTimersRunInDeadlineOrder(t *testing.T) {
 	}
 }
 
+// A segment that fills the window exactly, pulling a held span into the
+// stream, loses its FIN on the window's right edge. The peer's resent FIN
+// then ends the stream. The fuzz input fin-at-window-edge found this case.
+func TestTCPReassemblyFINOnWindowEdge(t *testing.T) {
+	stack := Stack{tuning: DefaultTuning()}
+	stack.tuning.TCP.ReceiveBuffer = testRing
+	start := uint32(0xffffff00)
+	entry := tcpEndpoint{state: TCPEstablished, rcvNxt: start, sndNxt: 50, localMSS: 1460, peerMSS: 1460}
+	stack.handlePayload(&entry, tcpSegment{sequence: start + 100, flags: tcpFlagACK, payload: pattern(100, 100)}, second)
+	if entry.heldBytes() != 100 {
+		t.Fatalf("held %d bytes", entry.heldBytes())
+	}
+	window := stack.tcpAdvertisedWindow(&entry)
+	stream := pattern(0, window)
+	stack.handlePayload(&entry, tcpSegment{sequence: start, flags: tcpFlagACK | tcpFlagFIN, payload: stream}, second)
+	end := start + uint32(window)
+	if entry.rcvNxt != end || entry.peerFIN || entry.finReceived || entry.heldBytes() != 0 || entry.recvLen != uint32(window) {
+		t.Fatalf("rcvNxt %d, peerFIN %v, FIN %v, held %d, length %d",
+			entry.rcvNxt-start, entry.peerFIN, entry.finReceived, entry.heldBytes(), entry.recvLen)
+	}
+	got := make([]byte, window)
+	ringLoad(got, entry.recvRing, int(entry.recvHead), window)
+	if !bytes.Equal(got, stream) {
+		t.Fatal("stream differs")
+	}
+	entry.recvHead = ringAdvance(int(entry.recvHead), window, len(entry.recvRing))
+	entry.recvLen = 0
+	stack.handlePayload(&entry, tcpSegment{sequence: end, flags: tcpFlagACK | tcpFlagFIN}, second)
+	if !entry.finReceived || entry.peerFINAt != end || entry.rcvNxt != end+1 || entry.state != TCPCloseWait {
+		t.Fatalf("resent FIN: received %v at %d, rcvNxt %d, state %d", entry.finReceived, entry.peerFINAt-start, entry.rcvNxt-start, entry.state)
+	}
+}
+
 // FuzzTCPReassembly delivers a stream as overlapping, duplicated and
 // reordered segments, with reads in between, and checks that the reader
 // only ever sees the stream's prefix and, after a last full copy with the
-// FIN, all of it and then EOF.
+// FIN and resends of what the window held back, all of it and then EOF. A
+// FIN on the window's right edge counts as held back.
 func FuzzTCPReassembly(f *testing.F) {
 	f.Add([]byte{3, 200, 1, 9, 50, 0, 7, 255, 4, 4, 120, 3})
 	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
@@ -453,12 +487,13 @@ func FuzzTCPReassembly(f *testing.F) {
 		}
 		stack.handlePayload(&entry, tcpSegment{sequence: start, flags: tcpFlagACK | tcpFlagFIN, payload: stream}, second)
 		read(length)
-		for !entry.finReceived && len(got) < length {
-			// The window held back part of the last copy; send the rest.
+		for !entry.finReceived {
+			// The window held back part of the last copy, or the FIN alone
+			// when the bytes filled the window exactly. Send the rest.
 			sent := len(got)
 			stack.handlePayload(&entry, tcpSegment{sequence: start + uint32(sent), flags: tcpFlagACK | tcpFlagFIN, payload: stream[sent:]}, second)
 			read(length)
-			if len(got) == sent {
+			if len(got) == sent && !entry.finReceived {
 				t.Fatalf("no progress at %d of %d", sent, length)
 			}
 		}
