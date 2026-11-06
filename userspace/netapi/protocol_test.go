@@ -178,7 +178,11 @@ func replies() []Reply {
 			TCPEphemeralMin: 49152, TCPEphemeralMax: 65535, TCPMaxEndpoints: 1024, TCPSessionEndpoints: 8,
 			TCPListenBacklog: 128, TCPSendBuffer: 262144, TCPReceiveBuffer: 262144,
 			TCPConnectTimeoutMS: 30000, TCPRTOMinMS: 1000, TCPRTOMaxMS: 60000, TCPTimeWaitMS: 60000,
-			GTCP2Requests: 5, GTCP2Replies: 6, GTCP3Requests: 1 << 40, GTCP3Replies: ^uint64(0)},
+			GTCP2Requests: 5, GTCP2Replies: 6, GTCP3Requests: 1 << 40, GTCP3Replies: ^uint64(0),
+			Capacity: TCPCapacity{MemoryBytes: 1 << 33, MemoryBudget: 40 << 20, OwnerMemoryBudget: 8 << 20,
+				TimeWait: 300, TimeWaitBudget: 8192, OwnerTimeWaitBudget: 2048, TimeWaitHeld: 7,
+				DropMemory: 11, DropBacklog: 12, MemoryCapped: 13, LookupProbes: 1 << 50, MaxSegmentProbes: 9,
+				CommandSessions: 2, CommandSessionLimit: 8, UDPSessions: 8, UDPSessionLimit: 8, TCPSessions: 3, TCPSessionLimit: 46}},
 		{Opcode: OpTCPStatus, Result: ResultPermissionDenied},
 	}
 }
@@ -239,6 +243,11 @@ func TestReplyFieldUsage(t *testing.T) {
 		{Opcode: OpServers, ServerCount: MaxServers + 1},
 		{Opcode: OpServers, ServerCount: 1, Servers: [MaxServers][4]byte{gateway, local}},
 		{Opcode: OpServers, Result: ResultBusy, Generation: 1},
+		{Opcode: OpStatus, Capacity: TCPCapacity{MemoryBytes: 1}},
+		{Opcode: OpTCPStatus, Result: ResultBusy, Capacity: TCPCapacity{TCPSessionLimit: 46}},
+		{Opcode: OpTCPStatus, TCPListenBacklog: 1, Capacity: TCPCapacity{TCPSessions: 47, TCPSessionLimit: 46}},
+		{Opcode: OpTCPStatus, TCPListenBacklog: 1, Capacity: TCPCapacity{CommandSessions: 9, CommandSessionLimit: 8}},
+		{Opcode: OpTCPStatus, TCPListenBacklog: 1, Capacity: TCPCapacity{UDPSessions: 1}},
 	}
 	for index, reply := range invalid {
 		var wire ipc.Message
@@ -274,7 +283,8 @@ func TestReplyUnusedBytes(t *testing.T) {
 		18: append(append(append(span(replyTCPCounters, replyTCPConnections+2),
 			span(replyTCPStates, replyTCPStates+2*tcpStateCount)...),
 			replyTCPSessionEP), append(span(replyTCPLimits, replyTCPLimits+32),
-			span(replyTCPMessages, replyTCPMessages+8*gtcpCounterCount)...)...),
+			append(span(replyTCPMessages, replyTCPMessages+8*gtcpCounterCount),
+				append(span(replyTCPSessions, replyTCPSessions+6), span(replyTCPCapacity, replyTCPCapacityEnd)...)...)...)...),
 	}
 	for index, reply := range replies() {
 		mask := [ReplySize]bool{0: true, 1: true}
@@ -316,7 +326,8 @@ func TestReplyRejects(t *testing.T) {
 		{"version 3", func(m *ipc.Message) { m.Version = 3 }},
 		{"version 4", func(m *ipc.Message) { m.Version = 4 }},
 		{"version 6", func(m *ipc.Message) { m.Version = 6 }},
-		{"version 8", func(m *ipc.Message) { m.Version = 8 }},
+		{"version 7", func(m *ipc.Message) { m.Version = 7 }},
+		{"version 9", func(m *ipc.Message) { m.Version = 9 }},
 		{"version 5", func(m *ipc.Message) { m.Version = 5 }},
 		{"request kind", func(m *ipc.Message) { m.Kind = ipc.KindRequest }},
 		{"correlation", func(m *ipc.Message) { m.Correlation = 8 }},

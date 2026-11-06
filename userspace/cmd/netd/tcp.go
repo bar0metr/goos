@@ -10,7 +10,6 @@ import (
 	"goos/kernel/kcall"
 	syslog "goos/userspace/log"
 	"goos/userspace/netapi"
-	"goos/userspace/network"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/tcpapi"
 	"goos/userspace/tcpserve"
@@ -115,12 +114,6 @@ func flushTCPReplies(current *tcpSession) bool {
 	}
 	return true
 }
-
-// tcpSessionSlots is how many TCP sessions netd serves: the WaitAny room
-// the driver, the control channel and the command and UDP sessions leave,
-// at most the stack's owners. The stack has room for more owners than one
-// WaitAny can watch.
-const tcpSessionSlots = min(network.MaxTCPSessions, kcall.WaitAnyMaxObjects-2-network.MaxSessions-network.MaxUDPSessions)
 
 var (
 	tcpSessions [tcpSessionSlots]tcpSession
@@ -316,6 +309,17 @@ func dumpTCP() {
 		syslog.Uint("gtcp3-req", gtcpMessages[1][0]), syslog.Uint("gtcp3-rep", gtcpMessages[1][1]))
 	syslog.Warn("gtcp4", syslog.Uint("req", gtcpMessages[2][0]), syslog.Uint("rep", gtcpMessages[2][1]),
 		syslog.Uint("bell-in", gtcpDoorbells[0]), syslog.Uint("bell-out", gtcpDoorbells[1]))
+	capacity := tcpCapacity(&stats, stack.TCPBudgets(), sessionsInUse())
+	syslog.Warn("tcp memory", syslog.Uint("bytes", capacity.MemoryBytes), syslog.Uint("budget", uint64(capacity.MemoryBudget)),
+		syslog.Uint("session-budget", uint64(capacity.OwnerMemoryBudget)), syslog.Uint("drop", capacity.DropMemory),
+		syslog.Uint("capped", capacity.MemoryCapped))
+	syslog.Warn("tcp time-wait", syslog.Uint("tombstones", uint64(capacity.TimeWait)), syslog.Uint("budget", uint64(capacity.TimeWaitBudget)),
+		syslog.Uint("session-budget", uint64(capacity.OwnerTimeWaitBudget)), syslog.Uint("held", capacity.TimeWaitHeld),
+		syslog.Uint("drop-backlog", capacity.DropBacklog))
+	syslog.Warn("tcp lookup cost", syslog.Uint("probes", capacity.LookupProbes), syslog.Uint("max-segment", uint64(capacity.MaxSegmentProbes)))
+	syslog.Warn("netd sessions", syslog.Uint("command", uint64(capacity.CommandSessions)), syslog.Uint("command-max", uint64(capacity.CommandSessionLimit)),
+		syslog.Uint("udp", uint64(capacity.UDPSessions)), syslog.Uint("udp-max", uint64(capacity.UDPSessionLimit)),
+		syslog.Uint("tcp", uint64(capacity.TCPSessions)), syslog.Uint("tcp-max", uint64(capacity.TCPSessionLimit)))
 	if diag.Enabled {
 		syslog.Warn("netd loop", syslog.Uint("loops", stageLoops), syslog.Uint("advance-us", stageNanos[stageAdvance]/1000),
 			syslog.Uint("deliver-us", stageNanos[stageDeliver]/1000))
@@ -351,6 +355,27 @@ func dumpTCP() {
 				syslog.Uint("bell-held", boolValue(current.doorbellHeld)))
 		}
 	}
+}
+
+// sessionsInUse counts the command, UDP and TCP sessions netd serves now.
+func sessionsInUse() sessionUse {
+	var use sessionUse
+	for index := range sessions {
+		if sessions[index].channel != 0 {
+			use.command++
+		}
+	}
+	for index := range udpSessions {
+		if udpSessions[index].channel != 0 {
+			use.udp++
+		}
+	}
+	for index := range tcpSessions {
+		if tcpSessions[index].channel != 0 {
+			use.tcp++
+		}
+	}
+	return use
 }
 
 func boolValue(value bool) uint64 {
