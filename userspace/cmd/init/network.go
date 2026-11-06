@@ -274,12 +274,12 @@ func openTCPSession() ([3]handle.ID, bool) {
 // openLinuxSocketSessions opens the TCP and UDP sessions of linuxsockd, the
 // Linux socket service, each with the largest endpoint quota,
 // netapi.MaxSessionQuota, so one service can back many Linux sockets. Its
-// TCP session speaks GTCP 3, whose 16 KiB slots carry stream data in larger
-// units. Each result is a session's channel, TX pool and RX pool. Ordinary
+// TCP session speaks GTCP 4, whose rings carry stream data in 16 KiB slots
+// without a channel message per slot. Each result is a session's channel, TX pool and RX pool. Ordinary
 // commands and the resolver keep the ordinary quota and GTCP 2. On failure
 // nothing stays open.
 func openLinuxSocketSessions() (tcp, udp [3]handle.ID, ok bool) {
-	if tcp, ok = openTCPSessionQuota(netapi.MaxSessionQuota, tcpapi.Layout3); !ok {
+	if tcp, ok = openTCPSessionQuota(netapi.MaxSessionQuota, tcpapi.Layout4); !ok {
 		return tcp, udp, false
 	}
 	if udp, ok = openUDPSessionQuota(netapi.MaxSessionQuota); !ok {

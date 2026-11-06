@@ -139,10 +139,14 @@ func (s *Service) arm(global int) {
 		!s.backends[sock.proto].up || s.backends[sock.proto].generation != sock.generation {
 		return
 	}
+	wake := s.needsWake(global)
 	s.native = NativeRequest{Op: NativeWaitReady, Endpoint: sock.endpoint, Mask: sock.mask}
+	if wake {
+		s.native.Flags = NativeWake
+	}
 	switch s.backend.Submit(sock.proto, makeTag(tagWait, global, sock.serial), &s.native) {
 	case SubmitAccepted:
-		sock.waiting, sock.armedMask = true, sock.mask
+		sock.waiting, sock.armedMask, sock.wakeWait = true, sock.mask, wake
 		s.families[sock.family].stats.WaitsArmed++
 	case SubmitBusy:
 		sock.needWait = true
@@ -152,13 +156,42 @@ func (s *Service) arm(global int) {
 	}
 }
 
+// needsWake reports whether a stream on a GTCP 4 session depends on its
+// wait to learn that bytes arrived: it can receive, has no read posted, and
+// the kernel holds none of its bytes. A read it could not post for want of
+// a family RX slot comes back only through the wait.
+func (s *Service) needsWake(global int) bool {
+	sock := s.sock(global)
+	if !s.streamRing || !sock.stream || sock.readsOut != 0 || !receiving(sock) {
+		return false
+	}
+	_, published := s.rxOf(&s.families[sock.family], global)
+	return published == 0
+}
+
+// wakeUp marks the held wait of a stream that came to depend on it.
+func (s *Service) wakeUp(global int) {
+	sock := s.sock(global)
+	if !sock.waiting || sock.wakeWait || !s.needsWake(global) {
+		return
+	}
+	s.native = NativeRequest{Op: NativeWaitReady, Flags: NativeWake, Endpoint: sock.endpoint, Mask: sock.armedMask}
+	if s.backend.Submit(sock.proto, makeTag(tagWait, global, sock.serial), &s.native) == SubmitAccepted {
+		sock.wakeWait = true
+	}
+}
+
 // waited takes the answer to a socket's wait and holds the next one.
 func (s *Service) waited(global int, serial uint32, c *NativeCompletion) {
 	sock := s.sock(global)
 	if !sock.used || sock.serial != serial || !sock.waiting || c.Op != NativeWaitReady {
 		return
 	}
-	sock.waiting = false
+	if c.Endpoint != 0 && c.Endpoint != sock.endpoint {
+		// The answer to the wait of an endpoint a connect replaced.
+		return
+	}
+	sock.waiting, sock.wakeWait = false, false
 	switch c.Result {
 	case NativeOK:
 	case NativeBusy:

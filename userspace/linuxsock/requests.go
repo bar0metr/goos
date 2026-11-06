@@ -86,7 +86,8 @@ func (s *Service) done(o *op, c *NativeCompletion) {
 	}
 	// An endpoint a completion created belongs to no one unless a handler
 	// takes it.
-	created := c.Result == NativeOK && (c.Op == NativeOpen || c.Op == NativeAccept) && c.Endpoint != 0
+	created := c.Result == NativeOK && (c.Op == NativeOpen || c.Op == NativeAccept) && c.Endpoint != 0 ||
+		c.Op == NativeOpenConnect && c.Endpoint != 0
 	if o.kind == kindWarm {
 		s.doneWarm(o, c)
 		return
@@ -150,6 +151,14 @@ func (s *Service) done(o *op, c *NativeCompletion) {
 			s.finish(o, nativeResult(c.Result))
 			return
 		}
+		if sock.endpoint != 0 {
+			// Another request opened one meanwhile; this one goes on with it.
+			s.queueClose(o.proto, o.generation, c.Endpoint)
+			o.stage++
+			s.wait(o)
+			s.step(o)
+			return
+		}
 		sock.endpoint, sock.generation, sock.state, sock.reopen = c.Endpoint, o.generation, stateUnbound, false
 		sock.mask, sock.readable, sock.pending = 0, 0, linuxsockapi.ResultOK
 		sock.waiting, sock.noWait = false, false
@@ -157,6 +166,8 @@ func (s *Service) done(o *op, c *NativeCompletion) {
 		o.stage++
 		s.wait(o)
 		s.step(o)
+	case NativeOpenConnect:
+		s.doneOpenConnect(o, sock, c)
 	case NativeBind:
 		s.doneBind(o, sock, c)
 	case NativeListen:
@@ -215,6 +226,14 @@ func (s *Service) stepOpen(o *op) {
 		}
 		o.socket, o.socketSerial = int16(global), s.sock(global).serial
 	}
+	if stream && s.streamRing {
+		// The endpoint comes with the first request that needs one.
+		s.counters.Opens++
+		s.adopt(int(o.socket), 0, s.backends[proto].generation)
+		o.reply.Socket = s.sock(int(o.socket)).id
+		s.finish(o, linuxsockapi.ResultOK)
+		return
+	}
 	if endpoint, ok := s.takeWarm(proto); ok {
 		s.families[o.family].stats.WarmHits++
 		s.counters.Opens++
@@ -269,6 +288,9 @@ func (s *Service) stepBind(o *op, sock *socket) {
 		s.finish(o, linuxsockapi.ResultInvalidArgument)
 		return
 	}
+	if s.openFirst(o, sock) {
+		return
+	}
 	r := &o.request
 	s.native = NativeRequest{Op: NativeBind, Endpoint: sock.endpoint, Address: r.Address, Port: r.Port}
 	if r.Flags&linuxsockapi.FlagReuseAddr != 0 || sock.reuse {
@@ -280,6 +302,9 @@ func (s *Service) stepBind(o *op, sock *socket) {
 // bindAny binds to an ephemeral port on the wildcard, as Linux does for a
 // listen or a send on an unbound socket.
 func (s *Service) bindAny(o *op, sock *socket) {
+	if s.openFirst(o, sock) {
+		return
+	}
 	s.native = NativeRequest{Op: NativeBind, Endpoint: sock.endpoint}
 	if sock.reuse {
 		s.native.Flags = NativeReuseAddr
@@ -449,7 +474,7 @@ func (s *Service) stepConnect(o *op, sock *socket) {
 			return
 		}
 	}
-	if o.stage == 0 && (sock.state == stateFailed || sock.reopen) {
+	if o.stage == 0 && (sock.state == stateFailed || sock.reopen || sock.endpoint == 0) {
 		s.queueClose(TCP, sock.generation, sock.endpoint)
 		sock.endpoint = 0
 		if sock.needWait {
@@ -457,11 +482,44 @@ func (s *Service) stepConnect(o *op, sock *socket) {
 			s.waits--
 		}
 		s.native = NativeRequest{Op: NativeOpen}
+		if s.streamRing {
+			s.native = NativeRequest{Op: NativeOpenConnect, Flags: NativeNoWait, Address: r.Address, Port: r.Port}
+		}
 		s.submit(o, TCP)
 		return
 	}
 	s.native = NativeRequest{Op: NativeConnect, Flags: NativeNoWait, Endpoint: sock.endpoint, Address: r.Address, Port: r.Port}
 	s.submit(o, TCP)
+}
+
+// openFirst opens the endpoint of a stream socket that has none yet, for a
+// request that needs one; doneOpen's replacement path steps the request
+// again once it is open. It reports whether it took the request.
+func (s *Service) openFirst(o *op, sock *socket) bool {
+	if !sock.stream || sock.endpoint != 0 || sock.dead {
+		return false
+	}
+	s.native = NativeRequest{Op: NativeOpen}
+	s.submit(o, TCP)
+	return true
+}
+
+// doneOpenConnect takes the answer to an open-and-connect: the endpoint it
+// opened, if any, replaces the socket's, then the connect's outcome applies
+// as doneConnect's does.
+func (s *Service) doneOpenConnect(o *op, sock *socket, c *NativeCompletion) {
+	global := int(o.socket)
+	if sock.endpoint != 0 {
+		// Another request opened one meanwhile; the connect's replaces it.
+		s.queueClose(TCP, sock.generation, sock.endpoint)
+	}
+	sock.endpoint, sock.generation, sock.reopen = c.Endpoint, o.generation, false
+	sock.state, sock.mask, sock.readable, sock.pending = stateUnbound, c.Mask, 0, linuxsockapi.ResultOK
+	sock.waiting, sock.noWait = false, false
+	s.doneConnect(o, sock, c)
+	if sock.endpoint != 0 {
+		s.arm(global)
+	}
 }
 
 func (s *Service) doneConnect(o *op, sock *socket, c *NativeCompletion) {

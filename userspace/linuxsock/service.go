@@ -5,7 +5,9 @@
 // The core runs in one event loop and never waits. Every GLNXSOCK3 request
 // becomes an operation that either answers at once from local state or
 // issues one native request that netd completes at once (NoWait), sometimes
-// two in a row (an unbound listen binds first). An operation may wait in
+// two in a row (an unbound listen binds first). On GTCP 4 (SetStreamRing) a
+// stream socket opens its endpoint with the first request that needs one,
+// and a connect opens and connects in one request. An operation may wait in
 // the service only for something another prompt exchange brings: a native
 // pool slot, a read ahead under way, a TX queue draining before SHUT_WR, or
 // room in the family's channel for its reply.
@@ -17,7 +19,8 @@
 // readable socket the core keeps reads parked in netd that fill RX slots,
 // and publishes each filled slot on the complete ring.
 //
-// Readiness is learned from one NativeWaitReady held per endpoint. Each
+// Readiness is learned from one NativeWaitReady held per endpoint; a GTCP 4
+// link answers most of them from netd's readiness page (ringlink.go). Each
 // change is published in the family's readiness page; a ReadyChanged
 // notification follows when no other is outstanding, and one that finds
 // the queue full is sent again from Flush. The same notification covers
@@ -108,9 +111,11 @@ type socket struct {
 	readShut  bool
 	writeShut bool
 	waiting   bool // a NativeWaitReady is held
-	needWait  bool // the wait could not be sent and is retried
-	noWait    bool // the backend cannot wait; readiness comes from replies only
-	fetching  bool
+	// wakeWait: the held wait carries NativeWake.
+	wakeWait bool
+	needWait bool // the wait could not be sent and is retried
+	noWait   bool // the backend cannot wait; readiness comes from replies only
+	fetching bool
 	// refreshing: a kindRefresh operation is out.
 	refreshing bool
 	// reopen: a connect failed at once and the native endpoint is spent; the
@@ -296,15 +301,27 @@ type Service struct {
 	submits, waits, kicks int
 	// retryInternal: a refresh or an error fetch found no free operation.
 	retryInternal bool
-	counters      linuxsockapi.Counters
-	message       ipc.Message
-	request       linuxsockapi.Request
-	native        NativeRequest
+	// streamRing: the TCP session is GTCP 4. A stream socket opens its
+	// endpoint only when it needs one, and a connect opens and connects in
+	// one request.
+	streamRing bool
+	counters   linuxsockapi.Counters
+	message    ipc.Message
+	request    linuxsockapi.Request
+	native     NativeRequest
 }
 
 func (s *Service) Init(backend Backend, transport Transport) {
 	s.backend, s.transport = backend, transport
 	s.limits = DefaultLimits()
+}
+
+// SetStreamRing tells the core its TCP session is GTCP 4 (RingLink).
+func (s *Service) SetStreamRing(on bool) {
+	s.streamRing = on
+	if on {
+		s.dropWarm(TCP)
+	}
 }
 
 func (s *Service) nextSerial() uint32 {

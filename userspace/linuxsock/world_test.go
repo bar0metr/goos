@@ -8,32 +8,43 @@ import (
 	"goos/userspace/network"
 	"goos/userspace/tcpapi"
 	"goos/userspace/tcpserve"
+	"goos/userspace/udpapi"
 )
 
-// world runs linuxsockd's core against the real native TCP service and
-// stack of netd, over queues bounded as the kernel bounds channels, and
-// plays the kernel's side of one family's rings. Each party runs only on
-// the events that wake it in GoOS: linuxsockd on a reply, a family message
-// or its native channel turning writable while it asked for that; netd on
-// a request or room for the replies it held, and on its timers.
+// world runs linuxsockd's core and its RingLink against the real GTCP 4
+// service and stack of netd, over queues bounded as the kernel bounds
+// channels, and plays the kernel's side of one family's rings. Each party
+// runs only on the events that wake it in GoOS: linuxsockd on a reply or a
+// doorbell, a family message, its native channel turning writable while it
+// asked for that, or the short timeout it sleeps with while Release entries
+// wait for ring room; netd on a request or a doorbell, room for the
+// messages it held, and its timers. Before either sleeps it arms its
+// doorbell and checks its rings once more, and nothing may be runnable then.
 type world struct {
 	t       *testing.T
 	h       *harness
-	b       *linkBackend
+	ring    *RingLink
+	ch      boundedChannel
 	stack   network.Stack
-	session tcpserve.Session
+	session tcpserve.Session4
 	now     uint64
 	family  int
-	// netd's replies to linuxsockd, bounded, and the ones it held back.
-	replies []ipc.Message
-	held    []ipc.Message
-	queue   int
+	// netd's messages to linuxsockd, bounded, and the ones it held back; a
+	// doorbell a full queue refused waits in doorbellHeld.
+	replies      []ipc.Message
+	held         []ipc.Message
+	doorbellHeld bool
+	queue        int
 	// timers: simulated time moved, so netd's timers run once.
 	timers bool
 	in     tcpapi.Request
 	// The kernel's TX slots: committed or free, with their generations.
 	txBusy [linuxsockapi.TXSlots]bool
 	txGen  uint32
+	// Channel traffic between linuxsockd and netd, by opcode for requests.
+	requests                    [32]uint64
+	replyCount, doorbellsToNetd uint64
+	doorbellsFromNetd           uint64
 }
 
 const worldQueue = ipc.QueueCapacity
@@ -45,43 +56,103 @@ func (r worldReplier) Reply(reply *tcpapi.Reply, correlation uint64) bool {
 	if !r.w.session.Encode(reply, correlation, &message) {
 		return false
 	}
-	if len(r.w.held) == 0 && len(r.w.replies) < r.w.queue {
-		r.w.replies = append(r.w.replies, message)
+	return r.w.post(message)
+}
+
+func (r worldReplier) Doorbell() bool {
+	w := r.w
+	if w.doorbellHeld {
 		return true
 	}
-	if len(r.w.held) >= 128 {
+	if len(w.held) != 0 || len(w.replies) >= w.queue {
+		w.doorbellHeld = true
+		return true
+	}
+	var message ipc.Message
+	if !tcpapi.EncodeDoorbell4(&message) {
 		return false
 	}
-	r.w.held = append(r.w.held, message)
+	w.replies = append(w.replies, message)
+	w.doorbellsFromNetd++
 	return true
+}
+
+func (w *world) post(message ipc.Message) bool {
+	w.replyCount++
+	if len(w.held) == 0 && len(w.replies) < w.queue {
+		w.replies = append(w.replies, message)
+		return true
+	}
+	if len(w.held) >= 1024 {
+		return false
+	}
+	w.held = append(w.held, message)
+	return true
+}
+
+// worldBackend sends TCP to the ring link; UDP goes to a GUDP link no one
+// serves, since the world runs streams only.
+type worldBackend struct {
+	w     *world
+	udp   NativeLink
+	udpCh boundedChannel
+}
+
+func (b *worldBackend) Submit(proto Proto, tag uint64, request *NativeRequest) SubmitStatus {
+	if proto == TCP {
+		return b.w.ring.Submit(&b.w.ch, tag, request)
+	}
+	return b.udp.Submit(&b.udpCh, tag, request)
 }
 
 func newWorld(t *testing.T) *world { return newWorldQueue(t, worldQueue) }
 
 // newWorldQueue bounds both channels at queue messages.
 func newWorldQueue(t *testing.T, queue int) *world {
-	h, b := newLinkHarness(t, queue)
-	w := &world{t: t, h: h, b: b, now: 1_000_000_000, queue: queue}
+	h := newHarness(t)
+	w := &world{t: t, h: h, now: 1_000_000_000, queue: queue, ring: new(RingLink)}
+	w.ch.capacity = queue
+	b := &worldBackend{w: w}
+	b.udpCh.capacity = queue
+	b.udp.Reset(UDP, h.generation[UDP], tcpapi.Layout3, make([]byte, udpapi.TXSlots*udpapi.SlotSize), make([]byte, udpapi.RXSlots*udpapi.SlotSize))
+	h.svc.backend = b
 	w.stack.Init(99)
-	tx, rx := b.links[TCP].tx, b.links[TCP].rx
-	if !w.session.StartLayout(&w.stack, 0, 64, tcpapi.Layout3, tx, rx, w.now) {
+	tx, rx := make([]byte, tcpapi.Layout4.TXPool()), make([]byte, tcpapi.Layout4.RXPool())
+	if !w.session.Start(&w.stack, 0, tcpapi.Endpoints4, tx, rx, w.now) {
 		t.Fatal("start session")
 	}
+	if !w.ring.Reset(h.generation[TCP], tx, rx) {
+		t.Fatal("ring link")
+	}
+	h.svc.SetStreamRing(true)
+	h.svc.SetLinkView(w.ring)
+	// netd armed before it first slept.
+	w.session.Idle()
 	h.svc.SetWarm(2)
 	w.family = h.family(1, 7)
 	w.settle()
 	return w
 }
 
+// deliver runs netd's data plane until it reports no more work.
+func (w *world) deliver() {
+	for more := true; more; {
+		var fault tcpserve.Fault
+		if fault, more = w.session.Deliver(&w.stack, w.now, worldReplier{w}); fault != tcpserve.FaultNone {
+			w.t.Fatalf("netd deliver fault %q", fault)
+		}
+	}
+}
+
 // netd takes its queue, handles each request, then delivers what the
 // requests made ready, as its event loop does.
 func (w *world) netd() bool {
-	// netd wakes only on an event: a request, room for the replies it held,
+	// netd wakes only on an event: a message, room for the messages it held,
 	// or a timer that came due. Without one it sleeps, whatever its own
 	// state would let it answer.
 	deadline, timed := w.stack.Deadline()
-	if len(w.b.channels[TCP].queue) == 0 && (len(w.held) == 0 || len(w.replies) >= w.queue) &&
-		(!timed || deadline > w.now) {
+	room := len(w.replies) < w.queue
+	if len(w.ch.queue) == 0 && (len(w.held) == 0 && !w.doorbellHeld || !room) && (!timed || deadline > w.now) {
 		return false
 	}
 	w.timers = false
@@ -91,12 +162,22 @@ func (w *world) netd() bool {
 		w.held = w.held[1:]
 		moved = true
 	}
-	queue := w.b.channels[TCP].queue
-	w.b.channels[TCP].queue = nil
+	if w.doorbellHeld && len(w.held) == 0 && len(w.replies) < w.queue {
+		w.doorbellHeld = false
+		worldReplier{w}.Doorbell()
+		moved = true
+	}
+	queue := w.ch.queue
+	w.ch.queue = nil
 	for index := range queue {
-		correlation, ok := tcpapi.Layout3.DecodeRequest(&queue[index], &w.in)
+		correlation, ok := w.session.Decode(&queue[index], &w.in)
 		if !ok {
 			w.t.Fatal("netd: undecodable request")
+		}
+		if w.in.Opcode == tcpapi.OpDoorbell {
+			w.doorbellsToNetd++
+		} else {
+			w.requests[w.in.Opcode]++
 		}
 		if fault := w.session.Handle(&w.stack, &w.in, correlation, w.now, worldReplier{w}); fault != tcpserve.FaultNone {
 			w.t.Fatalf("netd fault %q", fault)
@@ -104,15 +185,11 @@ func (w *world) netd() bool {
 		moved = true
 	}
 	w.stack.Advance(w.now)
-	// Netd calls Deliver again while it reports more work, then sleeps
-	// until its next event. Nothing may be runnable then, and a further
-	// call must find nothing to answer, or an answer waits for an
-	// unrelated event.
-	for more := true; more; {
-		var fault tcpserve.Fault
-		if fault, more = w.session.Deliver(&w.stack, w.now, worldReplier{w}); fault != tcpserve.FaultNone {
-			w.t.Fatalf("netd deliver fault %q", fault)
-		}
+	w.deliver()
+	// netd arms its doorbell before it sleeps and runs again when the
+	// client published meanwhile.
+	for !w.session.Idle() {
+		w.deliver()
 	}
 	if endpoint, op, found := w.session.Runnable(&w.stack); found {
 		w.t.Fatalf("netd would sleep with a runnable %s on endpoint %d", op, endpoint)
@@ -121,33 +198,53 @@ func (w *world) netd() bool {
 	if fault, _ := w.session.Deliver(&w.stack, w.now, worldReplier{w}); fault != tcpserve.FaultNone {
 		w.t.Fatalf("netd deliver fault %q", fault)
 	}
+	if w.session.Progressed() {
+		w.t.Fatal("a delivery pass found work netd left for the next event")
+	}
 	if after := len(w.replies) + len(w.held); after != before {
 		w.t.Fatalf("a delivery pass left %d answers for the next event", after-before)
 	}
 	return moved
 }
 
-// linuxsockd runs on a reply, or on its channel turning writable when it
-// waits for that.
+// linuxsockd runs on a message from netd, on its channel turning writable
+// when it waits for that, or on its timeout while Release entries wait;
+// then it arms its doorbell and sleeps once nothing moves.
 func (w *world) linuxsockd() bool {
 	moved := false
-	link, channel := &w.b.links[TCP], &w.b.channels[TCP]
-	if link.WantsWritable() && len(channel.queue) < channel.capacity {
-		if link.Writable(channel, w.h.svc) != SendOK {
-			w.t.Fatal("link gone")
-		}
+	link := w.ring
+	if link.WantsWritable() && len(w.ch.queue) < w.ch.capacity {
+		link.Writable(&w.ch, w.h.svc)
 		moved = true
 	}
 	for len(w.replies) != 0 {
 		message := w.replies[0]
 		w.replies = w.replies[1:]
-		tag, completion, ok := link.Decode(&message)
-		if !ok {
-			w.t.Fatal("linuxsockd: undecodable reply")
+		if !link.Receive(&w.ch, &message, w.h.svc) {
+			w.t.Fatal("linuxsockd: netd broke the protocol")
 		}
-		w.h.svc.Complete(TCP, w.h.generation[TCP], tag, completion)
-		link.Done(channel)
 		moved = true
+	}
+	for spins := 0; !link.Idle(&w.ch, w.h.svc); spins++ {
+		moved = true
+		if spins > 1000 {
+			for _, l := range link.local {
+				w.t.Logf("local %x %+v", l.tag, l.c)
+			}
+			w.t.Fatalf("linuxsockd never idles: stats %+v", link.Stats)
+		}
+	}
+	if link.Broken() {
+		w.t.Fatal("ring link broken")
+	}
+	// Nothing may be runnable once linuxsockd sleeps: no ring entry, no
+	// completion the link answered itself, no Release entry while the ring
+	// has room.
+	if link.control.ClientPending() || len(link.local) != 0 || link.Backlogged() && link.control.ReleaseRoom() != 0 {
+		w.t.Fatal("linuxsockd would sleep with work runnable")
+	}
+	if validationHoles := w.h.svc.ProgressHoles(); validationHoles != 0 {
+		w.t.Fatalf("%d progress holes", validationHoles)
 	}
 	return moved
 }
@@ -159,7 +256,7 @@ func (w *world) settle() {
 			return
 		}
 	}
-	w.t.Fatal("services never settled")
+	w.t.Fatalf("services never settled: requests %v doorbells %d %d", w.requests, w.doorbellsToNetd, w.doorbellsFromNetd)
 }
 
 // call sends a family request and runs the world until its reply.
@@ -178,27 +275,50 @@ func (w *world) call(request linuxsockapi.Request) linuxsockapi.Reply {
 	return linuxsockapi.Reply{}
 }
 
-// pair connects a client stream to an accepted server stream over loopback.
-func (w *world) pair() (client, server uint64) {
+// listen opens a loopback listener with backlog and returns it and its
+// port.
+func (w *world) listen(backlog uint32) (uint64, uint16) {
+	w.t.Helper()
 	listener := w.call(linuxsockapi.Request{Opcode: opOpen, Length: linuxsockapi.KindStream}).Socket
 	if r := w.call(linuxsockapi.Request{Opcode: opBind, Socket: listener, Address: [4]byte{127, 0, 0, 1}}); r.Result != linuxsockapi.ResultOK {
 		w.t.Fatalf("bind %d", r.Result)
 	}
 	port := w.call(linuxsockapi.Request{Opcode: linuxsockapi.OpGetSockName, Socket: listener}).LocalPort
-	w.call(linuxsockapi.Request{Opcode: opListen, Socket: listener, Length: 4})
-	client = w.call(linuxsockapi.Request{Opcode: opOpen, Length: linuxsockapi.KindStream}).Socket
+	if r := w.call(linuxsockapi.Request{Opcode: opListen, Socket: listener, Length: backlog}); r.Result != linuxsockapi.ResultOK {
+		w.t.Fatalf("listen %d", r.Result)
+	}
+	return listener, port
+}
+
+// dial opens a stream and starts its connect to port.
+func (w *world) dial(port uint16) uint64 {
+	w.t.Helper()
+	client := w.call(linuxsockapi.Request{Opcode: opOpen, Length: linuxsockapi.KindStream}).Socket
 	if r := w.call(linuxsockapi.Request{Opcode: opConnect, Socket: client, Address: [4]byte{127, 0, 0, 1}, Port: port}); r.Result != linuxsockapi.ResultInProgress {
 		w.t.Fatalf("connect %d", r.Result)
 	}
+	return client
+}
+
+// accept returns the listener's next child.
+func (w *world) accept(listener uint64) uint64 {
+	w.t.Helper()
 	for round := 0; round < 100; round++ {
 		reply := w.call(linuxsockapi.Request{Opcode: opAccept, Socket: listener})
 		if reply.Result == linuxsockapi.ResultOK {
-			return client, reply.Value
+			return reply.Value
 		}
-		w.now += 1_000_000
+		w.now += 10_000_000
 	}
 	w.t.Fatal("no child")
-	return 0, 0
+	return 0
+}
+
+// pair connects a client stream to an accepted server stream over loopback.
+func (w *world) pair() (client, server uint64) {
+	listener, port := w.listen(4)
+	client = w.dial(port)
+	return client, w.accept(listener)
 }
 
 func (w *world) rings() []byte { return w.h.rings(w.family) }
@@ -330,8 +450,23 @@ func (w *world) dump(ids ...uint64) {
 		}
 	}
 	f := &w.h.svc.families[w.family]
-	w.t.Logf("family txHeld %08b rxUsed %08b rxPub %08b; link wantsWritable %v queue %d held replies %d",
-		f.txHeld, f.rxUsed, f.rxPub, w.b.links[TCP].WantsWritable(), len(w.b.channels[TCP].queue), len(w.held))
+	tx, rx := w.ring.Held()
+	w.t.Logf("family txHeld %08b rxUsed %08b rxPub %08b; link tx %016b rx %016b wantsWritable %v queue %d held messages %d",
+		f.txHeld, f.rxUsed, f.rxPub, tx, rx, w.ring.WantsWritable(), len(w.ch.queue), len(w.held))
+}
+
+// traffic is the channel messages both ways since the last mark, besides
+// doorbells.
+func (w *world) traffic() (requests, replies, doorbells uint64) {
+	for _, count := range w.requests {
+		requests += count
+	}
+	return requests, w.replyCount, w.doorbellsToNetd + w.doorbellsFromNetd
+}
+
+func (w *world) mark() {
+	w.requests = [32]uint64{}
+	w.replyCount, w.doorbellsToNetd, w.doorbellsFromNetd = 0, 0, 0
 }
 
 func TestWorldStreamThroughRealStack(t *testing.T) {
