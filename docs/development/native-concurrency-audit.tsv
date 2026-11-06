@@ -918,8 +918,8 @@ CA-1132	goos/userspace/tcpapi	txDoneKinds	process	immutable	none
 CA-1133	goos/userspace/tcpapi	rxKinds	process	immutable	none
 CA-1134	goos/userspace/utility	ringSession	session	owned	none
 CA-1135	goos/userspace/cmd/linuxsockd	tcpRing	process	owned	none
-CA-1136	goos/userspace/cmd/logd	written	process	owned	none
-CA-1137	goos/userspace/cmd/logd	writtenPolicy	process	owned	none
-CA-1138	goos/userspace/cmd/logd	statusWritten	process	owned	none
-CA-1139	goos/userspace/cmd/logd	statusText	process	owned	none
-CA-1140	goos/userspace/cmd/shell	logStatus	process	owned	none
+CA-1145	goos/userspace/cmd/logd	written	process	owned	none
+CA-1146	goos/userspace/cmd/logd	writtenPolicy	process	owned	none
+CA-1147	goos/userspace/cmd/logd	statusWritten	process	owned	none
+CA-1148	goos/userspace/cmd/logd	statusText	process	owned	none
+CA-1149	goos/userspace/cmd/shell	logStatus	process	owned	none
