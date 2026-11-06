@@ -438,7 +438,9 @@ func (s *Service) Flush(index int) {
 	if !s.Family(index) {
 		return
 	}
-	for i := 0; i < s.opCap(); i++ {
+	// The event loop flushes before every read of the family's channel;
+	// only a reply a full channel held back needs the walk.
+	for i := 0; i < s.opCap() && s.families[index].replies != 0; i++ {
 		o := s.op(i)
 		if o.state == opReply && int(o.family) == index && !s.sendReply(o) {
 			return
