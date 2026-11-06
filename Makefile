@@ -31,9 +31,6 @@ COMMAND_ELF_DIR = $(OUT_DIR)/userspace/bin-elf
 COMMAND_IMAGES = $(addprefix $(COMMAND_DIR)/,$(COMMANDS))
 COMMAND_ELFS = $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,$(COMMANDS)))
 COMMAND_INDEX = $(OUT_DIR)/userspace/commands
-# Every command is rebuilt when any package a command imports changes; the
-# commands share nearly all of them.
-COMMAND_LIBRARY = $(call go_deps,$(addprefix ./userspace/bin/,$(filter-out $(GOROUTINE_COMMANDS),$(COMMANDS))))
 BLOCK_IMAGE = $(OUT_DIR)/userspace/block
 BLOCK_ELF = $(OUT_DIR)/userspace/block.elf
 VIRTIO_BLOCK_IMAGE = $(OUT_DIR)/userspace/virtio-blk
@@ -86,6 +83,8 @@ RUN_ISO = $(if $(filter 1,$(RECOVERY)),$(RECOVERY_ISO),$(ISO))
 # when it does; make disk-overwrite replaces it.
 SYSTEM_TREE = $(OUT_DIR)/system
 SYSTEM_IMAGE = $(OUT_DIR)/system.img
+SYSTEM_TREE_INPUTS = $(OUT_DIR)/system.inputs
+SYSTEM_TREE_STATE = $(OUT_DIR)/system.state
 DISK ?= $(BUILD_DIR)/goos-disk.img
 QEMU := qemu-system-x86_64
 QEMU_SHARE ?= /opt/local/share/qemu
@@ -185,7 +184,16 @@ TINYGO_TAGS := -tags "$(BUILD_TAGS)"
 # editing any of them rebuilds the program. If go list fails the target is
 # forced, and TinyGo reports the error.
 USERSPACE_TAGS := uefi baremetal linux amd64 tinygo goos_userspace $(BUILD_TAGS)
-go_deps = $(shell $(BUILD_ENV) GOOS=linux GOARCH=amd64 go list -tags "$(USERSPACE_TAGS) $(2)" -deps -f '{{if not .Standard}}{{$$d := .Dir}}{{range .GoFiles}}{{$$d}}/{{.}} {{end}}{{range .SFiles}}{{$$d}}/{{.}} {{end}}{{end}}' $(1) 2>/dev/null || echo FORCE)
+go_deps = $(shell $(BUILD_ENV) GOOS=linux GOARCH=amd64 go list -tags "$(USERSPACE_TAGS) $(2)" -deps -f '{{if not .Standard}}{{$$d := .Dir}}{{$$d}} {{range .GoFiles}}{{$$d}}/{{.}} {{end}}{{range .SFiles}}{{$$d}}/{{.}} {{end}}{{end}}' $(1) 2>/dev/null || echo FORCE)
+go_host_deps = $(shell $(BUILD_ENV) go list -deps -f '{{if not .Standard}}{{$$d := .Dir}}{{range .GoFiles}}{{$$d}}/{{.}} {{end}}{{range .SFiles}}{{$$d}}/{{.}} {{end}}{{range .EmbedFiles}}{{$$d}}/{{.}} {{end}}{{end}}' $(1) 2>/dev/null || echo FORCE)
+go_host_dirs = $(shell $(BUILD_ENV) go list -deps -f '{{if not .Standard}}{{.Dir}}{{end}}' $(1) 2>/dev/null || echo FORCE)
+SYSTEM_TREE_SOURCES = $(call go_host_deps,./tools/sysimage ./tools/truststore) go.mod $(wildcard go.sum)
+SYSTEM_TREE_SOURCE_DIRS = $(call go_host_dirs,./tools/sysimage ./tools/truststore)
+SYSTEM_IMAGE_SOURCES = $(call go_host_deps,./tools/mkfat32) $(call go_host_dirs,./tools/mkfat32) go.mod $(wildcard go.sum)
+STACKFRAMES_SOURCES += $(call go_host_deps,./tools/stackframes) $(call go_host_dirs,./tools/stackframes)
+ELF2NATIVE_SOURCES := $(call go_host_deps,./tools/elf2native) $(call go_host_dirs,./tools/elf2native)
+MKISO_SOURCES := $(call go_host_deps,./tools/mkiso) $(call go_host_dirs,./tools/mkiso)
+
 # OPT is TinyGo's optimisation level for the kernel and every userspace image.
 # TinyGo accepts 0, 1, 2, s, and z; 2 is its highest speed level (there is no 3).
 # 2 is the default, measured faster than z (the smallest) in ADR 0090.
@@ -200,7 +208,7 @@ VERSION := $(shell sed -n 's/^[[:space:]]*Release[[:space:]]*=[[:space:]]*"\(.*\
 # VALIDATION, VFS_PROBE, VFS_RUNTIME, or OPT never mixes objects built for
 # another configuration. The level is always in the name, so a tree built
 # before the default changed is never taken for one built at the new default.
-OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)$(if $(filter 1,$(VFS_PROBE)),-vfsprobe)$(if $(filter-out $(VFS_RUNTIME_DEFAULT),$(VFS_RUNTIME)),-vfs$(VFS_RUNTIME))-opt$(OPT)
+OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)$(if $(filter 1,$(VFS_PROBE)),-vfsprobe)$(if $(filter-out $(VFS_RUNTIME_DEFAULT),$(VFS_RUNTIME)),-vfs$(VFS_RUNTIME))-opt$(OPT)$(if $(filter-out 0,$(SOURCE_DATE_EPOCH)),-epoch$(SOURCE_DATE_EPOCH))
 
 .DEFAULT_GOAL := all
 
@@ -210,7 +218,11 @@ FORCE:
 
 all: iso
 
-kernel: $(KERNEL)
+kernel: $(KERNEL).checked
+
+$(KERNEL).checked: $(KERNEL) $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(KERNEL)
+	@touch $@
 
 
 $(KERNEL_IO): kernel/arch/amd64/io.S
@@ -219,12 +231,20 @@ $(KERNEL_IO): kernel/arch/amd64/io.S
 
 # The kernel also imports a few userspace protocol packages (the launch and
 # startup formats), so their sources are prerequisites too.
-KERNEL_LIBRARY = $(shell $(BUILD_ENV) GOOS=linux GOARCH=amd64 go list -tags "uefi baremetal linux amd64 tinygo $(BUILD_TAGS)" -deps -f '{{if not .Standard}}{{$$d := .Dir}}{{range .GoFiles}}{{$$d}}/{{.}} {{end}}{{end}}' ./kernel 2>/dev/null || echo FORCE)
-$(KERNEL): $(shell find kernel internal -type f) $(filter-out $(CURDIR)/kernel/% $(CURDIR)/internal/%,$(KERNEL_LIBRARY)) go.mod $(KERNEL_IO) $(STACKFRAMES_SOURCES)
+KERNEL_LIBRARY = $(shell $(BUILD_ENV) GOOS=linux GOARCH=amd64 go list -e -tags "uefi baremetal linux amd64 tinygo $(BUILD_TAGS)" -deps -f '{{if .Error}}{{if ne .ImportPath "device/uefi"}}FORCE {{end}}{{else}}{{if and (not .Standard) .Module (eq .Module.Path "goos")}}{{$$d := .Dir}}{{$$d}} {{range .GoFiles}}{{$$d}}/{{.}} {{end}}{{range .SFiles}}{{$$d}}/{{.}} {{end}}{{end}}{{end}}' ./kernel 2>/dev/null || echo FORCE)
+$(KERNEL): $(shell find $(CURDIR)/kernel $(CURDIR)/internal \( -type f -o -type d \)) $(filter-out $(CURDIR)/kernel/% $(CURDIR)/internal/%,$(KERNEL_LIBRARY)) go.mod $(KERNEL_IO)
 	@mkdir -p $(KERNEL_DIR)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=$(OPT) -no-debug -o $@ ./kernel
-	@$(STACKFRAMES) $@ || { rm -f $@; exit 1; }
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
+
+SERVICE_NAMES := init fault-probe shell vfs block virtio-blk fat32 log config tty netd virtio-net resolved linuxsockd remoted remoted-worker sftpd
+.PHONY: $(addprefix service-,$(SERVICE_NAMES)) $(addprefix command-,$(COMMANDS)) kernel-iso boot-service-vfs
+$(addprefix service-,$(SERVICE_NAMES)): service-%: $(OUT_DIR)/userspace/%
+$(addprefix command-,$(COMMANDS)): command-%: $(COMMAND_DIR)/%
+kernel-iso: iso
+boot-service-vfs: iso
+
+$(COMMAND_ELFS) $(INIT_ELF) $(SHELL_ELF) $(VFS_ELF) $(BLOCK_ELF) $(VIRTIO_BLOCK_ELF) $(FAT32_ELF) $(LOG_ELF) $(CONFIG_ELF) $(TTY_ELF) $(NETD_ELF) $(VIRTIO_NET_ELF) $(RESOLVED_ELF) $(LINUXSOCKD_ELF) $(REMOTED_ELF) $(REMOTED_WORKER_ELF) $(SFTPD_ELF): go.mod go.sum
 
 userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE)
 
@@ -236,7 +256,7 @@ $(INIT_ELF): $(call go_deps,./userspace/cmd/init) tinygo/targets/goos-userspace-
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/init
 
-$(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(INIT_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(INIT_ELF) $@
 
@@ -244,16 +264,16 @@ $(SHELL_ELF): $(call go_deps,./userspace/cmd/shell) tinygo/targets/goos-userspac
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/shell
 
-$(SHELL_IMAGE): $(SHELL_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(SHELL_IMAGE): $(SHELL_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(SHELL_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(SHELL_ELF) $@
 
-$(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(VFS_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(VFS_ELF) $@
 
 .SECONDEXPANSION:
-$(filter-out $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust $(GOROUTINE_COMMANDS))),$(COMMAND_ELFS)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(filter-out $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust $(GOROUTINE_COMMANDS))),$(COMMAND_ELFS)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $$(call go_deps,./userspace/bin/$$*) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/bin/$*
 
@@ -283,16 +303,16 @@ $(VFS_ELF): $(call go_deps,./userspace/cmd/vfs,goos_goroutines) $(GOROUTINE_ROOT
 	$(GOROUTINE_BUILD) -o $@ ./userspace/cmd/vfs
 endif
 
-$(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,$(GOROUTINE_COMMANDS))): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) $(wildcard userspace/runtime/goroutine/*.go) $(GOROUTINE_ROOT_STAMP) $(GOROUTINE_TARGET) userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,$(GOROUTINE_COMMANDS))): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $$(call go_deps,./userspace/bin/$$*,goos_goroutines) $(wildcard userspace/runtime/goroutine/*.go) $(GOROUTINE_ROOT_STAMP) $(GOROUTINE_TARGET) userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(GOROUTINE_BUILD) -o $@ ./userspace/bin/$*
 
 TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tools/internal/compatroot/*.go internal/repobuild/*.go tools/scratch/*.go tinygo/runtime/*.txt) tools/build-tls.sh
-$(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) $(TLS_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $$(call go_deps,./userspace/bin/$$*) $(TLS_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(BUILD_ENV) sh tools/build-tls.sh $@ ./userspace/bin/$* '$(BUILD_TAGS)' $(OPT)
 
-$(COMMAND_IMAGES): $(COMMAND_DIR)/%: $(COMMAND_ELF_DIR)/%.elf tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(COMMAND_IMAGES): $(COMMAND_DIR)/%: $(COMMAND_ELF_DIR)/%.elf tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@mkdir -p $(COMMAND_DIR)
 	@$(STACKFRAMES) $<
 	$(BUILD_ENV) go run ./tools/elf2native $< $@
@@ -302,16 +322,18 @@ command-index: $(COMMAND_INDEX)
 
 # The directory itself is a prerequisite: removing a command changes no source
 # file, only the listing, and the index must drop it.
-$(COMMAND_INDEX): userspace/bin $(wildcard userspace/bin/*/*.go) tools/commands/main.go userspace/commands/commands.go
+$(COMMAND_INDEX): userspace/bin $(wildcard userspace/bin/*/) $(wildcard userspace/bin/*/*.go) tools/commands/main.go userspace/commands/commands.go
 	@mkdir -p $(dir $@)
 	@$(if $(filter 0,$(VALIDATION)),rm -f $(addprefix $(COMMAND_DIR)/,$(VALIDATION_COMMANDS)),true)
-	$(BUILD_ENV) GOOS_VALIDATION=$(VALIDATION) go run ./tools/commands userspace/bin $@
+	@set -e; tmp='$@.tmp'; trap 'rm -f "$$tmp"' EXIT; \
+		$(BUILD_ENV) GOOS_VALIDATION=$(VALIDATION) go run ./tools/commands userspace/bin "$$tmp"; \
+		cmp -s "$$tmp" '$@' || mv "$$tmp" '$@'
 
 $(BLOCK_ELF): $(call go_deps,./userspace/cmd/block) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/block
 
-$(BLOCK_IMAGE): $(BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(BLOCK_IMAGE): $(BLOCK_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(BLOCK_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(BLOCK_ELF) $@
 
@@ -327,7 +349,7 @@ $(VIRTIO_BLOCK_ELF): $(call go_deps,./userspace/cmd/virtio-blk) tinygo/targets/g
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/virtio-blk
 endif
 
-$(VIRTIO_BLOCK_IMAGE): $(VIRTIO_BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(VIRTIO_BLOCK_IMAGE): $(VIRTIO_BLOCK_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(VIRTIO_BLOCK_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(VIRTIO_BLOCK_ELF) $@
 
@@ -335,7 +357,7 @@ $(FAT32_ELF): $(call go_deps,./userspace/cmd/fat32) tinygo/targets/goos-userspac
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/fat32
 
-$(FAT32_IMAGE): $(FAT32_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(FAT32_IMAGE): $(FAT32_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(FAT32_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(FAT32_ELF) $@
 
@@ -343,7 +365,7 @@ $(LOG_ELF): $(call go_deps,./userspace/cmd/logd) tinygo/targets/goos-userspace-a
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/logd
 
-$(LOG_IMAGE): $(LOG_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(LOG_IMAGE): $(LOG_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(LOG_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(LOG_ELF) $@
 
@@ -351,7 +373,7 @@ $(CONFIG_ELF): $(call go_deps,./userspace/cmd/configd) tinygo/targets/goos-users
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/configd
 
-$(CONFIG_IMAGE): $(CONFIG_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(CONFIG_IMAGE): $(CONFIG_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(CONFIG_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(CONFIG_ELF) $@
 
@@ -359,7 +381,7 @@ $(TTY_ELF): $(call go_deps,./userspace/cmd/tty) tinygo/targets/goos-userspace-am
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/tty
 
-$(TTY_IMAGE): $(TTY_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(TTY_IMAGE): $(TTY_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(TTY_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(TTY_ELF) $@
 
@@ -367,7 +389,7 @@ $(NETD_ELF): $(call go_deps,./userspace/cmd/netd) tinygo/targets/goos-userspace-
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/netd
 
-$(NETD_IMAGE): $(NETD_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(NETD_IMAGE): $(NETD_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(NETD_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(NETD_ELF) $@
 
@@ -375,7 +397,7 @@ $(RESOLVED_ELF): $(call go_deps,./userspace/cmd/resolved) tinygo/targets/goos-us
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/resolved
 
-$(RESOLVED_IMAGE): $(RESOLVED_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(RESOLVED_IMAGE): $(RESOLVED_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(RESOLVED_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(RESOLVED_ELF) $@
 
@@ -383,7 +405,7 @@ $(LINUXSOCKD_ELF): $(call go_deps,./userspace/cmd/linuxsockd) tinygo/targets/goo
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/linuxsockd
 
-$(LINUXSOCKD_IMAGE): $(LINUXSOCKD_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(LINUXSOCKD_IMAGE): $(LINUXSOCKD_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(LINUXSOCKD_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(LINUXSOCKD_ELF) $@
 
@@ -391,7 +413,7 @@ $(VIRTIO_NET_ELF): $(call go_deps,./userspace/cmd/virtio-net) tinygo/targets/goo
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/virtio-net
 
-$(VIRTIO_NET_IMAGE): $(VIRTIO_NET_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(VIRTIO_NET_IMAGE): $(VIRTIO_NET_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(VIRTIO_NET_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(VIRTIO_NET_ELF) $@
 
@@ -411,11 +433,11 @@ $(SFTPD_ELF): $(call go_deps,./userspace/cmd/sftpd) tinygo/targets/goos-userspac
 	@mkdir -p $(dir $@)
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/sftpd
 
-$(SFTPD_IMAGE): $(SFTPD_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(SFTPD_IMAGE): $(SFTPD_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(SFTPD_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(SFTPD_ELF) $@
 
-$(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE): %: %.elf tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+$(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE): %: %.elf tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $<
 	$(BUILD_ENV) go run ./tools/elf2native $< $@
 
@@ -430,37 +452,75 @@ INITRAMFS_INPUTS = $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(
 # runs without one; the rest of the system is installed on the volume
 # (ADR 0175). The recovery archive is the same with the request for recovery
 # mode added.
-initramfs: userspace
-	@mkdir -p $(OUT_DIR)/initramfs/root/system
-	@cp $(INIT_IMAGE) $(OUT_DIR)/initramfs/root/system/init
-	@# A command whose directory was removed leaves its image behind; the
-	@# archive takes only the commands the tree still has.
-	@find $(COMMAND_DIR) -type f $(foreach command,$(COMMANDS),! -name $(command)) -delete
-	$(BUILD_ENV) go run ./tools/initramfs $(INITRAMFS_FLAGS) $(INITRAMFS_INPUTS) $(INITRAMFS)
-	@$(BUILD_ENV) go run ./tools/initramfs $(INITRAMFS_FLAGS) -force-recovery $(INITRAMFS_INPUTS) $(RECOVERY_INITRAMFS)
+RECOVERY_COMMANDS := cat cp df echo edit fsck-fat ls mkdir mount mv pwd rm stat touch write
+INITRAMFS_COMMANDS := $(RECOVERY_COMMANDS) $(if $(filter 1,$(VALIDATION)),ps)
+INITRAMFS_DEPS := $(filter-out $(COMMAND_DIR),$(INITRAMFS_INPUTS)) $(addprefix $(COMMAND_DIR)/,$(INITRAMFS_COMMANDS)) $(wildcard tools/initramfs/*.go) $(call go_host_deps,./tools/initramfs) $(call go_host_dirs,./tools/initramfs)
+
+initramfs: $(INITRAMFS)
+
+$(INITRAMFS): $(INITRAMFS_DEPS)
+	@mkdir -p $(dir $@)
+	$(BUILD_ENV) go run ./tools/initramfs $(INITRAMFS_FLAGS) $(INITRAMFS_INPUTS) $@
+
+$(RECOVERY_INITRAMFS): $(INITRAMFS_DEPS)
+	@mkdir -p $(dir $@)
+	$(BUILD_ENV) go run ./tools/initramfs $(INITRAMFS_FLAGS) -force-recovery $(INITRAMFS_INPUTS) $@
 
 # The installed system as a directory tree and as a volume image. Both are
 # written in name order. LINUX_EXTRA adds files under /system/linux;
 # LINUX_APPS_DIR copies a host directory into /apps.
-system-tree: userspace
-	@$(if $(strip $(VALIDATION_CA_BUNDLE)),true,$(BUILD_ENV) go run ./tools/truststore -check security/ca-source.pem security/ca-certificates.pem)
-	@$(BUILD_ENV) SYSTEM_CA_BUNDLE='$(SYSTEM_CA_SOURCE)' SYSTEM_TRUST_UPDATE_KEY='$(SYSTEM_TRUST_KEY_SOURCE)' SYSTEM_TRUST_UPDATE_URL='$(SYSTEM_TRUST_URL)' LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
+system-tree: $(SYSTEM_TREE)
+system-image: $(SYSTEM_IMAGE) iso
 
-system-image: iso system-tree
-	@rm -f $(SYSTEM_IMAGE)
-	@$(BUILD_ENV) go run ./tools/mkfat32 -new -size auto -tree $(SYSTEM_TREE) $(SYSTEM_IMAGE)
-	@printf 'built %s and %s (GoOS %s)\n' '$(ISO)' '$(SYSTEM_IMAGE)' '$(VERSION)'
+define system_tree_digest
+if test -d '$(SYSTEM_TREE)'; then find '$(SYSTEM_TREE)' \( -type d -o -type f \) -print | LC_ALL=C sort | while IFS= read -r file; do if test -d "$$file"; then printf 'd %s\n' "$$file"; else printf 'f %s ' "$$file"; shasum -a 256 "$$file"; fi; done; else printf '%s\n' missing; fi
+endef
+
+$(SYSTEM_TREE_INPUTS): FORCE $$(SYSTEM_TREE_SOURCES) $$(SYSTEM_TREE_SOURCE_DIRS) security/ca-source.pem $(SYSTEM_CA_SOURCE) $(SYSTEM_TRUST_KEY_SOURCE)
+	@set -e; mkdir -p $(dir $@); tmp='$@.tmp'; { printf '%s\n' 'SYSTEM_CA_SOURCE=$(SYSTEM_CA_SOURCE)' 'SYSTEM_TRUST_UPDATE_KEY=$(SYSTEM_TRUST_KEY_SOURCE)' 'SYSTEM_TRUST_UPDATE_URL=$(SYSTEM_TRUST_URL)' 'LINUX_EXTRA=$(LINUX_EXTRA)' 'LINUX_APPS_DIR=$(LINUX_APPS_DIR)'; for file in $(filter-out FORCE,$(SYSTEM_TREE_SOURCES)) security/ca-source.pem "$(SYSTEM_CA_SOURCE)" "$(SYSTEM_TRUST_KEY_SOURCE)"; do printf 'source %s ' "$$file"; shasum -a 256 "$$file"; done; extras='$(LINUX_EXTRA)'; saved_ifs=$$IFS; IFS=:; set -f; for file in $$extras; do if test -n "$$file"; then printf 'extra %s ' "$$file"; shasum -a 256 "$$file"; fi; done; set +f; IFS=$$saved_ifs; if test -n '$(LINUX_APPS_DIR)'; then find '$(LINUX_APPS_DIR)' \( -type d -o -type f \) -print | LC_ALL=C sort | while IFS= read -r file; do if test -d "$$file"; then printf 'app-dir %s\n' "$$file"; else printf 'app-file %s ' "$$file"; shasum -a 256 "$$file"; fi; done; fi; } > "$$tmp"; if test -f '$@' && cmp -s "$$tmp" '$@'; then rm -f "$$tmp"; else mv "$$tmp" '$@'; fi
+
+$(SYSTEM_TREE_STATE): FORCE
+	@set -e; mkdir -p $(dir $@); tmp='$@.tmp'; { $(system_tree_digest); } > "$$tmp"; if test -f '$@' && cmp -s "$$tmp" '$@'; then rm -f "$$tmp"; else mv "$$tmp" '$@'; fi
+
+$(SYSTEM_TREE): $(SYSTEM_TREE_INPUTS) $(SYSTEM_TREE_STATE) $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX)
+	@$(if $(strip $(VALIDATION_CA_BUNDLE)),true,$(BUILD_ENV) go run ./tools/truststore -check security/ca-source.pem security/ca-certificates.pem)
+	@$(BUILD_ENV) SYSTEM_CA_BUNDLE='$(SYSTEM_CA_SOURCE)' SYSTEM_TRUST_UPDATE_KEY='$(SYSTEM_TRUST_KEY_SOURCE)' SYSTEM_TRUST_UPDATE_URL='$(SYSTEM_TRUST_URL)' LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $@
+	@set -e; tmp='$(SYSTEM_TREE_STATE).tmp'; { $(system_tree_digest); } > "$$tmp"; mv "$$tmp" '$(SYSTEM_TREE_STATE)'; touch '$@'
+
+$(SYSTEM_IMAGE): $(SYSTEM_TREE) $$(SYSTEM_IMAGE_SOURCES)
+	@mkdir -p $(dir $@)
+	@rm -f $@
+	@$(BUILD_ENV) go run ./tools/mkfat32 -new -size auto -tree $(SYSTEM_TREE) $@
+	@printf 'built %s (GoOS %s)\n' '$@' '$(VERSION)'
 
 # disk installs the system on a new DISK and refuses one that exists;
 # disk-overwrite replaces it, data and all. run and run-gui make DISK only
 # when it is missing, and never change one that is there.
+DISK_VARIANT = HZ=$(HZ);DIAG=$(DIAG);VALIDATION=$(VALIDATION);VFS_PROBE=$(VFS_PROBE);VFS_RUNTIME=$(VFS_RUNTIME);OPT=$(OPT)
+DISK_ASSOCIATE ?= 0
+DISK_UPDATE = $(BUILD_ENV) go run ./tools/mkfat32 -update -variant '$(DISK_VARIANT)' $(if $(filter 1,$(DISK_ASSOCIATE)),-associate)
+INSTALLED_SERVICES := shell config log netd virtio-net resolved linuxsockd remoted remoted-worker sftpd
+
+.PHONY: $(addprefix dev-service-,$(INSTALLED_SERVICES)) $(addprefix dev-command-,$(COMMANDS)) disk-update test-incremental
+$(addprefix dev-service-,$(INSTALLED_SERVICES)): dev-service-%: $(OUT_DIR)/userspace/%
+	@$(DISK_UPDATE) -put $<:/system/services/$* $(DISK)
+
+$(addprefix dev-command-,$(COMMANDS)): dev-command-%: $(COMMAND_DIR)/% $(COMMAND_INDEX)
+	@$(DISK_UPDATE) -put $<:/system/bin/$* -put $(COMMAND_INDEX):/system/commands $(DISK)
+
+disk-update: system-tree
+	@$(DISK_UPDATE) -tree $(SYSTEM_TREE) $(DISK)
+
+test-incremental:
+	python3 tests/build/incremental.py
+
 disk: system-tree
-	@$(BUILD_ENV) go run ./tools/mkfat32 -new -size auto -tree $(SYSTEM_TREE) $(DISK)
+	@$(BUILD_ENV) go run ./tools/mkfat32 -new -variant '$(DISK_VARIANT)' -size auto -tree $(SYSTEM_TREE) $(DISK)
 	@printf 'installed GoOS %s on %s\n' '$(VERSION)' '$(DISK)'
 
 disk-overwrite: system-tree
 	@rm -f $(DISK)
-	@$(BUILD_ENV) go run ./tools/mkfat32 -new -size auto -tree $(SYSTEM_TREE) $(DISK)
+	@$(BUILD_ENV) go run ./tools/mkfat32 -new -variant '$(DISK_VARIANT)' -size auto -tree $(SYSTEM_TREE) $(DISK)
 	@printf 'installed GoOS %s on %s, replacing what was there\n' '$(VERSION)' '$(DISK)'
 
 run-disk:
@@ -475,23 +535,23 @@ test-disk: system-tree
 # tools/mkiso writes both images from their inputs alone, with fixed names,
 # serial number, and SOURCE_DATE_EPOCH timestamps, so a clean rebuild is
 # byte-identical (ADR 0086).
-$(EFI_IMAGE): $(KERNEL) initramfs $(wildcard tools/mkiso/*.go)
+$(EFI_IMAGE): $(KERNEL).checked $(INITRAMFS) $(wildcard tools/mkiso/*.go) $(MKISO_SOURCES)
 	@mkdir -p $(dir $@)
 	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso esp $(KERNEL) $(INITRAMFS) $@
 
 iso: $(ISO)
 
-$(VARIANT_ISO): $(EFI_IMAGE)
+$(VARIANT_ISO): $(EFI_IMAGE) $(KERNEL) $(INITRAMFS) $(wildcard tools/mkiso/*.go) $(MKISO_SOURCES)
 	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso iso $(EFI_IMAGE) $(KERNEL) $(INITRAMFS) $@
 	@test -s $@
 
 recovery-iso: $(RECOVERY_ISO)
 
-$(RECOVERY_EFI_IMAGE): $(KERNEL) initramfs $(wildcard tools/mkiso/*.go)
+$(RECOVERY_EFI_IMAGE): $(KERNEL).checked $(RECOVERY_INITRAMFS) $(wildcard tools/mkiso/*.go) $(MKISO_SOURCES)
 	@mkdir -p $(dir $@)
 	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso esp $(KERNEL) $(RECOVERY_INITRAMFS) $@
 
-$(RECOVERY_ISO): $(RECOVERY_EFI_IMAGE)
+$(RECOVERY_ISO): $(RECOVERY_EFI_IMAGE) $(KERNEL) $(RECOVERY_INITRAMFS) $(wildcard tools/mkiso/*.go) $(MKISO_SOURCES)
 	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso iso $(RECOVERY_EFI_IMAGE) $(KERNEL) $(RECOVERY_INITRAMFS) $@
 	@printf 'built %s (GoOS %s, recovery)\n' '$@' '$(VERSION)'
 

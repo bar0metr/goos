@@ -68,11 +68,37 @@ def run(root):
                    unchanged=('config_elf', 'config', 'command_elf', 'command',
                               'vfs_elf', 'vfs', 'kernel', 'archive', 'efi', 'iso'), before=before)
 
+    extra = root / 'userspace/cmd/netd/zz_incremental.go'
+    time.sleep(1.1)
+    extra.write_text('package main\n')
+    make(root, 'service-netd')
+    before = check(root, 'source addition', changed=('netd_elf', 'netd'),
+                   unchanged=('config_elf', 'config', 'command_elf', 'command', 'kernel'), before=before)
+    time.sleep(1.1)
+    extra.unlink()
+    make(root, 'service-netd')
+    before = check(root, 'source deletion', changed=('netd_elf', 'netd'),
+                   unchanged=('config_elf', 'config', 'command_elf', 'command', 'kernel'), before=before)
+
+    manifest = root / 'userspace/bin/netbench4/main.go'
+    held_manifest = root / 'netbench4-manifest.saved'
+    time.sleep(1.1)
+    manifest.rename(held_manifest)
+    try:
+        result = subprocess.run(['make', '-j4', 'command-index'], cwd=root,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode == 0:
+            raise AssertionError('missing command manifest did not invalidate index')
+    finally:
+        held_manifest.rename(manifest)
+    make(root, 'command-index')
+    print('PASS missing command manifest', flush=True)
+
     change(root, 'userspace/bin/netbench4/main.go')
     make(root, 'userspace', 'iso')
     before = check(root, 'command isolation', changed=('command_elf', 'command'),
                    unchanged=('netd_elf', 'netd', 'config_elf', 'config',
-                              'other_command_elf', 'other_command', 'kernel'), before=before)
+                              'other_command_elf', 'other_command', 'kernel', 'archive', 'efi', 'iso'), before=before)
 
     change(root, 'userspace/tcpapi/protocol.go')
     make(root, 'userspace', 'iso')

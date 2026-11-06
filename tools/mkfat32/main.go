@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // fileDevice is a host file as the device fat32.Format writes to.
@@ -108,8 +109,11 @@ func main() {
 	})
 	tree := flag.String("tree", "", "copy the host directory `DIR` onto the volume root, empty directories included, in name order")
 	fresh := flag.Bool("new", false, "refuse an IMAGE that already exists rather than reuse or reformat it")
+	update := flag.Bool("update", false, "update an existing associated FAT32 image")
+	variant := flag.String("variant", "", "build variant for an update")
+	associate := flag.Bool("associate", false, "associate or reassociate an image with the build variant")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: mkfat32 [-new] [-size MiB|auto] [-table none|mbr|gpt] [-sector-size N] [-cluster-sectors N] [-fats N] [-tree DIR] [-put HOSTFILE:PATH]... [-get PATH:HOSTFILE]... IMAGE")
+		fmt.Fprintln(os.Stderr, "usage: mkfat32 [-new|-update] [-variant VALUE] [-associate] [-size MiB|auto] [-table none|mbr|gpt] [-sector-size N] [-cluster-sectors N] [-fats N] [-tree DIR] [-put HOSTFILE:PATH]... [-get PATH:HOSTFILE]... IMAGE")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -129,7 +133,34 @@ func main() {
 		if err != nil {
 			fail(err)
 		}
+		if *update {
+			filtered := entries[:0]
+			for _, entry := range entries {
+				target := strings.TrimPrefix(entry[strings.IndexByte(entry, ':')+1:], "/")
+				if !protectedTarget(target) {
+					filtered = append(filtered, entry)
+				}
+			}
+			entries = filtered
+		}
 		puts = append(entries, puts...)
+	}
+	if *update {
+		if *fresh || *variant == "" || len(gets) != 0 {
+			fail(fmt.Errorf("-update requires -variant and cannot be combined with -new or -get"))
+		}
+		if err := updateImage(path, *variant, *associate, puts); err != nil {
+			fail(err)
+		}
+		return
+	}
+	if *associate || (*variant != "" && !*fresh) {
+		fail(fmt.Errorf("-associate requires -update; -variant requires -update or -new"))
+	}
+	if *variant != "" {
+		if err := validateVariant(*variant); err != nil {
+			fail(err)
+		}
 	}
 	newImage := !valid(path)
 	var size uint64
@@ -156,6 +187,11 @@ func main() {
 	}
 	if len(puts) != 0 || len(gets) != 0 {
 		transfer(path, puts, gets)
+	}
+	if *variant != "" {
+		if err := updateImage(path, *variant, true, nil); err != nil {
+			fail(err)
+		}
 	}
 }
 
@@ -231,6 +267,10 @@ func transfer(path string, puts []string, gets []string) {
 		fail(err)
 	}
 	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		fail(err)
+	}
+	defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 	info, err := file.Stat()
 	if err != nil {
 		fail(err)
