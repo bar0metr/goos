@@ -105,11 +105,50 @@ func NoteReadyChanged(familyID uint64) {
 	tablesLock.Unlock()
 }
 
+// WakeEvents is what a change can make a socket ready for. A call that
+// waits on the socket wakes only for an event it waits for, so a send's
+// slot coming back does not wake the reader of the same socket.
+type WakeEvents uint8
+
+const (
+	WakeReadable WakeEvents = 1 << iota
+	WakeWritable
+	WakeClosed
+	WakeAll = WakeReadable | WakeWritable | WakeClosed
+)
+
+// SocketWake is one socket a wake scan found changed.
+type SocketWake struct {
+	Object uint64
+	Events WakeEvents
+}
+
 // touchHeld marks a live socket for the next wake scan.
-func (context *NetContext) touchHeld(identity uint64) {
+func (context *NetContext) touchHeld(identity uint64, events WakeEvents) {
 	if socket, found := context.liveSocketHeld(identity); found {
-		socket.touched = true
+		socket.touched |= events
 	}
+}
+
+// entryEvents is what a socket's published readiness makes it ready for.
+// A change to a state ready for nothing wakes nobody: whoever waits found
+// the socket not ready already.
+func entryEvents(page []byte, index int) WakeEvents {
+	state, status := linuxsockapi.ReadEntry(page, index, 4)
+	if status != linuxsockapi.EntrySettled {
+		return WakeAll
+	}
+	var events WakeEvents
+	if state.Ready&(linuxsockapi.ReadyIn|linuxsockapi.ReadyReadHangup) != 0 {
+		events |= WakeReadable
+	}
+	if state.Ready&linuxsockapi.ReadyOut != 0 || state.State&linuxsockapi.EntrySend != 0 {
+		events |= WakeWritable
+	}
+	if state.Ready&(linuxsockapi.ReadyError|linuxsockapi.ReadyHangup) != 0 {
+		events = WakeAll
+	}
+	return events
 }
 
 // ReadinessView is the readiness pages of a session's pool, in order.
@@ -131,7 +170,7 @@ func TakeRescan(familyID uint64) bool {
 // ScanSocketWakes lists the description objects of the sockets that need a
 // wake, from slot cursor on, into out. next is where a further call goes
 // on, or -1 when the scan is done.
-func ScanSocketWakes(familyID uint64, session uint32, pages *ReadinessView, cursor int, out []uint64) (count int, next int) {
+func ScanSocketWakes(familyID uint64, session uint32, pages *ReadinessView, cursor int, out []SocketWake) (count int, next int) {
 	tablesLock.Lock()
 	defer tablesLock.Unlock()
 	context, contextIndex, found := netContextHeld(familyID)
@@ -149,16 +188,23 @@ func ScanSocketWakes(familyID uint64, session uint32, pages *ReadinessView, curs
 		}
 		page := pages[linuxsockapi.EntryPage(index)-linuxsockapi.ReadinessPage]
 		sequence, ok := linuxsockapi.EntrySequence(page, index)
-		if !ok || sequence == socket.seen && sequence&1 == 0 && !socket.touched {
+		if !ok || sequence == socket.seen && sequence&1 == 0 && socket.touched == 0 {
 			continue
 		}
 		if count == len(out) {
 			// The socket stays changed for the call that goes on here.
 			return count, slot
 		}
-		socket.seen, socket.touched = sequence, false
+		events := socket.touched
+		if sequence != socket.seen || sequence&1 != 0 {
+			events |= entryEvents(page, index)
+		}
+		socket.seen, socket.touched = sequence, 0
+		if events == 0 {
+			continue
+		}
 		socket.wakes++
-		out[count] = socketObject(contextIndex, slot, socket.generation)
+		out[count] = SocketWake{Object: socketObject(contextIndex, slot, socket.generation), Events: events}
 		count++
 	}
 	return count, -1

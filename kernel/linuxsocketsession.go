@@ -83,6 +83,7 @@ type linuxSocketScratch struct {
 	pieces      [linuxsockapi.RXSlots]linuxcompat.RXPiece
 	waiters     [16]sched.TaskID
 	wakes       [32]uint64
+	changed     [32]linuxcompat.SocketWake
 	// pollEpoch is the wake epoch of the socket pollSocket last looked at.
 	pollEpoch uint32
 	address     [linuxcompat.SockaddrInSize]byte
@@ -766,6 +767,22 @@ func closeLinuxNetHandles(holder *process.Process, old linuxcompat.NetGrant) {
 // apart.
 const socketWakeEvents = kernelwait.Readable | kernelwait.Writable | kernelwait.PeerClosed
 
+// socketWakeEventsOf maps what a change made a socket ready for to the
+// events a socket wait names.
+func socketWakeEventsOf(events linuxcompat.WakeEvents) kernelwait.Event {
+	var out kernelwait.Event
+	if events&linuxcompat.WakeReadable != 0 {
+		out |= kernelwait.Readable
+	}
+	if events&linuxcompat.WakeWritable != 0 {
+		out |= kernelwait.Writable
+	}
+	if events&linuxcompat.WakeClosed != 0 {
+		out |= kernelwait.PeerClosed
+	}
+	return out
+}
+
 // socketWaitKey is the wait key of the socket a description Object names.
 func socketWaitKey(object uint64) kernelwait.Key {
 	return kernelwait.Key{Kind: kernelwait.KindLinuxSocket, Object: object}
@@ -812,8 +829,12 @@ func wakeChangedSockets(familyID uint64, endpoint linuxcompat.NetEndpoint) {
 	}
 	for cursor := 0; cursor >= 0; {
 		var count int
-		count, cursor = linuxcompat.ScanSocketWakes(familyID, endpoint.Session, &pages, cursor, scratch.wakes[:])
-		publishSocketWakes(scratch.wakes[:count])
+		count, cursor = linuxcompat.ScanSocketWakes(familyID, endpoint.Session, &pages, cursor, scratch.changed[:])
+		for index := range scratch.changed[:count] {
+			wake := &scratch.changed[index]
+			publishWaitAny(socketWaitKey(wake.Object), socketWakeEventsOf(wake.Events))
+			*wake = linuxcompat.SocketWake{}
+		}
 	}
 }
 
