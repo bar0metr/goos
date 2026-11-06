@@ -333,6 +333,48 @@ func TestOpenRespectsTheSessionShare(t *testing.T) {
 	other.open()
 }
 
+// TestTableWalksOnlyOpenedEntries opens endpoints under a 512 quota, closes
+// the last three, and checks that the walk stops after the highest entry in
+// use and that a reopened endpoint takes the lowest free entry and still
+// receives.
+func TestTableWalksOnlyOpenedEntries(t *testing.T) {
+	stack := newStack()
+	c := &client{t: t, stack: stack, out: recorder{t: t}, now: 1_000_000_000,
+		tx: make([]byte, udpapi.TXSlots*udpapi.SlotSize), rx: make([]byte, udpapi.RXSlots*udpapi.SlotSize)}
+	if !c.session.StartQuota(stack, 0, network.MaxUDPSessionQuota, c.tx, c.rx) {
+		t.Fatal("start")
+	}
+	var opened [4]uint32
+	for index := range opened {
+		opened[index] = c.open()
+	}
+	if c.session.limit != 4 || len(c.session.endpoints) != network.MaxUDPSessionQuota {
+		t.Fatalf("limit %d of %d", c.session.limit, len(c.session.endpoints))
+	}
+	for _, endpoint := range opened[1:] {
+		if reply := c.call(udpapi.Request{Opcode: udpapi.OpClose, Endpoint: endpoint}); reply.Result != udpapi.ResultOK {
+			t.Fatalf("close %d", reply.Result)
+		}
+	}
+	if c.session.limit != 1 {
+		t.Fatalf("limit %d after closing the last three", c.session.limit)
+	}
+	reopened := c.open()
+	c.bind(reopened, 7100)
+	if c.session.limit != 2 || c.session.endpoints[1].id != network.EndpointID(reopened) {
+		t.Fatalf("reopened endpoint not in the lowest free entry: limit %d", c.session.limit)
+	}
+	waiting := c.send(udpapi.Request{Opcode: udpapi.OpRecvFrom, Endpoint: reopened})
+	c.sendTo(opened[0], 7100, "ping")
+	if fault, _ := c.session.Deliver(stack, &c.out); fault != FaultNone {
+		t.Fatalf("deliver %q", fault)
+	}
+	replies := c.out.take()
+	if len(replies) != 1 || replies[0].correlation != waiting || c.payload(replies[0].reply) != "ping" {
+		t.Fatalf("replies %+v", replies)
+	}
+}
+
 func TestStackResultsMap(t *testing.T) {
 	for result := network.ResultOK; result <= network.ResultAddressInUse; result++ {
 		if Result(result).Text() == "" {
