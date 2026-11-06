@@ -162,8 +162,11 @@ type socket struct {
 }
 
 type family struct {
-	used     bool
-	notify   bool
+	used   bool
+	notify bool
+	// hot marks a family the service sent a ReadyChanged since linuxsockd
+	// last slept: its program is about to answer (Hot).
+	hot      bool
 	token    uint64
 	session  uint32
 	pool     []byte
@@ -1094,3 +1097,33 @@ func (s *Service) Status(reply *linuxsockapi.ControlReply) {
 
 // Counters returns the totals.
 func (s *Service) Counters() linuxsockapi.Counters { return s.counters }
+
+// Hot reports whether a family took a ReadyChanged since Cool: the program
+// it woke is likely to commit to its submit ring within microseconds.
+func (s *Service) Hot() bool {
+	for index := range s.families {
+		if s.families[index].hot {
+			return true
+		}
+	}
+	return false
+}
+
+// SubmitWaiting reports whether a hot family committed to its submit ring.
+// It reads the ring's indices only.
+func (s *Service) SubmitWaiting() bool {
+	for index := range s.families {
+		f := &s.families[index]
+		if f.hot && f.used && linuxsockapi.SubmitPending(f.rings) {
+			return true
+		}
+	}
+	return false
+}
+
+// Cool forgets which families were hot.
+func (s *Service) Cool() {
+	for index := range s.families {
+		s.families[index].hot = false
+	}
+}

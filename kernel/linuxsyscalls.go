@@ -44,6 +44,9 @@ func (handler *linuxCallHandler) Readv(request linuxcompat.Request) linuxcompat.
 // kernel itself for a device, and the stream code below for everything else.
 func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) linuxcompat.Result {
 	local := thisCPU()
+	if handler.widenUnlessSocket(request.Arguments[0]) {
+		return linuxcompat.Result{}
+	}
 	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
 		switch description.Kind {
 		case linuxcompat.FDVFSFile:
@@ -253,6 +256,9 @@ func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.
 	if request.Number == linuxabi.SysPwrite64 {
 		return handler.positioned(request, true)
 	}
+	if handler.widenUnlessSocket(request.Arguments[0]) {
+		return linuxcompat.Result{}
+	}
 	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
 		switch description.Kind {
 		case linuxcompat.FDVFSFile:
@@ -346,6 +352,9 @@ func (handler *linuxCallHandler) writeRange(request linuxcompat.Request, endpoin
 // from there.
 func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat.Result {
 	local := thisCPU()
+	if handler.widenUnlessSocket(request.Arguments[0]) {
+		return linuxcompat.Result{}
+	}
 	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
 		switch description.Kind {
 		case linuxcompat.FDVFSFile:
@@ -531,4 +540,20 @@ func min64(value uint64, bound int) int {
 		return bound
 	}
 	return int(value)
+}
+
+// widenUnlessSocket reports whether a read or write that runs under
+// linuxSockets names something other than a socket. It then asks the
+// dispatcher for linuxFiles, and the call returns at once, before it
+// changes anything.
+func (handler *linuxCallHandler) widenUnlessSocket(fd uint64) bool {
+	local := thisCPU()
+	if local.linuxCall.set != linuxSockets {
+		return false
+	}
+	if description, found := linuxcompat.DescriptionOf(handler.root, fd); found && description.Kind == linuxcompat.FDSocket {
+		return false
+	}
+	local.linuxWiden = true
+	return true
 }

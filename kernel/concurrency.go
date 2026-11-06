@@ -176,6 +176,9 @@ type cpuScratch struct {
 	linuxCall     heldLocks
 	peerWanted    process.ID
 	streamsWanted bool
+	// linuxWiden: a Linux call under linuxSockets found it needs
+	// linuxFiles and changed nothing.
+	linuxWiden bool
 	// call names the call the processor runs, for a panic report: 'n' and
 	// the native operation, 'l' and the Linux number, or zero.
 	callKind   byte

@@ -63,10 +63,10 @@ type NetSocket struct {
 	generation  uint32
 	used        bool
 	// seen is the readiness entry's sequence at the last wake scan, and
-	// touched marks a ring entry for the socket since that scan
-	// (socketwake.go).
+	// touched holds what the ring entries for the socket since that scan
+	// can make it ready for (socketwake.go).
 	seen    uint32
-	touched bool
+	touched WakeEvents
 	// wakes counts the wake scans that listed the socket, so a poll that
 	// registers after its scan sees whether a wake went out in between.
 	wakes uint32

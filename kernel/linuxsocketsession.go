@@ -36,6 +36,8 @@ package main
 // after it blocked takes it back itself.
 
 import (
+	"sync/atomic"
+
 	"goos/internal/capability"
 	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
@@ -81,6 +83,7 @@ type linuxSocketScratch struct {
 	pieces      [linuxsockapi.RXSlots]linuxcompat.RXPiece
 	waiters     [16]sched.TaskID
 	wakes       [32]uint64
+	changed     [32]linuxcompat.SocketWake
 	// pollEpoch is the wake epoch of the socket pollSocket last looked at.
 	pollEpoch uint32
 	address     [linuxcompat.SockaddrInSize]byte
@@ -297,18 +300,106 @@ func (handler *linuxCallHandler) socketAwait(call *socketCall) (linuxsockapi.Rep
 	return linuxsockapi.Reply{}, 0, true
 }
 
-// socketPoolPage returns one page of a session's pool.
+// socketPoolPage returns one page of a session's pool, from linuxPools: a
+// socket call holds no shared memory lock.
 func socketPoolPage(endpoint linuxcompat.NetEndpoint, index uint32) ([]byte, bool) {
-	object, found := sharedObjects.Find(endpoint.PoolObject)
+	if endpoint.PoolObject == 0 || index >= linuxsockapi.PoolPages {
+		return nil, false
+	}
+	for slot := range linuxPools {
+		pool := &linuxPools[slot]
+		if pool.object.Load() == endpoint.PoolObject {
+			page := pool.pages[index]
+			return page, len(page) == int(vm.PageSize)
+		}
+	}
+	return nil, false
+}
+
+// linuxPool holds the pages of one session pool. The kernel fills it, and
+// retains the pool object, before the session goes live, and lets both go
+// when the session's holder exits: that exit holds the family's lock and
+// the shared memory lock, so no socket call of the family and no drain in
+// a service's send can be using the pages then.
+type linuxPool struct {
+	object atomic.Uint64
+	family uint64
+	pages  [linuxsockapi.PoolPages][]byte
+}
+
+// linuxPools caches the pools of the sessions whose holder still runs: a
+// live session's, and those of sessions replaced since. Attaches and exits
+// write it under the shared memory lock; calls read it without a lock.
+var linuxPools [2 * linuxcompat.MaxNetFamilies]linuxPool
+
+// cacheLinuxPool puts family's session pool in linuxPools before the
+// session goes live. The caller holds the shared memory lock. With no entry
+// free it takes the oldest one no live session uses.
+func cacheLinuxPool(objectID uint64, family uint64) bool {
+	for slot := range linuxPools {
+		if linuxPools[slot].object.Load() == objectID {
+			return true
+		}
+	}
+	object, found := sharedObjects.Find(objectID)
 	if !found || object.PageCount() != linuxsockapi.PoolPages {
-		return nil, false
+		return false
 	}
-	frame, present := object.Frame(vm.PhysicalPage, index)
-	page, mapped := vm.PhysicalPage(frame)
-	if !present || !mapped || len(page) < int(vm.PageSize) {
-		return nil, false
+	pool := freeLinuxPool()
+	if pool == nil {
+		return false
 	}
-	return page[:vm.PageSize], true
+	for index := range pool.pages {
+		frame, present := object.Frame(vm.PhysicalPage, uint32(index))
+		page, mapped := vm.PhysicalPage(frame)
+		if !present || !mapped || len(page) < int(vm.PageSize) {
+			return false
+		}
+		pool.pages[index] = page[:vm.PageSize]
+	}
+	object.Retain()
+	pool.family = family
+	pool.object.Store(objectID)
+	return true
+}
+
+// freeLinuxPool returns an empty entry of linuxPools, emptying one whose
+// pool no live session uses when none is.
+func freeLinuxPool() *linuxPool {
+	for slot := range linuxPools {
+		if linuxPools[slot].object.Load() == 0 {
+			return &linuxPools[slot]
+		}
+	}
+	var families [linuxcompat.MaxNetFamilies]uint64
+	var endpoints [linuxcompat.MaxNetFamilies]linuxcompat.NetEndpoint
+	live := linuxcompat.LiveSessions(&families, &endpoints)
+	for slot := range linuxPools {
+		pool := &linuxPools[slot]
+		old, inUse := pool.object.Load(), false
+		for index := 0; index < live; index++ {
+			inUse = inUse || endpoints[index].PoolObject == old
+		}
+		if !inUse {
+			pool.object.Store(0)
+			dropShared(old)
+			return pool
+		}
+	}
+	return nil
+}
+
+// releaseLinuxPools lets go of every pool family's sessions used, when the
+// holder of its session exits.
+func releaseLinuxPools(family uint64) {
+	for slot := range linuxPools {
+		pool := &linuxPools[slot]
+		if old := pool.object.Load(); old != 0 && pool.family == family {
+			pool.object.Store(0)
+			pool.family = 0
+			dropShared(old)
+		}
+	}
 }
 
 // socketReadiness reads a socket's entry in the readiness pages. live false
@@ -604,12 +695,15 @@ func releaseSocketDescription(object uint64) {
 // the family's other members must not wait on a channel nobody serves.
 func endLinuxNetHolder(exited *process.Process, familyID uint64) {
 	grant, found := linuxcompat.NetHolder(familyID)
-	if !found || grant.Holder != exited.ID() {
+	if found && grant.Holder != exited.ID() {
 		return
 	}
-	if endpoint, live, _ := linuxcompat.NetSession(familyID); live {
+	if endpoint, live, _ := linuxcompat.NetSession(familyID); found && live {
 		failSocketSession(familyID, endpoint, socketFailedHolder)
 	}
+	// The family's last exit forgets its context before this runs; its
+	// pools go then too.
+	releaseLinuxPools(familyID)
 }
 
 // resolveLinuxNet checks the two session handles a process holds and
@@ -645,6 +739,9 @@ func attachLaunchNet(spawned *process.Process, root uint64, channelHandle handle
 	if !found || !valid {
 		return false
 	}
+	if !cacheLinuxPool(grant.PoolObject, state.FamilyID) {
+		return false
+	}
 	_, _, attached := linuxcompat.AttachNet(state.FamilyID, grant, false)
 	return attached
 }
@@ -671,6 +768,22 @@ func closeLinuxNetHandles(holder *process.Process, old linuxcompat.NetGrant) {
 // every event a socket wait names, since the drain does not tell them
 // apart.
 const socketWakeEvents = kernelwait.Readable | kernelwait.Writable | kernelwait.PeerClosed
+
+// socketWakeEventsOf maps what a change made a socket ready for to the
+// events a socket wait names.
+func socketWakeEventsOf(events linuxcompat.WakeEvents) kernelwait.Event {
+	var out kernelwait.Event
+	if events&linuxcompat.WakeReadable != 0 {
+		out |= kernelwait.Readable
+	}
+	if events&linuxcompat.WakeWritable != 0 {
+		out |= kernelwait.Writable
+	}
+	if events&linuxcompat.WakeClosed != 0 {
+		out |= kernelwait.PeerClosed
+	}
+	return out
+}
 
 // socketWaitKey is the wait key of the socket a description Object names.
 func socketWaitKey(object uint64) kernelwait.Key {
@@ -718,8 +831,12 @@ func wakeChangedSockets(familyID uint64, endpoint linuxcompat.NetEndpoint) {
 	}
 	for cursor := 0; cursor >= 0; {
 		var count int
-		count, cursor = linuxcompat.ScanSocketWakes(familyID, endpoint.Session, &pages, cursor, scratch.wakes[:])
-		publishSocketWakes(scratch.wakes[:count])
+		count, cursor = linuxcompat.ScanSocketWakes(familyID, endpoint.Session, &pages, cursor, scratch.changed[:])
+		for index := range scratch.changed[:count] {
+			wake := &scratch.changed[index]
+			publishWaitAny(socketWaitKey(wake.Object), socketWakeEventsOf(wake.Events))
+			*wake = linuxcompat.SocketWake{}
+		}
 	}
 }
 

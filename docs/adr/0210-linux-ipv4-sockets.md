@@ -167,7 +167,7 @@ it reads the entries. A change after that read draws a new notification, and
 a failed send leaves the token clear, so a full queue loses no change.
 
 The kernel evaluates a socket for `poll`, `select` and a blocking call from
-the page, with no message. A waiter registers on the family channel, then
+the page, with no message. A waiter registers on its socket's wait key, then
 reads the page again before it sleeps, so a change between the check and the
 sleep wakes it. Readiness is level-triggered.
 
@@ -426,7 +426,8 @@ static libc resolves names with ordinary socket traffic.
   link gives closed endpoints up in batched `EntryForget`s. Before it
   sleeps, `linuxsockd` takes the rings, arms its doorbell and checks them
   once more; it waits on the TCP channel in the same WaitAny as the family
-  channels. UDP keeps GUDP 2 through `NativeLink`.
+  channels. UDP kept GUDP 2 through `NativeLink` until GUDP 3 replaced it
+  (below).
 
   The world tests (`userspace/linuxsock/world*_test.go`) run the core and
   the link against `tcpserve.Session4` and the real stack, each side
@@ -436,6 +437,44 @@ static libc resolves names with ordinary socket traffic.
   connections (300 sockets) cost one `OpOpenConnect`, about one probe and
   four waits each: one for the connect, the rest for sockets that found no
   family RX slot free.
+
+- A socket wait wakes only the calls whose socket changed. Before, a
+  sleeping call registered on the family's session channel, so each
+  ReadyChanged woke every task of the family that slept on a socket, and
+  each took the family lock to drain the channel. Now a call that sleeps
+  on a socket, and a `poll` or `select` that names one, waits on the
+  socket's own key (`KindLinuxSocket`, the description's object) and on
+  the session channel's close. linuxsockd's send drains the family's
+  channel in the kernel right after its message lands (`dispatchLinuxNet`),
+  as an executable page reply does: a reply resumes the call that waits
+  for it, and a ReadyChanged or a ring entry wakes the sockets whose
+  readiness entry has a new sequence or that a ring entry named. One drain
+  of a session runs at a time; a drain asked for meanwhile makes the
+  running one go round again. A call that finds its reply filed only after
+  it blocked takes it back itself. A `poll` keeps each socket's wake count
+  from its scan and publishes the socket again after it registers when the
+  count moved. Closing a socket and failing a session wake every call on
+  its sockets.
+- linuxsockd's UDP session moved to GUDP 3 (ADR 0216), through
+  `linuxsock.UDPRingLink`: a datagram goes out as a TX ring entry and comes
+  in against posted credit, with the endpoint's readiness on its RX entry.
+- A socket call takes a narrower lock set (`linuxSockets` in
+  `kernel/locksets.go`): the family's lock, the registry for reading, the
+  executable table and its address space. It leaves out the stream
+  registry, its handle table and the shared memory table, which every
+  family's calls and every service's sends share. A `read` or `write`
+  starts under the narrow set and runs again under the file set when its
+  descriptor is not a socket. The kernel reaches a session's pool through
+  `linuxPools`, filled and retained when the session attaches and let go
+  when the family's holder exits, so a socket call needs no shared memory
+  lock.
+- A socket change wakes only the waits it can satisfy. A TX slot coming
+  back wakes writers, a datagram or a stream's bytes wake readers, and a
+  changed readiness entry wakes for what the entry now shows; an error or
+  a hangup wakes every wait.
+- linuxsockd spins for up to 2048 checks of the rings' indices before it
+  sleeps while netd holds one of its sends or a Linux program it just
+  woke is about to answer, so that answer costs no doorbell and no wake.
 
 ## Validation
 
@@ -583,3 +622,32 @@ costs 80 to 100 us against 30 to 40 us for a native request to netd.
 Meeting the remaining targets needs fewer hops per round, such as waking
 only the family task whose socket changed and carrying UDP through shared
 rings as GTCP 4 does for TCP, or a cheaper kernel entry and wake.
+
+The bench after the targeted wakes and GUDP 3 (run 20261106T160316Z at
+a317ed30, two warm-up and nine measured rounds) and after the narrower
+lock set (run 20261106T170650Z at 13a1f4af), medians:
+
+| Measurement | Target | 14a523a3 | a317ed30 | 13a1f4af | Native |
+| --- | --- | --- | --- | --- | --- |
+| TCP stream, 32 MiB | 258 MiB/s | 280 | 293 | 298 | 497 GTCP 4 |
+| TCP one-byte request and reply | 178 us | 220 | 233 | 232 | 15 us GTCP 4 |
+| TCP connect, accept and close | 245 us | 312 | 298 | 301 | 56 us GTCP 4 |
+| UDP 64-byte request and reply | 144 us | 228 | 228 | 223 | 18 us GUDP 3 |
+| write to a `poll` waiter's return | 248 us | 173 | 197 | 177 | |
+
+None of the three changes moved a request and reply round. The diagnostic
+pass at a317ed30 shows what they did remove: contended acquisitions of
+the family lock fell from 4.2 to 0.07 per TCP round, and readiness wakes
+from 4.6 to 4.0. It also shows where a round goes.
+linuxsockd runs 158 to 168 us of CPU in each 180 to 194 us UDP or TCP
+round, netd 75 to 128 us. Each half round crosses four processes: the
+writer's `write` rings linuxsockd, linuxsockd hands the datagram to netd,
+netd answers on the ring and rings linuxsockd, and linuxsockd publishes
+to the reader's ring and wakes it. Native GUDP 3 crosses two, from one
+process that never sleeps. The global stream and shared memory locks
+spun for about 45 and 37 us a round at a317ed30; the narrower set took
+the Linux calls off them, and the medians stayed where they were, so the
+time sits in the crossings and in linuxsockd's own loop. Meeting the
+remaining targets needs a data plane from the kernel to netd's rings
+without linuxsockd between them, under a mapping PID 1 scopes to one
+family.

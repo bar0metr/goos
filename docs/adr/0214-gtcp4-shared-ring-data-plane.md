@@ -108,3 +108,12 @@ four-core KVM guest (run 20261106T124643Z), medians:
 `netbench4` drives both ends of each connection from one goroutine, so a
 request and reply round seldom waits for a doorbell; a GTCP 3 round waits
 for netd's replies twice.
+
+The same bench at a317ed30 (run 20261106T160316Z), after netd took
+`EntryClose` on the TX ring, `tcpring` polled before it slept on a reply
+and userspace copies moved to word and `rep movsb` loops, measured GTCP 4
+at 497 MiB/s for the stream, 15 us for a request and reply round and
+56 us for a connect, accept and close, against 382, 17 and 125 above.
+GTCP 3's stream rose to 570 MiB/s on the same copies. linuxsockd's UDP
+session moved to GUDP 3 (ADR 0216), which reuses this ADR's ring and
+doorbell rules for datagrams.

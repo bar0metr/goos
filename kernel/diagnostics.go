@@ -506,6 +506,11 @@ func dumpProcess(out diagWriter, owner *process.Process, state amd64.SchedulerSt
 		out.word("state", taskState)
 		if valid {
 			out.uint("run-us", cyclesToMicros(amd64.TaskRunCycles(int(slot))))
+			cost := &callCosts[slot]
+			out.uint("calls", cost.calls)
+			out.uint("call-us", cyclesToMicros(cost.cycles))
+			out.uint("waits", cost.waits)
+			out.uint("sends", cost.sends)
 		}
 	}
 	out.uint("free-handles", uint64(owner.Handles().Available()))

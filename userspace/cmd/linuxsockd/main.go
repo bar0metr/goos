@@ -84,6 +84,7 @@ func userspaceMain() {
 
 func serve() {
 	for {
+		spin()
 		// The rings first: whatever the TCP session published must be taken
 		// before linuxsockd sleeps, and its doorbell armed.
 		timeout := kcall.WaitAnyInfiniteTimeout
@@ -374,3 +375,26 @@ func fatal(text string) {
 }
 
 func main() {}
+
+// spinRounds bounds spin: a few tens of microseconds on the lab's cores,
+// about what a sleep and the wake after it cost.
+const spinRounds = 2048
+
+// spin keeps linuxsockd awake for a moment when an answer is due: while
+// netd holds a send of a native link, or after a ReadyChanged woke a Linux
+// program, which commits its next send soon. It watches the rings' indices
+// without a system call and stops as soon as something arrived, so the
+// answer costs neither a doorbell's wake nor the sleep before it.
+func spin() {
+	for round := 0; round < spinRounds; round++ {
+		tcp := links[linuxsock.TCP].channel != 0
+		udp := links[linuxsock.UDP].channel != 0
+		if tcp && tcpRing.Peek() || udp && udpRing.Peek() || core.SubmitWaiting() {
+			return
+		}
+		if !(tcp && tcpRing.Awaiting() || udp && udpRing.Awaiting() || core.Hot()) {
+			return
+		}
+	}
+	core.Cool()
+}

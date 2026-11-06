@@ -20,11 +20,13 @@ func readinessPool(session uint32) ([]byte, *ReadinessView) {
 func scanAll(t *testing.T, endpoint NetEndpoint, view *ReadinessView) []uint64 {
 	t.Helper()
 	var out []uint64
-	var chunk [3]uint64
+	var chunk [3]SocketWake
 	for cursor := 0; cursor >= 0; {
 		var count int
 		count, cursor = ScanSocketWakes(testFamily, endpoint.Session, view, cursor, chunk[:])
-		out = append(out, chunk[:count]...)
+		for _, wake := range chunk[:count] {
+			out = append(out, wake.Object)
+		}
 	}
 	return out
 }
@@ -67,7 +69,7 @@ func TestWakeScanNamesOnlyChangedSockets(t *testing.T) {
 	// A ring entry for a socket wakes it though its entry stayed.
 	tablesLock.Lock()
 	context, _, _ := netContextHeld(testFamily)
-	context.touchHeld(identities[1])
+	context.touchHeld(identities[1], WakeWritable)
 	tablesLock.Unlock()
 	if got := scanAll(t, endpoint, view); len(got) != 1 || got[0] != objects[1] {
 		t.Fatalf("touched scan listed %x", got)

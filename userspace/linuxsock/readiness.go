@@ -123,7 +123,7 @@ func (s *Service) notify(index int) {
 	}
 	request := linuxsockapi.Request{Opcode: linuxsockapi.OpReadyChanged}
 	if linuxsockapi.EncodeRequest(&request, 0, &s.message) && s.transport.Send(index, &s.message) {
-		f.notify = false
+		f.notify, f.hot = false, true
 		s.counters.Notifications++
 		return
 	}
