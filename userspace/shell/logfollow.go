@@ -31,22 +31,31 @@ func RunLog(options LogOptions, hooks LogHooks, selected *[kcall.LogReadMax]uint
 	if !ok {
 		return 1
 	}
-	count := SelectLog(batch, options, selected)
-	for index := 0; index < count; index++ {
-		if options.Follow && index%LogBatchWork == 0 {
-			if status, stopped := hooks.Check(); stopped {
-				return status
+	var cursor uint64
+	if options.Limit > kcall.LogReadMax {
+		status, next, stopped := runLogRetained(options, hooks, batch)
+		if stopped || !options.Follow {
+			return status
+		}
+		cursor = next
+	} else {
+		count := SelectLog(batch, options, selected)
+		for index := 0; index < count; index++ {
+			if options.Follow && index%LogBatchWork == 0 {
+				if status, stopped := hooks.Check(); stopped {
+					return status
+				}
+			}
+			record, valid := batch.Record(int(selected[index]))
+			if !valid || !hooks.Write(record) {
+				return 1
 			}
 		}
-		record, valid := batch.Record(int(selected[index]))
-		if !valid || !hooks.Write(record) {
-			return 1
+		if !options.Follow {
+			return 0
 		}
+		cursor = batch.Next()
 	}
-	if !options.Follow {
-		return 0
-	}
-	cursor := batch.Next()
 	for {
 		if status, stopped := hooks.Check(); stopped {
 			return status
@@ -80,4 +89,49 @@ func RunLog(options LogOptions, hooks LogHooks, selected *[kcall.LogReadMax]uint
 			return 1
 		}
 	}
+}
+
+// runLogRetained prints the matching records among the newest
+// options.Limit the ring retained when the snapshot was taken, oldest first,
+// one batch at a time. A record the ring overwrote while the walk ran is
+// reported through Gap. It returns the status, the cursor after the
+// snapshot's end, and whether the run must stop with that status.
+func runLogRetained(options LogOptions, hooks LogHooks, newest sys.LogBatch) (uint64, uint64, bool) {
+	end := newest.Total
+	cursor := newest.Oldest
+	if retained := end - newest.Oldest; retained > uint64(options.Limit) {
+		cursor = end - uint64(options.Limit)
+	}
+	for cursor != end {
+		batch, ok := hooks.Read(cursor, false)
+		if !ok {
+			return 1, cursor, true
+		}
+		if batch.Gap && !hooks.Gap(batch.First-cursor) {
+			return 1, cursor, true
+		}
+		if batch.Count == 0 {
+			break
+		}
+		for index := 0; index < batch.Count && batch.First+uint64(index) != end; index++ {
+			if options.Follow && index%LogBatchWork == 0 {
+				if status, stopped := hooks.Check(); stopped {
+					return status, cursor, true
+				}
+			}
+			record, valid := batch.Record(index)
+			if !valid {
+				return 1, cursor, true
+			}
+			if options.Matches(record) && !hooks.Write(record) {
+				return 1, cursor, true
+			}
+		}
+		next := batch.Next()
+		if logfmt.SequenceBefore(end, next) {
+			next = end
+		}
+		cursor = next
+	}
+	return 0, cursor, false
 }

@@ -16,6 +16,7 @@ const LogStatusPath = "/state/system.log.status"
 func IsLogStatus(invocation Invocation) bool {
 	return invocation.Count == 2 && len(invocation.Arguments) >= 2 && equal(invocation.Arguments[1], "status")
 }
+
 const LogBatchWork = 8
 
 // LogOptions borrows Component from the invocation's stable argument storage.
@@ -31,7 +32,7 @@ func ParseLog(invocation Invocation) (LogOptions, bool) {
 	if invocation.Count < 1 || invocation.Count > len(invocation.Arguments) {
 		return LogOptions{}, false
 	}
-	options := LogOptions{Limit: kcall.LogReadMax}
+	options := LogOptions{Limit: kcall.LogRingCapacity}
 	seen := uint8(0)
 	for index := 1; index < int(invocation.Count); index++ {
 		argument := invocation.Arguments[index]
@@ -109,8 +110,8 @@ func logCount(value []byte) (int, bool) {
 		}
 		count = count*10 + digit
 	}
-	if count > kcall.LogReadMax {
-		return kcall.LogReadMax, true
+	if count > kcall.LogRingCapacity {
+		return kcall.LogRingCapacity, true
 	}
 	return int(count), true
 }

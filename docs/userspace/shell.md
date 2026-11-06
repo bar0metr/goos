@@ -196,13 +196,15 @@ memory in binary units.
 ## Log
 
 `log [-f] [-n N] [--level debug|info|warn|error] [--component NAME]` reads the
-64-record system ring. Options may be ordered freely but may occur only once.
+2048-record system ring. Options may be ordered freely but may occur only once.
 `--level` and `--component` are exact structured-field filters, not text
 searches; a component name is 1 through 16 ASCII letters, digits, hyphens,
 underscores, or dots. `-n N` is a decimal count, clamped to the ring capacity.
-Without `-n`, `log` selects all retained matching records. It selects the newest
-matches from one snapshot, then emits those selected records in chronological
-order.
+Without `-n`, `log` prints all retained matching records. Up to 64, it selects
+the newest matches from one snapshot; a larger count walks the ring from the
+oldest record of the newest `N` to the snapshot's end, 64 records per read, and
+prints a gap line for records the ring overwrote during the walk. Either way
+the output is in chronological order.
 
 `log status` prints `/state/system.log.status`, the counters the log service
 rewrites at its five-second maintenance round when they changed: records appended, overwritten,

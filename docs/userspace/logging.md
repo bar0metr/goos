@@ -18,7 +18,8 @@ and above are echoed to the console as they are accepted.
 `userspace/log` provides `Init(console, component)` and
 `Info`/`Warn`/`Error(message, fields...)` with `Str`, `Bytes`, and `Uint`
 fields. Services call `Init` once with their startup console handle. The
-shell's `log` builtin prints the newest 64 retained records, oldest first:
+shell's `log` builtin prints every record the kernel ring retains, up to
+2048, oldest first:
 
 ```text
 [2026-09-26T15:44:31.152328Z] INFO  kernel[0]: kernel initialized free-pages=93568
