@@ -7,6 +7,7 @@ package main
 import (
 	"sync/atomic"
 
+	"goos/kernel/diag"
 	"goos/internal/logfmt"
 	"goos/internal/validation"
 	"goos/kernel/arch/amd64"
@@ -51,6 +52,17 @@ func authorizeNativeCall(root uint64) uint64 {
 //
 //export goos_dispatch_linux_syscall
 func dispatchLinuxSyscall(frame *linuxabi.Frame) {
+	if !diag.Enabled {
+		linuxSyscall(frame)
+		return
+	}
+	start := amd64.ReadTSC()
+	linuxSyscall(frame)
+	noteCallCost(0, start)
+}
+
+// linuxSyscall serves one Linux call.
+func linuxSyscall(frame *linuxabi.Frame) {
 	local := thisCPU()
 	if frame == nil {
 		return
@@ -281,6 +293,17 @@ func resumeLinuxSyscall(task sched.TaskID, correlation uint64, reason linuxcompa
 //
 //export goos_dispatch_kernel_call
 func dispatchKernelCall(number uint64, arg0 uint64, arg1 uint64, root uint64) uint64 {
+	if !diag.Enabled {
+		return kernelCall(number, arg0, arg1, root)
+	}
+	start := amd64.ReadTSC()
+	result := kernelCall(number, arg0, arg1, root)
+	noteCallCost(kcall.Operation(number), start)
+	return result
+}
+
+// kernelCall serves one native call.
+func kernelCall(number uint64, arg0 uint64, arg1 uint64, root uint64) uint64 {
 	local := thisCPU()
 	arg2 := amd64.KernelCallArg2()
 	peer, extra := process.ID(0), lockSet(0)
@@ -392,5 +415,31 @@ func runDemoTaskB() {
 func runIdleTask() {
 	for {
 		amd64.Halt()
+	}
+}
+
+// callCosts counts, in a diagnostic build, each task slot's calls into the
+// kernel, the cycles they took there, and the calls that wait or send on a
+// channel, so a benchmark's counters split a process's run time into the
+// kernel's share and its own.
+var callCosts [sched.MaxTasks]struct {
+	calls, cycles, waits, sends uint64
+}
+
+// noteCallCost adds one call that began at start; operation is zero for a
+// Linux call.
+func noteCallCost(operation kcall.Operation, start uint64) {
+	slot, _, valid := amd64.CurrentTask().Parts()
+	if !valid {
+		return
+	}
+	cost := &callCosts[slot]
+	cost.calls++
+	cost.cycles += amd64.ReadTSC() - start
+	switch operation {
+	case kcall.OperationWaitAny, kcall.OperationIPCWaitReceive:
+		cost.waits++
+	case kcall.OperationIPCSend:
+		cost.sends++
 	}
 }
