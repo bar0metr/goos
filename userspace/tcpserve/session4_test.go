@@ -313,6 +313,71 @@ func TestSession4CloseIsAnOwnershipTransfer(t *testing.T) {
 	}
 }
 
+// EntryClose rides the TX ring behind the Writes before it: netd sends
+// them, hands their slots back and then announces the end, with no channel
+// request. A second EntryClose for the endpoint ends the session.
+func TestSession4CloseEntryFollowsQueuedWrites(t *testing.T) {
+	p := newPair4(t)
+	smallBuffers(t, p.stack)
+	client, server := p.connected(9106)
+	var offset uint32
+	for slot := range uint8(6) {
+		p.write(&p.b, slot, client.Index, client.Endpoint, offset, pattern(offset, tcpapi.SlotSize4))
+		offset += tcpapi.SlotSize4
+	}
+	if p.b.control.PushTX(&tcpapi.Entry{Kind: tcpapi.EntryClose, Index: client.Index, Endpoint: client.Endpoint}) != shmring.OK {
+		t.Fatal("push close")
+	}
+	var got []byte
+	var e tcpapi.Entry
+	done, closed, ended, credit := 0, false, false, 0
+	// The FIN meets a closed window and waits for its retransmission.
+	for round := 0; round < 2000 && !(closed && ended); round++ {
+		if credit == 0 {
+			p.push(&p.a, tcpapi.Entry{Kind: tcpapi.EntryCredit, Index: server.Index, Endpoint: server.Endpoint, Length: 1})
+			credit++
+		}
+		p.deliver()
+		for p.a.control.PopRX(&e) == shmring.OK {
+			credit--
+			switch e.Kind {
+			case tcpapi.EntryData:
+				got = append(got, p.a.rx[tcpapi.Layout4.Offset(e.Slot):][:e.Length]...)
+				p.push(&p.a, tcpapi.Entry{Kind: tcpapi.EntryRelease, Slot: e.Slot, Generation: e.Generation})
+			case tcpapi.EntryEnd:
+				ended = e.Result == tcpapi.ResultEOF
+			}
+		}
+		for p.b.control.PopTXDone(&e) == shmring.OK {
+			switch {
+			case e.Kind == tcpapi.EntryClosed:
+				if done != 6 {
+					t.Fatalf("closed before its slots: %d back", done)
+				}
+				closed = true
+			case e.Result == tcpapi.ResultOK && e.Length == tcpapi.SlotSize4:
+				done++
+			default:
+				t.Fatalf("write done %+v", e)
+			}
+		}
+		p.now += 1_000_000
+		p.stack.Advance(p.now)
+	}
+	if !closed || !ended || !bytes.Equal(got, pattern(0, 6*tcpapi.SlotSize4)) {
+		t.Fatalf("closed %v ended %v, got %d bytes", closed, ended, len(got))
+	}
+	if len(p.out.sent) != 0 {
+		t.Fatal("EntryClose drew a reply")
+	}
+	if p.b.control.PushTX(&tcpapi.Entry{Kind: tcpapi.EntryClose, Index: client.Index, Endpoint: client.Endpoint}) != shmring.OK {
+		t.Fatal("push second close")
+	}
+	if fault := p.fault(&p.b); fault != FaultProtocol {
+		t.Fatalf("second close: fault %q", fault)
+	}
+}
+
 func TestSession4ShutdownFollowsQueuedSlots(t *testing.T) {
 	p := newPair4(t)
 	client, server := p.connected(9103)

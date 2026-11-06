@@ -35,7 +35,7 @@ package tcpapi
 //	    RX ring, RXEntries4 entries
 //	    readiness, Endpoints4 entries of readinessSize bytes
 //
-// The client produces on TX (EntryWrite) and Release (EntryRelease,
+// The client produces on TX (EntryWrite, EntryClose) and Release (EntryRelease,
 // EntryCredit, EntryForget). netd produces on TXDone (EntryWriteDone,
 // EntryClosed) and RX (EntryData, EntryEnd, EntryAccepted). A producer that
 // publishes calls the doorbell rule of shmring and sends OpDoorbell when the
@@ -68,7 +68,9 @@ package tcpapi
 // up to Backlog children of a listener without further requests; each
 // arrives as EntryAccepted. OpClose answers at once and hands the endpoint
 // to netd: netd sends what the client queued, hands those TX slots back,
-// closes the connection and publishes EntryClosed. The client keeps the RX
+// closes the connection and publishes EntryClosed. EntryClose does the same
+// without a request, so a close costs the client no wait for netd; an
+// EntryClose naming an endpoint that is not open ends the session. The client keeps the RX
 // slots it holds until it releases them, and sends EntryForget for the
 // closed endpoint once it no longer refers to it; netd reuses the table
 // entry only then, so a stale entry cannot reach a new endpoint.
@@ -257,7 +259,10 @@ const (
 	// name the child, Offset the listener's index and Generation the
 	// listener's endpoint; the addresses are the child's tuple.
 	EntryAccepted
-	lastEntry = EntryAccepted
+	// EntryClose (TX ring): the client hands Endpoint to netd, as OpClose
+	// does, behind the Writes it queued before.
+	EntryClose
+	lastEntry = EntryClose
 )
 
 // Entry is one decoded version 4 ring entry.
@@ -301,7 +306,7 @@ func ValidEntry(e *Entry) bool {
 		return e.Slot < RXSlots4 && e.Index == 0 && e.Endpoint == 0 && e.Length == 0 && e.Offset == 0 && e.Result == ResultOK
 	case EntryCredit:
 		return named && e.Slot == 0 && e.Length != 0 && e.Length <= MaxCredit4 && e.Generation == 0 && e.Offset == 0 && e.Result == ResultOK
-	case EntryForget, EntryClosed:
+	case EntryForget, EntryClosed, EntryClose:
 		return named && e.Slot == 0 && e.Length == 0 && e.Generation == 0 && e.Offset == 0 && e.Result == ResultOK
 	case EntryWriteDone:
 		return named && e.Slot < TXSlots4 && e.Length <= SlotSize4 && e.Offset == 0
@@ -400,7 +405,7 @@ func kinds(list ...EntryKind) uint16 {
 }
 
 var (
-	txKinds      = kinds(EntryWrite)
+	txKinds      = kinds(EntryWrite, EntryClose)
 	releaseKinds = kinds(EntryRelease, EntryCredit, EntryForget)
 	txDoneKinds  = kinds(EntryWriteDone, EntryClosed)
 	rxKinds      = kinds(EntryData, EntryEnd, EntryAccepted)

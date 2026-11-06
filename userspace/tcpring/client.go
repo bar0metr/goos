@@ -31,14 +31,17 @@ const (
 	// Spins is how many times a waiting client yields and polls its rings
 	// before it arms its doorbell and sleeps.
 	Spins = 8
+	// ReplySpins is how many times Call yields and polls the channel for
+	// netd's reply before it sleeps on it.
+	ReplySpins = 32
 	// ReadDepth is the credit a reading Conn keeps posted.
 	ReadDepth = 4
 )
 
 // Stats count a client's channel traffic and ring entries.
 type Stats struct {
-	Requests, Replies, DoorbellsSent, DoorbellsReceived  uint64
-	Writes, WritesDone, Data, Releases, Credits, Forgets uint64
+	Requests, Replies, DoorbellsSent, DoorbellsReceived          uint64
+	Writes, WritesDone, Data, Releases, Credits, Forgets, Closes uint64
 }
 
 // Client is one GTCP 4 session.
@@ -122,10 +125,17 @@ func (c *Client) Call(request *tcpapi.Request, reply *tcpapi.Reply) bool {
 		return c.fail("request not sent")
 	}
 	c.Stats.Requests++
-	for {
-		got, alive := c.t.Receive(true, &c.in)
-		if !alive || !got {
+	// netd answers most requests within a few yields; polling first keeps
+	// the client off the sleep and wake path for them.
+	for spin := 0; ; spin++ {
+		wait := spin >= ReplySpins
+		got, alive := c.t.Receive(wait, &c.in)
+		if !alive || wait && !got {
 			return c.fail("no reply")
+		}
+		if !got {
+			c.t.Yield()
+			continue
 		}
 		if c.in.Kind == ipc.KindNotification {
 			if !tcpapi.IsDoorbell4(&c.in) {
@@ -686,22 +696,35 @@ func (conn *Conn) Readiness() (tcpapi.Readiness, bool) {
 // Close hands the endpoint to netd. netd still sends the bytes queued
 // before it, hands their slots back and announces the endpoint's end; the
 // client then gives the ID up. RX slots the endpoint held go back now.
+// Close queues EntryClose behind the connection's Writes and does not wait
+// for netd; with the TX ring full it sends OpClose and waits for the reply.
 func (conn *Conn) Close() tcpapi.Result {
 	c := conn.c
 	if conn.closing {
 		return tcpapi.ResultInvalidArgument
 	}
+	if c.broken {
+		return tcpapi.ResultDown
+	}
 	// netd may close the endpoint and publish EntryClosed before the client
 	// reads the reply: a doorbell queued ahead of the reply makes Call take
 	// the rings. The endpoint counts as closing from the request on.
 	conn.closing = true
-	var reply tcpapi.Reply
-	if !c.Call(&tcpapi.Request{Opcode: tcpapi.OpClose, Endpoint: conn.id}, &reply) {
+	switch c.control.PushTX(&tcpapi.Entry{Kind: tcpapi.EntryClose, Index: conn.index, Endpoint: conn.id}) {
+	case shmring.OK:
+		c.Stats.Closes++
+	case shmring.Full:
+		var reply tcpapi.Reply
+		if !c.Call(&tcpapi.Request{Opcode: tcpapi.OpClose, Endpoint: conn.id}, &reply) {
+			return tcpapi.ResultDown
+		}
+		if reply.Result != tcpapi.ResultOK {
+			conn.closing = false
+			return reply.Result
+		}
+	default:
+		c.fail("EntryClose not pushed")
 		return tcpapi.ResultDown
-	}
-	if reply.Result != tcpapi.ResultOK {
-		conn.closing = false
-		return reply.Result
 	}
 	for ; conn.count != 0; conn.count-- {
 		if !c.release(conn.pieces[conn.first].slot) {

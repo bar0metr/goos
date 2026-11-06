@@ -46,7 +46,7 @@ type Session4 struct {
 
 // Counters4 are a session's data-plane totals.
 type Counters4 struct {
-	TXEntries, ReleaseEntries, WriteDone, Data, Ends, Accepted, Closed uint64
+	TXEntries, ReleaseEntries, WriteDone, Data, Ends, Accepted, Closed, CloseEntries uint64
 	// Doorbells counts the OpDoorbell notifications netd sent.
 	Doorbells uint64
 }
@@ -201,7 +201,7 @@ func (s *Session4) RXLent() uint32 { return s.rxLent }
 // The entries the client published before it sent the request go first, so
 // a Close follows the Writes before it.
 func (s *Session4) Handle(stack *network.Stack, request *tcpapi.Request, correlation, now uint64, out Notifier) Fault {
-	if fault := s.takeRings(stack, now); fault != FaultNone {
+	if fault := s.takeRings(stack, out); fault != FaultNone {
 		return fault
 	}
 	if request.Opcode == tcpapi.OpDoorbell {
@@ -396,7 +396,7 @@ func (s *Session4) Deliver(stack *network.Stack, now uint64, out Notifier) (faul
 func (s *Session4) Progressed() bool { return s.progressed }
 
 func (s *Session4) pass(stack *network.Stack, now uint64, out Notifier) Fault {
-	if fault := s.takeRings(stack, now); fault != FaultNone {
+	if fault := s.takeRings(stack, out); fault != FaultNone {
 		return fault
 	}
 	for index := range s.endpoints[:s.limit] {
@@ -420,7 +420,7 @@ func (s *Session4) pass(stack *network.Stack, now uint64, out Notifier) Fault {
 }
 
 // takeRings consumes the TX and Release rings.
-func (s *Session4) takeRings(stack *network.Stack, now uint64) Fault {
+func (s *Session4) takeRings(stack *network.Stack, out Notifier) Fault {
 	var e tcpapi.Entry
 	for {
 		status := s.control.PopTX(&e)
@@ -432,6 +432,12 @@ func (s *Session4) takeRings(stack *network.Stack, now uint64) Fault {
 		}
 		s.worked++
 		s.Counters.TXEntries++
+		if e.Kind == tcpapi.EntryClose {
+			if fault := s.closeEntry(&e, out); fault != FaultNone {
+				return fault
+			}
+			continue
+		}
 		if !s.queue(&e) {
 			return FaultProtocol
 		}
@@ -478,6 +484,20 @@ func (s *Session4) queue(e *tcpapi.Entry) bool {
 		target.txTail = int8(e.Slot)
 	}
 	return true
+}
+
+// closeEntry hands an open endpoint to netd, as OpClose does.
+func (s *Session4) closeEntry(e *tcpapi.Entry, out Notifier) Fault {
+	target := &s.endpoints[e.Index]
+	if target.id != network.TCPEndpointID(e.Endpoint) || target.state != endpointOpen {
+		return FaultProtocol
+	}
+	if fault := s.cancel(target, out); fault != FaultNone {
+		return fault
+	}
+	target.state, target.credit, target.ahead = endpointClosing, 0, 0
+	s.Counters.CloseEntries++
+	return FaultNone
 }
 
 func (s *Session4) released(stack *network.Stack, e *tcpapi.Entry) bool {
