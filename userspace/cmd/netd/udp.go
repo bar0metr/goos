@@ -7,7 +7,9 @@ package main
 // reads, and the RX pool this service writes and the client only reads. The
 // session's index is the endpoints' owner in the stack, so a session reaches
 // only its own endpoints. A malformed message or a slot handed back that the
-// client does not hold ends the session, and every endpoint with it.
+// client does not hold ends the session, and every endpoint with it. A
+// GUDP 3 session (ADR 0216) moves its datagrams through rings at the end of
+// each pool, served by udpserve.Session3.
 
 import (
 	"goos/internal/capability"
@@ -33,10 +35,15 @@ type udpSession struct {
 	rxBase   uint64
 	rxSize   uint64
 	state    udpserve.Session
-	// Replies a full client queue held back, oldest first, as for TCP.
-	held      [udpHeldReplies]heldUDPReply
-	heldFirst int
-	heldCount int
+	// three marks a GUDP 3 session, which ring serves.
+	three bool
+	ring  udpserve.Session3
+	// Replies a full client queue held back, oldest first, as for TCP, and a
+	// GUDP 3 doorbell it held.
+	held         [udpHeldReplies]heldUDPReply
+	heldFirst    int
+	heldCount    int
+	doorbellHeld bool
 }
 
 const udpHeldReplies = 128
@@ -68,6 +75,32 @@ func (r udpReplier) Reply(out *udpapi.Reply, correlation uint64) bool {
 	return true
 }
 
+// Doorbell sends a GUDP 3 session's OpDoorbell. A full queue holds it, as
+// it holds a reply; the client sleeps until it arrives.
+func (r udpReplier) Doorbell() bool {
+	current := &udpSessions[r.index]
+	if current.doorbellHeld {
+		return true
+	}
+	switch sendUDPDoorbell(current) {
+	case kcall.StatusOK:
+	case kcall.StatusPeerDied, kcall.StatusCorruptData:
+		return false
+	default:
+		current.doorbellHeld = true
+	}
+	return true
+}
+
+func sendUDPDoorbell(current *udpSession) kcall.Status {
+	udpapi.EncodeServiceDoorbell(&reply)
+	size, ok := ipc.EncodeFrom(&reply, wire[:])
+	if !ok {
+		return kcall.StatusCorruptData
+	}
+	return sys.IPCSend(current.channel, wire[:size])
+}
+
 func sendUDPReply(current *udpSession, out *udpapi.Reply, correlation uint64) kcall.Status {
 	if !udpapi.EncodeReply(out, correlation, &reply) {
 		return kcall.StatusCorruptData
@@ -80,6 +113,16 @@ func sendUDPReply(current *udpSession, out *udpapi.Reply, correlation uint64) kc
 }
 
 func flushUDPReplies(current *udpSession) bool {
+	if current.doorbellHeld {
+		switch sendUDPDoorbell(current) {
+		case kcall.StatusOK:
+			current.doorbellHeld = false
+		case kcall.StatusPeerDied, kcall.StatusCorruptData:
+			return false
+		default:
+			return true
+		}
+	}
 	for current.heldCount != 0 {
 		held := &current.held[current.heldFirst]
 		switch sendUDPReply(current, &held.reply, held.correlation) {
@@ -123,7 +166,11 @@ func addUDPSession() netapi.ControlResult {
 	if index < 0 {
 		return refuse(netapi.ControlBusy)
 	}
-	const txPool, rxPool = udpapi.TXSlots * udpapi.SlotSize, udpapi.RXSlots * udpapi.SlotSize
+	three := control.UDPVersion == udpapi.Version3
+	txPool, rxPool := uint64(udpapi.TXSlots*udpapi.SlotSize), uint64(udpapi.RXSlots*udpapi.SlotSize)
+	if three {
+		txPool, rxPool = udpapi.TXPoolPages3*4096, udpapi.RXPoolPages3*4096
+	}
 	txBase, txSize, txStatus := sys.MemoryMapAnywhere(tx, false)
 	if txStatus != kcall.StatusOK || txSize < txPool {
 		if txStatus == kcall.StatusOK {
@@ -142,7 +189,17 @@ func addUDPSession() netapi.ControlResult {
 	current := &udpSessions[index]
 	current.channel, current.txHandle, current.rxHandle = channel, tx, rx
 	current.txBase, current.txSize, current.rxBase, current.rxSize = txBase, txSize, rxBase, rxSize
+	current.three, current.doorbellHeld, current.heldCount, current.heldFirst = three, false, 0, 0
 	// The control codec admits quotas 1 to netapi.MaxSessionQuota only.
+	if three {
+		if !current.ring.Start(&stack, index, int(control.Quota), sys.Window(txBase, txPool), sys.Window(rxBase, rxPool)) {
+			closeUDPSession(index, "quota invalid")
+			return netapi.ControlInvalidArgument
+		}
+		// netd armed before it first slept.
+		current.ring.Idle()
+		return netapi.ControlOK
+	}
 	if !current.state.StartQuota(&stack, index, int(control.Quota), sys.Window(txBase, txPool), sys.Window(rxBase, rxPool)) {
 		closeUDPSession(index, "quota invalid")
 		return netapi.ControlInvalidArgument
@@ -160,7 +217,12 @@ func closeUDPSession(index int, reason string) {
 	if reason != "" {
 		syslog.Warn("UDP session closed", syslog.Uint("session", uint64(index)), syslog.Str("reason", reason))
 	}
-	current.state.End(&stack)
+	if current.three {
+		current.ring.End(&stack)
+	} else {
+		current.state.End(&stack)
+	}
+	current.three, current.doorbellHeld, current.heldCount = false, false, 0
 	for _, id := range [...]handle.ID{current.channel, current.txHandle, current.rxHandle} {
 		sys.HandleClose(id)
 	}
@@ -190,13 +252,28 @@ func serviceUDP(index int) {
 			closeUDPSession(index, "message invalid")
 			return
 		}
+		if current.three && udpapi.IsDoorbell(&message) {
+			udpDoorbells[0]++
+			if fault, _ := current.ring.Deliver(&stack, servedAt, udpReplier{index}); fault != udpserve.FaultNone {
+				closeUDPSession(index, string(fault))
+				return
+			}
+			transmitPending()
+			continue
+		}
 		correlation, valid := udpapi.DecodeRequest(&message, &udpIn)
 		if !valid {
 			closeAttached()
 			closeUDPSession(index, "request invalid")
 			return
 		}
-		if fault := current.state.Handle(&stack, &udpIn, correlation, servedAt, udpReplier{index}); fault != udpserve.FaultNone {
+		var fault udpserve.Fault
+		if current.three {
+			fault = current.ring.Handle(&stack, &udpIn, correlation, servedAt, udpReplier{index})
+		} else {
+			fault = current.state.Handle(&stack, &udpIn, correlation, servedAt, udpReplier{index})
+		}
+		if fault != udpserve.FaultNone {
 			closeUDPSession(index, string(fault))
 			return
 		}
@@ -212,7 +289,13 @@ func deliverUDP() bool {
 		if udpSessions[index].channel == 0 {
 			continue
 		}
-		fault, left := udpSessions[index].state.Deliver(&stack, udpReplier{index})
+		var fault udpserve.Fault
+		var left bool
+		if udpSessions[index].three {
+			fault, left = udpSessions[index].ring.Deliver(&stack, servedAt, udpReplier{index})
+		} else {
+			fault, left = udpSessions[index].state.Deliver(&stack, udpReplier{index})
+		}
 		if fault != udpserve.FaultNone {
 			closeUDPSession(index, string(fault))
 			continue
@@ -229,9 +312,30 @@ func stalledUDP() (session int, endpoint uint32, op string, found bool) {
 		if udpSessions[index].channel == 0 {
 			continue
 		}
-		if endpoint, op, found := udpSessions[index].state.Runnable(&stack); found {
+		runnable := udpSessions[index].state.Runnable
+		if udpSessions[index].three {
+			runnable = udpSessions[index].ring.Runnable
+		}
+		if endpoint, op, found := runnable(&stack); found {
 			return index, endpoint, op, true
 		}
 	}
 	return 0, 0, "", false
+}
+
+// udpDoorbells counts the GUDP 3 doorbells netd took.
+var udpDoorbells [1]uint64
+
+// armUDP arms every GUDP 3 session's doorbell before netd sleeps. It
+// reports false when a client published ring entries meanwhile; then netd
+// must run Deliver before it sleeps.
+func armUDP() bool {
+	idle := true
+	for index := range udpSessions {
+		current := &udpSessions[index]
+		if current.channel != 0 && current.three && !current.ring.Idle() {
+			idle = false
+		}
+	}
+	return idle
 }

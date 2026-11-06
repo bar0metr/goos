@@ -289,7 +289,7 @@ func openNetSession(class netapi.RightsClass) (handle.ID, bool) {
 // openUDPSession asks the network service to serve a new UDP session with
 // the ordinary endpoint quota.
 func openUDPSession() ([3]handle.ID, bool) {
-	return openUDPSessionQuota(netapi.OrdinarySessionQuota)
+	return openUDPSessionQuota(netapi.OrdinarySessionQuota, 0)
 }
 
 // openTCPSession asks for a GTCP 2 session with the ordinary endpoint quota.
@@ -301,14 +301,15 @@ func openTCPSession() ([3]handle.ID, bool) {
 // Linux socket service, each with the largest endpoint quota,
 // netapi.MaxSessionQuota, so one service can back many Linux sockets. Its
 // TCP session speaks GTCP 4, whose rings carry stream data in 16 KiB slots
-// without a channel message per slot. Each result is a session's channel, TX pool and RX pool. Ordinary
-// commands and the resolver keep the ordinary quota and GTCP 2. On failure
-// nothing stays open.
+// without a channel message per slot, and its UDP session GUDP 3, whose
+// rings carry datagrams the same way (ADR 0216). Each result is a session's
+// channel, TX pool and RX pool. Ordinary commands and the resolver keep the
+// ordinary quota, GTCP 2 and GUDP 2. On failure nothing stays open.
 func openLinuxSocketSessions() (tcp, udp [3]handle.ID, ok bool) {
 	if tcp, ok = openTCPSessionQuota(netapi.MaxSessionQuota, tcpapi.Layout4); !ok {
 		return tcp, udp, false
 	}
-	if udp, ok = openUDPSessionQuota(netapi.MaxSessionQuota); !ok {
+	if udp, ok = openUDPSessionQuota(netapi.MaxSessionQuota, udpapi.Version3); !ok {
 		for _, id := range tcp {
 			sys.HandleClose(id)
 		}
@@ -318,10 +319,11 @@ func openLinuxSocketSessions() (tcp, udp [3]handle.ID, ok bool) {
 }
 
 // openUDPSessionQuota asks the network service to serve a new UDP session
-// whose endpoints are bounded by quota, and returns the client's channel,
-// TX pool and RX pool, in that order. Each side's pool handles are narrowed
-// to what it writes: the client writes the TX pool, the service the RX pool.
-func openUDPSessionQuota(quota uint16) ([3]handle.ID, bool) {
+// whose endpoints are bounded by quota and which speaks GUDP version, zero
+// for GUDP 2, and returns the client's channel, TX pool and RX pool, in
+// that order. Each side's pool handles are narrowed to what it writes: the
+// client writes the TX pool, the service the RX pool.
+func openUDPSessionQuota(quota uint16, version uint8) ([3]handle.ID, bool) {
 	var none [3]handle.ID
 	if netControl == 0 {
 		return none, false
@@ -330,8 +332,12 @@ func openUDPSessionQuota(quota uint16) ([3]handle.ID, bool) {
 	if !createChannel(&pair) {
 		return none, false
 	}
-	tx, txStatus := sys.MemoryCreate(udpapi.TXPoolPages)
-	rx, rxStatus := sys.MemoryCreate(udpapi.RXPoolPages)
+	txPages, rxPages := uint64(udpapi.TXPoolPages), uint64(udpapi.RXPoolPages)
+	if version == udpapi.Version3 {
+		txPages, rxPages = udpapi.TXPoolPages3, udpapi.RXPoolPages3
+	}
+	tx, txStatus := sys.MemoryCreate(txPages)
+	rx, rxStatus := sys.MemoryCreate(rxPages)
 	if txStatus != kcall.StatusOK || rxStatus != kcall.StatusOK {
 		closePair(pair)
 		closeOpen(tx)
@@ -354,7 +360,7 @@ func openUDPSessionQuota(quota uint16) ([3]handle.ID, bool) {
 	correlation++
 	var message ipc.Message
 	attachments := [...]handle.ID{handle.ID(pair[1]), serviceTX, serviceRX}
-	request := netapi.ControlRequest{Opcode: netapi.ControlAddUDPSession, Rights: netapi.RightsUDP, Quota: quota}
+	request := netapi.ControlRequest{Opcode: netapi.ControlAddUDPSession, Rights: netapi.RightsUDP, Quota: quota, UDPVersion: version}
 	if !netapi.EncodeControlRequest(&request, attachments[:], correlation, &message) || !sendMessage(uint64(netControl), message) {
 		closePair(pair)
 		for _, id := range [...]handle.ID{serviceTX, serviceRX, clientTX, clientRX} {

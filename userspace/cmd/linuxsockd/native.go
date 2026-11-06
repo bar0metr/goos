@@ -2,10 +2,10 @@
 
 package main
 
-// The native backend: the GTCP 4 and GUDP 2 sessions PID 1 hands over with
+// The native backend: the GTCP 4 and GUDP 3 sessions PID 1 hands over with
 // ControlSetTCP and ControlSetUDP, behind linuxsock.Backend. The rings, the
 // codec and the slot bookkeeping are linuxsock.RingLink for TCP and
-// linuxsock.NativeLink for UDP; this file owns the handles, the mappings
+// linuxsock.UDPRingLink for UDP; this file owns the handles, the mappings
 // and the channels. A send that finds netd's queue full makes the event
 // loop wait for the channel to turn writable, the one event that retries
 // it when the requests ahead of it park in netd.
@@ -36,15 +36,14 @@ type nativeLink struct {
 	txSize     uint64
 	rxBase     uint64
 	rxSize     uint64
-	// state is the UDP session; tcpRing holds the TCP one.
-	state linuxsock.NativeLink
 }
 
 var (
 	links [linuxsock.UDP + 1]nativeLink
-	// tcpRing stays apart from links: the link literals there would copy
-	// its table.
+	// The rings stay apart from links: the link literals there would copy
+	// their tables.
 	tcpRing    linuxsock.RingLink
+	udpRing    linuxsock.UDPRingLink
 	nativeWire [ipc.WireMaxSize]byte
 	nativeIn   ipc.Message
 )
@@ -80,7 +79,7 @@ func (backend) Submit(proto linuxsock.Proto, tag uint64, request *linuxsock.Nati
 	if proto == linuxsock.TCP {
 		return tcpRing.Submit(channelOf(proto), tag, request)
 	}
-	return links[proto].state.Submit(channelOf(proto), tag, request)
+	return udpRing.Submit(channelOf(proto), tag, request)
 }
 
 // wantsWritable reports whether the event loop must wait for the link's
@@ -89,41 +88,49 @@ func (link *nativeLink) wantsWritable() bool {
 	if link.proto == linuxsock.TCP {
 		return link.channel != 0 && tcpRing.WantsWritable()
 	}
-	return link.channel != 0 && link.state.WantsWritable()
+	return link.channel != 0 && udpRing.WantsWritable()
 }
 
-// settleRing takes what the TCP session published, then arms its doorbell
-// and checks the rings once more, until nothing moves: linuxsockd may sleep
-// only then. It reports whether Release entries still wait for ring room,
-// which no doorbell announces.
+// settleRing takes what the TCP and UDP sessions published, then arms
+// their doorbells and checks the rings once more, until nothing moves:
+// linuxsockd may sleep only then. It reports whether Release entries still
+// wait for ring room, which no doorbell announces.
 func settleRing() bool {
-	link := &links[linuxsock.TCP]
-	if link.channel == 0 {
-		return false
+	backlogged := false
+	if links[linuxsock.TCP].channel != 0 {
+		for !tcpRing.Idle(channelOf(linuxsock.TCP), &core) {
+		}
+		if tcpRing.Broken() {
+			syslog.Warn("native session broke the ring protocol", syslog.Uint("protocol", uint64(linuxsock.TCP)))
+			dropLink(linuxsock.TCP)
+		} else {
+			backlogged = tcpRing.Backlogged()
+		}
 	}
-	for !tcpRing.Idle(channelOf(linuxsock.TCP), &core) {
+	if links[linuxsock.UDP].channel != 0 {
+		for !udpRing.Idle(channelOf(linuxsock.UDP), &core) {
+		}
+		if udpRing.Broken() {
+			syslog.Warn("native session broke the ring protocol", syslog.Uint("protocol", uint64(linuxsock.UDP)))
+			dropLink(linuxsock.UDP)
+		} else {
+			backlogged = backlogged || udpRing.Backlogged()
+		}
 	}
-	if tcpRing.Broken() {
-		syslog.Warn("native session broke the ring protocol", syslog.Uint("protocol", uint64(linuxsock.TCP)))
-		dropLink(linuxsock.TCP)
-		return false
-	}
-	return tcpRing.Backlogged()
+	return backlogged
 }
 
-// serviceLink retries what a full queue held back, then reads every reply
-// waiting on a session and hands each to the core. A dead session takes
-// its sockets down.
+// serviceLink reads every message waiting on a session: replies and
+// doorbells. The link takes its rings after each. A dead session takes its
+// sockets down.
 func serviceLink(proto linuxsock.Proto) {
-	link := &links[proto]
 	if proto == linuxsock.TCP {
 		serviceRing()
 		return
 	}
-	if link.channel != 0 && link.state.Writable(channelOf(proto), &core) == linuxsock.SendGone {
-		syslog.Warn("native session ended", syslog.Uint("protocol", uint64(proto)))
-		dropLink(proto)
-		return
+	link := &links[linuxsock.UDP]
+	if link.channel != 0 && udpRing.WantsWritable() {
+		udpRing.Writable(channelOf(linuxsock.UDP), &core)
 	}
 	for link.channel != 0 {
 		status := sys.IPCReceive(link.channel, nativeWire[:])
@@ -131,25 +138,16 @@ func serviceLink(proto linuxsock.Proto) {
 			return
 		}
 		if status == kcall.StatusPeerDied {
-			syslog.Warn("native session ended", syslog.Uint("protocol", uint64(proto)))
-			dropLink(proto)
+			syslog.Warn("native session ended", syslog.Uint("protocol", uint64(linuxsock.UDP)))
+			dropLink(linuxsock.UDP)
 			return
 		}
 		payloadSize := int(nativeWire[24]) | int(nativeWire[25])<<8
-		if status != kcall.StatusOK || !ipc.DecodeInto(nativeWire[:ipc.WireHeaderSize+payloadSize+int(nativeWire[26])*8], &nativeIn) {
-			syslog.Warn("native session sent a malformed message", syslog.Uint("protocol", uint64(proto)))
-			dropLink(proto)
-			return
-		}
-		correlation, completion, ok := link.state.Decode(&nativeIn)
-		if !ok {
-			syslog.Warn("native session sent a malformed reply", syslog.Uint("protocol", uint64(proto)))
-			dropLink(proto)
-			return
-		}
-		core.Complete(proto, link.generation, correlation, completion)
-		if link.channel != 0 && link.state.Done(channelOf(proto)) == linuxsock.SendGone {
-			dropLink(proto)
+		if status != kcall.StatusOK || payloadSize > ipc.MaxPayload ||
+			!ipc.DecodeInto(nativeWire[:ipc.WireHeaderSize+payloadSize+int(nativeWire[26])*8], &nativeIn) || nativeIn.HandleCount != 0 ||
+			!udpRing.Receive(channelOf(linuxsock.UDP), &nativeIn, &core) {
+			syslog.Warn("native session sent a malformed message", syslog.Uint("protocol", uint64(linuxsock.UDP)))
+			dropLink(linuxsock.UDP)
 			return
 		}
 	}
@@ -189,7 +187,7 @@ func setLink(proto linuxsock.Proto, generation uint64, channel, tx, rx handle.ID
 	const rw = capability.Read | capability.Write | capability.Wait
 	txPool, rxPool := tcpLayout.TXPool(), tcpLayout.RXPool()
 	if proto == linuxsock.UDP {
-		txPool, rxPool = udpapi.TXSlots*udpapi.SlotSize, udpapi.RXSlots*udpapi.SlotSize
+		txPool, rxPool = udpapi.TXPoolPages3*4096, udpapi.RXPoolPages3*4096
 	}
 	if !handleIs(channel, handle.TypeChannel, rw) || !handleIs(tx, handle.TypeMemory, capability.Read|capability.Write) ||
 		!handleIs(rx, handle.TypeMemory, capability.Read) {
@@ -223,7 +221,12 @@ func setLink(proto linuxsock.Proto, generation uint64, channel, tx, rx handle.ID
 		}
 		return true
 	}
-	link.state.Reset(proto, generation, tcpLayout, sys.Window(txBase, txPool), sys.Window(rxBase, rxPool))
+	if !udpRing.Reset(generation, sys.Window(txBase, txPool), sys.Window(rxBase, rxPool)) {
+		*link = nativeLink{}
+		sys.VMUnmap(txBase, txSize)
+		sys.VMUnmap(rxBase, rxSize)
+		return false
+	}
 	return true
 }
 

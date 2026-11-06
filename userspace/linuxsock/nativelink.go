@@ -296,41 +296,47 @@ func tcpRequest(r *NativeRequest, out *tcpapi.Request) SubmitStatus {
 }
 
 func (l *NativeLink) encodeUDP(r *NativeRequest, slot uint8) SubmitStatus {
-	l.udpRequest = udpapi.Request{Endpoint: r.Endpoint}
+	return udpRequest(r, slot, &l.udpRequest)
+}
+
+// udpRequest builds the GUDP request of r; slot is the TX slot a send
+// fills.
+func udpRequest(r *NativeRequest, slot uint8, out *udpapi.Request) SubmitStatus {
+	*out = udpapi.Request{Endpoint: r.Endpoint}
 	switch r.Op {
 	case NativeOpen:
-		l.udpRequest.Opcode = udpapi.OpOpen
+		out.Opcode = udpapi.OpOpen
 	case NativeBind:
-		l.udpRequest.Opcode, l.udpRequest.Address, l.udpRequest.Port = udpapi.OpBind, r.Address, r.Port
+		out.Opcode, out.Address, out.Port = udpapi.OpBind, r.Address, r.Port
 		if r.Flags&NativeReuseAddr != 0 {
-			l.udpRequest.Flags = udpapi.FlagReuseAddr
+			out.Flags = udpapi.FlagReuseAddr
 		}
 	case NativeConnect:
-		l.udpRequest.Opcode, l.udpRequest.Address, l.udpRequest.Port = udpapi.OpConnect, r.Address, r.Port
+		out.Opcode, out.Address, out.Port = udpapi.OpConnect, r.Address, r.Port
 	case NativeRead:
-		l.udpRequest.Opcode = udpapi.OpRecvFrom
+		out.Opcode = udpapi.OpRecvFrom
 		if r.Flags&NativeNoWait != 0 {
-			l.udpRequest.Flags |= udpapi.FlagNoWait
+			out.Flags |= udpapi.FlagNoWait
 		}
 		if r.Flags&NativePeek != 0 {
-			l.udpRequest.Flags |= udpapi.FlagPeek
+			out.Flags |= udpapi.FlagPeek
 		}
 	case NativeWrite:
-		l.udpRequest.Opcode, l.udpRequest.Slot, l.udpRequest.Length = udpapi.OpSend, slot, uint16(len(r.Data))
+		out.Opcode, out.Slot, out.Length = udpapi.OpSend, slot, uint16(len(r.Data))
 	case NativeSendTo:
-		l.udpRequest.Opcode, l.udpRequest.Slot, l.udpRequest.Length = udpapi.OpSendTo, slot, uint16(len(r.Data))
-		l.udpRequest.Address, l.udpRequest.Port = r.Address, r.Port
+		out.Opcode, out.Slot, out.Length = udpapi.OpSendTo, slot, uint16(len(r.Data))
+		out.Address, out.Port = r.Address, r.Port
 	case NativeClose:
-		l.udpRequest.Opcode = udpapi.OpClose
+		out.Opcode = udpapi.OpClose
 	case NativeReady:
-		l.udpRequest.Opcode = udpapi.OpReady
+		out.Opcode = udpapi.OpReady
 	case NativeWaitReady:
-		l.udpRequest.Opcode, l.udpRequest.Mask = udpapi.OpWaitReady, udpMask(r.Mask)
+		out.Opcode, out.Mask = udpapi.OpWaitReady, udpMask(r.Mask)
 	case NativeOption:
 		if r.Option != OptionTTL {
 			return SubmitUnsupported
 		}
-		l.udpRequest.Opcode, l.udpRequest.Option = udpapi.OpOption, udpapi.OptionTTL
+		out.Opcode, out.Option = udpapi.OpOption, udpapi.OptionTTL
 	default:
 		return SubmitUnsupported
 	}

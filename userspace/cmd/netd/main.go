@@ -186,6 +186,9 @@ func serve() {
 		if !pending && !armTCP() {
 			pending = true
 		}
+		if !pending && !armUDP() {
+			pending = true
+		}
 		if pending {
 			timeout = 0
 		} else if validation.Enabled {
@@ -300,7 +303,7 @@ func buildInterests() int {
 	for index := range udpSessions {
 		if udpSessions[index].channel != 0 {
 			add(udpSessions[index].channel, udpOwner+index)
-			if udpSessions[index].heldCount != 0 {
+			if udpSessions[index].heldCount != 0 || udpSessions[index].doorbellHeld {
 				interests[count-1].Events |= kcall.WaitWritable
 			}
 		}
