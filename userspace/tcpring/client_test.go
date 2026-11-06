@@ -345,3 +345,41 @@ func TestBenchSequenceOnOneSession(t *testing.T) {
 		t.Fatal("settle listener")
 	}
 }
+
+// TestCloseFallsBackWhenTXRingIsFull closes more endpoints than the TX ring
+// holds while netd takes none of them: the close that finds the ring full
+// goes as an OpClose request, netd drains the ring before it answers, and
+// every endpoint still ends.
+func TestCloseFallsBackWhenTXRingIsFull(t *testing.T) {
+	n := newNetd(t)
+	w, c := n.session()
+	const count = tcpapi.TXEntries4 + 4
+	if !n.stack.SetTCPQuota(0, count) {
+		t.Fatal("quota")
+	}
+	conns := make([]*Conn, 0, count)
+	for range count {
+		conn, result := c.Open()
+		if result != tcpapi.ResultOK {
+			t.Fatalf("open %d", result)
+		}
+		conns = append(conns, conn)
+	}
+	requests := w.requests
+	for _, conn := range conns {
+		if result := conn.Close(); result != tcpapi.ResultOK {
+			t.Fatalf("close %d", result)
+		}
+	}
+	if c.Stats.Closes != count-1 || w.requests-requests != 1 {
+		t.Fatalf("%d closes on the ring, %d requests", c.Stats.Closes, w.requests-requests)
+	}
+	if !c.Settle() {
+		t.Fatal("settle")
+	}
+	for _, conn := range conns {
+		if !conn.Gone() {
+			t.Fatal("endpoint not released")
+		}
+	}
+}
