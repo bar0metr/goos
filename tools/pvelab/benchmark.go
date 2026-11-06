@@ -130,6 +130,8 @@ func benchGroup(name string) string {
 		return "native GTCP 2"
 	case strings.HasPrefix(name, "native-v4-"):
 		return "native GTCP 4"
+	case strings.HasPrefix(name, "native-u3-"):
+		return "native GUDP 3"
 	case strings.HasPrefix(name, "native-"):
 		return "native"
 	case strings.HasPrefix(name, "remote-"):
@@ -236,9 +238,8 @@ var benchTargets = []struct {
 	{"poll-wake", false, 236, 248},
 }
 
-// benchPairs set each Linux loopback metric beside the native one of the
-// same protocol: GTCP 3 for TCP, the protocol linuxsockd speaks, and GUDP 2
-// for UDP. The GTCP 2 lines of netbench stay in the report on their own, as
+// benchPairs set each Linux loopback metric beside a native one: GTCP 3
+// for TCP, and for UDP GUDP 3, the protocol linuxsockd speaks. The GTCP 2 lines of netbench stay in the report on their own, as
 // what an ordinary command's session costs.
 var benchPairs = [][2]string{
 	{"tcp-stream", "native-v3-tcp-stream"},
@@ -249,7 +250,7 @@ var benchPairs = [][2]string{
 	{"tcp-accept", "native-v3-tcp-accept"},
 	{"tcp-close-client", "native-v3-tcp-close-client"},
 	{"tcp-close-server", "native-v3-tcp-close-server"},
-	{"udp-request-reply", "native-udp-request-reply"},
+	{"udp-request-reply", "native-u3-udp-request-reply"},
 	{"poll-wake", "native-v3-wait-wake"},
 }
 

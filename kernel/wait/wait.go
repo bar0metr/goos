@@ -41,9 +41,13 @@ const (
 	// KindLinuxEvent is a Linux eventfd counter. Its object is the
 	// counter's description Object. Only Linux calls wait on it.
 	KindLinuxEvent
+	// KindLinuxSocket is one Linux socket's readiness. Its object is the
+	// socket's description Object, so a wake reaches only the calls that
+	// wait on that socket. Only Linux calls wait on it.
+	KindLinuxSocket
 
 	// lastKind is the highest valid kind; validKey bounds keys by it.
-	lastKind = KindLinuxEvent
+	lastKind = KindLinuxSocket
 )
 
 type Event uint8

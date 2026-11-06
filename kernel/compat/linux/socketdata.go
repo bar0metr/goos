@@ -201,11 +201,13 @@ func DrainComplete(familyID uint64, session uint32, rings []byte) (doorbell bool
 		case linuxsockapi.RingBroken:
 			return false, DataBroken
 		}
+		context.rescan = true
 		if entry.Kind == linuxsockapi.RingTXDone {
 			slot := &data.tx[entry.Slot]
 			if slot.state != txCommitted || slot.generation != entry.Generation {
 				return false, DataBroken
 			}
+			context.touchHeld(slot.socket)
 			*slot = txSlot{}
 			continue
 		}
@@ -222,6 +224,7 @@ func DrainComplete(familyID uint64, session uint32, rings []byte) (doorbell bool
 		*slot = rxSlot{held: true, generation: entry.Generation, socket: entry.Socket, length: entry.Length,
 			order: data.rxOrder, address: entry.Address, port: entry.Port}
 		noteNetHeld(&netDiagnostics.RingRX)
+		context.touchHeld(entry.Socket)
 		// A socket unknown now may be a child whose Accept reply still
 		// waits in the channel; the next drain of the channel decides.
 		slot.orphan = !known

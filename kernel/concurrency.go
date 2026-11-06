@@ -65,6 +65,9 @@ type cpuScratch struct {
 	// may.
 	linuxPollWire    [linuxcompat.PollWindow * linuxcompat.PollFDSize]byte
 	linuxPollEntries [kernelwait.MaxObjects]kernelwait.Entry
+	// linuxPollEpochs holds, for a socket entry of linuxPollEntries, the
+	// socket's wake epoch when the scan looked at it.
+	linuxPollEpochs [kernelwait.MaxObjects]uint32
 	// linuxSelectWire holds one window of the read, write, and exceptional
 	// fd_sets of a select, and linuxSelectSets the window of the sets it
 	// asked about and then of the sets it reports.

@@ -283,7 +283,7 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 	if status == ipc.StatusOK {
 		// A receiver that registered before the send is woken now; one that
 		// registers after it finds the message when it looks again.
-		if !completeExecutablePage(channelID, side^1) {
+		if !completeExecutablePage(channelID, side^1) && !dispatchLinuxNet(channelID, side^1) {
 			wakeIPCWaiters(channelID, side^1, ipc.WaitMessage)
 		}
 		for index := 0; index < transferCount; index++ {

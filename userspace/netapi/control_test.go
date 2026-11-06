@@ -21,6 +21,7 @@ func controlSamples() []controlSample {
 		{ControlRequest{Opcode: ControlAddSession, Rights: RightsResolveStatus}, []handle.ID{14}},
 		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsUDP, Quota: OrdinarySessionQuota}, []handle.ID{30, 31, 32}},
 		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsUDP, Quota: MaxSessionQuota}, []handle.ID{30, 31, 32}},
+		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsUDP, Quota: MaxSessionQuota, UDPVersion: 3}, []handle.ID{30, 31, 32}},
 		{ControlRequest{Opcode: ControlAddTCPSession, Rights: RightsTCP, Quota: 1, TCPVersion: 2}, []handle.ID{33, 34, 35}},
 		{ControlRequest{Opcode: ControlAddTCPSession, Rights: RightsTCP, Quota: MaxSessionQuota, TCPVersion: 3}, []handle.ID{33, 34, 35}},
 		{ControlRequest{Opcode: ControlSetNetwork, Generation: 2}, []handle.ID{40, 41, 42, 43}},
@@ -128,7 +129,7 @@ func TestControlRequestRejects(t *testing.T) {
 				binary.LittleEndian.PutUint16(m.Payload[controlQuota:], 1)
 			}
 		}},
-		{"reserved byte", func(m *ipc.Message) { m.Payload[controlReserved1] = 1 }},
+		{"udp version", func(m *ipc.Message) { m.Payload[controlUDPVersion] = 2 }},
 		{"tcp version", func(m *ipc.Message) {
 			if m.Payload[0] == byte(ControlAddTCPSession) {
 				m.Payload[controlTCPVersion] = 0

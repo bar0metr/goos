@@ -24,6 +24,7 @@ import (
 	shellcmd "goos/userspace/shell"
 	"goos/userspace/startup"
 	"goos/userspace/tcpapi"
+	"goos/userspace/udpapi"
 	"goos/userspace/tty"
 	"goos/userspace/utility"
 )
@@ -153,7 +154,10 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	// A UDP session is its own grant: neither ping nor name resolution
 	// carries the authority to send datagrams.
 	var udpSession [3]handle.ID
-	if grantable && grantsRequested&commands.GrantUDP != 0 {
+	switch {
+	case grantable && grantsRequested&commands.GrantUDPRing != 0:
+		udpSession, _ = openUDPSessionQuota(netapi.OrdinarySessionQuota, udpapi.Version3)
+	case grantable && grantsRequested&commands.GrantUDP != 0:
 		udpSession, _ = openUDPSession()
 	}
 	useUDP := udpSession[0] != 0

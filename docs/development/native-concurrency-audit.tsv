@@ -924,3 +924,5 @@ CA-1146	goos/userspace/cmd/logd	writtenPolicy	process	owned	none
 CA-1147	goos/userspace/cmd/logd	statusWritten	process	owned	none
 CA-1148	goos/userspace/cmd/logd	statusText	process	owned	none
 CA-1149	goos/userspace/cmd/shell	logStatus	process	owned	none
+CA-1151	goos/userspace/cmd/linuxsockd	udpRing	process	owned	none
+CA-1152	goos/userspace/cmd/netd	udpDoorbells	process	owned	none
