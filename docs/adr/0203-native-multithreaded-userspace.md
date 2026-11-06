@@ -80,8 +80,8 @@ last thread to call `ThreadExit`.
 ### Stacks
 
 The kernel makes every thread stack, as it makes the main one. A process has
-16 thread slots. Slot 0 is the main task and its stack. Slot k from 1 to 15
-owns a fixed stack of 512 KiB ending at
+64 thread slots (16 before the revision below). Slot 0 is the main task and
+its stack. Slot k from 1 to 63 owns a fixed stack of 512 KiB ending at
 `ThreadAreaTop - (k-1) * 576 KiB`, with a 64 KiB guard region below it, both
 pinned. `ThreadAreaTop` lies 65 MiB below `vm.UserStackTop`, past the
 largest main stack an image may ask for (`MaxStackReserve`, 64 MiB) and its
@@ -102,8 +102,8 @@ The runtime finds the current thread from the stack pointer: above
 `(ThreadAreaTop - 1 - SP) / 576 KiB + 1`. That costs a subtraction and a
 division by a constant, needs no system call, no FS base, and no change to
 TinyGo's code generation, and holds because a task's stack pointer never
-leaves its stack under `scheduler: none`. Thread descriptors are a
-`[16]`-element array indexed by slot. A descriptor holds the thread's ID,
+leaves its stack under `scheduler: none`. Thread descriptors are indexed by
+slot; the revision below moves all but slot 0's out of the globals. A descriptor holds the thread's ID,
 stack bounds, its system-call scratch, its region cursor and depth, its
 allocator caches, and its fast-path flag. The FS base stays unused: TinyGo on
 this target emits no FS-relative access, and a process may keep it for
@@ -311,10 +311,36 @@ by a fifth: part of the cost is pages discarded after each collection and
 faulted in again. Under TCG (`make bench-thread-allocator`) the same run
 shows a speedup of 1.25x at four and eight threads.
 
+### Revision: 64 thread slots
+
+`kcall.ThreadSlots` is 64, so one process can run 64 threads, the main one
+included, and `MaxThreadSnapshots` is 63. Slot k keeps the address it had:
+the area grows down from `ThreadAreaTop` to 36 MiB and no slot moved, so the
+layout carries no version. A program built for 16 slots runs unchanged on
+this kernel; one built for 64 on an older kernel gets `ResourceExhausted`
+when it asks for slot 16.
+
+Sixty-four of each per-thread record in the globals would have cost a
+program built with the goroutine runtime about 245 KiB, threaded or not: the collector scans every global,
+so each page is resident from the first collection. The goroutine runtime's
+M is 2752 bytes, the allocator's thread state 472, the `sys` descriptors
+280, a snapshot 416. Slot 0 keeps its record in the globals. The others lie
+in demand-zero reservations (`sys.SlotRecords`) that the runtime makes when
+it starts its second thread, and a page of one costs memory once a thread
+whose record lies in it runs. Walks over the threads stop at the highest
+slot started (`arena`) or skip slots that never ran (`goroutine.ms`), so
+they touch no page of an unused slot. The reservations hold no heap
+address the collector must find: the Ms point into the goroutine table, and
+the thread states hold slabs, not allocations. The collector's copy of the
+held threads is a global, not a 1 KiB stack array. What stays static per
+slot is small: the 64-byte control blocks (`goos_tcbs`, 4 KiB), the
+TinyGo static tasks (129 of 48 bytes) and the pending `thread.Start` table.
+
 ## Consequences
 
-- Native programs may create up to 15 threads, within their task quota:
-  4 tasks in the normal profile, 8 in the large one.
+- Native programs may create up to 63 threads, within their task quota:
+  16 tasks in the normal profile, 64 in the large one (see the revision
+  below).
 - `Exit` kills sibling threads, and a fault in any thread ends the process.
 - Existing single-thread programs keep their behaviour: they never call the
   new operations, the heap lock is uncontended, and the collector skips

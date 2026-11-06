@@ -72,7 +72,7 @@ const testFamily = uint64(0x5150)
 
 func newTestSession(t *testing.T) (*fakeService, NetEndpoint) {
 	t.Helper()
-	vfsContexts = [len(vfsContexts)]LinuxVFSContext{}
+	vfsContexts = lazyTable[LinuxVFSContext]{}
 	for index := range netContexts {
 		netContexts[index].reset(0)
 	}

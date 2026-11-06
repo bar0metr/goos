@@ -102,13 +102,10 @@ func releaseChildWaiterHeld(parentPID int32) sched.TaskID {
 	if parentPID < firstPID {
 		return 0
 	}
-	for index := range processStates {
-		state := &processStates[index]
-		if state.Root != 0 && state.PID == parentPID {
-			task := state.childWaiter
-			state.childWaiter = 0
-			return task
-		}
+	if state, found := findProcessByPIDHeld(parentPID); found {
+		task := state.childWaiter
+		state.childWaiter = 0
+		return task
 	}
 	return 0
 }

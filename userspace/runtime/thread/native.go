@@ -16,7 +16,9 @@ func Start(fn func(uintptr), argument uintptr) (ID, Status) {
 	if hooks.Starting != nil {
 		hooks.Starting()
 	}
-	arena.EnableThreads()
+	if !arena.EnableThreads() {
+		return 0, kcall.StatusResourceExhausted
+	}
 	index, ok := claim(fn, argument)
 	if !ok {
 		return 0, kcall.StatusResourceExhausted

@@ -163,9 +163,12 @@ func ValidHoldRange(lo, hi uint64) bool { return hi > lo && hi-lo <= MaxHoldRang
 // Slot 0 is the main task on its own stack; slot k from 1 owns a stack of
 // ThreadStackSize bytes ending at ThreadStackTop(k), above a ThreadGuardSize
 // guard. ThreadAreaTop lies 65 MiB below the top of the main stack, past the
-// largest main stack an image may ask for and its guard.
+// largest main stack an image may ask for and its guard. Slot k's addresses
+// do not depend on ThreadSlots: raising it from 16 to 64 extended the area
+// down to 36 MiB and moved no slot, so a program built for 16 slots runs
+// unchanged and the layout needs no version (ADR 0203).
 const (
-	ThreadSlots     = 16
+	ThreadSlots     = 64
 	ThreadStackSize = uint64(512 << 10)
 	ThreadGuardSize = uint64(64 << 10)
 	ThreadStride    = ThreadStackSize + ThreadGuardSize

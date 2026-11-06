@@ -34,14 +34,6 @@ func nanotime() int64
 //go:linkname staticTask goos_task_static
 func staticTask(index int) uintptr
 
-// The static tasks (tinygo/goroutines/task_stack.go.txt): one per thread
-// slot for its scheduler stack, the main function's, and one per slot for a
-// thread.Start function.
-const (
-	taskMain   = 16
-	taskPinned = 17
-)
-
 //go:linkname taskG goos_task_g
 func taskG(task uintptr) uintptr
 
@@ -110,6 +102,23 @@ var sched struct {
 
 func currentM() *M { return (*M)(unsafe.Pointer(tls.Current().M)) }
 
+// claimM returns slot's M and names it in ms. Only the thread in slot calls
+// it, before it runs the scheduler.
+func claimM(slot int) *M {
+	if m := mOf(slot); m != nil {
+		return m
+	}
+	m := &m0
+	if slot != 0 {
+		if !reserveMs() {
+			fatal("goroutine: no memory for a thread record")
+		}
+		m = (*M)(mRecords.At(slot, unsafe.Sizeof(m0)))
+	}
+	ms[slot].Store(m)
+	return m
+}
+
 // ensureStarted starts the scheduler on the main thread the first time a
 // goroutine operation runs.
 func ensureStarted() {
@@ -138,7 +147,7 @@ func start() {
 	sched.maxProcs.Store(procs)
 	sched.free.Store(procs - 1)
 	sched.workers = 1
-	m := &ms[0]
+	m := claimM(0)
 	if !makeSchedulerStack(m, 0) {
 		fatal("goroutine: no scheduler stack for the main thread")
 	}
@@ -373,7 +382,7 @@ func readyG(g *G) {
 func enqueue(m *M, g *G) {
 	sched.wakes.Add(1)
 	if g.pinned >= 0 {
-		wakeThread(&ms[g.pinned])
+		wakeThread(mOf(int(g.pinned)))
 		return
 	}
 	if m != nil && m.kind.Load() == mWorker && m.permit {
@@ -470,7 +479,7 @@ func wakep() {
 	sched.lock.lock()
 	var target *M
 	if sched.idle != 0 {
-		target = &ms[sched.idle-1]
+		target = mOf(int(sched.idle - 1))
 		sched.idle = target.idleNext
 		target.idle = false
 		target.wokenSpinning = true
@@ -495,15 +504,16 @@ func wakep() {
 // spinning. A thread the task quota refuses lowers the parallelism the
 // process gets instead of failing anything.
 func makeWorker() bool {
-	arena.EnableThreads()
-	if _, _, status := sys.WorkerCreate(1); status != kcall.StatusOK {
-		sched.lock.lock()
-		sched.workers--
-		sched.createFailed = true
-		sched.lock.unlock()
-		return false
+	if arena.EnableThreads() && reserveMs() {
+		if _, _, status := sys.WorkerCreate(1); status == kcall.StatusOK {
+			return true
+		}
 	}
-	return true
+	sched.lock.lock()
+	sched.workers--
+	sched.createFailed = true
+	sched.lock.unlock()
+	return false
 }
 
 // workerMain is where a thread makeWorker started runs, on the stack the
@@ -514,7 +524,7 @@ func workerMain(argument uintptr, slot uint64) {
 	pin()
 	tls.Current().Task = staticTask(int(slot))
 	arena.ThreadStarted(int(slot))
-	m := &ms[slot]
+	m := claimM(int(slot))
 	m.sysLo, m.sysHi = arena.NativeStack(int(slot))
 	m.sysBase = 0
 	m.queue = runQueue{}
@@ -618,8 +628,8 @@ func steal(m *M) *G {
 	start := int(m.tick) % tls.Slots
 	for round := 0; round < 2; round++ {
 		for offset := 0; offset < tls.Slots; offset++ {
-			victim := &ms[(start+offset)%tls.Slots]
-			if victim == m || victim.kind.Load() != mWorker {
+			victim := mOf((start + offset) % tls.Slots)
+			if victim == nil || victim == m || victim.kind.Load() != mWorker {
 				continue
 			}
 			count := victim.queue.steal(&stolen)
@@ -645,7 +655,7 @@ func anyWork() bool {
 		return true
 	}
 	for slot := range ms {
-		if ms[slot].kind.Load() == mWorker && ms[slot].queue.length() != 0 {
+		if m := mOf(slot); m != nil && m.kind.Load() == mWorker && m.queue.length() != 0 {
 			return true
 		}
 	}
@@ -686,7 +696,7 @@ func idle(m *M) {
 func removeIdle(m *M) {
 	link := &sched.idle
 	for *link != 0 {
-		other := &ms[*link-1]
+		other := mOf(int(*link - 1))
 		if other == m {
 			*link = m.idleNext
 			break
@@ -724,8 +734,8 @@ func wakeIdle() {
 	sched.lock.lock()
 	var target *M
 	self := currentM()
-	for link := sched.idle; link != 0; link = ms[link-1].idleNext {
-		candidate := &ms[link-1]
+	for link := sched.idle; link != 0; link = mOf(int(link - 1)).idleNext {
+		candidate := mOf(int(link - 1))
 		if candidate != self {
 			target = candidate
 			break
@@ -774,8 +784,8 @@ func dump() {
 	println("goroutine: free", sched.free.Load(), "spinning", sched.spinning.Load(), "idle", sched.nidle.Load(),
 		"workers", sched.workers, "global", sched.global.length.Load(), "live", sched.live.Load())
 	for slot := range ms {
-		m := &ms[slot]
-		if m.kind.Load() == mNone {
+		m := mOf(slot)
+		if m == nil || m.kind.Load() == mNone {
 			continue
 		}
 		current := uint64(0)
