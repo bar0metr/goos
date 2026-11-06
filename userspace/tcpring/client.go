@@ -59,7 +59,9 @@ type Client struct {
 	// forgets: closed endpoints whose EntryForget waits for ring room.
 	forgets []*Conn
 	broken  bool
-	Stats   Stats
+	// why names the first protocol rule the session broke.
+	why   string
+	Stats Stats
 }
 
 // Conn is one endpoint of the session.
@@ -117,17 +119,17 @@ func (c *Client) Call(request *tcpapi.Request, reply *tcpapi.Reply) bool {
 	// The client's own copy keeps the caller's request on its stack.
 	c.request = *request
 	if !tcpapi.Layout4.EncodeRequest(&c.request, sent, &c.out) || !c.t.Send(&c.out) {
-		return c.fail()
+		return c.fail("request not sent")
 	}
 	c.Stats.Requests++
 	for {
 		got, alive := c.t.Receive(true, &c.in)
 		if !alive || !got {
-			return c.fail()
+			return c.fail("no reply")
 		}
 		if c.in.Kind == ipc.KindNotification {
 			if !tcpapi.IsDoorbell4(&c.in) {
-				return c.fail()
+				return c.fail("notification not a doorbell")
 			}
 			c.Stats.DoorbellsReceived++
 			if _, ok := c.poll(); !ok {
@@ -137,20 +139,25 @@ func (c *Client) Call(request *tcpapi.Request, reply *tcpapi.Reply) bool {
 		}
 		correlation, ok := tcpapi.Layout4.DecodeReply(&c.in, reply)
 		if !ok || correlation != sent || reply.Opcode != request.Opcode {
-			return c.fail()
+			return c.fail("reply does not match the request")
 		}
 		c.Stats.Replies++
 		return true
 	}
 }
 
-func (c *Client) fail() bool {
-	c.broken = true
+func (c *Client) fail(why string) bool {
+	if !c.broken {
+		c.broken, c.why = true, why
+	}
 	return false
 }
 
 // Broken reports whether the session failed.
 func (c *Client) Broken() bool { return c.broken }
+
+// Why names what failed the session, or is empty.
+func (c *Client) Why() string { return c.why }
 
 // notify sends OpDoorbell when netd armed since the client last rang.
 func (c *Client) notify() bool {
@@ -158,7 +165,7 @@ func (c *Client) notify() bool {
 		return true
 	}
 	if !tcpapi.EncodeDoorbell4(&c.out) || !c.t.Send(&c.out) {
-		return c.fail()
+		return c.fail("doorbell not sent")
 	}
 	c.Stats.DoorbellsSent++
 	return true
@@ -189,11 +196,11 @@ func (c *Client) Wait() bool {
 		}
 		got, alive := c.t.Receive(true, &c.in)
 		if !alive || !got {
-			return c.fail()
+			return c.fail("no doorbell")
 		}
 		if c.in.Kind != ipc.KindNotification || !tcpapi.IsDoorbell4(&c.in) {
 			// No request is outstanding, so no reply can come.
-			return c.fail()
+			return c.fail("message while no request was out")
 		}
 		c.Stats.DoorbellsReceived++
 	}
@@ -206,27 +213,27 @@ func (c *Client) poll() (moved, ok bool) {
 	for {
 		status := c.control.PopTXDone(&e)
 		if status == shmring.Broken {
-			return false, c.fail()
+			return false, c.fail("TXDone ring broken")
 		}
 		if status != shmring.OK {
 			break
 		}
 		moved = true
-		if !c.txDone(&e) {
-			return false, c.fail()
+		if why := c.txDone(&e); why != "" {
+			return false, c.fail(why)
 		}
 	}
 	for {
 		status := c.control.PopRX(&e)
 		if status == shmring.Broken {
-			return false, c.fail()
+			return false, c.fail("RX ring broken")
 		}
 		if status != shmring.OK {
 			break
 		}
 		moved = true
-		if !c.received(&e) {
-			return false, c.fail()
+		if why := c.received(&e); why != "" {
+			return false, c.fail(why)
 		}
 	}
 	if !c.flushForgets() {
@@ -243,38 +250,45 @@ func (c *Client) conn(index uint16, id uint32) *Conn {
 	return conn
 }
 
-func (c *Client) txDone(e *tcpapi.Entry) bool {
+// txDone takes one TXDone entry. It returns the rule the entry broke, or
+// an empty string.
+func (c *Client) txDone(e *tcpapi.Entry) string {
 	if e.Kind == tcpapi.EntryClosed {
 		conn := c.conn(e.Index, e.Endpoint)
 		if conn == nil || !conn.closing {
-			return false
+			return "EntryClosed for an endpoint not closing"
 		}
 		c.forgets = append(c.forgets, conn)
-		return true
+		return ""
 	}
 	bit := uint32(1) << e.Slot
 	if c.txLent&bit == 0 || c.txGen[e.Slot] != e.Generation {
-		return false
+		return "EntryWriteDone for a slot netd does not hold"
 	}
 	c.txLent &^= bit
 	c.Stats.WritesDone++
 	conn := c.conn(e.Index, e.Endpoint)
 	if conn == nil {
-		return false
+		return "EntryWriteDone for an unknown endpoint"
 	}
 	conn.inflight--
 	if e.Result != tcpapi.ResultOK && conn.err == tcpapi.ResultOK {
 		conn.err = e.Result
 	}
-	return true
+	return ""
 }
 
-func (c *Client) received(e *tcpapi.Entry) bool {
+// received takes one RX entry. It returns the rule the entry broke, or an
+// empty string.
+func (c *Client) received(e *tcpapi.Entry) string {
 	switch e.Kind {
 	case tcpapi.EntryAccepted:
 		listener := c.conns[e.Offset]
-		if listener == nil || listener.id != e.Generation || c.conns[e.Index] != nil {
-			return false
+		if listener == nil || listener.id != e.Generation {
+			return "EntryAccepted for an unknown listener"
+		}
+		if c.conns[e.Index] != nil {
+			return "EntryAccepted at an index in use"
 		}
 		child := &Conn{c: c, index: e.Index, id: e.Endpoint, listener: listener, Remote: e.Address, RemotePort: e.Port,
 			Local: e.Local, LocalPort: e.LocalPort}
@@ -283,33 +297,42 @@ func (c *Client) received(e *tcpapi.Entry) bool {
 		}
 		c.conns[e.Index] = child
 		c.accepts = append(c.accepts, child)
-		return true
+		return ""
 	case tcpapi.EntryData:
 		bit := uint32(1) << e.Slot
 		if c.rxHeld&bit != 0 || e.Generation != c.rxGen[e.Slot]+1 {
-			return false
+			return "EntryData for a slot out of turn"
 		}
 		c.rxHeld |= bit
 		c.rxGen[e.Slot] = e.Generation
 		c.Stats.Data++
 	}
 	conn := c.conn(e.Index, e.Endpoint)
-	if conn == nil || conn.credit == 0 {
-		return false
+	if conn == nil {
+		return "RX entry for an unknown endpoint"
+	}
+	if conn.credit == 0 {
+		return "RX entry without credit"
 	}
 	conn.credit--
 	if e.Kind == tcpapi.EntryEnd {
 		if !conn.ended {
 			conn.ended, conn.end = true, e.Result
 		}
-		return true
+		return ""
 	}
-	if conn.closing || conn.count == len(conn.pieces) {
-		return conn.closing && c.release(e.Slot)
+	if conn.closing {
+		if !c.release(e.Slot) {
+			return c.why
+		}
+		return ""
+	}
+	if conn.count == len(conn.pieces) {
+		return "EntryData past the pieces a connection keeps"
 	}
 	conn.pieces[(conn.first+conn.count)%len(conn.pieces)] = piece{slot: e.Slot, length: e.Length}
 	conn.count++
-	return true
+	return ""
 }
 
 // pushRelease puts an entry on the Release ring, waiting for room.
@@ -319,7 +342,7 @@ func (c *Client) pushRelease(e *tcpapi.Entry) bool {
 		case shmring.OK:
 			return true
 		case shmring.Broken:
-			return c.fail()
+			return c.fail("Release ring broken")
 		}
 		if !c.notify() {
 			return false
@@ -343,7 +366,7 @@ func (c *Client) flushForgets() bool {
 	for len(c.forgets) != 0 && c.control.ReleaseRoom() != 0 {
 		conn := c.forgets[0]
 		if c.control.PushRelease(&tcpapi.Entry{Kind: tcpapi.EntryForget, Index: conn.index, Endpoint: conn.id}) != shmring.OK {
-			return c.fail()
+			return c.fail("EntryForget not pushed")
 		}
 		c.forgets = c.forgets[1:]
 		c.conns[conn.index] = nil
@@ -357,7 +380,7 @@ func (c *Client) adopt(reply *tcpapi.Reply) *Conn {
 	conn := &Conn{c: c, index: reply.Index, id: reply.Endpoint, Remote: reply.Address, RemotePort: reply.Port, Local: reply.Local,
 		LocalPort: reply.LocalPort}
 	if c.conns[reply.Index] != nil {
-		c.fail()
+		c.fail("reply names an index in use")
 		return nil
 	}
 	c.conns[reply.Index] = conn
@@ -558,7 +581,7 @@ func (conn *Conn) write(p []byte, block bool) (int, tcpapi.Result) {
 			Generation: c.txGen[slot], Offset: conn.offset}
 		if c.control.PushTX(&e) != shmring.OK {
 			// The client holds at most TXSlots4 entries there.
-			c.fail()
+			c.fail("EntryWrite not pushed")
 			return written, tcpapi.ResultDown
 		}
 		c.txLent |= 1 << slot
@@ -585,12 +608,15 @@ func (conn *Conn) Flush() tcpapi.Result {
 	return conn.err
 }
 
-// post keeps ReadDepth fills posted.
+// post keeps ReadDepth fills posted, and no more than the pieces the
+// connection has room for: a reader behind its fills would otherwise have
+// more arrive than it can keep.
 func (conn *Conn) post() bool {
-	if conn.ended || conn.closing || conn.credit >= ReadDepth {
+	room := uint32(len(conn.pieces) - conn.count)
+	if conn.ended || conn.closing || conn.credit >= min(ReadDepth, room) {
 		return true
 	}
-	more := ReadDepth - conn.credit
+	more := min(ReadDepth, room) - conn.credit
 	conn.credit += more
 	conn.c.Stats.Credits++
 	return conn.c.pushRelease(&tcpapi.Entry{Kind: tcpapi.EntryCredit, Index: conn.index, Endpoint: conn.id, Length: more})

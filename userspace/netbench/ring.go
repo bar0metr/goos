@@ -19,7 +19,7 @@ func RunRing(data startup.Data) {
 	if !ok {
 		utility.Fail(nil, "GTCP 4 session not granted")
 	}
-	prefix = "native-v4-"
+	prefix, ringClient = "native-v4-", c
 	total := uint64(32) << 20
 	if data.ArgCount() == 1 {
 		value, _ := data.Arg(1)
@@ -47,7 +47,7 @@ func RunRing(data startup.Data) {
 	ringConnectClose(c, listener, port)
 	ringCheck("close listener", listener.Close())
 	if !c.Settle() {
-		utility.Fail([]byte("settle"), "session failed")
+		ringCheck("settle", tcpapi.ResultDown)
 	}
 	if tx, rx := c.Held(); tx != 0 || rx != 0 {
 		utility.Fail([]byte("settle"), "slots still out")
@@ -56,10 +56,18 @@ func RunRing(data startup.Data) {
 	utility.EndLine()
 }
 
+// ringClient is the session RunRing measures; a failure names the rule
+// it broke.
+var ringClient *tcpring.Client
+
 func ringCheck(what string, result tcpapi.Result) {
-	if result != tcpapi.ResultOK {
-		utility.Fail([]byte(what), result.Text())
+	if result == tcpapi.ResultOK {
+		return
 	}
+	if ringClient != nil && ringClient.Why() != "" {
+		utility.Fail([]byte(what), result.Text()+": "+ringClient.Why())
+	}
+	utility.Fail([]byte(what), result.Text())
 }
 
 // traffic is a snapshot of the client's channel counters.
@@ -94,14 +102,14 @@ func ringStream(c *tcpring.Client, client, server *tcpring.Conn, total uint64) {
 			length := min(total-sent, uint64(len(source))-offset)
 			written, result := client.TryWrite(source[offset : offset+length])
 			if result != tcpapi.ResultOK && result != tcpapi.ResultWouldBlock {
-				utility.Fail([]byte("stream write"), result.Text())
+				ringCheck("stream write", result)
 			}
 			sent += uint64(written)
 			moved = written != 0
 		}
 		read, result := server.TryRead(sink[:])
 		if result != tcpapi.ResultOK && result != tcpapi.ResultWouldBlock {
-			utility.Fail([]byte("stream read"), result.Text())
+			ringCheck("stream read", result)
 		}
 		for index := range read {
 			if sink[index] != byte((received+uint64(index))%251) {
@@ -110,7 +118,7 @@ func ringStream(c *tcpring.Client, client, server *tcpring.Conn, total uint64) {
 		}
 		received += uint64(read)
 		if !moved && read == 0 && !c.Wait() {
-			utility.Fail([]byte("stream"), "session failed")
+			ringCheck("stream", tcpapi.ResultDown)
 		}
 	}
 	ringCheck("stream flush", client.Flush())
@@ -182,7 +190,7 @@ func ringConnectClose(c *tcpring.Client, listener *tcpring.Conn, port uint16) {
 		conns = append(conns, client, server)
 	}
 	if !c.Settle() {
-		utility.Fail([]byte("connect-close"), "session failed")
+		ringCheck("connect-close", tcpapi.ResultDown)
 	}
 	for _, conn := range conns {
 		if !conn.Gone() {
