@@ -358,6 +358,15 @@ address passed validation and conflict detection; `failed` means a device or
 configuration fault requiring a reload or driver restart. It prints no DNS server because DNS is out of
 scope. The command has no hardware or filesystem authority.
 
+Under `tcp:` it also prints use against each limit: `memory` gives the ring
+bytes charged against `memory-bytes`, the per-session budget, handshakes
+refused and ring growths capped; `time-wait` gives the tombstones against
+their two budgets and the connections held as endpoints for want of one;
+`lookups` gives the index probes and the most one segment needed;
+`sessions` gives the command, UDP and TCP sessions `netd` serves against
+8, 8 and 46. The `dropped` line counts SYNs a full listener dropped as
+`backlog`.
+
 ## 7. Client protocol and commands
 
 `GNETAPI1` version 1 uses one PID 1-created channel per client. The network

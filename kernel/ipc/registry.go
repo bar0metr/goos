@@ -167,3 +167,16 @@ func (registry *Registry) AcquireAt(index int) (uint64, *Channel, bool) {
 	registry.slots.Unlock()
 	return id, channel, true
 }
+
+// Count counts the channels in existence, under the slots lock.
+func (registry *Registry) Count() int {
+	registry.lock()
+	count := 0
+	for _, id := range registry.ids[:] {
+		if id != 0 {
+			count++
+		}
+	}
+	registry.slots.Unlock()
+	return count
+}

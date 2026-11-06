@@ -60,12 +60,12 @@ below without a rebuild.
 | --- | --- | --- |
 | 256 task slots | `kernel/sched.MaxTasks` = 256 | Yes for slots. No for use: 64 processes (`process.MaxProcesses`), 16 thread slots per process (`kcall.ThreadSlots`) and task quotas of 1, 4 and 8 per launch profile leave a process at most 8 tasks. |
 | 1024 Linux descriptors per process | `RLIMIT_NOFILE` soft 1024, hard `linux.LinuxFDCeiling` 4096 (ADR 0212) | Per table, yes. The system pool `linux.MaxOpenDescriptions` (4096) is shared by every family, so four processes at their soft limit fill it. Regular files also need a VFS slot: `vfs.MaxOpenPerOwner` (64) per session and `vfs.MaxOpenFiles` (256) in all. Directories share 32 slots system-wide. |
-| 256 concurrent TCP connections | `system.net.tcp.max-endpoints` 1024 (ceiling 4096); `netapi.MaxSessionQuota` 512 granted to `linuxsockd`; `linuxsock` family quota 512, service quota 1024; `system.net.tcp.memory-bytes` 40 MiB at 8 KiB per handshake | Yes for Linux programs and for a native session PID 1 grants 512. An ordinary native session gets 8 by policy. `netd` serves at most 46 TCP sessions (see gaps). |
-| Listen backlog of at least 128 | `system.net.tcp.listen-backlog` 128 (ceiling 4096); `linuxsock.MaxBacklog` 128 | Yes. A Linux listener cannot go past 128 even when the key is raised: `linuxsock.MaxBacklog` is a constant. |
+| 256 concurrent TCP connections | `system.net.tcp.max-endpoints` 1024 (ceiling 4096); `netapi.MaxSessionQuota` 512 granted to `linuxsockd`; `linuxsock` family quota 512, service quota 1024; `system.net.tcp.memory-bytes` 40 MiB at 8 KiB per handshake | Yes for Linux programs and for a native session PID 1 grants 512. An ordinary native session gets 8 by policy. `netd` serves at most 46 TCP sessions, and `net status` shows how many are in use (see gaps). |
+| Listen backlog of at least 128 | `system.net.tcp.listen-backlog` 128 (ceiling 4096); `linuxsock.MaxBacklog` 255 | Yes. A Linux backlog reaches `netd` up to 255, the width of the GTCP listen byte, and `netd` clamps it to the key, as Linux clamps to `somaxconn`. Raising the key past 255 reaches no listener. |
 | Kernel log ring of at least 2048 records | `klog.Capacity` = `kcall.LogRingCapacity` = 2048 (416 KiB BSS) | Yes, at the floor. |
 | 64 MiB of persistent log history | `system.log.segment-bytes` 16 MiB × `system.log.segments` 4 (`logpersist.DefaultSegmentBytes`, `DefaultSegments`) | As a ceiling. The count includes the live segment, so right after a rotation the files hold 48 MiB. Five segments would keep 64 MiB at all times. |
 | Network progress never waits for an idle timeout | `netd` computes its wait from `stack.Deadline()`, polls while work is pending, and arms the GTCP 4 doorbell before it sleeps; `idleWait` (30 s) covers only a lost wake | Yes in `netd`. A validation build stops with `NETD_DELIVERY_STALLED` when a parked request could run before the wait (`checkSettled`). `linuxsockd` and the kernel socket bridge have not been audited for the same property. |
-| No full-table TCP lookup on receive | Hashed four-tuple, port and listener indexes (ADR 0213); validation builds compare each lookup with a registry walk | Yes. `TCPStats.LookupProbes` and `MaxSegmentProbes` measure it, but `OpTCPStatus` does not carry them. |
+| No full-table TCP lookup on receive | Hashed four-tuple, port and listener indexes (ADR 0213); validation builds compare each lookup with a registry walk | Yes. `TCPStats.LookupProbes` and `MaxSegmentProbes` measure it; `OpTCPStatus` carries both and `net status` prints them as `lookups`. |
 
 ### Gaps against the profile
 
@@ -76,23 +76,28 @@ below without a rebuild.
 2. **Processes.** `process.MaxProcesses` is 64, fixed by a static Linux
    record of several KiB per process. Linux programs get 48 of them, 16 per
    family. The scheduler has 256 slots that processes cannot use.
-3. **TCP sessions in `netd`.** One `WaitAny` names 64 objects; the driver,
-   the control channel, eight command sessions and eight UDP sessions take
-   18, which leaves 46 TCP sessions (`netd` `tcpSessionSlots`). The stack keeps
-   64 owners. Connections are not affected; native client processes are.
+3. **TCP sessions in `netd`.** One `WaitAny` names 64 objects, because its
+   ready mask is one 64-bit word (ADR 0111); the driver, the control
+   channel, eight command sessions and eight UDP sessions take 18, which
+   leaves 46 TCP sessions (`netd` `tcpSessionSlots`). The stack keeps 64
+   owners. Connections are not affected; native client processes are. A
+   wider mask changes the `WaitAny` result ABI and every per-processor wait
+   buffer, so the bound stays as policy and `net status` reports the
+   sessions in use against it.
 4. **Open descriptions.** `linux.MaxOpenDescriptions` (4096) is one pool
    for sockets, files, pipes and eventfds of every Linux family, with no
    per-family share and no status field.
 5. **Linux side tables.** 32 directory descriptions, 64 eventfd counters
    and 8 terminals serve every Linux process together, and `readv`/`writev`
    refuse more than 16 vectors where Linux accepts 1024.
-6. **TCP memory and drop counters in `net tcp`.** `memory-bytes`,
-   `memory-bytes-per-session`, the bytes charged, the TIME_WAIT tombstones
-   and their budget, `DropMemory`, `DropBacklog`, `MemoryCapped` and
-   `TimeWaitHeld` exist in `TCPStats` but not in the `OpTCPStatus` reply.
-7. **Global kernel tables have no status.** Use of the task, channel,
-   stream, shared memory, executable and VFS open-file tables is invisible
-   to userspace. `SystemInfo` reports the process count without its limit.
+6. **Global kernel tables have no release status.** A `goos_diag` build's
+   dump prints `DIAG tables` (tasks, processes, channels, streams, shared
+   memory, executables) and `DIAG linux-tables` (open descriptions,
+   directories, eventfds, terminals, Linux processes and the busiest
+   family) as use/limit. A release build has no such call: `SystemInfo`
+   refuses any length but 40 bytes and carries no version, so it still
+   reports the process count without its limit. The VFS service has no
+   status operation, so its open-file table stays invisible.
 
 ## Implementation artifacts
 
@@ -118,9 +123,7 @@ defect to fix or to reclassify with a reason.
 | `kernel/compat/linux/abi.Max*` | 64 KiB stack, 256 strings | Same initial stack bound as exec. |
 | `kernel/compat/linux/elf.Max*` | 64 headers, 16 load segments | Fixed loader arrays. |
 | `kernel/compat/linux.MaxSocketRequests` | 8 | Fixed in-flight array per family. |
-| `userspace/linuxsock.MaxBacklog` | 128 | Constant copy of a tunable default; raising `listen-backlog` does not reach Linux listeners. |
 | `userspace/linuxsock.MaxFamilies` | 16 | Width of the GLNXCTL2 status table. |
-| `netd` `tcpSessionSlots` | 46 | What one `WaitAny` has left. |
 | `userspace/runtime/goroutine.MaxWaiters` | 63 | One kernel `WaitAny` per waiting thread. |
 | `userspace/dns.MaxTransactions` | 4 | Fixed transaction array; a burst of distinct names queues. |
 | `userspace/tcpupstream.MaxStreams` | 2 | Two 64 KiB assembly buffers. |
@@ -130,19 +133,28 @@ defect to fix or to reclassify with a reason.
 
 | Resource | Use and limit that exist | Status that should carry them |
 | --- | --- | --- |
-| Kernel tasks | `sched` slot use, `MaxTasks` | `SystemInfo` |
-| Processes | count in `SystemInfo` word 1 | the limit, `MaxProcesses` |
-| Channels, streams, shared memory, executables | registry occupancy | `SystemInfo` or a table-use call |
-| VFS open files | `MaxOpenFiles`, per-owner counts | VFS service status |
-| Linux open descriptions, directories, eventfds, terminals | pool occupancy | a Linux table-use call |
-| Linux processes | live count, 48 and 16 per family | a Linux table-use call |
-| TCP memory | `TCPStats.MemoryBytes`, both budgets | `OpTCPStatus` |
-| TCP TIME_WAIT | `TCPStats.TimeWait`, `TimeWaitHeld`, budgets 8192 and 2048 | `OpTCPStatus` |
-| TCP drops | `DropMemory`, `DropBacklog`, `MemoryCapped` | `OpTCPStatus` |
-| TCP lookup cost | `LookupProbes`, `MaxSegmentProbes` | `OpTCPStatus` |
-| `netd` sessions | sessions in use of 8, 8 and 46 | `net status` |
+| Kernel tasks | `DIAG tables` `tasks` in `goos_diag` builds | a release call; `SystemInfo` has no room |
+| Processes | count in `SystemInfo` word 1; `DIAG tables` `processes` with the limit | the limit in a release call |
+| Channels, streams, shared memory, executables | `DIAG tables` in `goos_diag` builds | a release table-use call |
+| VFS open files | `MaxOpenFiles`, per-owner counts | VFS service status; the service has no status operation |
+| Linux open descriptions, directories, eventfds, terminals | `DIAG linux-tables` in `goos_diag` builds | a release Linux table-use call |
+| Linux processes | `DIAG linux-tables` `processes` (of 48), `family-peak` (of 16) | a release Linux table-use call |
 | Goroutines | `goroutine.ReadStats` `Live`, `Limit` | a per-process diagnostic a command can print |
-| Kernel log loss | `logpersist.Stats.Lost`, `Overwritten` | only the `logd` `counters` record in the log itself |
+
+These status fields exist:
+
+| Resource | Status |
+| --- | --- |
+| TCP memory | `OpTCPStatus` `Capacity.MemoryBytes`, `MemoryBudget`, `OwnerMemoryBudget`; `net status` `memory` |
+| TCP TIME_WAIT | `Capacity.TimeWait`, `TimeWaitBudget`, `OwnerTimeWaitBudget`, `TimeWaitHeld`; `net status` `time-wait` |
+| TCP drops | `Capacity.DropMemory`, `DropBacklog`, `MemoryCapped`; `net status` `memory` and `dropped` |
+| TCP lookup cost | `Capacity.LookupProbes`, `MaxSegmentProbes`; `net status` `lookups` |
+| `netd` sessions | `Capacity.CommandSessions`, `UDPSessions`, `TCPSessions` against 8, 8 and 46; `net status` `sessions` |
+| Kernel log persistence | `/state/system.log.status`, printed by `log status`: appended, overwritten, persisted, lost, failures, rotations |
+
+`net endpoints` writes the same TCP and session figures to the log as
+`tcp memory`, `tcp time-wait`, `tcp lookup cost` and `netd sessions`
+records.
 
 ## Inventory
 
@@ -150,10 +162,10 @@ defect to fix or to reclassify with a reason.
 
 | Bound | Default / max | Class | Owner | Memory | At exhaustion | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| `kernel/sched.MaxTasks` | 256 | profile (build constant) | global | static per-slot contexts, roots and FPU areas; assembly `GOOS_MAX_TASKS` | `StatusResourceExhausted` | none |
+| `kernel/sched.MaxTasks` | 256 | profile (build constant) | global | static per-slot contexts, roots and FPU areas; assembly `GOOS_MAX_TASKS` | `StatusResourceExhausted` | `DIAG tables` `tasks` |
 | `kernel/sched.MaxKernelTasks` | 64 | artifact | kernel | one word | boot panic | none |
 | `kernel/sched.MaxCPUs` | 64 | artifact | global | one word per set | extra processors stay offline | `CPUInfo` count |
-| `kernel/process.MaxProcesses` | 64 | artifact | global | process record pages on first use; Linux record several KiB, static | `LaunchResourceExhausted` | `SystemInfo` process count; limit none |
+| `kernel/process.MaxProcesses` | 64 | artifact | global | process record pages on first use; Linux record several KiB, static | `LaunchResourceExhausted` | `SystemInfo` process count; `DIAG tables` `processes` with the limit |
 | `kernel/process.MaxExitEvents` | 64 | artifact | PID 1 | static | follows `MaxProcesses` | none |
 | `kernel/process.MaxTasksPerProcess` | 64 | artifact | process | in the process record | `StatusResourceExhausted` | `ProcessInfo` task count |
 | `kernel/process.MaxWaiters` | 256 | protocol (one per task slot) | global | static | cannot fill | n/a |
@@ -164,28 +176,28 @@ defect to fix or to reclassify with a reason.
 | `kcall.ThreadSlots` | 16 | artifact | process | 576 KiB address space per slot, pages on touch | `StatusResourceExhausted` from thread create | none |
 | `kernel/kcall.MaxThreadSnapshots` | 15 | artifact | process | 416 B per snapshot | n/a | n/a |
 | `kernel/kcall.MaxPreemptTicks` | 1000 | policy | task | n/a | value refused | n/a |
-| `linux.NativeProcessReserve`, `LinuxGlobalMaxProcesses`, `LinuxFamilyMaxProcesses` | 16, 48, 16 | policy | global, family | static | `EAGAIN` from `fork`/`clone` | none |
+| `linux.NativeProcessReserve`, `LinuxGlobalMaxProcesses`, `LinuxFamilyMaxProcesses` | 16, 48, 16 | policy | global, family | static | `EAGAIN` from `fork`/`clone` | `DIAG linux-tables` `processes`, `family-peak` |
 | `linux.NativeTaskReserve` | 16 | policy | global | none | `EAGAIN` | none |
 
 ### IPC, streams, handles, waits, shared memory
 
 | Bound | Default / max | Class | Owner | Memory | At exhaustion | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| `kernel/ipc.MaxChannels` | 256 | profile (build constant) | global; creator charged | a page per live channel (ADR 0111) | `StatusResourceExhausted` | per process `ProcessInfo`; global none |
+| `kernel/ipc.MaxChannels` | 256 | profile (build constant) | global; creator charged | a page per live channel (ADR 0111) | `StatusResourceExhausted` | per process `ProcessInfo`; global `DIAG tables` `channels` |
 | `kernel/ipc.MaxPayload` | 256 | protocol | n/a | n/a | `StatusInvalidArgument` | n/a |
 | `kernel/ipc.MaxAttachedHandles` | 4 | protocol | n/a | n/a | `StatusInvalidArgument` | n/a |
 | `ipc.QueueCapacity` | 16 messages | profile | channel | in the channel page | sender waits or `StatusResourceExhausted` | none |
 | `kernel/ipc.MaxWaiters` | 256 | protocol (one per task) | global | static | cannot fill | n/a |
-| `kernel/stream.MaxStreams` | 256 | profile (build constant) | global; creator charged | a page per live stream | `StatusResourceExhausted` | per process `ProcessInfo`; global none |
+| `kernel/stream.MaxStreams` | 256 | profile (build constant) | global; creator charged | a page per live stream | `StatusResourceExhausted` | per process `ProcessInfo`; global `DIAG tables` `streams` |
 | `kernel/stream.MaxReferences` | 65535 | protocol (counter width) | stream | n/a | refused before wrap | n/a |
 | `kernel/handle.MaxHandles` | 256 | policy | process | 24 B a slot, 6 KiB per process record | `StatusResourceExhausted` | `HandleInfo` per slot; count none |
 | `kernel/wait.MaxObjects` | 64 | protocol (ready-mask width) | wait | n/a | `StatusInvalidArgument` | n/a |
 | `userspace/wait.MaxObjects` | 64 | protocol | n/a | n/a | n/a | n/a |
-| `kernel/shmem.MaxObjects` | 256 | profile (build constant) | global | a page per live object | `StatusResourceExhausted` | none |
+| `kernel/shmem.MaxObjects` | 256 | profile (build constant) | global | a page per live object | `StatusResourceExhausted` | `DIAG tables` `shmem` |
 | `kernel/shmem.MaxObjectsPerProcess` | 16 | policy | process | none | `StatusResourceExhausted` | none |
 | `kernel/shmem.MaxObjectsPerSupervisor` | 32 | policy | PID 1 | none | `StatusResourceExhausted` | none |
 | `kernel/shmem.MaxPages` | 65536 pages (256 MiB) | profile | creator's page quota | on touch | `StatusResourceExhausted` | `ProcessInfo` pages |
-| `kernel/executable.MaxObjects` | 64 | artifact | PID 1 | a page per object | `StatusResourceExhausted` | none |
+| `kernel/executable.MaxObjects` | 64 | artifact | PID 1 | a page per object | `StatusResourceExhausted` | `DIAG tables` `executables` |
 | `kernel/executable.MaxSize` | 256 MiB | profile | launcher's page quota | pages | `StatusResourceExhausted` | n/a |
 | `kernel/executable.MaxWrite` | 1 MiB | protocol | n/a | n/a | short write | n/a |
 
@@ -246,10 +258,10 @@ defect to fix or to reclassify with a reason.
 | Bound | Default / max | Class | Owner | Memory | At exhaustion | Status |
 | --- | --- | --- | --- | --- | --- | --- |
 | `RLIMIT_NOFILE` | soft 1024, hard 4096 (`LinuxFDCeiling`) | policy (ADR 0212) | process | 64 entries inline, then a 4 KiB page per 1024, charged to the process | `EMFILE`; `ENOMEM` when the table cannot grow | none (`prlimit64` reads the limit) |
-| `kernel/compat/linux.MaxOpenDescriptions` | 4096 | profile (build constant) | global | static pool | `ENFILE` | none |
-| `kernel/compat/linux.MaxOpenDirectories` | 32 | artifact | global | static, a path each | `ENFILE` | none |
-| `kernel/compat/linux.MaxEventCounters` | 64 | artifact | global | static | `ENFILE` | none |
-| `kernel/compat/linux.MaxTerminals` | 8 | policy (one per session PID 1 serves) | global | static | launch refused | none |
+| `kernel/compat/linux.MaxOpenDescriptions` | 4096 | profile (build constant) | global | static pool | `ENFILE` | `DIAG linux-tables` `descriptions` |
+| `kernel/compat/linux.MaxOpenDirectories` | 32 | artifact | global | static, a path each | `ENFILE` | `DIAG linux-tables` `directories` |
+| `kernel/compat/linux.MaxEventCounters` | 64 | artifact | global | static | `ENFILE` | `DIAG linux-tables` `eventfds` |
+| `kernel/compat/linux.MaxTerminals` | 8 | policy (one per session PID 1 serves) | global | static | launch refused | `DIAG linux-tables` `terminals` |
 | `kernel/compat/linux.MaxNetFamilies` | 16 | policy (follows `linuxsockd`) | global | static | `socket` fails, `ENFILE` | GLNXCTL2 `Families` |
 | `kernel/compat/linux.MaxSockets` | 512 | protocol (GLNXCTL2 index field) | family | readiness and snapshot pages of the pool | `ENFILE` | GLNXCTL2 `FamilySockets` |
 | `kernel/compat/linux.MaxSocketRequests` | 8 | artifact | family | static | caller waits for a slot | none |
@@ -267,7 +279,7 @@ defect to fix or to reclassify with a reason.
 
 Keys are under `system.net.` and documented in
 [configuration](../userspace/configuration.md). `net status` reads the UDP
-fields; `net tcp` reads `OpTCPStatus`.
+fields from `OpStatus` and the TCP fields from `OpTCPStatus`.
 
 | Bound | Default / max | Class | Owner | Memory | At exhaustion | Status |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -275,24 +287,25 @@ fields; `net tcp` reads `OpTCPStatus`.
 | `userspace/network.MaxTCPEndpointsPerSession` (`tcp.max-endpoints-per-session`) | 8 / 8 | policy | session | none | `Busy` | `OpTCPStatus` `TCPSessionEndpoints` |
 | `userspace/network.MaxTCPSessionQuota` | 512 | policy (PID 1 grant) | session | per-session tables sized to the grant | session refused | none |
 | `userspace/network.MaxTCPSessions` | 64 | policy | global | per owner | session refused | none |
-| `netd` `tcpSessionSlots` | 46 | artifact | `netd` | static | session refused | none |
+| `netd` `tcpSessionSlots` | 46 | policy (one `WaitAny` of 64 objects watches every session) | `netd` | static | session refused | `OpTCPStatus` `Capacity.TCPSessions`, `TCPSessionLimit` |
 | `userspace/network.MaxTCPListeners` | 256 | profile | global | index entry | `Busy` from `Listen` | `OpTCPStatus` `TCPListeners`; limit none |
-| `userspace/network.MaxTCPBacklog` (`tcp.listen-backlog`) | 128 / 4096 | policy | listener | children are endpoints | SYN dropped, `DropBacklog` | limit in `OpTCPStatus`; `DropBacklog` none |
+| `userspace/network.MaxTCPBacklog` (`tcp.listen-backlog`) | 128 / 4096 | policy | listener | children are endpoints | SYN dropped, `DropBacklog` | limit and `Capacity.DropBacklog` in `OpTCPStatus` |
 | `userspace/network.MaxTCPBuffer` (`tcp.send-buffer-bytes`, `tcp.recv-buffer-bytes`) | 256 KiB / 4 MiB | profile | connection | ring from 4 KiB, doubling | write `Busy`, window closes | limits in `OpTCPStatus` |
-| `userspace/network.MaxTCPMemoryBudget` (`tcp.memory-bytes`) | 40 MiB / 48 MiB | profile | global | the budget is the cost | `Busy`, SYN dropped, `DropMemory` | none |
-| `tcp.memory-bytes-per-session` | 32 MiB / 48 MiB | policy | session | inside the global budget | as above | none |
-| TIME_WAIT tombstones (`SetTCPTimeWaitBudget`) | 8192, 2048 per owner | profile | global, owner | 56 B each | endpoint kept, then `Busy` | none |
+| `userspace/network.MaxTCPMemoryBudget` (`tcp.memory-bytes`) | 40 MiB / 48 MiB | profile | global | the budget is the cost | `Busy`, SYN dropped, `DropMemory` | `OpTCPStatus` `Capacity.MemoryBytes`, `MemoryBudget`, `DropMemory`, `MemoryCapped` |
+| `tcp.memory-bytes-per-session` | 32 MiB / 48 MiB | policy | session | inside the global budget | as above | `OpTCPStatus` `Capacity.OwnerMemoryBudget` |
+| TIME_WAIT tombstones (`SetTCPTimeWaitBudget`) | 8192, 2048 per owner | profile | global, owner | 56 B each | endpoint kept, then `Busy` | `OpTCPStatus` `Capacity.TimeWait`, both budgets, `TimeWaitHeld` |
 | `userspace/network.MaxUDPEndpoints` (`udp.max-endpoints`) | 1024 / 4096 | profile | global | per endpoint plus receive queue | `Busy` | `net status` `UDPEndpoints`, `UDPMaxEndpoints` |
 | `userspace/network.MaxUDPSessionEndpoints` (`udp.max-endpoints-per-session`) | 8 / 8 | policy | session | none | `Busy` | `net status` `UDPSessionEndpoints` |
 | `userspace/network.MaxUDPSessionQuota` | 512 | policy | session | none | session refused | none |
-| `userspace/network.MaxUDPSessions` | 8 | profile | global | static | session refused | none |
-| `userspace/network.MaxSessions` | 8 command sessions | profile | global | static | session refused | none |
+| `userspace/network.MaxUDPSessions` | 8 | profile | global | static | session refused | `OpTCPStatus` `Capacity.UDPSessions`, `UDPSessionLimit` |
+| `userspace/network.MaxSessions` | 8 command sessions | profile | global | static | session refused | `OpTCPStatus` `Capacity.CommandSessions`, `CommandSessionLimit` |
 | `userspace/network.MaxNeighbors`, `userspace/network.MaxResolutions` | 16, 4 | profile | global | static | the entry closest to expiry is replaced; a resolution waits | none |
 | `userspace/network.MaxDNSServers` | 4 | protocol (lease option kept) | n/a | n/a | extra servers ignored | `net status` servers |
 | `userspace/network.MaxEchoTimeout`, `userspace/netapi.MaxEchoTimeoutMS` | 5 s | policy | n/a | n/a | refused | n/a |
 | `userspace/network.MaxFrame`, `userspace/netdev.MaxFrame` | 1514 | protocol (Ethernet) | n/a | n/a | frame dropped | n/a |
 | `userspace/network.MaxPrefix`, `userspace/network.MaxIPv4Text`, `userspace/network.MaxMACText`, `userspace/netapi.MaxPrefix` | 30, 15, 17, 32 | protocol | n/a | n/a | refused | n/a |
 | `userspace/netapi.MaxServers` | 4 | protocol (status reply) | n/a | n/a | n/a | n/a |
+| GNETAPI1 reply | 256 bytes, version 8 | protocol (`ipc.MaxPayload`) | n/a | n/a | n/a | n/a |
 | `userspace/netapi.MaxSessionQuota` | 512 | protocol (16-bit control field, version 7) | n/a | n/a | refused | n/a |
 | `userspace/netdev.MaxQueueSize` | 1024 | hardware (virtio queue) | driver | queue pages | device refused | none |
 | `userspace/netdev.MaxFaultReason` | enum bound | protocol | n/a | n/a | n/a | n/a |
@@ -315,7 +328,7 @@ fields; `net tcp` reads `OpTCPStatus`.
 | family quota (`DefaultFamilySockets`) / `userspace/linuxsockapi.MaxSockets` | 512 / 512 | policy; protocol ceiling | family | pool pages per family | `ENFILE` | GLNXCTL2 `FamilyLimit`, `FamilySockets` |
 | `DefaultFamilyReserve` | 32 per family | policy | family | none | n/a | GLNXCTL2 `FamilyReserve` |
 | `userspace/linuxsock.MaxFamilies` | 16 | artifact | service | family table | family refused | GLNXCTL2 `Families` |
-| `userspace/linuxsock.MaxBacklog` | 128 | artifact | listener | none | Linux backlog clamped | none |
+| `userspace/linuxsock.MaxBacklog` | 255 | protocol (GTCP listen backlog byte) | listener | none | Linux backlog clamped; `netd` clamps again to `tcp.listen-backlog` | limit in `OpTCPStatus` `TCPListenBacklog` |
 | `userspace/linuxsock.MaxWarm` | 8 per protocol | profile | service | 8 endpoints of its native quota | opened on demand | none |
 | `userspace/linuxsockapi.MaxDatagram` | 4096 | protocol (GUDP) | n/a | n/a | `EMSGSIZE` | n/a |
 
@@ -368,8 +381,9 @@ fields; `net tcp` reads `OpTCPStatus`.
 
 | Bound | Default / max | Class | Owner | Memory | At exhaustion | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| `userspace/logpersist.MaxSegmentBytes` (`system.log.segment-bytes`) | 16 MiB / 1 GiB | profile | `logd` | disk | rotation | `logd` `counters` record (`rotations`) |
-| `userspace/logpersist.MaxSegments` (`system.log.segments`) | 4 / 9 | profile (one-digit names) | `logd` | disk | oldest segment removed | none |
+| `userspace/logpersist.MaxSegmentBytes` (`system.log.segment-bytes`) | 16 MiB / 1 GiB | profile | `logd` | disk | rotation | `log status` `rotations`, `segment-bytes` |
+| `userspace/logpersist.MaxSegments` (`system.log.segments`) | 4 / 9 | profile (one-digit names) | `logd` | disk | oldest segment removed | `log status` `segments` |
+| `userspace/logpersist.MaxStatus` | 512 | protocol (eleven counters of at most 20 digits) | `logd` | static | n/a | n/a |
 
 ### Runtime and terminals
 

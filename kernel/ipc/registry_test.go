@@ -21,6 +21,9 @@ func TestRegistryCreatesUniqueBoundedChannels(t *testing.T) {
 	if channel, id, created := registry.Create(7); created || channel != nil || id != 0 {
 		t.Fatal("registry exceeded its bound")
 	}
+	if count := registry.Count(); count != MaxChannels {
+		t.Fatalf("full registry counts %d", count)
+	}
 	if registry.Live(channelNamespace | 0xffff) {
 		t.Fatal("unknown channel resolved")
 	}
@@ -70,6 +73,9 @@ func TestRegistryReusesReleasedChannelSlot(t *testing.T) {
 	}
 	if registry.Live(id) {
 		t.Fatal("released channel still resolves")
+	}
+	if count := registry.Count(); count != 0 {
+		t.Fatalf("empty registry counts %d", count)
 	}
 	reused, reusedID, created := registry.Create(7)
 	if !created || reused == nil || reusedID == id {

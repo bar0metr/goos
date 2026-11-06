@@ -50,11 +50,14 @@ const (
 	// family RX slot under a read, and NativeWriteDepth writes for as many
 	// sockets as the native TX slots of both sessions can carry at once.
 	dataOps = MaxFamilies*linuxsockapi.RXSlots + 2*nativeTXSlots
-	// MaxBacklog is the native listen backlog limit, the stack's default
-	// listen-backlog; Linux backlogs are clamped to it, and the stack
-	// clamps again to the tuned value.
-	MaxBacklog = 128
+	// MaxBacklog is the widest backlog a GTCP listen request carries, one
+	// byte. A Linux backlog is clamped to it, and netd clamps again to
+	// system.net.tcp.listen-backlog, as Linux clamps to somaxconn.
+	MaxBacklog = 255
 )
+
+// MaxBacklog fits the GTCP listen request's backlog byte.
+var _ = uint8(MaxBacklog)
 
 // The status reply has an entry for every family.
 var _ [linuxsockapi.StatusFamilies - MaxFamilies]byte
