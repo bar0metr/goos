@@ -277,9 +277,11 @@ func kernelEnter() uint64 {
 	if atomic.LoadUint64(&cpuData[cpu][cpuKill]) != 0 {
 		return 0
 	}
-	schedulerLock.Lock()
-	runState.ForgetWake(cpu)
-	schedulerLock.Unlock()
+	if runState.WakeRecorded(cpu) {
+		schedulerLock.Lock()
+		runState.ForgetWake(cpu)
+		schedulerLock.Unlock()
+	}
 	noteKernelEntry()
 	return 1
 }

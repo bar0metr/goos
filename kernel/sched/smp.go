@@ -1,6 +1,9 @@
 package sched
 
-import "math/bits"
+import (
+	"math/bits"
+	"sync/atomic"
+)
 
 // MaxCPUs bounds the processors the scheduler runs on. Processor sets are
 // 64-bit masks indexed by processor, so the bound is one machine word. Task
@@ -212,6 +215,20 @@ func (core *Core) ForgetWake(cpu int) {
 	if slot := int(core.current[cpu]); slot != Idle {
 		core.wakePending.Remove(slot)
 	}
+}
+
+// WakeRecorded reports, without the scheduler lock, whether a wake is
+// recorded for the task cpu runs; cpu itself calls it. A false answer may
+// miss a wake another processor records at the same moment, and that wake
+// came after the call, the same as one recorded once ForgetWake let the
+// lock go. Every system call reads it, so the common entry, with no wake to
+// drop, takes no lock.
+func (core *Core) WakeRecorded(cpu int) bool {
+	slot := int(core.current[cpu])
+	if slot < 0 || slot >= MaxTasks {
+		return false
+	}
+	return atomic.LoadUint64(&core.wakePending[slot>>6])&(uint64(1)<<uint(slot&63)) != 0
 }
 
 // Block parks the task a processor runs unless a wake is pending for it. The
