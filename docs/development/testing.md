@@ -64,6 +64,10 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   [native concurrency audit](native-concurrency-audit.md);
   `make test-userspace-libs` runs the userspace libraries' concurrency tests,
   2, 4 and 8 goroutines each, under the race detector.
+- `make test-resource-policy` checks that every `Max*` constant or variable
+  under `kernel/` and `userspace/` has a row in the
+  [resource policy](../architecture/resource-policy.md) (ADR 0215).
+  `make test-unit` runs the same check.
 - `make test-integration` builds and validates the UEFI kernel artifact.
 - `make test-security` runs the capability, handle, IPC, VM, filesystem, and
   userspace security-focused host tests explicitly, and those of the

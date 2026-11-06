@@ -1441,3 +1441,11 @@ test-concurrency-audit:
 
 test-userspace-libs:
 	$(BUILD_ENV) go test -race -count=1 $(USERSPACE_LIB_PACKAGES)
+
+# Resource policy (docs/architecture/resource-policy.md, ADR 0215): every
+# Max* bound under kernel/ and userspace/ needs an inventory row. test-unit
+# runs the same check through go test ./...
+.PHONY: test-resource-policy
+test-resource-policy:
+	$(BUILD_ENV) go test -count=1 ./tools/resourcepolicy
+	$(BUILD_ENV) go run ./tools/resourcepolicy
