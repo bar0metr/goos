@@ -118,7 +118,7 @@ owner, which no session pays for.
 | listeners | 256 | | `Busy` from `Listen` |
 | listen backlog (`listen-backlog`) | 4096 | 128 | SYN dropped, `DropBacklog` |
 | send and receive buffer | 4 MiB | 256 KiB | write `Busy`, window closes |
-| ring memory | | 16 MiB, 8 MiB per owner | `Busy`, `DropMemory` |
+| ring memory (`memory-bytes`, `memory-bytes-per-session`) | 48 MiB | 40 MiB, 32 MiB per owner (16 and 8 before the revision below) | `Busy`, `DropMemory` |
 | TIME_WAIT tombstones | | 8192, 2048 per owner | endpoint kept, then `Busy` |
 
 `Listen` clamps a larger backlog to the tuned value, as Linux clamps to
@@ -204,3 +204,58 @@ nor the buffer share walks the registry. The receive pool allocates a
 4 KiB buffer when no free one is left and keeps it for reuse, up to 512
 buffers with 256 per owner; the old static pool held 128 with 64 per owner.
 An idle `netd` holds no UDP buffer memory.
+
+## Revision: progress under memory pressure
+
+**The stall.** `linuxsockd` owns every Linux socket through one session, so
+300 sockets share one owner budget. With 150 loopback pairs streaming
+32 KiB each, the early flows grew their rings to the 8 MiB owner budget
+and kept them. A client that had not written yet had no send ring, and
+`tcpSendRoom` offered it only what the budget had left: nothing. Its
+readiness lacked `Writable`, no segment or read would ever change that, and
+97 clients slept with empty send buffers. The budget charged the memory
+correctly; the stack let one connection's growth take another's minimum.
+
+**A paid minimum.** A handshake now charges its receive ring and a send
+floor of 4 KiB (`tcpSendFloor`, or the send buffer when smaller) before the
+send ring exists. Growth past the floor takes what the budgets leave, so a
+connection's minimum never waits for another connection's memory, and no
+readiness bit depends on the budgets: `Writable` clears only when the ring
+holds the send buffer or all it could grow to, and the peer's ACK sets it
+again. With no budget-dependent readiness, a released byte has no waiter
+to wake. A handshake whose minimum the budgets cannot pay is refused as
+before: `Busy` from `TCPConnect`, a dropped SYN at a listener, both counted
+in `DropMemory`. The client's SYN timer retries the drop.
+
+**Smaller windows, not stalls.** A loopback connection gets the 16 KiB
+receive ring only while the larger ring leaves at least half of the
+smaller budget; after that it starts at 4 KiB like a wire connection. An
+owner whose budget is twice its connections' floor admits all of them, and
+each stream then runs at 4 KiB windows. A drained send ring larger than the
+floor goes back to the budgets when they could not pay for another full
+send buffer. `TCPStats.MemoryCapped` counts ring growths the budgets cut
+short, and `TCPOwnerMemory` reports an owner's charged bytes and budget, so
+the pressure has a counter and an owner.
+
+**`linuxsockd` readiness.** The smaller windows exposed a hole in
+`linuxsockd`: a stream read that consumed every byte the service knew of
+left `MaskReadable` in its mask. Bytes that arrived later kept netd's mask
+unchanged, so a wait naming the stale mask never answered while the family
+had no RX slot for a parked read. The service now drops the readable bit
+and asks netd once the known bytes run out.
+
+**Defaults.** The budgets are `system.net.tcp.memory-bytes` (40 MiB) and
+`system.net.tcp.memory-bytes-per-session` (32 MiB), each 64 KiB to 48 MiB,
+the session budget at most the total. `netd` runs with the large resource
+profile, a 64 MiB page quota, so the largest budget and the garbage ring
+growth leaves for the collector fit beside the rest of the service. A
+connection costs 8 KiB at the floor and 20 KiB with a loopback starting
+ring. One session holds 512 loopback pairs, 1024 connections, at 20 KiB
+each in 20 MiB, or at the floor in 8 MiB, with the rest of its 32 MiB for
+growth.
+
+**Tests.** The 300-socket `linuxsockd` world streams 32 KiB per flow at the
+default budget and at 4 MiB with no idle clock step, retransmission or
+refusal. A network test streams 32 KiB each way over 300 loopback pairs at
+the defaults and at twice the floor without moving the clock, and another
+checks the refusals and their attribution.

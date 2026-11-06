@@ -95,8 +95,10 @@ func startNetwork(ticks uint64) {
 		capabilities = append(capabilities, supervisor.Capability{Name: "config", Handle: settings,
 			Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
+	// The large profile's 64 MiB page quota holds the TCP ring budget,
+	// network.MaxTCPMemoryBudget at most, beside the rest of netd (ADR 0213).
 	if manager.Register(supervisor.Definition{Name: netServiceName, Executable: supervisor.ServicePath(netServiceName, boot.Mode()),
-		Capabilities: capabilities, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
+		Capabilities: capabilities, Restart: supervisor.RestartOnFailure, Profile: supervisor.ProfileLarge}) != supervisor.StatusOK {
 		syslog.Warn("network service registration failed")
 		closePair(control)
 		netControl = 0
