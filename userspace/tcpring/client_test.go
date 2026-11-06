@@ -183,3 +183,43 @@ func TestCloseDrainsQueuedWrites(t *testing.T) {
 		t.Fatalf("got %d of %d bytes", len(got), total)
 	}
 }
+
+// TestAcceptAheadKeepsChildrenComing accepts more children than one
+// OpAcceptAhead grants, on one session, as netbench4 does. netd stops after
+// the grant, so Accept has to ask again or it waits until the session dies.
+func TestAcceptAheadKeepsChildrenComing(t *testing.T) {
+	n := newNetd(t)
+	_, c := n.session()
+	listener, result := c.Listen(loopback, 7009, 8)
+	if result != tcpapi.ResultOK {
+		t.Fatalf("listen %d", result)
+	}
+	if result := listener.AcceptAhead(2); result != tcpapi.ResultOK {
+		t.Fatalf("accept ahead %d", result)
+	}
+	conns := make([]*Conn, 0, 20)
+	for index := 0; index < 10; index++ {
+		client, result := c.Dial(loopback, 7009, false)
+		if result != tcpapi.ResultOK {
+			t.Fatalf("dial %d: %d", index, result)
+		}
+		server, result := listener.Accept(true)
+		if result != tcpapi.ResultOK || server.RemotePort != client.LocalPort {
+			t.Fatalf("accept %d: %d", index, result)
+		}
+		for _, conn := range [...]*Conn{client, server} {
+			if result := conn.Close(); result != tcpapi.ResultOK {
+				t.Fatalf("close %d: %d", index, result)
+			}
+		}
+		conns = append(conns, client, server)
+	}
+	if !c.Settle() {
+		t.Fatal("settle")
+	}
+	for _, conn := range conns {
+		if !conn.Gone() {
+			t.Fatal("endpoint not released")
+		}
+	}
+}

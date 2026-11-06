@@ -69,6 +69,9 @@ type Conn struct {
 	id    uint32
 	// listener is the listening Conn of a child accepted ahead.
 	listener *Conn
+	// A listener's accepts ahead: want children kept coming, granted of
+	// them asked for and not arrived yet.
+	want, granted uint8
 	// offset is the stream offset of the next byte the client queues.
 	offset   uint32
 	inflight int
@@ -275,6 +278,9 @@ func (c *Client) received(e *tcpapi.Entry) bool {
 		}
 		child := &Conn{c: c, index: e.Index, id: e.Endpoint, listener: listener, Remote: e.Address, RemotePort: e.Port,
 			Local: e.Local, LocalPort: e.LocalPort}
+		if listener.granted != 0 {
+			listener.granted--
+		}
 		c.conns[e.Index] = child
 		c.accepts = append(c.accepts, child)
 		return true
@@ -411,13 +417,51 @@ func (c *Client) Listen(address [4]byte, port uint16, backlog uint8) (*Conn, tcp
 }
 
 // AcceptAhead lets netd accept up to count children of the listener
-// without a request each.
+// without a request each. netd stops after count children; Accept asks for
+// more once every child granted arrived, so the listener keeps count
+// children coming.
 func (l *Conn) AcceptAhead(count uint8) tcpapi.Result {
+	result := l.askAhead(count)
+	if result == tcpapi.ResultOK {
+		l.want = count
+	}
+	return result
+}
+
+func (l *Conn) askAhead(count uint8) tcpapi.Result {
 	var reply tcpapi.Reply
 	if !l.c.Call(&tcpapi.Request{Opcode: tcpapi.OpAcceptAhead, Endpoint: l.id, Backlog: count}, &reply) {
 		return tcpapi.ResultDown
 	}
+	if reply.Result == tcpapi.ResultOK {
+		l.granted = count
+	}
 	return reply.Result
+}
+
+// topUp asks netd to accept ahead again once every child it was granted
+// arrived and fewer than want wait for Accept. A refusal stops the
+// accepts ahead; only a broken session fails the caller.
+func (l *Conn) topUp() tcpapi.Result {
+	if l.want == 0 || l.granted != 0 || l.closing {
+		return tcpapi.ResultOK
+	}
+	waiting := uint8(0)
+	for _, child := range l.c.accepts {
+		if child.listener == l {
+			waiting++
+		}
+	}
+	if waiting >= l.want {
+		return tcpapi.ResultOK
+	}
+	if result := l.askAhead(l.want - waiting); result != tcpapi.ResultOK {
+		l.want = 0
+		if result == tcpapi.ResultDown {
+			return result
+		}
+	}
+	return tcpapi.ResultOK
 }
 
 // Accept returns the next child of the listener: one netd accepted ahead,
@@ -438,8 +482,14 @@ func (l *Conn) Accept(ahead bool) (*Conn, tcpapi.Result) {
 		for index, child := range c.accepts {
 			if child.listener == l {
 				c.accepts = append(c.accepts[:index], c.accepts[index+1:]...)
+				if result := l.topUp(); result != tcpapi.ResultOK {
+					return nil, result
+				}
 				return child, tcpapi.ResultOK
 			}
+		}
+		if result := l.topUp(); result != tcpapi.ResultOK {
+			return nil, result
 		}
 		if !c.Wait() {
 			return nil, tcpapi.ResultDown
