@@ -691,14 +691,18 @@ func (conn *Conn) Close() tcpapi.Result {
 	if conn.closing {
 		return tcpapi.ResultInvalidArgument
 	}
+	// netd may close the endpoint and publish EntryClosed before the client
+	// reads the reply: a doorbell queued ahead of the reply makes Call take
+	// the rings. The endpoint counts as closing from the request on.
+	conn.closing = true
 	var reply tcpapi.Reply
 	if !c.Call(&tcpapi.Request{Opcode: tcpapi.OpClose, Endpoint: conn.id}, &reply) {
 		return tcpapi.ResultDown
 	}
 	if reply.Result != tcpapi.ResultOK {
+		conn.closing = false
 		return reply.Result
 	}
-	conn.closing = true
 	for ; conn.count != 0; conn.count-- {
 		if !c.release(conn.pieces[conn.first].slot) {
 			return tcpapi.ResultDown

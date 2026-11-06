@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 
+	"goos/kernel/ipc"
 	"goos/userspace/tcpapi"
 )
 
@@ -221,6 +222,55 @@ func TestAcceptAheadKeepsChildrenComing(t *testing.T) {
 		if !conn.Gone() {
 			t.Fatal("endpoint not released")
 		}
+	}
+}
+
+// stepping is a session's transport whose every receive first lets netd
+// run a pass, as netd on another processor does while the client still
+// reads older messages.
+type stepping struct{ *wire }
+
+func (s stepping) Receive(wait bool, out *ipc.Message) (bool, bool) {
+	s.n.mu.Lock()
+	s.n.step()
+	s.n.mu.Unlock()
+	return s.wire.Receive(wait, out)
+}
+
+// TestCloseTakesEntryClosedBeforeItsReply closes an endpoint while a
+// doorbell waits ahead of the reply. netd closes the endpoint and publishes
+// EntryClosed before the client reads the reply; the doorbell makes Call
+// take the rings first, and the entry must find the endpoint closing.
+func TestCloseTakesEntryClosedBeforeItsReply(t *testing.T) {
+	n := newNetd(t)
+	w, _ := n.session()
+	c, ok := New(stepping{w}, w.tx, w.rx)
+	if !ok {
+		t.Fatal("client")
+	}
+	listener, result := c.Listen(loopback, 7011, 4)
+	if result != tcpapi.ResultOK || listener.AcceptAhead(1) != tcpapi.ResultOK {
+		t.Fatalf("listen %d", result)
+	}
+	client, result := c.Dial(loopback, 7011, false)
+	if result != tcpapi.ResultOK {
+		t.Fatalf("dial %d", result)
+	}
+	if _, result := listener.Accept(true); result != tcpapi.ResultOK {
+		t.Fatalf("accept %d", result)
+	}
+	var bell ipc.Message
+	if !tcpapi.EncodeDoorbell4(&bell) {
+		t.Fatal("doorbell")
+	}
+	n.mu.Lock()
+	w.inbox = append(w.inbox, bell)
+	n.mu.Unlock()
+	if result := client.Close(); result != tcpapi.ResultOK {
+		t.Fatalf("close %d: %s", result, c.Why())
+	}
+	if !c.Settle() || !client.Gone() {
+		t.Fatalf("closed endpoint not released: %s", c.Why())
 	}
 }
 
