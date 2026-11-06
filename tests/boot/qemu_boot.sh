@@ -371,9 +371,9 @@ long_name=$(awk 'BEGIN { for (i = 0; i < 255; i++) printf "n" }')
 too_long_name=$(awk 'BEGIN { for (i = 0; i < 1025; i++) printf "n" }')
 long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 ( await_ready "$log"
-  # Capture startup grants before the bounded kernel log ring overwrites them.
-  printf 'log\n'
-  sleep 1
+  # log prints every record the ring retains, a few hundred at boot; the
+  # next command waits until the listing ends.
+  send_after_done 'log' 'INFO  kernel\[0\]: kernel initialized'
   printf 'help\n'
   sleep 1
 	printf 'echo "hello structured world"\n'
@@ -679,8 +679,7 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'handles\n'
 	sleep 1
-	printf 'log\n'
-	sleep 1
+	send_after_done 'log' 'INFO  kernel\[0\]: kernel initialized'
 	printf 'write /persist/startup.txt "a startup block larger than the former 128-byte limit"\n'
 	sleep 2
 	printf 'cat /persist/startup.txt\n'
