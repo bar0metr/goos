@@ -536,3 +536,50 @@ A native accept once went unanswered, in round 3 at HZ 250 of an earlier
 run of the same tree, after the stream phase of `netbench`; the connect
 it waited for had finished. It did not recur in 66 later rounds or in 25
 runs under QEMU. The bench now takes `net endpoints` when a step fails.
+
+The same bench after TCP moved to GTCP 4 (ADR 0214), a release build at
+HZ 250 with one warm-up and five measured rounds (run 20261106T124643Z on
+14a523a3), against the medians at 4127a6c4 that another run of nine
+rounds took:
+
+| Measurement | Target | 4127a6c4 | 14a523a3 | Native |
+| --- | --- | --- | --- | --- |
+| TCP stream, 32 MiB | 258 MiB/s | 300 | 280 | 382 GTCP 4, 316 GTCP 3 |
+| TCP one-byte request and reply | 178 us | 213 | 220 | 77 us GTCP 3 |
+| TCP connect, accept and close | 245 us | 395 | 312 | 178 us GTCP 3 |
+| UDP 64-byte request and reply | 144 us | 285 | 228 | 74 us |
+| write to a `poll` waiter's return | 248 us | 222 | 173 | |
+
+Stream and `poll` meet their targets; request and reply, connect and UDP
+do not. The lab's runs spread by 10 to 15% from round to round: a run of
+4127a6c4 with the accept fix measured 225 and 240 us for TCP request and
+reply, 315 and 370 us for connect and 238 and 252 us for UDP.
+
+Four changes went in. `udpserve` walked its whole endpoint table, 512
+entries for linuxsockd's session, on every Deliver pass and every lookup;
+it now walks the entries in use. A loopback send answers the receive it filled before its own
+reply, so linuxsockd takes both on one wake. Every system call took the
+global scheduler lock to drop a recorded wake; it now reads the wake bit
+first and locks only when one is recorded, which the diagnostic build
+counted at 313 scheduler lock acquisitions and 35 contended ones per TCP
+request and reply round before. netd reads the clock once per lap instead
+of twice. An idle loop that polled for woken tasks for 50 us before it
+halted made every Linux metric slower on this host and was left out.
+
+`netprobe` gained `bench-connect` and `bench-udp`, and the diagnostic pass
+counts both and subtracts a baseline window, one launch with almost no
+socket work, so the per-round figures leave out the dumps and the launch.
+That pass puts the remaining cost in wakes and system calls. A TCP request
+and reply round costs about 16 context switches, 8 wakes, 8.6 Linux calls
+and 313 scheduler lock acquisitions, most of them native system call
+entries in linuxsockd and netd; a wake took 14 us from `WakeTask` to the
+task running on average. Both ends of the benchmark belong to one Linux family, whose lock
+every Linux call holds, and a ReadyChanged wakes every task of the family
+sleeping on the session channel: 4 to 5 contended acquisitions of the
+family lock per round. In a UDP round netd never waited: it spent 174 us
+of each 181 us round in its loop, 39 us of it in Deliver passes, on four
+requests and four replies. A socket call that waits for linuxsockd
+costs 80 to 100 us against 30 to 40 us for a native request to netd.
+Meeting the remaining targets needs fewer hops per round, such as waking
+only the family task whose socket changed and carrying UDP through shared
+rings as GTCP 4 does for TCP, or a cheaper kernel entry and wake.
