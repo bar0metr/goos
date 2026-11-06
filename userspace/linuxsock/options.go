@@ -99,6 +99,9 @@ func (s *Service) stepOption(o *op, sock *socket) {
 	if !s.usable(o, sock) {
 		return
 	}
+	if s.openFirst(o, sock) {
+		return
+	}
 	if sock.endpoint == 0 {
 		s.finish(o, linuxsockapi.ResultInvalidArgument)
 		return

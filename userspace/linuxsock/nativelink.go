@@ -1,9 +1,10 @@
 package linuxsock
 
-// NativeLink is the service's end of one native session, GTCP 3 or GUDP 2,
+// NativeLink is the service's end of one native session, GUDP 2 or GTCP 3,
 // without the channel and the mapping, which the platform owns: the codec,
 // the TX slots netd holds, and the RX slot releases a full queue held
-// back. cmd/linuxsockd drives it with the channel's send and receive.
+// back. cmd/linuxsockd drives it with the channel's send and receive for
+// UDP; its TCP session is GTCP 4 and goes through RingLink.
 
 import (
 	"goos/kernel/ipc"
@@ -220,53 +221,71 @@ func (l *NativeLink) rxLend(slot uint8) bool {
 }
 
 func (l *NativeLink) encodeTCP(r *NativeRequest, slot uint8, length int) SubmitStatus {
-	l.tcpRequest = tcpapi.Request{Endpoint: r.Endpoint}
+	if status := tcpRequest(r, &l.tcpRequest); status != SubmitAccepted {
+		return status
+	}
+	switch r.Op {
+	case NativeRead:
+		l.tcpRequest.Length = uint16(min(r.Length, l.layout.SlotSize))
+	case NativeWrite:
+		l.tcpRequest.Slot, l.tcpRequest.Length, l.tcpRequest.Offset = slot, uint16(length), r.Offset
+	case NativeOpenConnect:
+		return SubmitUnsupported
+	}
+	return SubmitAccepted
+}
+
+// tcpRequest builds the GTCP request of r, without the slot and length a
+// version 3 read or write carries.
+func tcpRequest(r *NativeRequest, out *tcpapi.Request) SubmitStatus {
+	*out = tcpapi.Request{Endpoint: r.Endpoint}
 	if r.Flags&NativeNoWait != 0 {
-		l.tcpRequest.Flags |= tcpapi.FlagNoWait
+		out.Flags |= tcpapi.FlagNoWait
 	}
 	if r.Flags&NativePeek != 0 {
-		l.tcpRequest.Flags |= tcpapi.FlagPeek
+		out.Flags |= tcpapi.FlagPeek
 	}
 	switch r.Op {
 	case NativeOpen:
-		l.tcpRequest.Opcode = tcpapi.OpOpen
+		out.Opcode = tcpapi.OpOpen
+	case NativeOpenConnect:
+		out.Opcode, out.Address, out.Port = tcpapi.OpOpenConnect, r.Address, r.Port
 	case NativeBind:
-		l.tcpRequest.Opcode, l.tcpRequest.Address, l.tcpRequest.Port = tcpapi.OpBind, r.Address, r.Port
+		out.Opcode, out.Address, out.Port = tcpapi.OpBind, r.Address, r.Port
 		if r.Flags&NativeReuseAddr != 0 {
-			l.tcpRequest.Flags = tcpapi.FlagReuseAddr
+			out.Flags = tcpapi.FlagReuseAddr
 		}
 	case NativeListen:
-		l.tcpRequest.Opcode, l.tcpRequest.Backlog = tcpapi.OpListen, uint8(min(r.Length, 255))
+		out.Opcode, out.Backlog = tcpapi.OpListen, uint8(min(r.Length, 255))
 	case NativeAccept:
-		l.tcpRequest.Opcode = tcpapi.OpAccept
+		out.Opcode = tcpapi.OpAccept
 	case NativeConnect:
-		l.tcpRequest.Opcode, l.tcpRequest.Address, l.tcpRequest.Port = tcpapi.OpConnect, r.Address, r.Port
+		out.Opcode, out.Address, out.Port = tcpapi.OpConnect, r.Address, r.Port
 	case NativeRead:
-		l.tcpRequest.Opcode, l.tcpRequest.Length = tcpapi.OpRead, uint16(min(r.Length, l.layout.SlotSize))
+		out.Opcode = tcpapi.OpRead
 	case NativeWrite:
-		l.tcpRequest.Opcode, l.tcpRequest.Slot, l.tcpRequest.Length = tcpapi.OpWrite, slot, uint16(length)
-		l.tcpRequest.Offset = r.Offset
+		out.Opcode = tcpapi.OpWrite
 	case NativeShutdownWrite:
-		l.tcpRequest.Opcode = tcpapi.OpShutdownWrite
+		out.Opcode = tcpapi.OpShutdownWrite
 	case NativeClose:
-		l.tcpRequest.Opcode = tcpapi.OpClose
+		out.Opcode = tcpapi.OpClose
 	case NativeReady:
-		l.tcpRequest.Opcode = tcpapi.OpReady
+		out.Opcode = tcpapi.OpReady
 	case NativeWaitReady:
-		l.tcpRequest.Opcode, l.tcpRequest.Mask = tcpapi.OpWaitReady, tcpMask(r.Mask)
+		out.Opcode, out.Mask = tcpapi.OpWaitReady, tcpMask(r.Mask)
 	case NativeError:
-		l.tcpRequest.Opcode = tcpapi.OpError
+		out.Opcode = tcpapi.OpError
 	case NativeOption:
-		l.tcpRequest.Opcode = tcpapi.OpOption
+		out.Opcode = tcpapi.OpOption
 		switch r.Option {
 		case OptionMSS:
-			l.tcpRequest.Option = tcpapi.OptionSendMSS
+			out.Option = tcpapi.OptionSendMSS
 		case OptionSendBuffer:
-			l.tcpRequest.Option = tcpapi.OptionSendBuffer
+			out.Option = tcpapi.OptionSendBuffer
 		case OptionReceiveBuffer:
-			l.tcpRequest.Option = tcpapi.OptionReceiveBuffer
+			out.Option = tcpapi.OptionReceiveBuffer
 		case OptionTTL:
-			l.tcpRequest.Option = tcpapi.OptionTTL
+			out.Option = tcpapi.OptionTTL
 		default:
 			return SubmitUnsupported
 		}
@@ -455,22 +474,10 @@ func (l *NativeLink) completeTCP() (uint64, bool) {
 	if !ok {
 		return 0, false
 	}
-	l.completion = NativeCompletion{Result: tcpResult(l.tcpReply.Result), Endpoint: l.tcpReply.Endpoint}
 	r := &l.tcpReply
+	tcpCompletion(r, &l.completion)
 	switch r.Opcode {
-	case tcpapi.OpOpen:
-		l.completion.Op = NativeOpen
-	case tcpapi.OpBind:
-		l.completion.Op, l.completion.Local, l.completion.LocalPort = NativeBind, r.Address, r.Port
-	case tcpapi.OpListen:
-		l.completion.Op = NativeListen
-	case tcpapi.OpAccept:
-		l.completion.Op, l.completion.Address, l.completion.Port = NativeAccept, r.Address, r.Port
-		l.completion.Local, l.completion.LocalPort = r.Local, r.LocalPort
-	case tcpapi.OpConnect:
-		l.completion.Op, l.completion.Local, l.completion.LocalPort = NativeConnect, r.Local, r.LocalPort
 	case tcpapi.OpRead:
-		l.completion.Op = NativeRead
 		if r.Result == tcpapi.ResultOK {
 			if !l.rxLend(r.Slot) {
 				return 0, false
@@ -479,26 +486,51 @@ func (l *NativeLink) completeTCP() (uint64, bool) {
 			l.completion.Data = l.rx[offset : offset+uint64(r.Length)]
 		}
 	case tcpapi.OpWrite:
-		l.completion.Op, l.completion.Length = NativeWrite, uint32(r.Length)
+		l.completion.Length = uint32(r.Length)
 		if !l.txLent.Return(r.Slot) {
 			return 0, false
 		}
-	case tcpapi.OpShutdownWrite:
-		l.completion.Op = NativeShutdownWrite
-	case tcpapi.OpClose:
-		l.completion.Op = NativeClose
-	case tcpapi.OpReady, tcpapi.OpWaitReady:
-		l.completion.Op = NativeReady
-		if r.Opcode == tcpapi.OpWaitReady {
-			l.completion.Op = NativeWaitReady
-		}
-		l.completion.Mask, l.completion.Readable = coreTCPMask(r.Mask), r.Value
-	case tcpapi.OpError:
-		l.completion.Op, l.completion.Value = NativeError, uint32(tcpResult(r.Error))
-	case tcpapi.OpOption:
-		l.completion.Op, l.completion.Value = NativeOption, r.Value
 	}
 	return correlation, true
+}
+
+// tcpCompletion fills c from a GTCP reply, except a version 3 read's data
+// and a write's slot.
+func tcpCompletion(r *tcpapi.Reply, c *NativeCompletion) {
+	*c = NativeCompletion{Result: tcpResult(r.Result), Endpoint: r.Endpoint}
+	switch r.Opcode {
+	case tcpapi.OpOpen:
+		c.Op = NativeOpen
+	case tcpapi.OpOpenConnect:
+		c.Op, c.Address, c.Port, c.Local, c.LocalPort = NativeOpenConnect, r.Address, r.Port, r.Local, r.LocalPort
+	case tcpapi.OpBind:
+		c.Op, c.Local, c.LocalPort = NativeBind, r.Address, r.Port
+	case tcpapi.OpListen:
+		c.Op = NativeListen
+	case tcpapi.OpAccept:
+		c.Op, c.Address, c.Port = NativeAccept, r.Address, r.Port
+		c.Local, c.LocalPort = r.Local, r.LocalPort
+	case tcpapi.OpConnect:
+		c.Op, c.Local, c.LocalPort = NativeConnect, r.Local, r.LocalPort
+	case tcpapi.OpRead:
+		c.Op = NativeRead
+	case tcpapi.OpWrite:
+		c.Op = NativeWrite
+	case tcpapi.OpShutdownWrite:
+		c.Op = NativeShutdownWrite
+	case tcpapi.OpClose:
+		c.Op = NativeClose
+	case tcpapi.OpReady, tcpapi.OpWaitReady:
+		c.Op = NativeReady
+		if r.Opcode == tcpapi.OpWaitReady {
+			c.Op = NativeWaitReady
+		}
+		c.Mask, c.Readable = coreTCPMask(r.Mask), r.Value
+	case tcpapi.OpError:
+		c.Op, c.Value = NativeError, uint32(tcpResult(r.Error))
+	case tcpapi.OpOption:
+		c.Op, c.Value = NativeOption, r.Value
+	}
 }
 
 // completeUDP turns a GUDP 2 reply into l.completion.

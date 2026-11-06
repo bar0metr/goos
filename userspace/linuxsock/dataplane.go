@@ -7,28 +7,29 @@ import "goos/userspace/linuxsockapi"
 //
 // TX. The kernel commits TX slots on the submit ring; drainSubmit queues
 // each on its socket in ring order. A stream's queue goes to netd in
-// pipelined NoWait writes of at most NativeSlotSize bytes, NativeWriteDepth
-// at a time, each naming the stream offset of its first byte; netd takes a
-// write only at the offset it reached, so a write after one that took a
-// prefix takes nothing and the queue sends again from the first byte netd
-// did not take. A slot goes back on the complete ring once netd took all of
-// it. A datagram slot is one datagram and goes back once netd answered it.
+// pipelined writes of at most NativeSlotSize bytes, NativeWriteDepth at a
+// time. On GTCP 4 (RingLink) each write is a TX ring entry that netd hands
+// back once the stack took every byte. On a GTCP 3 link each is a NoWait
+// request naming the stream offset of its first byte; netd takes a write
+// only at the offset it reached, so a write after one that took a prefix
+// takes nothing and the queue sends again from the first byte netd did not
+// take. A slot goes back on the complete ring once netd took all of it. A datagram slot is one datagram and goes back once netd answered it.
 // A transport error drops the queue, hands every slot back and becomes the
 // socket's pending error: those bytes were reported written already.
 //
 // RX. While a socket can receive, the core keeps native reads parked in
-// netd, each into an RX slot it reserved, leaving linuxsockapi.RXReserve
+// netd (on GTCP 4, credit for one fill each), each into an RX slot it
+// reserved, leaving linuxsockapi.RXReserve
 // slots free for a read the kernel asks for. A read that netd answers fills
 // its slot, which goes on the complete ring for the kernel; the kernel
 // hands it back once a Linux read consumed all of it.
 
 const (
 	// NativeSlotSize is the most one native write or read carries: the
-	// GTCP 3 slot of linuxsockd's session.
+	// slot of linuxsockd's TCP session.
 	NativeSlotSize = NativeStreamSlot
 	// NativeWriteDepth bounds a stream's writes in netd at once, and
-	// NativeReadDepth its reads parked there: GTCP 3 accepts pipelined
-	// writes with offsets and queues that many reads per endpoint.
+	// NativeReadDepth its reads parked there.
 	NativeWriteDepth = NativePipelinedWrites
 	NativeReadDepth  = NativeQueuedReads
 	// datagramWriteDepth bounds a datagram socket's sends in netd at once.
@@ -214,6 +215,7 @@ func (s *Service) kick(global int) {
 		s.sendDatagrams(global)
 	}
 	s.readAhead(global)
+	s.wakeUp(global)
 	s.acceptAhead(global)
 	if sock.shutQueued && sock.txqLen == 0 && sock.writesOut == 0 {
 		s.shutdownLater(global)

@@ -408,6 +408,35 @@ static libc resolves names with ordinary socket traffic.
   `netd` grants `linuxsockd` 512 endpoints per protocol (ADR 0213), and
   TCP and UDP sockets both reach that grant.
 
+- `linuxsockd`'s TCP session moved to GTCP 4 (ADR 0214); PID 1 opens it
+  with `tcpapi.Layout4` and the 512-endpoint quota. `linuxsock.RingLink`
+  maps the core's native operations onto the rings. A write copies the
+  family TX slot into a GTCP 4 TX slot and publishes `EntryWrite`; the
+  family slot goes back on `EntryWriteDone`. A read posts one fill of
+  credit, and `EntryData` fills the family RX slot before the link releases
+  the GTCP 4 slot. Waits and readiness queries answer from netd's readiness
+  page. A wait goes to netd only while a connect runs, or when the core
+  marks it `NativeWake`: a stream with no read posted whose bytes the
+  kernel does not hold, which learns of new bytes only through the wait. A
+  stream socket opens its endpoint when a request first needs one, so a
+  connect is one `OpOpenConnect`, and the warm pool keeps UDP endpoints
+  only. A listener has netd accept up to four children ahead
+  (`OpAcceptAhead`); `accept` takes them off the RX ring without a request.
+  Close hands the endpoint to netd, which still sends the queued slots; the
+  link gives closed endpoints up in batched `EntryForget`s. Before it
+  sleeps, `linuxsockd` takes the rings, arms its doorbell and checks them
+  once more; it waits on the TCP channel in the same WaitAny as the family
+  channels. UDP keeps GUDP 2 through `NativeLink`.
+
+  The world tests (`userspace/linuxsock/world*_test.go`) run the core and
+  the link against `tcpserve.Session4` and the real stack, each side
+  sleeping after every exchange. A steady 1 MiB stream costs no channel
+  request or reply, and 57 doorbells, 3.6 per 64 KiB; GTCP 3 costs 24
+  channel messages per 64 KiB in `tcpring`'s comparison. 150 loopback
+  connections (300 sockets) cost one `OpOpenConnect`, about one probe and
+  four waits each: one for the connect, the rest for sockets that found no
+  family RX slot free.
+
 ## Validation
 
 `make test-linux-network` passes 80 checks under QEMU: all 16 `netprobe`

@@ -45,6 +45,10 @@ func (s *Service) SetWarm(target int) {
 // refill opens endpoints until the pool reaches its target.
 func (s *Service) refill(proto Proto) {
 	w := &s.warm[proto]
+	if proto == TCP && s.streamRing {
+		// A stream socket opens its endpoint when it binds or connects.
+		return
+	}
 	for w.count+w.opening < w.target && !w.full && s.backends[proto].up {
 		o := s.newOp(-1, kindWarm)
 		if o == nil {

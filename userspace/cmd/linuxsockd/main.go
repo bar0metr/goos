@@ -75,16 +75,25 @@ func userspaceMain() {
 		fatal("LINUXSOCKD_CONTROL_MISSING\n")
 	}
 	core.Init(backend{}, transport{})
+	core.SetStreamRing(true)
 	core.SetWarm(linuxsock.MaxWarm)
-	core.SetLinkView(&links[linuxsock.TCP].state)
+	core.SetLinkView(&tcpRing)
 	mark("LINUXSOCKD_STARTED_OK\n")
 	serve()
 }
 
 func serve() {
 	for {
+		// The rings first: whatever the TCP session published must be taken
+		// before linuxsockd sleeps, and its doorbell armed.
+		timeout := kcall.WaitAnyInfiniteTimeout
+		if settleRing() {
+			// Release entries wait for ring room; netd says nothing when it
+			// takes entries, so come back after a tick.
+			timeout = 1
+		}
 		count := buildInterests()
-		result, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout)
+		result, status := userwait.Any(&interests, count, timeout)
 		if status == kcall.StatusTimeout {
 			continue
 		}
