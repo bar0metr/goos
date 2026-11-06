@@ -108,6 +108,25 @@ grants (512 at most), and the ring and tombstone budgets, which bound what
 the live connections may take. As with the kernel registries, memory in use
 is what is live, and the limits are decisions about how much may be.
 
+**Revision: 256 processes.** `process.MaxProcesses` now equals
+`sched.MaxTasks`, 256. The static Linux state that held it at 64 is gone: a
+`linux.ProcessState` is 7136 bytes (two pages) and a family's VFS context one
+page, its waiter queue now sized for every task rather than one per process.
+Both sit in tables of pointers (`linux.lazyTable`) and take their pages the
+first time a slot is used. A slot keeps its pages for the next process, as
+process records do: kernel code holds a state pointer past the lock it found
+it under, and the per-task caller cache is one such holder, so a freed page
+could be read after another owner took it. Pages track the most Linux
+processes that ever ran at once, not the bound. `MaxExitEvents` and
+`executable.MaxObjects` follow at 256, and the registry's count and ring
+cursor are 16-bit. The kernel image's memory went from 4,380 KiB to
+3,940 KiB, its data and BSS from 3,368 KiB to 2,940 KiB: the process states
+alone were 446 KiB.
+
+Linux processes may hold 224 of the slots (`NativeProcessReserve` is 32) and
+one family 64. `NativeTaskReserve` equals the process reserve, so each
+process the reserve keeps for native code still finds a task.
+
 ## Alternatives
 
 - **Larger static arrays.** 256 channels would be 2.7 MiB of kernel memory

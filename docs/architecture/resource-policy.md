@@ -58,7 +58,8 @@ below without a rebuild.
 
 | Requirement | Provided by | Holds |
 | --- | --- | --- |
-| 256 task slots | `kernel/sched.MaxTasks` = 256 | Yes for slots. No for use: 64 processes (`process.MaxProcesses`), 16 thread slots per process (`kcall.ThreadSlots`) and task quotas of 1, 4 and 8 per launch profile leave a process at most 8 tasks. |
+| 256 task slots | `kernel/sched.MaxTasks` = 256 | Yes. `process.MaxProcesses` is 256 and Linux programs may hold 224 of them, 64 per family. |
+| 64 threads in one process | `kcall.ThreadSlots` = 64; large profile task quota 64 (normal 16, tiny 1) | Yes for a large process: each thread past the first holds six pages of its page quota, 378 of 16384 for 64. A Go program pays for the per-thread runtime records of the slots it runs, not for 64. |
 | 1024 Linux descriptors per process | `RLIMIT_NOFILE` soft 1024, hard `linux.LinuxFDCeiling` 4096 (ADR 0212) | Per table, yes. The system pool `linux.MaxOpenDescriptions` (4096) is shared by every family, so four processes at their soft limit fill it. Regular files also need a VFS slot: `vfs.MaxOpenPerOwner` (64) per session and `vfs.MaxOpenFiles` (256) in all. Directories share 32 slots system-wide. |
 | 256 concurrent TCP connections | `system.net.tcp.max-endpoints` 1024 (ceiling 4096); `netapi.MaxSessionQuota` 512 granted to `linuxsockd`; `linuxsock` family quota 512, service quota 1024; `system.net.tcp.memory-bytes` 40 MiB at 8 KiB per handshake | Yes for Linux programs and for a native session PID 1 grants 512. An ordinary native session gets 8 by policy. `netd` serves at most 46 TCP sessions (see gaps). |
 | Listen backlog of at least 128 | `system.net.tcp.listen-backlog` 128 (ceiling 4096); `linuxsock.MaxBacklog` 128 | Yes. A Linux listener cannot go past 128 even when the key is raised: `linuxsock.MaxBacklog` is a constant. |
@@ -69,13 +70,13 @@ below without a rebuild.
 
 ### Gaps against the profile
 
-1. **Threads per process.** `kcall.ThreadSlots` is 16 and the launch task
-   quotas are 1 (tiny), 4 (normal), 8 (large) and 8 for PID 1. A Go or
-   Linux program that wants 64 threads gets 8 at most. Fixing it needs a
-   larger thread area and a profile with a task quota of 64.
-2. **Processes.** `process.MaxProcesses` is 64, fixed by a static Linux
-   record of several KiB per process. Linux programs get 48 of them, 16 per
-   family. The scheduler has 256 slots that processes cannot use.
+1. **Threads per process.** Closed: 64 thread slots, a large-profile task
+   quota of 64 charged in pages, and runtime records paid by the slots in
+   use (ADR 0203, ADR 0122). Programs PID 1 launches with the normal
+   profile still stop at 16 threads.
+2. **Processes.** Closed: `process.MaxProcesses` is 256 and the Linux
+   per-process state takes pages on first use (ADR 0111). A slot keeps its
+   pages after its process ends, so memory follows the peak process count.
 3. **TCP sessions in `netd`.** One `WaitAny` names 64 objects; the driver,
    the control channel, eight command sessions and eight UDP sessions take
    18, which leaves 46 TCP sessions (`netd` `tcpSessionSlots`). The stack keeps
@@ -101,12 +102,6 @@ defect to fix or to reclassify with a reason.
 
 | Bound | Value | Why it is an artifact |
 | --- | --- | --- |
-| `kernel/process.MaxProcesses` | 64 | Static Linux process records; the scheduler has 256 slots. |
-| `kernel/process.MaxExitEvents` | 64 | Follows `MaxProcesses`. |
-| `kernel/process.MaxTasksPerProcess` | 64 | Fixed task table in the process record; quotas bind first today. |
-| `kcall.ThreadSlots` | 16 | Fixed thread stack layout under `ThreadAreaTop`. |
-| `kernel/kcall.MaxThreadSnapshots` | 15 | Follows `ThreadSlots`. |
-| `kernel/executable.MaxObjects` | 64 | One per process slot. |
 | `kernel/mm/region.MaxRegions` | 128 | Fixed region table per process; Linux allows 65530 maps. |
 | `kernel/cpu.MaxCPUs`, `kernel/sched.MaxCPUs`, `kernel/arch/amd64.MaxCPUs` | 64 | One 64-bit mask per processor set. |
 | `kernel/sched.MaxKernelTasks` | 64 | One-word mask in `Bootstrap`. |
@@ -135,7 +130,7 @@ defect to fix or to reclassify with a reason.
 | Channels, streams, shared memory, executables | registry occupancy | `SystemInfo` or a table-use call |
 | VFS open files | `MaxOpenFiles`, per-owner counts | VFS service status |
 | Linux open descriptions, directories, eventfds, terminals | pool occupancy | a Linux table-use call |
-| Linux processes | live count, 48 and 16 per family | a Linux table-use call |
+| Linux processes | live count, 224 and 64 per family | a Linux table-use call |
 | TCP memory | `TCPStats.MemoryBytes`, both budgets | `OpTCPStatus` |
 | TCP TIME_WAIT | `TCPStats.TimeWait`, `TimeWaitHeld`, budgets 8192 and 2048 | `OpTCPStatus` |
 | TCP drops | `DropMemory`, `DropBacklog`, `MemoryCapped` | `OpTCPStatus` |
@@ -153,19 +148,21 @@ defect to fix or to reclassify with a reason.
 | `kernel/sched.MaxTasks` | 256 | profile (build constant) | global | static per-slot contexts, roots and FPU areas; assembly `GOOS_MAX_TASKS` | `StatusResourceExhausted` | none |
 | `kernel/sched.MaxKernelTasks` | 64 | artifact | kernel | one word | boot panic | none |
 | `kernel/sched.MaxCPUs` | 64 | artifact | global | one word per set | extra processors stay offline | `CPUInfo` count |
-| `kernel/process.MaxProcesses` | 64 | artifact | global | process record pages on first use; Linux record several KiB, static | `LaunchResourceExhausted` | `SystemInfo` process count; limit none |
-| `kernel/process.MaxExitEvents` | 64 | artifact | PID 1 | static | follows `MaxProcesses` | none |
-| `kernel/process.MaxTasksPerProcess` | 64 | artifact | process | in the process record | `StatusResourceExhausted` | `ProcessInfo` task count |
+| `kernel/process.MaxProcesses` | 256 (`sched.MaxTasks`) | profile (build constant, ADR 0111) | global | a 16 KiB process record on a slot's first use; a Linux process adds a two-page state and its family a one-page VFS context on first use; a slot keeps its pages for reuse; 8 B per slot static | `LaunchResourceExhausted`; Linux `EAGAIN` | `SystemInfo` process count; limit none |
+| `kernel/process.MaxExitEvents` | 256 | profile (follows `MaxProcesses`) | PID 1 | 24 B each, static | oldest report overwritten | none |
+| `kernel/process.MaxTasksPerProcess` | 64 | policy (the large profile's task quota) | process | 8 B a task in the process record | `StatusResourceExhausted`; Linux `EAGAIN` | `ProcessInfo` task count |
+| `kernel/process.TaskPages` | 6 pages | hardware (kernel stack and guard, `amd64.TaskStackPages`) | process page quota, per task past the first | the stack | `StatusResourceExhausted`; Linux `EAGAIN` | `ProcessInfo` pages |
 | `kernel/process.MaxWaiters` | 256 | protocol (one per task slot) | global | static | cannot fill | n/a |
 | Launch quota, tiny | 2 channels, 8 streams, 1 task, 2048 pages | policy (ADR 0122) | process | counters | `StatusResourceExhausted` | `ProcessInfo` used and limits (`quota`, `ps`) |
-| Launch quota, normal | 4, 16, 4, 8192 pages | policy | process | counters | `StatusResourceExhausted` | `ProcessInfo` |
-| Launch quota, large | 8, 32, 8, 16384 pages (64 MiB) | policy | process | counters | `StatusResourceExhausted` | `ProcessInfo` |
-| PID 1 quota | 256 channels, 64 streams, 8 tasks, 16384 pages | policy (ADR 0072) | PID 1 | counters | `StatusResourceExhausted` | `ProcessInfo` |
-| `kcall.ThreadSlots` | 16 | artifact | process | 576 KiB address space per slot, pages on touch | `StatusResourceExhausted` from thread create | none |
-| `kernel/kcall.MaxThreadSnapshots` | 15 | artifact | process | 416 B per snapshot | n/a | n/a |
+| Launch quota, normal | 4, 16, 16 tasks, 8192 pages | policy | process | counters; each task past the first holds `TaskPages` | `StatusResourceExhausted` | `ProcessInfo` |
+| Launch quota, large | 8, 32, 64 tasks, 16384 pages (64 MiB) | policy (ADR 0122) | process | counters; 64 tasks hold 378 pages | `StatusResourceExhausted`; Linux `EAGAIN` | `ProcessInfo` |
+| PID 1 quota | 256 channels, 64 streams, 16 tasks, 16384 pages | policy (ADR 0072) | PID 1 | counters | `StatusResourceExhausted` | `ProcessInfo` |
+| `kcall.ThreadSlots` | 64 | protocol (thread-area layout, ADR 0203) | process | 576 KiB address space per slot, pages on touch; runtime records of slots past 0 in demand-zero reservations, paid by the slots that run | `StatusResourceExhausted` from thread create | none |
+| `kernel/kcall.MaxThreadSnapshots` | 63 | protocol (follows `ThreadSlots`) | process | 416 B per held thread, in a reservation | n/a | n/a |
 | `kernel/kcall.MaxPreemptTicks` | 1000 | policy | task | n/a | value refused | n/a |
-| `linux.NativeProcessReserve`, `LinuxGlobalMaxProcesses`, `LinuxFamilyMaxProcesses` | 16, 48, 16 | policy | global, family | static | `EAGAIN` from `fork`/`clone` | none |
-| `linux.NativeTaskReserve` | 16 | policy | global | none | `EAGAIN` | none |
+| `linux.NativeProcessReserve`, `LinuxGlobalMaxProcesses`, `LinuxFamilyMaxProcesses` | 32, 224, 64 | policy | global, family | process states and VFS contexts on first use (see `MaxProcesses`) | `EAGAIN` from `fork`/`clone` | none |
+| `linux.NativeTaskReserve` | 32 (`NativeProcessReserve`) | policy | global | none | `EAGAIN` | none |
+| `RLIMIT_NPROC` | unlimited | policy | n/a | n/a | not enforced; the task quota, family limit and task reserve answer `EAGAIN` | `getrlimit` |
 
 ### IPC, streams, handles, waits, shared memory
 
@@ -177,7 +174,7 @@ defect to fix or to reclassify with a reason.
 | `ipc.QueueCapacity` | 16 messages | profile | channel | in the channel page | sender waits or `StatusResourceExhausted` | none |
 | `kernel/ipc.MaxWaiters` | 256 | protocol (one per task) | global | static | cannot fill | n/a |
 | `kernel/stream.MaxStreams` | 256 | profile (build constant) | global; creator charged | a page per live stream | `StatusResourceExhausted` | per process `ProcessInfo`; global none |
-| `kernel/stream.MaxReferences` | 65535 | protocol (counter width) | stream | n/a | refused before wrap | n/a |
+| `kernel/stream.MaxReferences` | 65535 | protocol (counter width) | stream | n/a | refused before wrap; 256 tables of 256 handles reach 65536 | n/a |
 | `kernel/handle.MaxHandles` | 256 | policy | process | 24 B a slot, 6 KiB per process record | `StatusResourceExhausted` | `HandleInfo` per slot; count none |
 | `kernel/wait.MaxObjects` | 64 | protocol (ready-mask width) | wait | n/a | `StatusInvalidArgument` | n/a |
 | `userspace/wait.MaxObjects` | 64 | protocol | n/a | n/a | n/a | n/a |
@@ -185,7 +182,7 @@ defect to fix or to reclassify with a reason.
 | `kernel/shmem.MaxObjectsPerProcess` | 16 | policy | process | none | `StatusResourceExhausted` | none |
 | `kernel/shmem.MaxObjectsPerSupervisor` | 32 | policy | PID 1 | none | `StatusResourceExhausted` | none |
 | `kernel/shmem.MaxPages` | 65536 pages (256 MiB) | profile | creator's page quota | on touch | `StatusResourceExhausted` | `ProcessInfo` pages |
-| `kernel/executable.MaxObjects` | 64 | artifact | PID 1 | a page per object | `StatusResourceExhausted` | none |
+| `kernel/executable.MaxObjects` | 256 (`process.MaxProcesses`) | policy (one per process) | PID 1 | a page per object; 8 B per slot static | `StatusResourceExhausted` | none |
 | `kernel/executable.MaxSize` | 256 MiB | profile | launcher's page quota | pages | `StatusResourceExhausted` | n/a |
 | `kernel/executable.MaxWrite` | 1 MiB | protocol | n/a | n/a | short write | n/a |
 
