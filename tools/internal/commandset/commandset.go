@@ -1,8 +1,8 @@
-// Package commandset checks that a directory of command images and the
-// command index built from the same tree agree, and cuts the index down to a
-// subset. The boot archive and the installed system both carry commands, and
-// PID 1 grants each from an index, so neither may describe a program it does
-// not hold (ADR 0080, ADR 0175).
+// Package commandset validates command-image directories against command
+// indexes and selects indexed command subsets. The boot archive and installed
+// system both carry command images, while PID 1 grants each command from an
+// index, so an index must not describe a program its tree does not hold (ADR
+// 0080, ADR 0175).
 package commandset
 
 import (
