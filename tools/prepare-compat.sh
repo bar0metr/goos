@@ -36,8 +36,8 @@ if [ "$kind" = ssh ]; then
     cp go.mod "$stage/go.mod"
     cp go.sum "$stage/go.sum"
     go mod edit -modfile="$stage/go.mod" -replace="golang.org/x/crypto=$root/crypto"
-elif [ "$kind" = tls ]; then
-    printf 'module goos-compat-tls\n' > "$stage/go.mod"
+else
+    printf 'module goos-compat-%s\n' "$kind" > "$stage/go.mod"
 fi
 touch "$stage/.stamp"
 rm -rf "$cache/tinygo-home-$kind/Library/Caches/tinygo"/goroot-* "$cache/tinygo-home-$kind/cache/tinygo"/goroot-*

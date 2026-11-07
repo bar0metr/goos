@@ -866,14 +866,14 @@ crypto-check: $(if $(filter 1,$(CRYPTO_COMPAT)),$(CRYPTO_ROOT_STAMP))
 	@set -eu; work='$(CRYPTO_WORK)'; if [ -z "$$work" ]; then \
 		work=$$($(BUILD_ENV) go run ./tools/scratch goos-crypto.); \
 	fi; mkdir -p "$$work"; work=$$(cd "$$work" && pwd -P); \
-	$(BUILD_ENV) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) COMPAT_ROOT=$(abspath $(CRYPTO_ROOT)) sh tools/crypto-check.sh "$$work"
+	$(BUILD_ENV) GOOS_BUILD_CACHE=$(abspath $(CACHE_DIR)) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) COMPAT_ROOT=$(abspath $(CRYPTO_ROOT)) sh tools/crypto-check.sh "$$work"
 
 test-crypto: $(if $(filter 1,$(CRYPTO_COMPAT)),$(CRYPTO_ROOT_STAMP))
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
 	@set -eu; work='$(CRYPTO_WORK)'; if [ -z "$$work" ]; then \
 		work=$$($(BUILD_ENV) go run ./tools/scratch goos-crypto.); \
 	fi; mkdir -p "$$work"; work=$$(cd "$$work" && pwd -P); \
-	status=0; $(BUILD_ENV) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) COMPAT_ROOT=$(abspath $(CRYPTO_ROOT)) sh tools/crypto-check.sh "$$work" || status=1; \
+	status=0; $(BUILD_ENV) GOOS_BUILD_CACHE=$(abspath $(CACHE_DIR)) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) COMPAT_ROOT=$(abspath $(CRYPTO_ROOT)) sh tools/crypto-check.sh "$$work" || status=1; \
 	MEMORY=$(MEMORY) SMP=$(or $(SMP),1) sh tests/boot/crypto.sh "$$work" $(ISO) $(OVMF_CODE) $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation-opt$(OPT)/system || status=1; \
 	exit $$status
 
