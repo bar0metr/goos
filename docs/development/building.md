@@ -136,8 +136,11 @@ disk run their recipe each time you request them.
 | `make disk-update` | An incremental update of an associated installed disk. |
 
 `system-tree` starts from an empty output directory, so it cannot retain files
-removed from the build tree. When a command source directory disappears,
-`initramfs` also removes its old command image before it creates the archive.
+removed from the build tree. When a command source directory disappears, the
+command index drops it. The system tree uses that index, and `initramfs`
+packages recovery commands plus validation commands in validation builds. Stale
+command images can remain in the build directory, but are not installed. If a
+required recovery command is missing from the index, the archive build fails.
 An existing disk is separate from these build outputs: `disk-update` replaces
 current files but leaves stale files on the disk. Use `disk-overwrite` when the
 installed system must omit removed files.
