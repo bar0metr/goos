@@ -25,6 +25,10 @@ if [ "$(uname -s)" = Darwin ]; then
     export GOPATH GOMODCACHE
   fi
   mkdir -p "$home/Library/Caches"
+  if [ -z "${NETRC:-}" ] && [ -n "${HOME:-}" ]; then
+    NETRC=$HOME/.netrc
+    export NETRC
+  fi
   HOME=$home
   export HOME
 else
