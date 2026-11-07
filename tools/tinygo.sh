@@ -15,7 +15,9 @@ if [ "$(uname -s)" = Darwin ]; then
   if command -v go >/dev/null 2>&1; then
     GOPATH=$(go env GOPATH)
     GOMODCACHE=$(go env GOMODCACHE)
-    GOENV=$(go env GOENV)
+    if [ "${GOENV:-}" != off ]; then
+      GOENV=$(go env GOENV)
+    fi
     export GOPATH GOMODCACHE GOENV
   else
     GOPATH=${GOPATH:-${HOME:?}/go}
