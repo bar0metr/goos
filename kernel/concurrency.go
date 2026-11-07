@@ -49,17 +49,20 @@ type cpuScratch struct {
 	imageWire            [16]byte
 	// linuxStackRandom holds the AT_RANDOM bytes of the launch in progress. The
 	// launch clears it once the stack image has its copy.
-	linuxStackRandom  [linuxabi.RandomSize]byte
-	linuxExecPointer  [8]byte
-	linuxStat         [linuxcompat.StatSize]byte
-	linuxStatx        [linuxcompat.StatxSize]byte
-	linuxDirent       [linuxcompat.MaxDirentSize]byte
-	linuxTerminator   [1]byte
-	linuxFutexWord    [4]byte
-	linuxFutexTimeout [linuxcompat.TimespecSize]byte
-	linuxFSBaseResult [8]byte
-	linuxTimes        [32]byte
-	linuxPipeWire     [8]byte
+	linuxStackRandom [linuxabi.RandomSize]byte
+	// linuxPlacementDraw holds the draw that picks a static PIE's base
+	// (ADR 0219) until the base is chosen.
+	linuxPlacementDraw [8]byte
+	linuxExecPointer   [8]byte
+	linuxStat          [linuxcompat.StatSize]byte
+	linuxStatx         [linuxcompat.StatxSize]byte
+	linuxDirent        [linuxcompat.MaxDirentSize]byte
+	linuxTerminator    [1]byte
+	linuxFutexWord     [4]byte
+	linuxFutexTimeout  [linuxcompat.TimespecSize]byte
+	linuxFSBaseResult  [8]byte
+	linuxTimes         [32]byte
+	linuxPipeWire      [8]byte
 	// linuxPollWire holds one window of a poll array, and linuxPollEntries
 	// the native waits a sleeping poll or select names, as many as one wait
 	// may.

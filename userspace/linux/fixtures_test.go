@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"testing"
 
+	linuxcompat "goos/kernel/compat/linux"
 	linuxelf "goos/kernel/compat/linux/elf"
 )
 
@@ -18,19 +19,19 @@ func TestFixturesMatchTheirPinnedChecksums(t *testing.T) {
 }
 
 // The kernel loader must accept every fixture as built: a static image with
-// no writable and executable segment and a non-executable stack. One
-// fixture is position-independent and loads at the fixed base; the rest
-// stay at the addresses they name.
+// no writable and executable segment and a non-executable stack. Two
+// fixtures are position-independent and move to the base they are parsed
+// at; the rest stay at the addresses they name.
 func TestFixturesAreAcceptedStaticELF(t *testing.T) {
 	for _, fixture := range All() {
-		image, failure := linuxelf.Parse(fixture.Image, linuxelf.GoOSConfig())
+		image, failure := linuxelf.Parse(fixture.Image, linuxelf.GoOSConfig(linuxelf.StaticPIEWindowStart))
 		if failure != linuxelf.OK {
 			t.Errorf("%s: parse failure %d", fixture.Name, failure)
 			continue
 		}
 		wantBase := uint64(0)
-		if fixture.Name == "hello-pie" {
-			wantBase = linuxelf.StaticPIEBase
+		if fixture.Name == "hello-pie" || fixture.Name == "pie-probe" {
+			wantBase = linuxelf.StaticPIEWindowStart
 		}
 		if image.Base != wantBase || image.DynamicPresent != (wantBase != 0) || image.Entry < wantBase {
 			t.Errorf("%s: base=%#x dynamic=%v entry=%#x", fixture.Name, image.Base, image.DynamicPresent, image.Entry)
@@ -48,9 +49,9 @@ func TestFixturesAreAcceptedStaticELF(t *testing.T) {
 		if executable != 1 || !image.GNUStackPresent {
 			t.Errorf("%s: executable segments=%d stack header=%v", fixture.Name, executable, image.GNUStackPresent)
 		}
-		// The two programs with thread-local variables carry a TLS image
+		// The programs with thread-local variables carry a TLS image
 		// and the RELRO range that holds it.
-		if (fixture.Name == "musl-hello" || fixture.Name == "abi-probe") && (!image.TLS.Present || !image.RELROPresent) {
+		if (fixture.Name == "musl-hello" || fixture.Name == "abi-probe" || fixture.Name == "pie-probe") && (!image.TLS.Present || !image.RELROPresent) {
 			t.Errorf("%s: TLS=%v RELRO=%v", fixture.Name, image.TLS.Present, image.RELROPresent)
 		}
 	}
@@ -68,5 +69,21 @@ func TestTermInfoHoldsTheSupportedTerminals(t *testing.T) {
 		if !found[path] {
 			t.Fatalf("%s missing from %v", path, found)
 		}
+	}
+}
+
+// Each position-independent fixture has room for well over 2^17 bases in
+// the static-PIE window with its brk reservation (ADR 0219).
+func TestPositionIndependentFixturesHaveManyPlacements(t *testing.T) {
+	for _, fixture := range All() {
+		image, failure := linuxelf.Parse(fixture.Image, linuxelf.GoOSConfig(linuxelf.StaticPIEWindowStart))
+		if failure != linuxelf.OK || image.Base == 0 {
+			continue
+		}
+		placement, ok := linuxelf.PlacePIE(&image, linuxcompat.BrkReserve)
+		if !ok || placement.Step != linuxcompat.LinuxPageSize || placement.Count < 1<<17 {
+			t.Errorf("%s: placement %+v %v", fixture.Name, placement, ok)
+		}
+		t.Logf("%s: %d bases", fixture.Name, placement.Count)
 	}
 }

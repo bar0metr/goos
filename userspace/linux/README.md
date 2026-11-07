@@ -13,7 +13,7 @@ them to the native image format.
 | `dirprobe` | [dirprobe/main.c](dirprobe/main.c) | list a directory with `getdents64` |
 | `abi-probe` | [abi-probe/main.c](abi-probe/main.c) | the conformance suite: every group of calls, checked result by result |
 | `netprobe` | [netprobe/main.c](netprobe/main.c) | IPv4 sockets: loopback groups checked against Linux, and the clients and servers of the network gate |
-| `pie-probe` | `pie-probe/` | a musl static PIE that reports its load base for `make test-linux-aslr`; see [Static PIE probe](#static-pie-probe) |
+| `pie-probe` | [pie-probe/main.c](pie-probe/main.c) | a musl static PIE that reports its load base for `make test-linux-aslr`; see [Static PIE probe](#static-pie-probe) |
 
 `abi-probe` with two ordinary arguments runs the conformance checks and
 prints one line per group. A first argument selects another mode: `hostile`
@@ -142,6 +142,7 @@ Linker flags:
 | `prebuilt/abi-probe` | `1f18f949dc3e19d0dd592666da5db68932debda42ab435d951f84d10e5805121` |
 | `prebuilt/tty-probe` | `5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957` |
 | `prebuilt/netprobe` | `dca2339b9c61ea9f190613aa58b6289e6166a58463e1a4441bfd8ba661d742cb` |
+| `prebuilt/pie-probe` | `4e1822fc5fd6c174726c8751cabb0c298e67adfa46e7a82c9b425732b00c7144` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF
@@ -315,14 +316,18 @@ bound or another choice:
 `pie-probe` is a musl static PIE: an `ET_DYN` file with `PT_DYNAMIC` and no
 `PT_INTERP`. `build.sh` compiles a second copy of musl
 position-independent and links the probe against it as a static PIE. The
-probe's own start code finds its base from `AT_PHDR` and applies the
-image's relative relocations before it enters libc. The probe prints the base it derived and checks TLS,
-RELRO, a brk allocation, `AT_RANDOM` and `getrandom`; its fork mode checks
-that a child keeps the parent's base, and its exec mode re-executes the
-probe to observe a new one. `make test-linux-aslr` runs it (ADR 0219).
+probe's own start code takes its base from the run-time address of its ELF
+header, applies the image's `R_X86_64_RELATIVE` relocations, and then
+enters musl's `__libc_start_main`. Each run prints
+`pie base=... end=... brk=...` and checks `AT_PHDR`, `AT_PHENT`,
+`AT_PHNUM`, `AT_ENTRY`, `AT_RANDOM`, the initial stack, its relocated data
+and RELRO pointers, TLS, `getrandom`, and that brk starts on the page after
+the image and grows. `pie-probe fork` checks that a child keeps the
+parent's base; `pie-probe exec N` re-executes itself N times, and each image
+prints its own base. `make test-linux-aslr` runs it (ADR 0219).
 
 ## License
 
 The fixture sources in this directory are part of GoOS and carry its license.
-`prebuilt/musl-hello` also contains musl code. musl is MIT licensed;
+`prebuilt/musl-hello` and the other C fixtures also contain musl code. musl is MIT licensed;
 [COPYRIGHT.musl](COPYRIGHT.musl) is the notice from the sources TinyGo ships.

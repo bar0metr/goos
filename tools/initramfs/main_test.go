@@ -21,7 +21,7 @@ func TestArchiveSizeIsBoundedByTheKernelLoader(t *testing.T) {
 
 func TestLinuxProbeIsAcceptedStaticELF(t *testing.T) {
 	fixture := linuxProbe()
-	image, failure := linuxelf.Parse(fixture, linuxelf.GoOSConfig())
+	image, failure := linuxelf.Parse(fixture, linuxelf.GoOSConfig(linuxelf.StaticPIEWindowStart))
 	if failure != linuxelf.OK || image.Entry != 0x4000b0 || image.SegmentCount != 2 {
 		t.Fatalf("probe ELF: failure=%d image=%#v", failure, image)
 	}

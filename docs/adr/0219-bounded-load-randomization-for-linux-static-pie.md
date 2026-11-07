@@ -59,16 +59,27 @@ second parser.
 at a fresh base. `fork` and thread creation keep the current layout, so a
 child shares its parent's base.
 
-**Failure.** When the generator refuses output, the launch fails; there is
-no fallback to a fixed base. The generator needs no RDRAND, so a CPU
-without it still places images. Diagnostics tell the placement failures
-apart: no legal placement, random unavailable, invalid ELF after
-relocation, region conflict, and resource exhaustion.
+**Failure.** Placement runs before the loader builds anything for the new
+image, so a failure leaves no partial process, and a failed `execve` keeps
+the caller in its old image. There is no fallback to a fixed base. The
+generator needs no RDRAND, so a CPU without it still places images.
+
+| Failure | PID 1 launch | `execve` |
+| --- | --- | --- |
+| no legal placement | `LaunchAddressSpaceFailed` | `ENOMEM` |
+| generator refuses output | `LaunchResourceExhausted` | `EAGAIN` |
+| ELF invalid at the window start or at the drawn base | `LaunchInvalidImage` | `ENOEXEC` |
+| region conflict while mapping | `LaunchInvalidImage` | `ENOEXEC` |
+| no memory for the address space | `LaunchAddressSpaceFailed` | `ENOMEM` |
+
+A `goos_diag` build names the first three on the console.
 
 **Exposure.** No new auxv entry carries the base. A program derives it from
-`AT_PHDR`, as musl's `_dlstart` and glibc's `_dl_relocate_static_pie`
-already do. A `goos_diag` build prints `linux pie base=<hex> span=<hex>`
-for each placement; a release build prints nothing.
+`AT_PHDR` or from the run-time address of its own ELF header, as static-PIE
+start code does on Linux. A `goos_diag` build prints
+`linux pie base=<hex> span=<hex> slots=<hex>` for each placement; a release
+build prints nothing. The draw stays in per-CPU storage until the base is
+chosen and is then cleared.
 
 **Reproducibility.** The build draws no randomness. The ISO and the disk
 image stay byte-identical across builds, and `make test-reproducible` does
@@ -82,9 +93,10 @@ For a page-aligned image of size `S` whose largest alignment is 4 KiB:
 count = floor((1 GiB - 64 MiB - S) / 4 KiB) + 1
 ```
 
-A small image gets about 2^17.9 bases: an 8 KiB image has 245,759. A larger
-alignment divides the count: an image of about 64 MiB whose largest
-alignment is 2 MiB gets about 448 bases, near 8.8 bits.
+A small image gets about 2^17.9 bases: an 8 KiB image has 245,759, the
+12 KiB `hello-pie` 245,758, and the 52 KiB `pie-probe` 245,748. A larger
+alignment divides the count: a 64 MiB image whose largest alignment is
+2 MiB gets 449 bases, near 8.8 bits.
 
 ## Non-goals
 
@@ -119,6 +131,6 @@ a working brk allocation, `AT_RANDOM`, and a successful `getrandom`. It
 needs no external binaries and runs in `test-all` and `release-check`.
 Host tests in `kernel/compat/linux/elf` cover `PlacePIE`.
 
-An image that needs more than the window, less 64 MiB of brk, no longer
-loads; under ADR 0149 the same limit applied to the half above
-`0x40000000`.
+An image larger than 960 MiB, the window less 64 MiB of brk, no longer
+loads. Under ADR 0149 an image up to 1 GiB loaded and its brk could reach
+past 2 GiB.

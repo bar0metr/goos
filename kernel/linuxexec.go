@@ -445,12 +445,19 @@ func (handler *linuxCallHandler) prepareLinuxExec(state *linuxExecState) linuxab
 	}
 	launchObject = object
 	source, sourceOK := loader.Paged(executablePage, vm.PageSize, object.Size())
-	parseStatus := linuxelf.SourceReadFailed
+	placed := linuxPlacementInvalid
 	if sourceOK {
-		parseStatus = linuxelf.ParseInto(&linuxLaunchImage, source, linuxelf.GoOSConfig())
+		placed = placeLinuxImage(&linuxLaunchImage, source)
 	}
 	launchObject = nil
-	if parseStatus != linuxelf.OK {
+	switch placed {
+	case linuxPlaced:
+	case linuxPlacementNoRoom:
+		return linuxabi.ENOMEM
+	case linuxPlacementNoRandom:
+		// Before the point of no return, so the caller keeps its image.
+		return linuxabi.EAGAIN
+	default:
 		return linuxabi.ENOEXEC
 	}
 	pagesBefore := pageAllocator.Statistics().FreePages
