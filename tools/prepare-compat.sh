@@ -4,8 +4,14 @@ kind=${1:?compatibility kind required}
 root=${2:?compatibility root required}
 root=$(cd "$(dirname "$root")" && pwd)/$(basename "$root")
 cache=${3:?cache directory required}
-rm -rf "${root}".stage.*
-stage=$(mktemp -d "${root}.stage.XXXXXX")
+for candidate in "${root}".stage.*; do
+    [ -d "$candidate" ] || continue
+    pid=${candidate##*.stage.}
+    pid=${pid%%.*}
+    case "$pid" in *[!0-9]*|'') continue ;; esac
+    if ! kill -0 "$pid" 2>/dev/null; then rm -rf "$candidate"; fi
+done
+stage=$(mktemp -d "${root}.stage.$$.XXXXXX")
 old="${root}.old.$$"
 cleanup() {
     rm -rf "$stage"

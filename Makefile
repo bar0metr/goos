@@ -307,9 +307,16 @@ $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,$(GOROUTINE_COMMANDS))): $(COMM
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(GOROUTINE_BUILD) -o $@ ./userspace/bin/$*
 
+COMPAT_TOOLCHAIN_ID := $(BUILD_DIR)/toolchains/identity
+$(COMPAT_TOOLCHAIN_ID): FORCE tools/toolchain.versions
+	@mkdir -p $(dir $@)
+	@set -e; tmp=$$(mktemp '$@.tmp.XXXXXX'); trap 'rm -f "$$tmp"' EXIT; \
+		{ command -v go; $(BUILD_ENV) go env GOROOT GOVERSION; command -v tinygo; $(BUILD_ENV) tinygo env TINYGOROOT; $(BUILD_ENV) tinygo version; } > "$$tmp"; \
+		cmp -s "$$tmp" '$@' || mv "$$tmp" '$@'
+
 TLS_ROOT := $(BUILD_DIR)/toolchains/tls
 TLS_ROOT_STAMP := $(TLS_ROOT)/.stamp
-TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tools/internal/compatroot/*.go internal/repobuild/*.go tinygo/runtime/*.txt) tools/prepare-compat.sh go.mod go.sum
+TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tools/internal/compatroot/*.go internal/repobuild/*.go tinygo/runtime/*.txt) tools/prepare-compat.sh tools/toolchain.versions $(COMPAT_TOOLCHAIN_ID) go.mod go.sum
 $(TLS_ROOT_STAMP): $(TLS_COMPAT_SOURCES)
 	@mkdir -p $(dir $(TLS_ROOT))
 	$(BUILD_ENV) sh tools/prepare-compat.sh tls $(TLS_ROOT) $(CACHE_DIR)
