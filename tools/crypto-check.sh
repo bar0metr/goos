@@ -5,6 +5,7 @@ set -eu
 work=${1:?output directory required}
 opt=${OPT:-2}
 tags=${BUILD_TAGS:-goos_hz250 goos_validation}
+packages=${CRYPTO_PACKAGES:-platform sha256 sha512 hmac aes cipher ecdh ecdsa rsa rand asn1 pem x509 tls}
 mkdir -p "$work/elf" "$work/images" "$work/logs"
 make --no-print-directory toolchain-check build/userspace/runtime.o
 if [ "${CRYPTO_COMPAT:-0}" = 1 ]; then
@@ -26,7 +27,7 @@ fi
 } >"$work/toolchain.txt"
 printf 'package\tbuild\timage_bytes\n' >"$work/build.tsv"
 failed=0
-for package in platform sha256 sha512 hmac aes cipher ecdh ecdsa rsa rand asn1 pem x509 tls; do
+for package in $packages; do
 	selected=$tags
 	if [ "$package" != platform ]; then
 		selected="$selected cryptoprobe_$package"

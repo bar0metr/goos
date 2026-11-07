@@ -860,13 +860,20 @@ test-linux-network:
 # Crypto feasibility reports stay in ignored build scratch output. A failed dependency
 # does not prevent native execution of the independently built probes.
 CRYPTO_WORK ?=
+CRYPTO_FRAMES_WORK ?=
 CRYPTO_COMPAT ?= 0
-.PHONY: crypto-check test-crypto
+.PHONY: crypto-check test-crypto-frames test-crypto
 crypto-check: $(if $(filter 1,$(CRYPTO_COMPAT)),$(CRYPTO_ROOT_STAMP))
 	@set -eu; work='$(CRYPTO_WORK)'; if [ -z "$$work" ]; then \
 		work=$$($(BUILD_ENV) go run ./tools/scratch goos-crypto.); \
 	fi; mkdir -p "$$work"; work=$$(cd "$$work" && pwd -P); \
 	$(BUILD_ENV) GOOS_BUILD_CACHE=$(abspath $(CACHE_DIR)) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) COMPAT_ROOT=$(abspath $(CRYPTO_ROOT)) sh tools/crypto-check.sh "$$work"
+
+test-crypto-frames: $(CRYPTO_ROOT_STAMP)
+	@set -eu; work='$(CRYPTO_FRAMES_WORK)'; if [ -z "$$work" ]; then \
+		work=$$($(BUILD_ENV) go run ./tools/scratch goos-crypto-frames.); \
+	fi; mkdir -p "$$work"; work=$$(cd "$$work" && pwd -P); \
+	$(BUILD_ENV) GOOS_BUILD_CACHE=$(abspath $(CACHE_DIR)) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) COMPAT_ROOT=$(abspath $(CRYPTO_ROOT)) sh tools/crypto-frames-check.sh "$$work"
 
 test-crypto: $(if $(filter 1,$(CRYPTO_COMPAT)),$(CRYPTO_ROOT_STAMP))
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
