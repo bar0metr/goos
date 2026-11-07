@@ -135,8 +135,8 @@ disk run their recipe each time you request them.
 | `make disk` | A new installed disk. |
 | `make disk-update` | An incremental update of an associated installed disk. |
 
-Go and TinyGo build caches live under `build/cache/`. TLS and SSH compatibility
-roots live under `build/toolchains/` and are reused until their inputs change.
+Go and TinyGo build caches live under `build/cache/`. Crypto, TLS, and SSH
+compatibility roots live under `build/toolchains/` and are reused until their inputs change.
 `make clean` removes these caches and roots; ordinary builds retain them. The
 host Go module cache remains in its configured location.
 
