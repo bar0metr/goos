@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Extends ADR 0133.
+Accepted. Extends ADR 0133. ADR 0219 supersedes the fixed base; the rest
+stands.
 
 ## Context
 
@@ -60,3 +61,14 @@ A program that prints its own addresses prints the same ones on every run. An
 image whose startup code does not relocate itself faults in its own code, as
 it would on Linux without an interpreter. A shared object with an entry point
 and no interpreter is a static PIE by this definition and loads.
+
+## Amendments
+
+- The fixed base is superseded. This decision fixed `0x40000000` because a
+  CPU without RDRAND had no entropy at launch and a varying layout would
+  have tied the boot test to its CPU. ADR 0185 gave the kernel a generator
+  seeded from timing jitter on every CPU, which removed the first reason.
+  ADR 0219 now loads each static PIE at a random aligned base between
+  1 GiB and 2 GiB, with room for the 64 MiB brk, and its boot test checks
+  properties of the base instead of its value. The relocation, interpreter
+  and descriptive-header decisions above still hold.

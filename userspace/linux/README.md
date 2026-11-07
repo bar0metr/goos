@@ -13,6 +13,7 @@ them to the native image format.
 | `dirprobe` | [dirprobe/main.c](dirprobe/main.c) | list a directory with `getdents64` |
 | `abi-probe` | [abi-probe/main.c](abi-probe/main.c) | the conformance suite: every group of calls, checked result by result |
 | `netprobe` | [netprobe/main.c](netprobe/main.c) | IPv4 sockets: loopback groups checked against Linux, and the clients and servers of the network gate |
+| `pie-probe` | `pie-probe/` | a musl static PIE that reports its load base for `make test-linux-aslr`; see [Static PIE probe](#static-pie-probe) |
 
 `abi-probe` with two ordinary arguments runs the conformance checks and
 prints one line per group. A first argument selects another mode: `hostile`
@@ -22,7 +23,8 @@ gate; `port-io` touches an I/O port; `pair NAME` runs beside another
 instance in a pipeline; `block` and `sleep` wait to be interrupted; `bench`
 times four calls; `session-loss` and `session-timeout` serve the VFS restart
 and late-answer checks of the boot test; `stack-overflow` recurses into the
-guard below the stack; `random` says whether the kernel has a random source;
+guard below the stack; `random` checks that `getrandom` and `AT_RANDOM`
+both work;
 `exec` replaces the probe image and checks preserved identity, cwd, descriptor
 position, `CLOEXEC`, and signal state, and the initial x87 and SSE state; `fork` creates a child and checks that
 memory is private and the file position is shared; `vfork` checks that
@@ -83,7 +85,7 @@ assembles it byte by byte, so it has no entry here.
 | Compiler | the clang inside TinyGo (`tinygo clang`) |
 | Linker | the lld inside TinyGo (`tinygo ld.lld`), LLD 22.1.4 |
 | libc | musl 1.2.3, the sources TinyGo ships under `lib/musl` |
-| Target | `x86_64-unknown-linux-musl`, static, non-PIE; `hello-pie` is linked `-pie` with no dynamic linker |
+| Target | `x86_64-unknown-linux-musl`, static, non-PIE; `hello-pie` and `pie-probe` are linked `-pie` with no dynamic linker |
 
 TinyGo 0.42.0 pins `lib/musl` at commit
 `7a43f6fea9081bdd53d8a11cef9e9fab0348c53d` of `tinygo-org/musl-libc`, the
@@ -150,12 +152,15 @@ The musl programs have `PT_PHDR`, `R`, `R-X`, and `RW-` load segments, and a
 non-executable `PT_GNU_STACK`; the two with thread-local variables also have
 `PT_TLS` and `PT_GNU_RELRO`. `hello` has one `R` and one `R-X` segment.
 `hello-pie` is an `ET_DYN` file whose addresses start at zero, with a
-`PT_DYNAMIC` header and no `PT_INTERP`; the kernel loads it at `0x40000000`.
+`PT_DYNAMIC` header and no `PT_INTERP`; the kernel loads it at a random
+base between `0x40000000` and `0x80000000` (ADR 0219).
 
-The bundled musl has no `rcrt1` startup file, so the recipe builds no musl
-static PIE. A copy of `abi-probe` built with Alpine's `gcc -static-pie`
-against musl 1.2.5 relocates itself and passes its hostile mode on GoOS; the
-boot image takes such a program through `LINUX_EXTRA=path`.
+The bundled musl has no `rcrt1` startup file. `pie-probe` brings its own
+self-relocating start code and links against a second copy of musl compiled
+position-independent; see [Static PIE probe](#static-pie-probe). A copy of
+`abi-probe` built with Alpine's `gcc -static-pie` against musl 1.2.5
+relocates itself and passes its hostile mode on GoOS; the boot image takes
+such a program through `LINUX_EXTRA=path`.
 
 ## Syscall trace
 
@@ -218,10 +223,10 @@ of a device name with their refusals, which a Linux run as root would carry
 out. PID 1 also sets `GOOS_LINUX_LONG` to a 235-byte path, which the program
 must open.
 
-GoOS may also answer two checks in a way Linux never does. On a CPU without
-RDRAND, `getrandom` returns `ENOSYS` and `AT_RANDOM` is absent; the program
-requires the two to agree. A `getrandom` of 300 bytes returns 256 on GoOS
-and 300 on Linux.
+`getrandom` and `AT_RANDOM` come from the kernel generator of ADR 0185 on
+every CPU, with or without RDRAND, and the program requires both. GoOS
+answers one random check in a way Linux never does: a `getrandom` of 300
+bytes returns 256 on GoOS and 300 on Linux.
 
 The `hostile` mode runs on Linux too (`userspace/linux/run-on-linux.sh
 abi-probe hostile`, and the strict run above). Two of its checks are left to
@@ -304,6 +309,17 @@ bound or another choice:
 | `AF_INET6`, `AF_UNIX`, `AF_NETLINK`, `AF_PACKET`, `SOCK_RAW`, `SOCK_SEQPACKET` | supported | refused | refused, on GoOS only |
 | a second `connect` after a nonblocking connect finished | 0, then `EISCONN` | | 0 or `EISCONN`, then `EISCONN` |
 | close with unread bytes | sends a reset | | not checked; the gate checks a reset from the peer |
+
+## Static PIE probe
+
+`pie-probe` is a musl static PIE: an `ET_DYN` file with `PT_DYNAMIC` and no
+`PT_INTERP`. `build.sh` compiles a second copy of musl
+position-independent and links the probe against it as a static PIE. The
+probe's own start code finds its base from `AT_PHDR` and applies the
+image's relative relocations before it enters libc. The probe prints the base it derived and checks TLS,
+RELRO, a brk allocation, `AT_RANDOM` and `getrandom`; its fork mode checks
+that a child keeps the parent's base, and its exec mode re-executes the
+probe to observe a new one. `make test-linux-aslr` runs it (ADR 0219).
 
 ## License
 

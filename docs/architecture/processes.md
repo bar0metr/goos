@@ -106,7 +106,12 @@ structures.
 launch, but it is not exposed as the Linux application ABI. The stack builder
 copies its command, arguments, and environment into a bounded System V
 stack containing `argc`, pointer vectors, auxv, NUL-terminated strings, and
-16 random bytes when the CPU has a generator.
+16 random bytes behind `AT_RANDOM` from the kernel generator (ADR 0185),
+which every CPU has, with or without RDRAND. A static PIE image (`ET_DYN`
+without `PT_INTERP`) loads at a random aligned base inside
+`[0x40000000, 0x80000000)`, drawn from the same generator for each PID 1
+launch and each successful `execve`; a forked child or a new thread keeps
+its parent's base (ADR 0219).
 Resolved GoOS handles and the working directory remain kernel-side
 compatibility state. Only occupied initial-stack pages are mapped before the
 task runs; the rest of the Linux stack reservation remains demand-zero.

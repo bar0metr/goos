@@ -45,3 +45,8 @@ was already true of every other secret in the guest. On a CPU with RDRAND the
 pool also holds hardware output. The abi-probe's `random` mode now requires
 both sources of bytes on every machine, and the general boot test, whose CPU
 has no RDRAND, runs it.
+
+## Amendments
+
+- Linux static PIE placement (ADR 0219) draws one 64-bit value from this
+  generator for each launch and `execve` to pick the image base.

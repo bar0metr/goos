@@ -443,8 +443,10 @@ as it can for any session (ADR 0117); scopes on that target still apply by node.
 
 - IOMMU. DMA is not confined for either driver (see compromised driver).
 - ASLR. Kernel and user layouts are fixed (kernel image at `0x400000`, user
-  code at `0x40002000`). What would have to change is described in
-  [memory.md](../architecture/memory.md#aslr-readiness).
+  code at `0x40002000`). The one exception is the base of a Linux static
+  PIE, which each launch and `execve` picks at random inside
+  `[0x40000000, 0x80000000)` (ADR 0219). What would have to change for the
+  rest is described in [memory.md](../architecture/memory.md#aslr-readiness).
 - Signed or measured images, Secure Boot, and initramfs integrity. The planned
   chain is described in [boot-chain.md](boot-chain.md).
 - CPU limits. CPU time is accounted per process but never refused (ADR 0072).
