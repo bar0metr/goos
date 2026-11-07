@@ -307,10 +307,16 @@ $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,$(GOROUTINE_COMMANDS))): $(COMM
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(GOROUTINE_BUILD) -o $@ ./userspace/bin/$*
 
-TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tools/internal/compatroot/*.go internal/repobuild/*.go tools/scratch/*.go tinygo/runtime/*.txt) tools/build-tls.sh
-$(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $$(call go_deps,./userspace/bin/$$*) $(TLS_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+TLS_ROOT := $(BUILD_DIR)/toolchains/tls
+TLS_ROOT_STAMP := $(TLS_ROOT)/.stamp
+TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tools/internal/compatroot/*.go internal/repobuild/*.go tinygo/runtime/*.txt) tools/prepare-compat.sh go.mod go.sum
+$(TLS_ROOT_STAMP): $(TLS_COMPAT_SOURCES)
+	@mkdir -p $(dir $(TLS_ROOT))
+	$(BUILD_ENV) sh tools/prepare-compat.sh tls $(TLS_ROOT) $(CACHE_DIR)
+
+$(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $$(call go_deps,./userspace/bin/$$*) $(TLS_ROOT_STAMP) tools/build-tls.sh tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(COMMAND_ELF_DIR)
-	$(BUILD_ENV) sh tools/build-tls.sh $@ ./userspace/bin/$* '$(BUILD_TAGS)' $(OPT)
+	$(BUILD_ENV) GOOS_BUILD_CACHE=$(abspath $(CACHE_DIR)) COMPAT_ROOT=$(abspath $(TLS_ROOT)) sh tools/build-tls.sh $@ ./userspace/bin/$* '$(BUILD_TAGS)' $(OPT)
 
 $(COMMAND_IMAGES): $(COMMAND_DIR)/%: $(COMMAND_ELF_DIR)/%.elf tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@mkdir -p $(COMMAND_DIR)
@@ -419,15 +425,22 @@ $(VIRTIO_NET_IMAGE): $(VIRTIO_NET_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOU
 
 # Both SSH services use the private crypto/SSH source tree. No installed
 # toolchain or module-cache sources are modified by this build.
-SSH_COMPAT_SOURCES := $(TLS_COMPAT_SOURCES) $(wildcard tools/sshcompat/*.go tools/sshcompat/*.txt userspace/sshserver/*.go userspace/runtime/arena/*.go) tools/build-ssh.sh go.mod go.sum
+SSH_ROOT := $(BUILD_DIR)/toolchains/ssh
+SSH_ROOT_STAMP := $(SSH_ROOT)/.stamp
+SSH_COMPAT_SOURCES := $(TLS_COMPAT_SOURCES) $(wildcard tools/sshcompat/*.go tools/sshcompat/*.txt)
+$(SSH_ROOT_STAMP): $(SSH_COMPAT_SOURCES)
+	@mkdir -p $(dir $(SSH_ROOT))
+	$(BUILD_ENV) sh tools/prepare-compat.sh ssh $(SSH_ROOT) $(CACHE_DIR)
 
-$(REMOTED_ELF): $(call go_deps,./userspace/cmd/remoted) $(SSH_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
-	@mkdir -p $(dir $@)
-	$(BUILD_ENV) sh tools/build-ssh.sh $@ ./userspace/cmd/remoted '$(BUILD_TAGS)' $(OPT)
+$(REMOTED_ELF) $(REMOTED_WORKER_ELF): $(wildcard userspace/sshserver/*.go userspace/runtime/arena/*.go)
 
-$(REMOTED_WORKER_ELF): $(call go_deps,./userspace/cmd/remoted-worker) $(SSH_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(REMOTED_ELF): $(call go_deps,./userspace/cmd/remoted) $(SSH_ROOT_STAMP) tools/build-ssh.sh tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(dir $@)
-	$(BUILD_ENV) sh tools/build-ssh.sh $@ ./userspace/cmd/remoted-worker '$(BUILD_TAGS)' $(OPT)
+	$(BUILD_ENV) GOOS_BUILD_CACHE=$(abspath $(CACHE_DIR)) COMPAT_ROOT=$(abspath $(SSH_ROOT)) sh tools/build-ssh.sh $@ ./userspace/cmd/remoted '$(BUILD_TAGS)' $(OPT)
+
+$(REMOTED_WORKER_ELF): $(call go_deps,./userspace/cmd/remoted-worker) $(SSH_ROOT_STAMP) tools/build-ssh.sh tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(dir $@)
+	$(BUILD_ENV) GOOS_BUILD_CACHE=$(abspath $(CACHE_DIR)) COMPAT_ROOT=$(abspath $(SSH_ROOT)) sh tools/build-ssh.sh $@ ./userspace/cmd/remoted-worker '$(BUILD_TAGS)' $(OPT)
 
 $(SFTPD_ELF): $(call go_deps,./userspace/cmd/sftpd) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(dir $@)
