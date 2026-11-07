@@ -186,6 +186,7 @@ func serveHTTPReader(conn net.Conn, reader *bufio.Reader, mode string, counters 
 	if _, err := io.Copy(io.Discard, io.LimitReader(request.Body, 1<<20)); err != nil {
 		return
 	}
+	counters.request(mode)
 	status, location, body := reply(request)
 	contentLength := len(body)
 	if request.Method == http.MethodHead {
@@ -199,7 +200,6 @@ func serveHTTPReader(conn net.Conn, reader *bufio.Reader, mode string, counters 
 	if len(body) != 0 {
 		_, _ = conn.Write(body)
 	}
-	counters.request(mode)
 	fmt.Printf("tlspeer: request mode=%s method=%s path=%s\n", mode, request.Method, request.URL.Path)
 }
 
