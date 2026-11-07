@@ -117,6 +117,34 @@ had drifted, and an edit to `kernel/mm/vm` once left the filesystem service
 built against the old image window. The kernel depends on everything under
 `kernel/` and `internal/`.
 
+### Incremental build targets
+
+Run the public target for the artifact you need. Make rebuilds stale file
+targets and their prerequisites; targets that assemble a directory or write a
+disk run their recipe each time you request them.
+
+| Target | Result |
+| --- | --- |
+| `make kernel` | The UEFI kernel image. |
+| `make userspace` | Native images for PID 1, services, and commands. |
+| `make initramfs` | The normal boot archive. |
+| `make iso` | The bootable ISO. `make all` selects this target. |
+| `make recovery-iso` | The ISO that starts PID 1 in recovery mode. |
+| `make system-tree` | The installed-system directory for the selected variant. |
+| `make system-image` | The ISO and an installed-system volume image. |
+| `make disk` | A new installed disk. |
+| `make disk-update` | An incremental update of an associated installed disk. |
+
+`system-tree` starts from an empty output directory, so it cannot retain files
+removed from the build tree. When a command source directory disappears, the
+command index drops it. The system tree uses that index, and `initramfs`
+packages recovery commands plus validation commands in validation builds. Stale
+command images can remain in the build directory, but are not installed. If a
+required recovery command is missing from the index, the archive build fails.
+An existing disk is separate from these build outputs: `disk-update` replaces
+current files but leaves stale files on the disk. Use `disk-overwrite` when the
+installed system must omit removed files.
+
 Before the conversion, `tools/stackframes` disassembles each userspace ELF
 with `go tool objdump` and fails the build if a function's stack frame is deep
 enough to step over the 64 KiB guard below the stack, or changes the stack
@@ -127,17 +155,44 @@ every frame (ADR 0088).
 
 `make run` boots the ISO headlessly with 512 MiB in QEMU and attaches COM1 to
 the current terminal. It boots the installed system on `build/goos-disk.img`
-(`DISK`), which it makes from the build's system tree when the file does not
-exist and never changes when it does (ADR 0175). After a rebuild the disk
-still holds the system it was installed with; a disk of another release boots
-into recovery. `make disk` installs the system on a new `DISK` and refuses one
-that exists; `make disk-overwrite` replaces it, user data and all.
+(`DISK`). `make disk` creates that disk from the current system tree and
+refuses an existing file. `make disk-overwrite` replaces an existing disk,
+including its user data. `make run` does not modify an existing disk.
+
+### Incremental installed-disk updates
+
+`make disk-update` copies the current system tree onto an existing `DISK`.
+It preserves `/home` and `/state`, so use it after changing the system while
+keeping the disk's user data. The target requires an existing regular FAT32
+disk; it does not create, resize, or reformat one. `make run` also leaves the
+disk unchanged after a rebuild.
+
+Each disk records the build configuration that last updated it. The update
+refuses an unassociated disk or a disk associated with another configuration.
+Pass `DISK_ASSOCIATE=1` only when you intend to associate or reassociate the
+existing disk with the selected configuration:
+
+```sh
+make disk
+make disk-update
+make disk-update DISK_ASSOCIATE=1
+```
+
+Stop QEMU before updating its disk. `disk-update` locks cooperating host
+writers, but it cannot coordinate with a running VM that has mounted the
+volume. It writes the filesystem in place. A power loss or host crash during
+its commit can leave the disk inconsistent; keep a backup before an important
+update. The target replaces files present in the current system tree but does
+not delete files removed from that tree. Use `make disk-overwrite` for a clean
+installed system, after saving any user data you need.
+
 The installer sizes a new FAT32 disk from the files in the system tree,
 including `LINUX_APPS_DIR`: at least 512 MiB, with at least 5% more data
-clusters than installation needs. `make run` does not resize an existing disk.
-`make system-image` builds the ISO and a volume image of the installed system,
-`$(OUT_DIR)/system.img`. `make run RECOVERY=1` boots an ISO whose archive asks
-PID 1 for recovery mode, to inspect or check the disk. `make run-gui` uses the same OVMF, ISO, persistent disk,
+clusters than installation needs. `make run` and `make disk-update` do not
+resize an existing disk. `make system-image` builds the ISO and a volume image
+of the installed system, `$(OUT_DIR)/system.img`. `make run RECOVERY=1` boots
+an ISO whose archive asks PID 1 for recovery mode, to inspect or check the
+disk. `make run-gui` uses the same OVMF, ISO, persistent disk,
 q35 machine, and COM1 connection, but also opens QEMU's VGA window for manual
 framebuffer-console validation. It uses the native macOS Cocoa backend by
 default; set `QEMU_DISPLAY=gtk`, `QEMU_DISPLAY=sdl`, or another backend

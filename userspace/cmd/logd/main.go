@@ -91,8 +91,8 @@ var (
 	writtenPolicy logpersist.Policy
 	statusWritten bool
 	statusText    [logpersist.MaxStatus]byte
-	rounds     int
-	interests  [userwait.MaxObjects]userwait.CursorInterest
+	rounds        int
+	interests     [userwait.MaxObjects]userwait.CursorInterest
 )
 
 //export userspaceMain

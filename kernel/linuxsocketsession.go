@@ -86,10 +86,10 @@ type linuxSocketScratch struct {
 	changed     [32]linuxcompat.SocketWake
 	// pollEpoch is the wake epoch of the socket pollSocket last looked at.
 	pollEpoch uint32
-	address     [linuxcompat.SockaddrInSize]byte
-	word        [4]byte
-	header      [linuxcompat.MsghdrSize]byte
-	option      [16]byte
+	address   [linuxcompat.SockaddrInSize]byte
+	word      [4]byte
+	header    [linuxcompat.MsghdrSize]byte
+	option    [16]byte
 }
 
 // socketDescriptor resolves a descriptor of a socket call: EBADF when it is

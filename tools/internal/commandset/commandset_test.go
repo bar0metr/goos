@@ -31,8 +31,9 @@ func TestNamesRequiresAgreement(t *testing.T) {
 	if err != nil || len(names) != 2 || names[0] != "cat" {
 		t.Fatalf("names = %v, %v", names, err)
 	}
-	if _, err := Names(directory, testIndex(t, "cat")); err == nil {
-		t.Fatal("an image without an entry was accepted")
+	indexed, err := Names(directory, testIndex(t, "cat"))
+	if err != nil || len(indexed) != 1 || indexed[0] != "cat" {
+		t.Fatalf("indexed names = %v, %v", indexed, err)
 	}
 	if _, err := Names(directory, testIndex(t, "cat", "ls", "rm")); err == nil {
 		t.Fatal("an entry without an image was accepted")

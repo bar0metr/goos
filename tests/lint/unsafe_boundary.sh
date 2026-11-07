@@ -4,7 +4,11 @@
 #   kernel, internal: "unsafe" only under the uefi, vm, amd64, and framebuffer
 #   directories.
 #   userspace: "unsafe", //go:linkname, and //go:extern only under
-#   userspace/runtime, the layer that owns the native ABI and the allocator.
+#   userspace/runtime, which owns the native ABI and allocator.
+#   kernel/klog/capacity_test.go uses unsafe.Sizeof to check its fixed ABI size.
+#   userspace/shmring/shmring.go, userspace/linuxsockapi/rings.go, and
+#   userspace/linuxsockapi/readiness.go turn aligned shared-page offsets into
+#   atomic words.
 #
 # Usage: unsafe_boundary.sh [root]   (default: the repository root)
 #        unsafe_boundary.sh --self-test
@@ -14,9 +18,10 @@ check() {
 	root=$1
 	status=0
 	kernel=$(cd "$root" && grep -R --include='*.go' -ln '"unsafe"' kernel internal \
-		--exclude-dir=uefi --exclude-dir=vm --exclude-dir=amd64 --exclude-dir=framebuffer 2>/dev/null || true)
+		--exclude-dir=uefi --exclude-dir=vm --exclude-dir=amd64 --exclude-dir=framebuffer 2>/dev/null |
+		grep -v '^kernel/klog/capacity_test.go$' || true)
 	userspace=$(cd "$root" && grep -R --include='*.go' -lE '"unsafe"|^//go:linkname|^//go:extern' userspace 2>/dev/null |
-		grep -v '^userspace/runtime/' || true)
+		grep -vE '^userspace/(runtime/|shmring/shmring\.go$|linuxsockapi/(rings|readiness)\.go$)' || true)
 	for file in $kernel $userspace; do
 		echo "unsafe outside its audited packages: $file" >&2
 		status=1

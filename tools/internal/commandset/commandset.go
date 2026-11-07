@@ -1,30 +1,42 @@
-// Package commandset checks that a directory of command images and the
-// command index built from the same tree agree, and cuts the index down to a
-// subset. The boot archive and the installed system both carry commands, and
-// PID 1 grants each from an index, so neither may describe a program it does
-// not hold (ADR 0080, ADR 0175).
+// Package commandset validates command-image directories against command
+// indexes and selects indexed command subsets. The boot archive and installed
+// system both carry command images, while PID 1 grants each command from an
+// index, so an index must not describe a program its tree does not hold (ADR
+// 0080, ADR 0175).
 package commandset
 
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 
 	"goos/userspace/commands"
 )
 
-// Names returns the command images in directory, in name order, and refuses
-// an image the index does not describe or an index entry without an image.
+// Names returns the command images named by index, in name order, and refuses
+// an index entry without a regular image.
 func Names(directory string, index []byte) ([]string, error) {
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, entry := range entries {
-		if entry.Type().IsRegular() {
-			names = append(names, entry.Name())
+	seen := map[string]bool{}
+	for offset := 0; ; {
+		entry, next, ok := commands.Next(index, offset)
+		if !ok {
+			if offset != len(index) {
+				return nil, fmt.Errorf("command index is malformed at byte %d", offset)
+			}
+			break
 		}
+		name := string(entry.Name)
+		info, err := os.Lstat(filepath.Join(directory, name))
+		if err != nil || !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("%s: index entry without an image", entry.Name)
+		}
+		seen[name] = true
+		offset = next
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
 	}
 	sort.Strings(names)
 	if err := Agree(names, index); err != nil {

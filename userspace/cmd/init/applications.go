@@ -24,8 +24,8 @@ import (
 	shellcmd "goos/userspace/shell"
 	"goos/userspace/startup"
 	"goos/userspace/tcpapi"
-	"goos/userspace/udpapi"
 	"goos/userspace/tty"
+	"goos/userspace/udpapi"
 	"goos/userspace/utility"
 )
 

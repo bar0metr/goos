@@ -67,9 +67,6 @@ func main() {
 	}
 	commandDirectory, outputPath := arguments[len(services)], arguments[len(services)+2]
 	index := read(arguments[len(services)+1])
-	if _, err := commandset.Names(commandDirectory, index); err != nil {
-		fail(err)
-	}
 	archived := RecoveryCommands
 	if *validation {
 		archived = append(append([]string(nil), RecoveryCommands...), ValidationCommands...)
