@@ -7,12 +7,12 @@ package main
 import (
 	"sync/atomic"
 
-	"goos/kernel/diag"
 	"goos/internal/logfmt"
 	"goos/internal/validation"
 	"goos/kernel/arch/amd64"
 	linuxcompat "goos/kernel/compat/linux"
 	linuxabi "goos/kernel/compat/linux/abi"
+	"goos/kernel/diag"
 	"goos/kernel/kcall"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
