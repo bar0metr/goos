@@ -332,12 +332,20 @@ const preemptFrame = 128 + 17*8 + 512 + 15 + 8
 // Legacy scheduler:none images resolve the unused weak hook to zero;
 // goroutine images must call the reviewed preemption runtime entry.
 func preemptCallPinned(instructions []instruction) bool {
+	if len(instructions) == 0 || instructions[len(instructions)-1].text != "UD2" {
+		return false
+	}
+	var call, branch bool
 	for _, ins := range instructions {
 		if strings.HasPrefix(ins.text, "CALL ") {
-			return ins.text == "CALL goos_g_preempt(SB)" || ins.text == "CALL 0x0"
+			call = ins.text == "CALL goos_g_preempt(SB)" || ins.text == "CALL 0x0"
+		}
+		if strings.HasPrefix(ins.text, "JNE ") {
+			target, err := strconv.ParseUint(strings.TrimPrefix(ins.text, "JNE "), 0, 64)
+			branch = err == nil && target == instructions[len(instructions)-1].address
 		}
 	}
-	return false
+	return call && branch
 }
 
 // sameInstructions reports whether a function is exactly want; a want entry
