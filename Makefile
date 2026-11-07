@@ -580,6 +580,7 @@ test-all:
 	$(MAKE) test
 	$(MAKE) lint
 	$(MAKE) docs
+	$(MAKE) test-incremental
 	$(MAKE) test-memory
 	$(MAKE) test-boot
 	$(MAKE) test-vfs-serial
@@ -612,6 +613,7 @@ release-check:
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test
+	$(MAKE) test-incremental
 	$(MAKE) test-storage-stress
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
@@ -1351,6 +1353,14 @@ help:
 	  'GoOS build targets:' \
 	  '  all/iso          build the bootable x86_64 ISO' \
 	  '  kernel          build the UEFI kernel' \
+	  '  kernel-iso      rebuild the kernel and boot ISO' \
+	  '  boot-service-vfs rebuild VFS and the boot ISO' \
+	  '  service-NAME    build one service, e.g. service-netd' \
+	  '  command-NAME    build one command, e.g. command-netbench4' \
+	  '  dev-service-NAME  install one service on an existing development disk' \
+	  '  dev-command-NAME  install one command on an existing development disk' \
+	  '  disk-update     copy the system tree onto DISK without removing stale files' \
+	  '  DISK_ASSOCIATE=1  explicitly associate DISK with the current build variant' \
 	  '  run             boot with QEMU and serial on this terminal, from DISK' \
 	  '  RECOVERY=1      run, run-gui: boot into recovery mode' \
 	  '  system-image    build the ISO and an installed system volume image' \
@@ -1401,6 +1411,7 @@ help:
 	  '  test-latency    measure command latency in QEMU into build/reports (LATENCY_REPEATS)' \
 	  '  test-microbench measure context switch, IPC, and VFS reads in QEMU (MICROBENCH_REPEATS)' \
 	  '  test-performance run host and in-guest microbenchmarks into build/reports' \
+	  '  test-incremental check build isolation in a temporary source tree' \
 	  '  test-reproducible build the ISO twice from clean and compare every artifact' \
 	  '  lint/fmt/docs   quality checks' \
 	  '  clean           remove build artifacts' \

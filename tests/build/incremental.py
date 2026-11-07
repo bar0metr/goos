@@ -7,27 +7,27 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
-OUT = Path('build/variants/hz250-opt2')
+OUT = None
 ARTIFACTS = {
-    'netd_elf': OUT / 'userspace/netd.elf',
-    'netd': OUT / 'userspace/netd',
-    'config_elf': OUT / 'userspace/config.elf',
-    'config': OUT / 'userspace/config',
-    'vfs_elf': OUT / 'userspace/vfs.elf',
-    'vfs': OUT / 'userspace/vfs',
-    'command_elf': OUT / 'userspace/bin-elf/netbench4.elf',
-    'command': OUT / 'userspace/bin/netbench4',
-    'other_command_elf': OUT / 'userspace/bin-elf/echo.elf',
-    'other_command': OUT / 'userspace/bin/echo',
-    'kernel': OUT / 'kernel/goos.efi',
-    'archive': OUT / 'initramfs/initramfs.tar',
-    'efi': OUT / 'iso/efi.img',
-    'iso': OUT / 'goos-x86_64.iso',
+    'netd_elf': Path('userspace/netd.elf'),
+    'netd': Path('userspace/netd'),
+    'config_elf': Path('userspace/config.elf'),
+    'config': Path('userspace/config'),
+    'vfs_elf': Path('userspace/vfs.elf'),
+    'vfs': Path('userspace/vfs'),
+    'command_elf': Path('userspace/bin-elf/netbench4.elf'),
+    'command': Path('userspace/bin/netbench4'),
+    'other_command_elf': Path('userspace/bin-elf/echo.elf'),
+    'other_command': Path('userspace/bin/echo'),
+    'kernel': Path('kernel/goos.efi'),
+    'archive': Path('initramfs/initramfs.tar'),
+    'efi': Path('iso/efi.img'),
+    'iso': Path('goos-x86_64.iso'),
 }
 
 
 def snapshot(root):
-    return {name: (root / path).stat().st_mtime_ns for name, path in ARTIFACTS.items()}
+    return {name: (root / OUT / path).stat().st_mtime_ns for name, path in ARTIFACTS.items()}
 
 
 def check(root, label, changed=(), unchanged=(), before=None):
@@ -46,7 +46,7 @@ def check(root, label, changed=(), unchanged=(), before=None):
 
 
 def make(root, *targets, **variables):
-    args = ['make', '-j4', *targets]
+    args = ['make', '-j4', *targets, 'BUILD_DIR=build']
     args.extend(f'{name}={value}' for name, value in variables.items())
     subprocess.run(args, cwd=root, check=True)
 
@@ -57,6 +57,15 @@ def change(root, source):
 
 
 def run(root):
+    global OUT
+    out = subprocess.run(
+        ['make', '-s', '-j4', '-f', 'Makefile', '-f', '-', '__incremental_out', 'BUILD_DIR=build'],
+        input='.PHONY: __incremental_out\n__incremental_out:\n\t@printf "%s\\n" "$(OUT_DIR)"\n',
+        cwd=root, text=True, check=True, stdout=subprocess.PIPE,
+    ).stdout.strip()
+    OUT = Path(out)
+    if OUT.is_absolute() or '..' in OUT.parts or not OUT.parts or OUT.parts[0] != 'build':
+        raise ValueError(f'build output must be inside the temporary build directory: {out}')
     make(root, 'userspace', 'iso')
     before = snapshot(root)
     make(root, 'userspace', 'iso')
@@ -85,7 +94,7 @@ def run(root):
     time.sleep(1.1)
     manifest.rename(held_manifest)
     try:
-        result = subprocess.run(['make', '-j4', 'command-index'], cwd=root,
+        result = subprocess.run(['make', '-j4', 'command-index', 'BUILD_DIR=build'], cwd=root,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode == 0:
             raise AssertionError('missing command manifest did not invalidate index')
