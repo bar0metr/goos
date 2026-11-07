@@ -19,11 +19,14 @@ cleanup() {
     rm -rf "$old"
 }
 trap cleanup EXIT HUP INT TERM
-source_go=$(go env GOROOT)
 source_tinygo=$(tools/tinygo.sh env TINYGOROOT)
-mkdir "$stage/tinygo" "$stage/go"
+mkdir "$stage/tinygo"
 go run ./tools/cryptocompat "$source_tinygo" "$stage/tinygo" tinygo/runtime/native.go.txt
-go run ./tools/tlscompat "$source_go" "$stage/tinygo" "$stage/go" tinygo/runtime/sysrand.go.txt tinygo/runtime/tls-cache.go.txt
+if [ "$kind" != crypto ]; then
+    source_go=$(go env GOROOT)
+    mkdir "$stage/go"
+    go run ./tools/tlscompat "$source_go" "$stage/tinygo" "$stage/go" tinygo/runtime/sysrand.go.txt tinygo/runtime/tls-cache.go.txt
+fi
 if [ "$kind" = ssh ]; then
     source_crypto=$(go mod download -json golang.org/x/crypto@v0.53.0 | sed -n 's/^[[:space:]]*"Dir": "\(.*\)",/\1/p')
     [ -n "$source_crypto" ] || { echo 'missing pinned x/crypto source' >&2; exit 1; }
@@ -33,7 +36,7 @@ if [ "$kind" = ssh ]; then
     cp go.mod "$stage/go.mod"
     cp go.sum "$stage/go.sum"
     go mod edit -modfile="$stage/go.mod" -replace="golang.org/x/crypto=$root/crypto"
-else
+elif [ "$kind" = tls ]; then
     printf 'module goos-compat-tls\n' > "$stage/go.mod"
 fi
 touch "$stage/.stamp"

@@ -314,6 +314,13 @@ $(COMPAT_TOOLCHAIN_ID): FORCE tools/toolchain.versions
 		{ command -v go; $(BUILD_ENV) go env GOROOT GOVERSION; command -v "$${TINYGO_BIN:-tinygo}"; $(BUILD_ENV) tools/tinygo.sh env TINYGOROOT; $(BUILD_ENV) tools/tinygo.sh version; } > "$$tmp"; \
 		cmp -s "$$tmp" '$@' || mv "$$tmp" '$@'
 
+CRYPTO_ROOT := $(BUILD_DIR)/toolchains/crypto
+CRYPTO_ROOT_STAMP := $(CRYPTO_ROOT)/.stamp
+CRYPTO_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/internal/compatroot/*.go internal/repobuild/*.go) tinygo/runtime/native.go.txt tools/prepare-compat.sh tools/toolchain.versions $(COMPAT_TOOLCHAIN_ID) go.mod go.sum
+$(CRYPTO_ROOT_STAMP): $(CRYPTO_COMPAT_SOURCES)
+	@mkdir -p $(dir $(CRYPTO_ROOT))
+	$(BUILD_ENV) sh tools/prepare-compat.sh crypto $(CRYPTO_ROOT) $(CACHE_DIR)
+
 TLS_ROOT := $(BUILD_DIR)/toolchains/tls
 TLS_ROOT_STAMP := $(TLS_ROOT)/.stamp
 TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tools/internal/compatroot/*.go internal/repobuild/*.go tinygo/runtime/*.txt) tools/prepare-compat.sh tools/toolchain.versions $(COMPAT_TOOLCHAIN_ID) go.mod go.sum
@@ -855,18 +862,18 @@ test-linux-network:
 CRYPTO_WORK ?=
 CRYPTO_COMPAT ?= 0
 .PHONY: crypto-check test-crypto
-crypto-check:
+crypto-check: $(if $(filter 1,$(CRYPTO_COMPAT)),$(CRYPTO_ROOT_STAMP))
 	@set -eu; work='$(CRYPTO_WORK)'; if [ -z "$$work" ]; then \
 		work=$$($(BUILD_ENV) go run ./tools/scratch goos-crypto.); \
 	fi; mkdir -p "$$work"; work=$$(cd "$$work" && pwd -P); \
-	$(BUILD_ENV) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) sh tools/crypto-check.sh "$$work"
+	$(BUILD_ENV) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) COMPAT_ROOT=$(abspath $(CRYPTO_ROOT)) sh tools/crypto-check.sh "$$work"
 
-test-crypto:
+test-crypto: $(if $(filter 1,$(CRYPTO_COMPAT)),$(CRYPTO_ROOT_STAMP))
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
 	@set -eu; work='$(CRYPTO_WORK)'; if [ -z "$$work" ]; then \
 		work=$$($(BUILD_ENV) go run ./tools/scratch goos-crypto.); \
 	fi; mkdir -p "$$work"; work=$$(cd "$$work" && pwd -P); \
-	status=0; $(BUILD_ENV) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) sh tools/crypto-check.sh "$$work" || status=1; \
+	status=0; $(BUILD_ENV) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) COMPAT_ROOT=$(abspath $(CRYPTO_ROOT)) sh tools/crypto-check.sh "$$work" || status=1; \
 	MEMORY=$(MEMORY) SMP=$(or $(SMP),1) sh tests/boot/crypto.sh "$$work" $(ISO) $(OVMF_CODE) $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation-opt$(OPT)/system || status=1; \
 	exit $$status
 

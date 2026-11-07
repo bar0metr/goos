@@ -8,10 +8,11 @@ tags=${BUILD_TAGS:-goos_hz250 goos_validation}
 mkdir -p "$work/elf" "$work/images" "$work/logs"
 make --no-print-directory toolchain-check build/userspace/runtime.o
 if [ "${CRYPTO_COMPAT:-0}" = 1 ]; then
-	original_root=$(tools/tinygo.sh env TINYGOROOT)
-	mkdir "$work/tinygo"
-	go run ./tools/cryptocompat "$original_root" "$work/tinygo" tinygo/runtime/native.go.txt
-	export TINYGOROOT="$work/tinygo"
+	root=${COMPAT_ROOT:-$(pwd)/build/toolchains/crypto}
+	if [ -z "${COMPAT_ROOT:-}" ]; then
+		make -j4 --no-print-directory build/toolchains/crypto/.stamp
+	fi
+	export TINYGOROOT="$root/tinygo" TINYGO_CACHE_NAMESPACE=crypto
 fi
 {
 	go version
