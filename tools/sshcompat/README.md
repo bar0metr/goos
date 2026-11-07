@@ -4,8 +4,8 @@ Build with `sh tools/build-ssh.sh OUTPUT_ELF PACKAGE TAGS [OPT]`.
 Run the host gates with `sh tools/build-ssh.sh --host-test`.
 
 The builder pins `golang.org/x/crypto v0.53.0` (Go 1.25), Go 1.25.5,
-and TinyGo 0.42.0. It copies sources into `build/tmp/goos-ssh-build.*/`, generates
-compatibility code there, and applies a temporary module replacement. It does
+and TinyGo 0.42.0. It prepares sources and a module replacement under
+`build/toolchains/ssh/` and reuses them until their inputs change. It does
 not change installed Go, TinyGo, the module cache, or the repository module file.
 `sshcompat.json` records SHA256 for the complete upstream module, adapters,
 and generated outputs. The generator checks a pinned complete-source-tree hash

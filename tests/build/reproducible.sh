@@ -18,7 +18,7 @@ second=$work/second
 # and logs and reports of other targets.
 keep='reproducible goos-disk.img virtio-blk.img boot-test-virtio-blk.img latency-virtio-blk.img logs reports'
 # Ephemeral build state removed before each build and excluded from snapshots.
-# build/tmp holds randomly named TLS/SSH/crypto compatibility roots.
+# Compatibility roots are collected under build/toolchains.
 exclude_collect='cache tmp'
 
 clean_build() {
