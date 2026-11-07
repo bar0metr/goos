@@ -1,12 +1,10 @@
 package main
 
 import (
-	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"regexp"
-	"strconv"
-	"strings"
+
+	"golang.org/x/arch/x86/x86asm"
 )
 
 // preemptionActive reports whether the image registers the goroutine
@@ -29,7 +27,7 @@ func preemptionActive(functions []function) bool {
 
 // accessReach checks every SP-relative operand of fn against the red zone
 // and returns the function's reach: the deepest of its SP depth, the return
-// slot each call writes, and its lowest stack operand.
+// slot each call writes, and every stack operand's lowest address.
 func accessReach(fn function, steps []step, depth []int64, frame int64, preemptible bool) analysis {
 	result := analysis{frame: frame, reach: frame}
 	calls := false
@@ -45,21 +43,22 @@ func accessReach(fn function, steps []step, depth []int64, frame int64, preempti
 		for _, access := range current.accesses {
 			lowest := access.disp
 			if access.index != "" {
+				// The compiler answers for an index's bounds, as for any
+				// computed pointer. A base below the red zone is the
+				// tool's to clear, so it needs the index proved.
 				start, proven := bounds[position][registerFamily(access.index)]
 				switch {
 				case proven:
 					lowest = access.disp + access.scale*start
 				case access.disp < -redZoneSize:
-					// A negative index could reach anywhere below.
 					result.problems = append(result.problems, fmt.Sprintf(
 						"%s at %#x: %q indexes the stack below the %d-byte red zone with a register the tool cannot bound",
 						fn.name, ins.address, ins.text, redZoneSize))
 					continue
 				}
-				// An index the tool cannot bound counts as zero, as it
-				// always has above the red zone.
 			}
 			if lowest >= -redZoneSize {
+				result.reach = max(result.reach, depth[position]-lowest)
 				continue
 			}
 			switch {
@@ -107,39 +106,30 @@ func registerFamily(name string) string {
 
 var numberedRegister = regexp.MustCompile(`^(R(?:8|9|1[0-5]))[BWL]?$`)
 
-// loopSafe lists instructions that write nothing but their last operand
-// and do not branch. A counted loop's body may hold only these.
-var loopSafe = map[string]bool{
-	"MOVB": true, "MOVW": true, "MOVL": true, "MOVQ": true, "MOVZX": true, "MOVSX": true,
-	"MOVAPS": true, "MOVUPS": true, "MOVDQA": true, "MOVDQU": true,
-	"ADDL": true, "ADDQ": true, "SUBL": true, "SUBQ": true, "ANDL": true, "ANDQ": true,
-	"ORL": true, "ORQ": true, "XORL": true, "XORQ": true, "XORPS": true, "PXOR": true,
-	"ROLL": true, "ROLQ": true, "RORL": true, "RORQ": true, "SHLL": true, "SHLQ": true,
-	"SHRL": true, "SHRQ": true, "SARL": true, "SARQ": true, "NOTL": true, "NOTQ": true,
-	"NEGL": true, "NEGQ": true, "BSWAP": true, "LEAL": true, "LEAQ": true,
-	"CMPB": true, "CMPW": true, "CMPL": true, "CMPQ": true,
-	"TESTB": true, "TESTW": true, "TESTL": true, "TESTQ": true,
-}
-
-// countedLoops proves bounds on loop counters. It accepts one shape:
+// countedLoops proves bounds on loop counters of this shape:
 //
-//	MOVL $start, R          ; B8+r imm32, which clears R's upper half
-//	NOP...                  ; optional padding
-//	header: ...body...      ; writes neither R nor control flow
-//	INCQ R
+//	init                    ; MOVL $start, R or XORL R, R, both of which
+//	...                     ;   clear R's upper half; then code that
+//	header: ...             ;   leaves R alone and does not branch
+//	step                    ; INCQ R or ADDQ $k, R: the body's only write to R
+//	...
 //	CMPQ R, $limit
 //	JNE header
 //
-// with start < limit <= 2^31, entered only through the MOVL and left only
-// through the JNE's fall-through. R then holds start..limit-1 throughout
-// the body, so the map gives start for each body position. Anything else
-// proves nothing.
+// with start < limit <= 2^31, (limit-start) a multiple of k, no branch in
+// the loop and no way in but the fall-through from init and the JNE. R then
+// holds start, start+k, ... limit-k before the step, so the map gives start
+// for each loop position. The machine code decides every write; anything
+// else proves nothing.
 func countedLoops(fn function, steps []step) map[int]map[string]int64 {
 	bounds := make(map[int]map[string]int64)
 	count := len(fn.instructions)
 	index := make(map[uint64]int, count)
+	decoded := make([]x86asm.Inst, count)
+	valid := make([]bool, count)
 	for position, ins := range fn.instructions {
 		index[ins.address] = position
+		decoded[position], valid[position] = decodeMachine(ins.encoding)
 	}
 	sources := make(map[int][]int)
 	for position, current := range steps {
@@ -153,103 +143,88 @@ func countedLoops(fn function, steps []step) map[int]map[string]int64 {
 		}
 	}
 	for latch := 2; latch < count; latch++ {
-		inc, cmp, jne := fn.instructions[latch-2].text, fn.instructions[latch-1].text, fn.instructions[latch].text
-		register, ok := strings.CutPrefix(inc, "INCQ ")
-		if !ok || registerFamily(register) != register {
+		if !valid[latch] || !valid[latch-1] || decoded[latch].Op != x86asm.JNE || steps[latch].flow != flowBranch {
 			continue
 		}
-		limitText, ok := strings.CutPrefix(cmp, "CMPQ "+register+", $")
-		if !ok {
+		header, found := index[steps[latch].target]
+		cmp := decoded[latch-1]
+		reg, isReg := cmp.Args[0].(x86asm.Reg)
+		limit, isImm := cmp.Args[1].(x86asm.Imm)
+		number, width, isGPR := gpr(reg)
+		if !found || header >= latch-1 || cmp.Op != x86asm.CMP || !isReg || !isImm || !isGPR || width != 64 || limit <= 0 || limit > 1<<31 {
 			continue
 		}
-		limit, err := strconv.ParseInt(limitText, 0, 64)
-		if err != nil || limit <= 0 || limit > 1<<31 {
+		if len(sources[header]) != 1 || sources[header][0] != latch {
 			continue
 		}
-		targetText, ok := strings.CutPrefix(jne, "JNE ")
-		if !ok {
+		stride, writer, ok := int64(0), -1, true
+		for position := header; position <= latch-1 && ok; position++ {
+			if position > header && len(sources[position]) != 0 || !valid[position] || steps[position].flow != flowNext {
+				ok = false
+				break
+			}
+			if !writesRegister(decoded[position], number) {
+				continue
+			}
+			inst := decoded[position]
+			ok = writer < 0 && inst.Args[0] == reg
+			writer = position
+			switch {
+			case ok && inst.Op == x86asm.INC:
+				stride = 1
+			case ok && inst.Op == x86asm.ADD:
+				k, isK := inst.Args[1].(x86asm.Imm)
+				ok, stride = isK && k > 0, int64(k)
+			default:
+				ok = false
+			}
+		}
+		if !ok || writer < 0 || len(sources[latch]) != 0 {
 			continue
 		}
-		target, err := strconv.ParseUint(targetText, 0, 64)
-		header, found := index[target]
-		if err != nil || !found || header >= latch-2 {
+		start, ok := loopStart(decoded, valid, steps, sources, header, number)
+		if !ok || start >= int64(limit) || (int64(limit)-start)%stride != 0 {
 			continue
 		}
-		start, ok := loopEntry(fn, sources, header, latch, register)
-		if !ok || start >= limit || !loopBody(fn, sources, header, latch-2, register) {
-			continue
-		}
-		for position := header; position <= latch-2; position++ {
+		name := []string{"AX", "CX", "DX", "BX", "SP", "BP", "SI", "DI",
+			"R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15"}[number]
+		for position := header; position < latch; position++ {
 			if bounds[position] == nil {
 				bounds[position] = make(map[string]int64)
 			}
-			bounds[position][register] = start
+			bounds[position][name] = start
 		}
 	}
 	return bounds
 }
 
-// loopEntry finds the MOVL that sets the counter before header and checks
-// that the JNE at latch is the only other way into the loop.
-func loopEntry(fn function, sources map[int][]int, header, latch int, register string) (int64, bool) {
-	if len(sources[header]) != 1 || sources[header][0] != latch {
-		return 0, false
-	}
-	for position := header + 1; position <= latch; position++ {
+// loopStart walks back from header to the instruction that sets the
+// counter, through code that neither writes it, branches, nor is a branch
+// target.
+func loopStart(decoded []x86asm.Inst, valid []bool, steps []step, sources map[int][]int, header, number int) (int64, bool) {
+	for position := header - 1; position >= 0 && position >= header-64; position-- {
+		if !valid[position] || steps[position].flow != flowNext {
+			return 0, false
+		}
+		inst := decoded[position]
+		if writesRegister(inst, number) {
+			reg, _ := inst.Args[0].(x86asm.Reg)
+			dest, width, _ := gpr(reg)
+			if dest != number || width != 32 {
+				return 0, false
+			}
+			switch inst.Op {
+			case x86asm.MOV:
+				value, isImm := inst.Args[1].(x86asm.Imm)
+				return int64(uint32(value)), isImm
+			case x86asm.XOR:
+				return 0, inst.Args[1] == inst.Args[0]
+			}
+			return 0, false
+		}
 		if len(sources[position]) != 0 {
 			return 0, false
 		}
 	}
-	position := header - 1
-	for position >= 0 && strings.HasPrefix(fn.instructions[position].text, "NOP") {
-		if len(sources[position]) != 0 {
-			return 0, false
-		}
-		position--
-	}
-	if position < 0 {
-		return 0, false
-	}
-	ins := fn.instructions[position]
-	valueText, ok := strings.CutPrefix(ins.text, "MOVL $")
-	if !ok || !strings.HasSuffix(valueText, ", "+register) {
-		return 0, false
-	}
-	value, err := strconv.ParseInt(strings.TrimSuffix(valueText, ", "+register), 0, 64)
-	if err != nil || value < 0 {
-		return 0, false
-	}
-	// Check the encoding: objdump has printed byte operations with long
-	// mnemonics, and only a 32-bit move clears the upper half.
-	code, err := hex.DecodeString(ins.encoding)
-	if err != nil {
-		return 0, false
-	}
-	if len(code) == 6 && code[0]&0xf8 == 0x40 { // REX without W
-		code = code[1:]
-	}
-	if len(code) != 5 || code[0]&0xf8 != 0xb8 || int64(binary.LittleEndian.Uint32(code[1:])) != value {
-		return 0, false
-	}
-	return value, true
-}
-
-// loopBody checks that body positions header..inc-1 neither branch nor
-// write the counter.
-func loopBody(fn function, sources map[int][]int, header, inc int, register string) bool {
-	for position := header; position < inc; position++ {
-		mnemonic, rest, _ := strings.Cut(fn.instructions[position].text, " ")
-		if strings.HasPrefix(mnemonic, "NOP") {
-			continue
-		}
-		if !loopSafe[mnemonic] {
-			return false
-		}
-		operands := strings.Split(strings.TrimSpace(rest), ", ")
-		writes := !strings.HasPrefix(mnemonic, "CMP") && !strings.HasPrefix(mnemonic, "TEST")
-		if writes && registerFamily(operands[len(operands)-1]) == register {
-			return false
-		}
-	}
-	return true
+	return 0, false
 }

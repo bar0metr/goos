@@ -78,8 +78,10 @@ func TestSHA256BlockEvidence(t *testing.T) {
 	if len(result.problems) != 0 {
 		t.Fatalf("sha256.block rejected even under preemption rules: %v", result.problems)
 	}
-	if result.reach != frame {
-		t.Fatalf("reach %d, want the frame %d: every access stays in the red zone", result.reach, frame)
+	// The deepest access is MOVL R15, -0x78(SP), 120 bytes below the
+	// 232-byte frame; the indexed loads reach only SP-80.
+	if result.reach != frame+120 {
+		t.Fatalf("reach %d, want %d", result.reach, frame+120)
 	}
 }
 
@@ -137,11 +139,26 @@ func TestReachThatSkipsTheGuardIsRejected(t *testing.T) {
 	}
 }
 
-func TestUnboundedIndexBelowRedZoneIsRejected(t *testing.T) {
+// The tool clears an indexed base below the red zone only with a proved
+// index; inside it, the index is the compiler's to bound, and the base
+// counts in the reach.
+func TestIndexBoundary(t *testing.T) {
 	for _, text := range []string{"MOVL 0xffffff70(SP)(AX*4), CX", "MOVL -0x90(SP)(AX*4), CX"} {
 		fn := parseOne(t, listing("index", 0x1000, text, "RET"))
 		if result := analyze(fn, false); len(result.problems) == 0 {
 			t.Fatalf("%s with an unknown AX accepted", text)
+		}
+	}
+	for text, reach := range map[string]int64{
+		"MOVQ 0(SP)(AX*8), CX":     0x10,
+		"MOVL 0x40(SP)(AX*4), CX":  0x10,
+		"MOVB CL, -0x7f(SP)(DX*1)": 0x10 + 0x7f,
+		"MOVL -0x80(SP)(AX*4), CX": 0x10 + 0x80,
+	} {
+		fn := parseOne(t, listing("index", 0x1000, "SUBQ $0x10, SP", text, "ADDQ $0x10, SP", "RET"))
+		result := analyze(fn, true)
+		if len(result.problems) != 0 || result.reach != reach {
+			t.Fatalf("%s: reach %d, problems %v; want reach %d", text, result.reach, result.problems, reach)
 		}
 	}
 	for _, text := range []string{"MOVQ AX, 0(SP)(SP*1)", "MOVQ AX, (SP)", "MOVQ AX, 0x10(SP)(AX*3)"} {
@@ -174,12 +191,17 @@ func TestCountedLoopProof(t *testing.T) {
 		"counter written in the body": loop("b810000000\tMOVL $0x10, AX", "4801c0\tADDQ AX, AX"),
 		"byte write to the counter":   loop("b810000000\tMOVL $0x10, AX", "b001\tMOVB $0x1, AL"),
 		"call in the body":            loop("b810000000\tMOVL $0x10, AX", "e800000000\tCALL f(SB)"),
-		"64-bit initial value":        loop("48c7c010000000\tMOVQ $0x10, AX", "c1c20f\tROLL $0xf, DX"),
-		"encoding disagrees":          loop("b800000000\tMOVL $0x10, AX", "c1c20f\tROLL $0xf, DX"),
+		"initial value from memory":   loop("488b06\tMOVQ 0(SI), AX", "c1c20f\tROLL $0xf, DX"),
 	} {
 		if result := analyze(parseOne(t, mutated), false); len(result.problems) == 0 {
 			t.Fatalf("%s: loop accepted", name)
 		}
+	}
+	// The machine code, not objdump's text, gives the start: zero here,
+	// so the ADDL reaches 144 bytes below SP.
+	bytesSayZero := parseOne(t, loop("b800000000\tMOVL $0x10, AX", "c1c20f\tROLL $0xf, DX"))
+	if result := analyze(bytesSayZero, true); len(result.problems) == 0 {
+		t.Fatal("the loop took its start from the text")
 	}
 	entered := encodedListing("entered", 0x1000,
 		"7406\tJE 0x1010",
