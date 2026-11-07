@@ -38,8 +38,7 @@ const (
 	// have.
 	userFrameLimit = int64(loader.StackGuardSize) - userMargin
 	// maxAlignment is the largest stack realignment (ANDQ $-n, SP) accepted.
-	// Realigning lowers the stack pointer by at most n-8 bytes, which the
-	// depth counts.
+	// Realigning can lower SP by at most n-1 bytes.
 	maxAlignment = 64
 	// divergenceLimit stops the analysis of a function whose depth keeps
 	// growing, which only a loop that allocates on the stack can cause.
@@ -273,7 +272,7 @@ func adjustment(text, mnemonic string, operands []string) step {
 		if alignment < 8 || alignment > maxAlignment || alignment&(alignment-1) != 0 {
 			return step{problem: fmt.Sprintf("%q realigns SP by more than %d bytes", text, maxAlignment)}
 		}
-		return step{delta: alignment - 8}
+		return step{delta: alignment - 1}
 	}
 	return dynamic
 }
@@ -327,7 +326,7 @@ var preemptInstructions = []string{
 
 // preemptFrame is the red zone, seventeen pushed words, the FXSAVE area and
 // its alignment, and the return address of the call.
-const preemptFrame = 128 + 17*8 + 512 + 8 + 8
+const preemptFrame = 128 + 17*8 + 512 + 15 + 8
 
 // preemptCallPinned also checks the operand of the sequence's only call.
 // Legacy scheduler:none images resolve the unused weak hook to zero;

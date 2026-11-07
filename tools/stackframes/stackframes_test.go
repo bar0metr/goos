@@ -142,8 +142,21 @@ func TestFrameOfStartRealignment(t *testing.T) {
 		"CALL userspaceMain(SB)",
 		"UD2",
 	))
-	if len(problems) != 0 || frame != 8 {
+	if len(problems) != 0 || frame != 15 {
 		t.Fatalf("frame = %d, problems = %v", frame, problems)
+	}
+}
+
+func TestFrameOfMisalignedStack(t *testing.T) {
+	for _, alignment := range []int{16, 64} {
+		frame, problems := analyzeListing(t, listing("f", 0x1000,
+			"SUBQ $0x9, SP",
+			fmt.Sprintf("ANDQ $-%#x, SP", alignment),
+			"RET",
+		))
+		if len(problems) != 0 || frame != int64(9+alignment-1) {
+			t.Errorf("alignment %d: frame = %d, problems = %v", alignment, frame, problems)
+		}
 	}
 }
 
