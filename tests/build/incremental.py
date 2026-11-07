@@ -98,8 +98,10 @@ def check_compatibility_roots(root):
         if not (path / 'goroot-test').is_dir():
             raise AssertionError('TLS or SSH rebuild removed the crypto cache')
     crypto_root = root / 'build/toolchains/crypto'
-    if (crypto_root / 'go').exists() or (crypto_root / 'go.mod').exists():
+    if (crypto_root / 'go').exists():
         raise AssertionError('crypto root contains TLS compatibility inputs')
+    if (crypto_root / 'go.mod').read_text() != 'module goos-compat-crypto\n':
+        raise AssertionError('crypto root has an incorrect module manifest')
     change(root, 'tools/cryptocompat/main.go')
     make(root, *targets)
     rebuilt = [path.stat().st_mtime_ns for path in stamps]
