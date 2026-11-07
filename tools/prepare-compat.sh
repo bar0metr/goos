@@ -20,7 +20,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 source_go=$(go env GOROOT)
-source_tinygo=$(tinygo env TINYGOROOT)
+source_tinygo=$(tools/tinygo.sh env TINYGOROOT)
 mkdir "$stage/tinygo" "$stage/go"
 go run ./tools/cryptocompat "$source_tinygo" "$stage/tinygo" tinygo/runtime/native.go.txt
 go run ./tools/tlscompat "$source_go" "$stage/tinygo" "$stage/go" tinygo/runtime/sysrand.go.txt tinygo/runtime/tls-cache.go.txt
@@ -33,6 +33,8 @@ if [ "$kind" = ssh ]; then
     cp go.mod "$stage/go.mod"
     cp go.sum "$stage/go.sum"
     go mod edit -modfile="$stage/go.mod" -replace="golang.org/x/crypto=$root/crypto"
+else
+    printf 'module goos-compat-tls\n' > "$stage/go.mod"
 fi
 touch "$stage/.stamp"
 rm -rf "$cache/tinygo-home-$kind/Library/Caches/tinygo"/goroot-* "$cache/tinygo-home-$kind/cache/tinygo"/goroot-*

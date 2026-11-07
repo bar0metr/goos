@@ -311,7 +311,7 @@ COMPAT_TOOLCHAIN_ID := $(BUILD_DIR)/toolchains/identity
 $(COMPAT_TOOLCHAIN_ID): FORCE tools/toolchain.versions
 	@mkdir -p $(dir $@)
 	@set -e; tmp=$$(mktemp '$@.tmp.XXXXXX'); trap 'rm -f "$$tmp"' EXIT; \
-		{ command -v go; $(BUILD_ENV) go env GOROOT GOVERSION; command -v tinygo; $(BUILD_ENV) tinygo env TINYGOROOT; $(BUILD_ENV) tinygo version; } > "$$tmp"; \
+		{ command -v go; $(BUILD_ENV) go env GOROOT GOVERSION; command -v "$${TINYGO_BIN:-tinygo}"; $(BUILD_ENV) tools/tinygo.sh env TINYGOROOT; $(BUILD_ENV) tools/tinygo.sh version; } > "$$tmp"; \
 		cmp -s "$$tmp" '$@' || mv "$$tmp" '$@'
 
 TLS_ROOT := $(BUILD_DIR)/toolchains/tls
