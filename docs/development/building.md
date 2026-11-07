@@ -140,6 +140,12 @@ compatibility roots live under `build/toolchains/` and are reused until their in
 `make clean` removes these caches and roots; ordinary builds retain them. The
 host Go module cache remains in its configured location.
 
+Independent `make` processes may share one `BUILD_DIR`. `tools/rootlock`
+keeps one lock file per generated root under `build/.locks`: builds read a
+root under a shared lock, a rebuild replaces it under an exclusive one, and
+`make clean` waits for both before it removes the whole build directory
+(ADR 0218). Separate `BUILD_DIR` values do not wait for each other.
+
 `system-tree` starts from an empty output directory, so it cannot retain files
 removed from the build tree. When a command source directory disappears, the
 command index drops it. The system tree uses that index, and `initramfs`

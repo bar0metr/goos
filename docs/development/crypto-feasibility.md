@@ -103,10 +103,10 @@ The tool pins TinyGo 0.42.0 and these source checksums:
 
 The tool records the replacement backend and patched source checksums in
 `cryptocompat.json`. It creates real source directories with file symlinks;
-TinyGo's GOROOT merger cannot merge symlinked namespace directories. On macOS,
-preparation removes the verified-empty output directory before renaming its
-staging directory, so there is a brief non-atomic gap. It refuses nonempty or
-symlink output targets.
+TinyGo's GOROOT merger cannot merge symlinked namespace directories. It writes
+into a private stage and refuses nonempty or symlink output targets;
+`tools/rootlock` publishes the stage in one rename under the root's lock
+(ADR 0218).
 
 `sys.RandomRead(dst)` requests at most `kcall.MaxRandomRead` bytes per call. It
 allocates nothing, fills the whole buffer on success and clears the whole buffer
@@ -145,6 +145,24 @@ X.509 fixture costs about 817 KiB of image bytes over the platform probe and
 555 KiB of arena allocation. Most of the ECDSA allocation appears in both the
 ECDSA and X.509 probes; we have not measured root-bundle or ordinary-chain costs.
 A largest-frame check does not prove total call-depth safety.
+
+Once `tools/stackframes` decoded objdump's unsigned negative displacements,
+it rejected the `sha256` and `ecdsa` probes for two indexed loads in
+`crypto/internal/fips140/sha256.block`. ADR 0217 proves their loop index and
+places them at SP-76 and SP-80, inside the red zone. A rebuild with
+`make crypto-check CRYPTO_COMPAT=1` gives every probe a `pass` row:
+
+| Probe | Native image bytes | Largest frame bytes |
+| --- | ---: | ---: |
+| platform, SHA-256, SHA-512, AES, cipher, ECDH, rand, RSA, PEM, TLS | 102,044 to 215,622 | 1,128 |
+| HMAC | 124,277 | 1,368 |
+| ECDSA | 557,077 | 1,144 |
+| ASN.1 | 355,106 | 1,640 |
+| X.509 | 895,154 | 2,136 |
+
+`sha256.block` has a 232-byte frame and the same reach. `make
+test-crypto-frames` rebuilds the `sha256` and `ecdsa` probes and checks their
+final ELFs.
 
 ## Software TLS follow-up
 

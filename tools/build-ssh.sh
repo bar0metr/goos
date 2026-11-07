@@ -1,8 +1,12 @@
 #!/bin/sh
 set -eu
 root=${COMPAT_ROOT:-$(pwd)/build/toolchains/ssh}
-if [ -z "${COMPAT_ROOT:-}" ]; then
-    make -j4 build/toolchains/ssh/.stamp
+# Builds and host tests read the root under its shared lock (tools/rootlock).
+if [ "${GOOS_ROOT_LOCK:-}" != "shared $root" ]; then
+    if [ -z "${COMPAT_ROOT:-}" ]; then
+        make -j4 build/toolchains/ssh/.stamp
+    fi
+    exec go run ./tools/rootlock shared -stamp .stamp "$root" -- sh "$0" "$@"
 fi
 if [ "${1:-}" = --host-test ]; then
     source_crypto=$(go mod download -json golang.org/x/crypto@v0.53.0 | sed -n 's/^[[:space:]]*"Dir": "\(.*\)",/\1/p')
