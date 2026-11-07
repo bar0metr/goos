@@ -96,7 +96,7 @@ fi
 
 tinygo_url="https://github.com/tinygo-org/tinygo/releases/download/v$(pin tinygo 2)/tinygo$(pin tinygo 2).darwin-$goarch.tar.gz"
 if found tinygo; then
-	check tinygo "$(tinygo version | awk '{ print $3 }')" \
+	check tinygo "$("$root/tools/tinygo.sh" version | awk '{ print $3 }')" \
 		"macOS: unpack $tinygo_url into /opt and put /opt/tinygo/bin on PATH"
 else
 	miss tinygo "macOS: unpack $tinygo_url into /opt and put /opt/tinygo/bin on PATH" \

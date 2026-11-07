@@ -178,7 +178,9 @@ func run(args []string) error {
 	if parent != filepath.Dir(output) || !compatroot.Allowed(output) {
 		return errors.New("output must be under the GoOS build directory")
 	}
-	version, err := exec.Command(filepath.Join(args[0], "bin", "tinygo"), "version").Output()
+	cmd := exec.Command("./tools/tinygo.sh", "version")
+	cmd.Env = append(os.Environ(), "TINYGO_BIN="+filepath.Join(args[0], "bin", "tinygo"))
+	version, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("read TinyGo version: %w", err)
 	}

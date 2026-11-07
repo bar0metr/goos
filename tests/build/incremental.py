@@ -56,6 +56,64 @@ def change(root, source):
     os.utime(root / source, None)
 
 
+def check_compatibility_roots(root):
+    targets = ('build/toolchains/tls/.stamp', 'build/toolchains/ssh/.stamp',
+               'build/toolchains/crypto/.stamp')
+    make(root, *targets)
+    stamps = [root / target for target in targets]
+    before = [path.stat().st_mtime_ns for path in stamps]
+    make(root, *targets)
+    if [path.stat().st_mtime_ns for path in stamps] != before:
+        raise AssertionError('unchanged compatibility roots were rebuilt')
+
+    caches = []
+    for kind in ('tls', 'ssh', 'crypto'):
+        paths = [root / 'build/cache' / f'tinygo-home-{kind}' / suffix / 'tinygo'
+                 for suffix in ('Library/Caches', 'cache')]
+        for path in paths:
+            (path / 'goroot-test').mkdir(parents=True, exist_ok=True)
+            (path / 'keep').mkdir(exist_ok=True)
+        caches.append(paths)
+
+    change(root, 'tools/sshcompat/main.go')
+    make(root, *targets)
+    after = [path.stat().st_mtime_ns for path in stamps]
+    if after[0] != before[0] or after[1] <= before[1] or after[2] != before[2]:
+        raise AssertionError('SSH input did not rebuild only the SSH root')
+    for path in caches[0]:
+        if not (path / 'goroot-test').is_dir():
+            raise AssertionError('SSH rebuild removed the TLS cache')
+    for path in caches[1]:
+        if (path / 'goroot-test').exists() or not (path / 'keep').is_dir():
+            raise AssertionError('SSH rebuild invalidated the wrong cache entries')
+    change(root, 'tools/tlscompat/main.go')
+    make(root, *targets)
+    final = [path.stat().st_mtime_ns for path in stamps]
+    if final[0] <= after[0] or final[1] <= after[1] or final[2] != after[2]:
+        raise AssertionError('TLS input did not rebuild both compatibility roots')
+    for path in caches[0]:
+        if (path / 'goroot-test').exists() or not (path / 'keep').is_dir():
+            raise AssertionError('TLS rebuild invalidated the wrong cache entries')
+    for path in caches[2]:
+        if not (path / 'goroot-test').is_dir():
+            raise AssertionError('TLS or SSH rebuild removed the crypto cache')
+    crypto_root = root / 'build/toolchains/crypto'
+    if (crypto_root / 'go').exists() or (crypto_root / 'go.mod').exists():
+        raise AssertionError('crypto root contains TLS compatibility inputs')
+    change(root, 'tools/cryptocompat/main.go')
+    make(root, *targets)
+    rebuilt = [path.stat().st_mtime_ns for path in stamps]
+    if any(a <= b for a, b in zip(rebuilt, final)):
+        raise AssertionError('crypto input did not rebuild all compatibility roots')
+    for path in caches[2]:
+        if (path / 'goroot-test').exists() or not (path / 'keep').is_dir():
+            raise AssertionError('crypto rebuild invalidated the wrong cache entries')
+    make(root, 'clean')
+    if (root / 'build/cache').exists() or (root / 'build/toolchains').exists():
+        raise AssertionError('clean left compatibility roots or caches')
+    print('PASS compatibility root reuse and invalidation', flush=True)
+
+
 def run(root):
     global OUT
     out = subprocess.run(
@@ -138,6 +196,7 @@ def run(root):
     disk.touch()
     make(root, 'run', QEMU='true', DISK=disk)
     check(root, 'run after build', unchanged=ARTIFACTS, before=before)
+    check_compatibility_roots(root)
 
 
 def main():

@@ -70,7 +70,9 @@ func run(args []string) error {
 	if err := emptyOutput(output); err != nil {
 		return err
 	}
-	version, err := exec.Command(filepath.Join(args[0], "bin", "tinygo"), "version").Output()
+	cmd := exec.Command("./tools/tinygo.sh", "version")
+	cmd.Env = append(os.Environ(), "TINYGO_BIN="+filepath.Join(args[0], "bin", "tinygo"))
+	version, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("read TinyGo version: %w", err)
 	}
