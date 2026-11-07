@@ -38,8 +38,7 @@ const (
 	// have.
 	userFrameLimit = int64(loader.StackGuardSize) - userMargin
 	// maxAlignment is the largest stack realignment (ANDQ $-n, SP) accepted.
-	// Realigning lowers the stack pointer by at most n-8 bytes, which the
-	// depth counts.
+	// Realigning can lower SP by at most n-1 bytes.
 	maxAlignment = 64
 	// divergenceLimit stops the analysis of a function whose depth keeps
 	// growing, which only a loop that allocates on the stack can cause.
@@ -47,8 +46,9 @@ const (
 )
 
 type instruction struct {
-	address uint64
-	text    string
+	address  uint64
+	encoding string // machine code in hex, as go tool objdump prints it
+	text     string
 }
 
 type function struct {
@@ -84,7 +84,7 @@ func parseObjdump(input io.Reader) ([]function, error) {
 				return nil, fmt.Errorf("objdump line %d: malformed address %q", line, fields[1])
 			}
 			last := &functions[len(functions)-1]
-			last.instructions = append(last.instructions, instruction{address: address, text: fields[3]})
+			last.instructions = append(last.instructions, instruction{address: address, encoding: fields[2], text: fields[3]})
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -113,19 +113,31 @@ const (
 	flowIndirect             // jumps through a register or table
 )
 
-// step is what one instruction does to the stack depth and to control flow.
+// step is what one instruction does to the stack depth and to control flow,
+// and which memory it addresses relative to SP.
 type step struct {
-	delta   int64
-	flow    flow
-	target  uint64
-	problem string
+	delta    int64
+	flow     flow
+	target   uint64
+	call     bool
+	accesses []stackAccess
+	problem  string
 }
 
-var belowStackPointer = regexp.MustCompile(`(-?0x[0-9a-f]+)\(SP\)`)
+// stackAccess is a memory operand based on SP: disp(SP), or
+// disp(SP)(index*scale) when index is set.
+type stackAccess struct {
+	disp  int64
+	index string
+	scale int64
+}
 
 // stackPointerOffset matches a memory operand that is SP plus a constant and
 // nothing else.
 var stackPointerOffset = regexp.MustCompile(`^(-?0x[0-9a-f]+|-?[0-9]+)\(SP\)$`)
+
+// stackPointerIndexed matches SP plus a constant plus a scaled register.
+var stackPointerIndexed = regexp.MustCompile(`^(-?0x[0-9a-f]+|-?[0-9]+)\(SP\)\(([A-Z0-9]+)\*([1248])\)$`)
 
 // displacement parses the constant of an SP-relative operand. go tool
 // objdump prints a large negative 32-bit displacement unsigned, so -4096 reads
@@ -148,16 +160,41 @@ func decode(text string) step {
 	if mnemonic == "?" {
 		return step{problem: "undecodable instruction"}
 	}
+	var accesses []stackAccess
 	for _, operand := range operands {
-		if match := belowStackPointer.FindStringSubmatch(operand); match != nil {
-			if offset, err := displacement(match[1]); err != nil || offset < -redZoneSize {
-				return step{problem: fmt.Sprintf("%q reaches below the %d-byte red zone", text, redZoneSize)}
-			}
+		if !strings.Contains(operand, "(SP)") {
+			continue
 		}
+		access, ok := stackOperand(operand)
+		if !ok {
+			return step{problem: fmt.Sprintf("%q addresses the stack in a form the tool does not bound", text)}
+		}
+		accesses = append(accesses, access)
 	}
 	if writesStackPointer(mnemonic, operands) {
 		return adjustment(text, mnemonic, operands)
 	}
+	result := decodeFlow(text, mnemonic, operands)
+	result.accesses = accesses
+	result.call = mnemonic == "CALL"
+	return result
+}
+
+// stackOperand parses disp(SP) and disp(SP)(index*scale).
+func stackOperand(operand string) (stackAccess, bool) {
+	if match := stackPointerOffset.FindStringSubmatch(operand); match != nil {
+		disp, err := displacement(match[1])
+		return stackAccess{disp: disp}, err == nil
+	}
+	if match := stackPointerIndexed.FindStringSubmatch(operand); match != nil && match[2] != "SP" {
+		disp, err := displacement(match[1])
+		scale, _ := strconv.ParseInt(match[3], 10, 64)
+		return stackAccess{disp: disp, index: match[2], scale: scale}, err == nil
+	}
+	return stackAccess{}, false
+}
+
+func decodeFlow(text, mnemonic string, operands []string) step {
 	switch mnemonic {
 	case "PUSHQ", "PUSHL", "PUSHFQ":
 		// PUSHL is Go's name for pushing an immediate, eight bytes in
@@ -273,7 +310,7 @@ func adjustment(text, mnemonic string, operands []string) step {
 		if alignment < 8 || alignment > maxAlignment || alignment&(alignment-1) != 0 {
 			return step{problem: fmt.Sprintf("%q realigns SP by more than %d bytes", text, maxAlignment)}
 		}
-		return step{delta: alignment - 8}
+		return step{delta: alignment - 1}
 	}
 	return dynamic
 }
@@ -327,18 +364,26 @@ var preemptInstructions = []string{
 
 // preemptFrame is the red zone, seventeen pushed words, the FXSAVE area and
 // its alignment, and the return address of the call.
-const preemptFrame = 128 + 17*8 + 512 + 8 + 8
+const preemptFrame = 128 + 17*8 + 512 + 15 + 8
 
 // preemptCallPinned also checks the operand of the sequence's only call.
 // Legacy scheduler:none images resolve the unused weak hook to zero;
 // goroutine images must call the reviewed preemption runtime entry.
 func preemptCallPinned(instructions []instruction) bool {
+	if len(instructions) == 0 || instructions[len(instructions)-1].text != "UD2" {
+		return false
+	}
+	var call, branch bool
 	for _, ins := range instructions {
 		if strings.HasPrefix(ins.text, "CALL ") {
-			return ins.text == "CALL goos_g_preempt(SB)" || ins.text == "CALL 0x0"
+			call = ins.text == "CALL goos_g_preempt(SB)" || ins.text == "CALL 0x0"
+		}
+		if strings.HasPrefix(ins.text, "JNE ") {
+			target, err := strconv.ParseUint(strings.TrimPrefix(ins.text, "JNE "), 0, 64)
+			branch = err == nil && target == instructions[len(instructions)-1].address
 		}
 	}
-	return false
+	return call && branch
 }
 
 // sameInstructions reports whether a function is exactly want; a want entry
@@ -356,20 +401,41 @@ func sameInstructions(instructions []instruction, want []string) bool {
 	return true
 }
 
-// analyzeFunction returns the deepest the stack pointer gets below its value
-// at the function's entry, following control flow so that code after an
-// early return is still counted at the depth it runs at. Where two paths meet
-// at different depths - after a call that does not return, the next block is
-// reached by a jump only - the deeper one is kept, which can only overstate a
-// frame. Jump-table targets are analysed at the depth of the indirect jump.
+// analysis is what one function does to the stack: frame is the deepest SP
+// gets below its value at entry, reach the deepest address the function
+// writes or reads below it.
+type analysis struct {
+	frame, reach int64
+	problems     []string
+}
+
+// analyzeFunction checks fn as code of an image with goroutine preemption,
+// the stricter case.
 func analyzeFunction(fn function) (int64, []string) {
+	result := analyze(fn, true)
+	return result.frame, result.problems
+}
+
+// analyze follows control flow so that code after an early return is still
+// counted at the depth it runs at. Where two paths meet at different depths -
+// after a call that does not return, the next block is reached by a jump
+// only - the deeper one is kept, which can only overstate a frame. Jump-table
+// targets are analysed at the depth of the indirect jump.
+//
+// Two properties bound the stack (ADR 0088). Guard reach: no access may lie
+// so far below the entry SP that it skips the guard. The preemption red
+// zone: in an image with goroutine preemption the kernel diverts a thread to
+// RSP-128, so data more than 128 bytes below SP can be overwritten at any
+// instruction. Without preemption nothing uses memory below SP, so a leaf
+// function may address further down while its reach stays inside the guard.
+func analyze(fn function, preemptible bool) analysis {
 	// TinyGo's continuation restores an ancestor frame's saved SP without
 	// allocating or accessing memory through the restored stack pointer.
 	if fn.name == "tinygo_longjmp" && len(fn.instructions) == 3 &&
 		fn.instructions[0].text == "MOVQ 0(DI), SP" &&
 		fn.instructions[1].text == "MOVQ 0x8(DI), AX" &&
 		fn.instructions[2].text == "JMP AX" {
-		return 0, nil
+		return analysis{}
 	}
 	// The collector's stack scrub zeroes from max(SP - 4096, DI) up to SP
 	// through DI, where DI is the stack base the runtime passes: at most
@@ -377,17 +443,27 @@ func analyzeFunction(fn function) (int64, []string) {
 	// were wrong, and none below the stack (ADR 0202). Any other
 	// instruction sequence is analysed, and rejected, like any function.
 	if fn.name == "goos_gc_scrub" && sameInstructions(fn.instructions, scrubInstructions) {
-		return 0, nil
+		return analysis{reach: 4096}
 	}
 	// The goroutine runtime's stack switch and preemption entry move SP to
 	// a stack the runtime made or restore the one they saved; the depth
 	// each reaches on the stack it starts on is fixed (ADR 0204).
 	if fn.name == "goos_g_swap" && sameInstructions(fn.instructions, swapInstructions) {
-		return swapFrame, nil
+		return analysis{frame: swapFrame, reach: swapFrame}
 	}
 	if fn.name == "goos_preempt_entry" && sameInstructions(fn.instructions, preemptInstructions) && preemptCallPinned(fn.instructions) {
-		return preemptFrame, nil
+		return analysis{frame: preemptFrame, reach: preemptFrame}
 	}
+	frame, depth, steps, problems := depths(fn)
+	if len(problems) != 0 {
+		return analysis{frame: frame, reach: frame, problems: problems}
+	}
+	return accessReach(fn, steps, depth, frame, preemptible)
+}
+
+// depths returns the deepest depth in fn and the depth before each
+// instruction.
+func depths(fn function) (int64, []int64, []step, []string) {
 	count := len(fn.instructions)
 	steps := make([]step, count)
 	index := make(map[uint64]int, count)
@@ -400,7 +476,7 @@ func analyzeFunction(fn function) (int64, []string) {
 		}
 	}
 	if len(problems) != 0 || count == 0 {
-		return 0, problems
+		return 0, nil, steps, problems
 	}
 	depth := make([]int64, count)
 	known := make([]bool, count)
@@ -428,7 +504,7 @@ func analyzeFunction(fn function) (int64, []string) {
 			after := depth[position] + current.delta
 			largest = max(largest, after)
 			if visits++; after > divergenceLimit || visits > 64*count {
-				return largest, []string{fmt.Sprintf("%s: stack depth does not converge (allocation in a loop?)", fn.name)}
+				return largest, depth, steps, []string{fmt.Sprintf("%s: stack depth does not converge (allocation in a loop?)", fn.name)}
 			}
 			switch current.flow {
 			case flowNext:
@@ -461,7 +537,7 @@ func analyzeFunction(fn function) (int64, []string) {
 			}
 		}
 		if unreached < 0 {
-			return largest, nil
+			return largest, depth, steps, nil
 		}
 		visit(unreached, seed)
 	}
@@ -469,9 +545,16 @@ func analyzeFunction(fn function) (int64, []string) {
 
 func checkFunctions(functions []function, limit int64) report {
 	result := report{limit: limit, largest: -1}
+	preemptible := preemptionActive(functions)
 	for _, fn := range functions {
-		frame, problems := analyzeFunction(fn)
-		result.problems = append(result.problems, problems...)
+		analyzed := analyze(fn, preemptible)
+		frame := analyzed.frame
+		result.problems = append(result.problems, analyzed.problems...)
+		if analyzed.reach > limit+redZoneSize && frame <= limit {
+			result.problems = append(result.problems, fmt.Sprintf(
+				"%s: reaches %d bytes below its entry SP, past %d bytes (a %d-byte guard less a return address)",
+				fn.name, analyzed.reach, limit+redZoneSize, loader.StackGuardSize))
+		}
 		result.frames = append(result.frames, namedFrame{name: fn.name, size: frame})
 		if frame > result.largest {
 			result.largest, result.function = frame, fn.name

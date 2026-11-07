@@ -283,11 +283,11 @@ GOROUTINE_TARGET := tinygo/targets/goos-userspace-goroutines-amd64.json
 GOROUTINE_ROOT_SOURCES := $(wildcard tools/goroutineroot/*.go tools/internal/compatroot/*.go internal/repobuild/*.go tinygo/goroutines/*.txt) tinygo/runtime/native.go.txt
 # The root is a copy-on-write mirror of the installed TinyGo with the
 # scheduler files replaced; it is made again whenever an input changes.
-$(GOROUTINE_ROOT_STAMP): $(GOROUTINE_ROOT_SOURCES)
-	rm -rf $(GOROUTINE_ROOT)
-	mkdir -p $(GOROUTINE_ROOT)
-	$(BUILD_ENV) go run ./tools/goroutineroot "$$(tools/tinygo.sh env TINYGOROOT)" $(GOROUTINE_ROOT) tinygo/goroutines
-GOROUTINE_BUILD = $(BUILD_ENV) TINYGOROOT=$(abspath $(GOROUTINE_ROOT)) tools/tinygo.sh build $(TINYGO_TAGS) -target=$(GOROUTINE_TARGET) -opt=$(OPT) -no-debug
+# Independent make processes share the root: tools/rootlock lets a writer
+# replace it only while no build reads it.
+$(GOROUTINE_ROOT_STAMP): $(GOROUTINE_ROOT_SOURCES) tools/prepare-goroutines.sh
+	$(BUILD_ENV) sh tools/prepare-goroutines.sh $(GOROUTINE_ROOT) $(abspath $(CACHE_DIR))
+GOROUTINE_BUILD = $(BUILD_ENV) go run ./tools/rootlock shared -stamp goroutineroot.json $(abspath $(GOROUTINE_ROOT)) -- env TINYGOROOT=$(abspath $(GOROUTINE_ROOT)) GOOS_BUILD_CACHE=$(abspath $(CACHE_DIR)) TINYGO_CACHE_NAMESPACE=goroutines tools/tinygo.sh build $(TINYGO_TAGS) -target=$(GOROUTINE_TARGET) -opt=$(OPT) -no-debug
 
 # Recipe changes must invalidate VFS images from older build trees, including
 # an ordinary tree that holds a VFS of the runtime a former default chose.
@@ -541,6 +541,13 @@ disk-update: system-tree
 test-incremental:
 	python3 tests/build/incremental.py
 
+# Independent make processes against one build directory (tools/rootlock).
+# CONCURRENCY_ITERATIONS repeats the light scenarios.
+.PHONY: test-build-concurrency
+test-build-concurrency:
+	$(BUILD_ENV) go test -count=1 ./tools/rootlock
+	python3 tests/build/concurrency.py
+
 disk: system-tree
 	@$(BUILD_ENV) go run ./tools/mkfat32 -new -variant '$(DISK_VARIANT)' -size auto -tree $(SYSTEM_TREE) $(DISK)
 	@printf 'installed GoOS %s on %s\n' '$(VERSION)' '$(DISK)'
@@ -608,6 +615,7 @@ test-all:
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test-incremental
+	$(MAKE) test-crypto-frames
 	$(MAKE) test-memory
 	$(MAKE) test-boot
 	$(MAKE) test-vfs-serial
@@ -641,6 +649,7 @@ release-check:
 	$(MAKE) docs
 	$(MAKE) test
 	$(MAKE) test-incremental
+	$(MAKE) test-crypto-frames
 	$(MAKE) test-storage-stress
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
@@ -860,13 +869,20 @@ test-linux-network:
 # Crypto feasibility reports stay in ignored build scratch output. A failed dependency
 # does not prevent native execution of the independently built probes.
 CRYPTO_WORK ?=
+CRYPTO_FRAMES_WORK ?=
 CRYPTO_COMPAT ?= 0
-.PHONY: crypto-check test-crypto
+.PHONY: crypto-check test-crypto-frames test-crypto
 crypto-check: $(if $(filter 1,$(CRYPTO_COMPAT)),$(CRYPTO_ROOT_STAMP))
 	@set -eu; work='$(CRYPTO_WORK)'; if [ -z "$$work" ]; then \
 		work=$$($(BUILD_ENV) go run ./tools/scratch goos-crypto.); \
 	fi; mkdir -p "$$work"; work=$$(cd "$$work" && pwd -P); \
 	$(BUILD_ENV) GOOS_BUILD_CACHE=$(abspath $(CACHE_DIR)) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) COMPAT_ROOT=$(abspath $(CRYPTO_ROOT)) sh tools/crypto-check.sh "$$work"
+
+test-crypto-frames: $(CRYPTO_ROOT_STAMP)
+	@set -eu; work='$(CRYPTO_FRAMES_WORK)'; if [ -z "$$work" ]; then \
+		work=$$($(BUILD_ENV) go run ./tools/scratch goos-crypto-frames.); \
+	fi; mkdir -p "$$work"; work=$$(cd "$$work" && pwd -P); \
+	$(BUILD_ENV) GOOS_BUILD_CACHE=$(abspath $(CACHE_DIR)) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) COMPAT_ROOT=$(abspath $(CRYPTO_ROOT)) sh tools/crypto-frames-check.sh "$$work"
 
 test-crypto: $(if $(filter 1,$(CRYPTO_COMPAT)),$(CRYPTO_ROOT_STAMP))
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
@@ -1364,8 +1380,10 @@ test-pvelab:
 
 test-hardware: test-pve-smoke test-pve-lscpu test-pve-linux test-pve-network
 
+# Waits for every reader and writer of a generated toolchain root, then
+# removes the whole build directory (tools/rootlock).
 clean:
-	@rm -rf $(BUILD_DIR)
+	@GOTOOLCHAIN=local go run ./tools/rootlock clean $(BUILD_DIR)
 
 distclean: clean
 

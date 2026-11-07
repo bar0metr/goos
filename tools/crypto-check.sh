@@ -5,14 +5,21 @@ set -eu
 work=${1:?output directory required}
 opt=${OPT:-2}
 tags=${BUILD_TAGS:-goos_hz250 goos_validation}
+packages=${CRYPTO_PACKAGES:-platform sha256 sha512 hmac aes cipher ecdh ecdsa rsa rand asn1 pem x509 tls}
 mkdir -p "$work/elf" "$work/images" "$work/logs"
-make --no-print-directory toolchain-check build/userspace/runtime.o
 if [ "${CRYPTO_COMPAT:-0}" = 1 ]; then
 	root=${COMPAT_ROOT:-$(pwd)/build/toolchains/crypto}
-	if [ -z "${COMPAT_ROOT:-}" ]; then
-		make -j4 --no-print-directory build/toolchains/crypto/.stamp
+	# Every probe reads the root under its shared lock (tools/rootlock).
+	if [ "${GOOS_ROOT_LOCK:-}" != "shared $root" ]; then
+		make --no-print-directory toolchain-check build/userspace/runtime.o
+		if [ -z "${COMPAT_ROOT:-}" ]; then
+			make -j4 --no-print-directory build/toolchains/crypto/.stamp
+		fi
+		exec go run ./tools/rootlock shared -stamp .stamp "$root" -- sh "$0" "$@"
 	fi
 	export TINYGOROOT="$root/tinygo" TINYGO_CACHE_NAMESPACE=crypto
+else
+	make --no-print-directory toolchain-check build/userspace/runtime.o
 fi
 {
 	go version
@@ -26,7 +33,7 @@ fi
 } >"$work/toolchain.txt"
 printf 'package\tbuild\timage_bytes\n' >"$work/build.tsv"
 failed=0
-for package in platform sha256 sha512 hmac aes cipher ecdh ecdsa rsa rand asn1 pem x509 tls; do
+for package in $packages; do
 	selected=$tags
 	if [ "$package" != platform ]; then
 		selected="$selected cryptoprobe_$package"

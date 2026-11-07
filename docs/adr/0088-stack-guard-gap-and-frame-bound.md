@@ -68,12 +68,13 @@ depth: how far the stack pointer can get below its value at entry. It follows
 control flow, so code after an early return is counted at the depth it runs
 at; it counts pushes and pops, `SUBQ` and `ADDQ` by a constant (a negative
 constant moves the other way), and `ANDQ $-n, SP` realignment, for at most
-`n - 8` bytes and `n` up to 64. Where paths meet at different depths it keeps
+`n - 1` bytes and `n` up to 64. Where paths meet at different depths it keeps
 the deeper, and jump-table targets are analysed at the depth of the indirect
 jump. Anything else that writes SP fails the build with the function's name:
 a register or memory amount, `MOVQ`, `LEAQ`, `LEAVE`, `XCHG`, `POPQ SP`, and
-so does an access more than the red zone below SP, an undecodable
-instruction, and a depth that grows around a loop. No allowlist is needed:
+so does an undecodable instruction and a depth that grows around a loop.
+ADR 0217 decides which accesses below SP-128 pass and bounds each
+function's reach, its lowest access below the entry SP, by the guard. No allowlist is needed:
 `_start`'s `ANDQ $-0x10, SP` is ordinary realignment, and the kernel-call
 stubs in `amd64.S` do not touch SP.
 

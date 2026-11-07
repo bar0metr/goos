@@ -142,8 +142,21 @@ func TestFrameOfStartRealignment(t *testing.T) {
 		"CALL userspaceMain(SB)",
 		"UD2",
 	))
-	if len(problems) != 0 || frame != 8 {
+	if len(problems) != 0 || frame != 15 {
 		t.Fatalf("frame = %d, problems = %v", frame, problems)
+	}
+}
+
+func TestFrameOfMisalignedStack(t *testing.T) {
+	for _, alignment := range []int{16, 64} {
+		frame, problems := analyzeListing(t, listing("f", 0x1000,
+			"SUBQ $0x9, SP",
+			fmt.Sprintf("ANDQ $-%#x, SP", alignment),
+			"RET",
+		))
+		if len(problems) != 0 || frame != int64(9+alignment-1) {
+			t.Errorf("alignment %d: frame = %d, problems = %v", alignment, frame, problems)
+		}
 	}
 }
 
@@ -387,7 +400,7 @@ func TestGoroutineSwitchesAcceptOnlyPinnedSequences(t *testing.T) {
 		body := append([]string(nil), c.body...)
 		for index, text := range body {
 			if text == "JNE" {
-				body[index] = "JNE 0x1000"
+				body[index] = fmt.Sprintf("JNE %#x", 0x1000+(len(body)-1)*4)
 			}
 			if text == "CALL" {
 				body[index] = "CALL goos_g_preempt(SB)"
@@ -400,6 +413,15 @@ func TestGoroutineSwitchesAcceptOnlyPinnedSequences(t *testing.T) {
 			t.Fatalf("%s accepted under another name", c.name)
 		}
 		if c.name == "goos_preempt_entry" {
+			changedBranch := append([]string(nil), body...)
+			for index, text := range changedBranch {
+				if strings.HasPrefix(text, "JNE ") {
+					changedBranch[index] = "JNE 0x1000"
+				}
+			}
+			if _, problems := analyzeListing(t, listing(c.name, 0x1000, changedBranch...)); len(problems) == 0 {
+				t.Fatal("preempt entry accepted an unpinned branch target")
+			}
 			for _, call := range []string{"CALL AX", "CALL 0x1234", "CALL another_runtime(SB)"} {
 				changed := append([]string(nil), body...)
 				for index, text := range changed {

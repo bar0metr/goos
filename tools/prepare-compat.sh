@@ -2,23 +2,29 @@
 set -eu
 kind=${1:?compatibility kind required}
 root=${2:?compatibility root required}
-root=$(cd "$(dirname "$root")" && pwd)/$(basename "$root")
 cache=${3:?cache directory required}
+mkdir -p "$(dirname "$root")"
+root=$(cd "$(dirname "$root")" && pwd -P)/$(basename "$root")
+# Hold the root's exclusive lock for the whole update (tools/rootlock). The
+# marker's age tells whether another writer published while this one waited.
+if [ "${GOOS_ROOT_LOCK:-}" != "exclusive $root" ]; then
+    marker=$(mktemp "${TMPDIR:-/tmp}/goos-compat-wait.XXXXXX")
+    exec go run ./tools/rootlock exclusive "$root" -- env GOOS_COMPAT_MARKER="$marker" sh "$0" "$@"
+fi
+marker=${GOOS_COMPAT_MARKER:-}
+if [ -n "$marker" ] && [ -f "$root/.stamp" ] && [ "$root/.stamp" -nt "$marker" ]; then
+    rm -f "$marker"
+    echo "prepare-compat: $root was published while waiting"
+    exit 0
+fi
+rm -f "$marker"
+# Only the lock holder makes stages, so any stage left here is stale.
 for candidate in "${root}".stage.*; do
-    [ -d "$candidate" ] || continue
-    pid=${candidate##*.stage.}
-    pid=${pid%%.*}
-    case "$pid" in *[!0-9]*|'') continue ;; esac
-    if ! kill -0 "$pid" 2>/dev/null; then rm -rf "$candidate"; fi
+    [ -e "$candidate" ] || continue
+    rm -rf "$candidate"
 done
-stage=$(mktemp -d "${root}.stage.$$.XXXXXX")
-old="${root}.old.$$"
-cleanup() {
-    rm -rf "$stage"
-    if [ -d "$old" ] && [ ! -e "$root" ]; then mv "$old" "$root"; fi
-    rm -rf "$old"
-}
-trap cleanup EXIT HUP INT TERM
+stage=$(mktemp -d "${root}.stage.XXXXXX")
+trap 'rm -rf "$stage"' EXIT HUP INT TERM
 source_tinygo=$(tools/tinygo.sh env TINYGOROOT)
 mkdir "$stage/tinygo"
 go run ./tools/cryptocompat "$source_tinygo" "$stage/tinygo" tinygo/runtime/native.go.txt
@@ -41,5 +47,4 @@ else
 fi
 touch "$stage/.stamp"
 rm -rf "$cache/tinygo-home-$kind/Library/Caches/tinygo"/goroot-* "$cache/tinygo-home-$kind/cache/tinygo"/goroot-*
-if [ -e "$root" ]; then mv "$root" "$old"; fi
-mv "$stage" "$root"
+go run ./tools/rootlock publish "$stage" "$root"
