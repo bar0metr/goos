@@ -160,9 +160,11 @@ places them at SP-76 and SP-80, inside the red zone. A rebuild with
 | ASN.1 | 355,106 | 1,640 |
 | X.509 | 895,154 | 2,136 |
 
-`sha256.block` has a 232-byte frame and the same reach. `make
-test-crypto-frames` rebuilds the `sha256` and `ecdsa` probes and checks their
-final ELFs.
+`make test-crypto-frames` rebuilds the `sha256` and `ecdsa` probes and checks
+their final ELFs. `make test-crypto CRYPTO_COMPAT=1` then ran every probe in
+the guest: all pass except `tls`, which fails on the documented stock-TinyGo
+TLS limit. ECDSA allocated 591,504 bytes with a 614,400-byte heap high mark in
+163,970,886 ns; SHA-256 allocated 320 bytes in 7,507,572 ns.
 
 ## Software TLS follow-up
 
