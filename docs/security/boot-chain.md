@@ -1,175 +1,188 @@
 # Boot chain and signature verification
 
-**Status: not implemented.** Nothing in GoOS verifies a signature, a hash, or
-a measurement today. Whoever can change the ISO controls the system. This
-document describes the chain as it is, where each verification step would go,
-and what already exists to support it. It answers spec §40: the architecture
-must provide for UEFI → bootloader → kernel → system image → services with
-signature checks, the owner of the machine must be able to use their own keys,
-and a mandatory vendor-controlled lock-in is forbidden.
+**Status: not implemented.** GoOS 0.2.9 validates formats, bounds, release
+compatibility and in-guest write policy, but it does not authenticate the
+kernel, boot archive or installed system. Whoever can replace the ISO controls
+the kernel and bootstrap code; whoever can replace the installed disk can
+supply a different but syntactically compatible normal-mode system.
 
-The boot sequence itself is described in
+This document describes the current chain and where authenticity verification
+would have to be inserted. The boot sequence itself is in
 [boot.md](../architecture/boot.md); the resulting trust assumptions are in
 [threat-model.md](threat-model.md).
 
 ## The chain today
 
 ```text
-OVMF (UEFI firmware, pflash, read-only)
- └─ El Torito EFI boot image: 8 MiB FAT volume on the ISO
-     ├─ EFI/BOOT/BOOTX64.EFI       kernel, PE32+, linked at 0x400000   ── loaded and started by firmware
-     └─ initramfs.tar              system image, USTAR                 ── read by the kernel through UEFI
-          ├─ system/init           PID 1                               ── loaded by the kernel
-          ├─ system/vfs, block, virtio-blk, config, log, shell         ── launched by PID 1 through the kernel
-          ├─ system/bin/<command>  one image per command               ── launched on request from the shell
-          ├─ system/commands       command index: grants per command   ── read by PID 1 through VFS
-          └─ system/motd, system/fault-probe (launched only by the validation build)
+OVMF / UEFI firmware
+ └─ ISO El Torito EFI system partition (8 MiB FAT)
+     ├─ EFI/BOOT/BOOTX64.EFI        GoOS kernel
+     └─ initramfs.tar               boot archive, at most 6 MiB
+          ├─ system/init            PID 1
+          ├─ bootstrap storage services
+          ├─ tty and recovery shell
+          └─ recovery commands/index
+
+installed FAT32 disk
+ ├─ system/                         protected and published as /system in normal mode
+ │   ├─ services/                   normal-mode services
+ │   ├─ bin/                        native commands
+ │   ├─ linux/                      static Linux programs
+ │   ├─ security/                   production trust inputs
+ │   ├─ commands                    installed command index
+ │   └─ release                     compatibility record
+ ├─ apps/                           published as /apps
+ ├─ home/
+ └─ state/
 ```
 
-1. **Firmware.** QEMU runs OVMF from `edk2-x86_64-code.fd` as read-only
-   pflash (`Makefile`, `QEMU_FLAGS`). No variable store is attached, so no
-   Secure Boot keys can be enrolled and Secure Boot is not in effect.
-2. **ISO.** `make iso` copies the kernel to `EFI/BOOT/BOOTX64.EFI` and the
-   archive to `initramfs.tar`, builds an 8 MiB FAT volume from them with
-   `hdiutil`, removes the MBR wrapper `hdiutil` adds, and uses the result as
-   the no-emulation El Torito boot image. `tools/iso-uefi` then rewrites the
-   boot catalog entry to the EFI platform ID, recomputes its checksum, and
-   records the image size (ADR 0001). The tool validates the catalog it
-   patches; it adds no signature.
-3. **Kernel.** The firmware finds the EFI El Torito entry, mounts the FAT
-   volume, and starts the removable-media default `\EFI\BOOT\BOOTX64.EFI`.
-   There is no separate bootloader: the kernel is a TinyGo UEFI application
-   and is its own loader. It is a PE image linked at `0x400000` without
-   `DYNAMIC_BASE`, and the kernel reads its own header at that address
-   (`vm.LoadedImage`).
-4. **System image.** Before `ExitBootServices`, the kernel asks the
-   loaded-image protocol for the device it was loaded from, opens
-   `\initramfs.tar` on that volume through the simple-file-system protocol,
-   and reads it into at most `boot.MaxInitramfs` (4 MiB) of `EfiLoaderData`
-   below 1 GiB (`kernel/boot/uefi/initramfs.go`, ADR 0020). A read that fills
-   the buffer is followed by a one-byte read; an archive over the bound stops
-   the boot rather than being used cut short, and the build refuses to produce
-   one. The pages stay reserved after the handoff and are never writable from
-   userspace.
-5. **PID 1.** The kernel finds `system/init` in the archive, loads it through
-   the native image loader, and runs it with the fixed capability layout.
-   USTAR header checksums are verified on every lookup, which catches damage,
-   not tampering.
-6. **Services and commands.** PID 1 maps the archive read-only, resolves
-   `/system/<service>` and `/system/bin/<command>` in it, and asks the kernel to
-   launch the extent it found, under an image capability with Execute. The
-   kernel checks that the extent lies inside the same archive and validates the
-   bytes as a native image; there is no path by which a file on `/persist`,
-   `/home`, `/state`, or `/tmp` can become a process (ADR 0022, 0030, 0093). The VFS service mounts the same archive read-only at
-   `/system` and validates it as a whole at mount time (ADR 0070). PID 1 reads
-   the command index `/system/commands` through VFS and grants a VFS session
-   only to commands whose entry asks for one (ADR 0080).
+1. **Firmware and kernel.** OVMF finds the no-emulation EFI boot image and
+   starts `EFI/BOOT/BOOTX64.EFI`. There is no separate bootloader: the kernel
+   is a TinyGo UEFI PE image. The normal QEMU configuration has no Secure Boot
+   variable store and no GoOS signing step, so firmware authenticity is not
+   established.
+2. **Boot archive.** Before `ExitBootServices`, the kernel opens
+   `\initramfs.tar` through UEFI file services and reads at most
+   `boot.MaxInitramfs` (6 MiB). A larger archive is refused rather than
+   truncated. The retained pages become the immutable boot-archive origin used
+   for PID 1 and bootstrap/recovery executables.
+3. **PID 1.** The kernel loads `system/init` from the boot archive. USTAR
+   header checksums detect damage; they are not cryptographic authentication.
+4. **Storage bootstrap.** PID 1 launches VFS, block, virtio-blk and FAT32 from
+   the boot archive. VFS mounts the archive at `/bootstrap` and the FAT32
+   volume at `/persist`, `/home` and `/state`, with the volume's
+   `system` directory protected by node identity (ADR 0175).
+5. **Normal/recovery decision.** In normal mode PID 1 reads
+   `/persist/system/release`, service headers, the installed command index and
+   indexed program headers. The release record must match the architecture,
+   release, startup format, native-image format and command-index format. This
+   is compatibility checking, not provenance checking. If it succeeds, VFS
+   publishes the protected volume directories as `/system` and `/apps`.
+   Otherwise PID 1 stays in recovery and runs archive-backed tools.
+6. **Normal-mode programs.** Configuration, logging, networking,
+   `linuxsockd`, remote access, the normal shell and other session services
+   are file-backed executables under `/system`. PID 1 reads them through VFS
+   into sealed executable sources; the kernel validates the executable format
+   and launch capabilities. Native commands use the installed
+   `/system/commands` index. None of these checks proves who supplied the
+   bytes on disk.
 
-## Where verification would be inserted
+The important 0.2.9 distinction is therefore:
 
-| Step | Verifier | Unit that is signed | Key store |
-| --- | --- | --- | --- |
-| firmware → kernel | UEFI Secure Boot in the firmware | the kernel EFI image `BOOTX64.EFI` (Authenticode signature in the PE) | UEFI `db`, `KEK`, `PK`, enrolled by the machine owner |
-| kernel → system image | the kernel, before it parses the archive | the whole `initramfs.tar` | public keys the kernel trusts, owner-controlled (see below) |
-| system image → services | nothing further | each image is a member of the verified archive | none needed |
+> The boot archive is the bootstrap/recovery origin. The installed FAT32
+> `/system` is a second executable origin used by normal mode.
 
-**Kernel.** The kernel image is the first code GoOS controls, so UEFI Secure
-Boot is the natural verifier and needs no GoOS code: the firmware refuses an
-image whose signature does not chain to `db` or that `dbx` revokes. The build
-would sign `goos.efi` after linking and before it is copied into the FAT
-volume. With no separate bootloader there is no intermediate stage to sign; if
-one is added later, it takes the kernel's place in this row and verifies the
-kernel itself.
+Protecting `/system` from normal namespace writes prevents accidental or
+unprivileged in-guest mutation. It is not an authenticity boundary against a
+modified disk image or a compromised FAT32 service.
 
-**System image.** The archive is read through firmware file services that
-Secure Boot does not cover, so the kernel must verify it. The check belongs
-right after `LoadInitramfs` returns and before the first `initramfs.Find`,
-that is, before any byte of the archive is parsed. A failure stops the boot
-with a console message, as a failed load does now. Two shapes fit the current
-design, and the choice is open:
+## Verification points
 
-- a detached signature file beside `initramfs.tar` on the boot volume, read
-  the same way, checked with a public key built into the kernel. The kernel's
-  own Secure Boot signature then covers that key;
-- the archive embedded as a section of the signed kernel PE, so one
-  Authenticode signature covers both, and the kernel reads the archive from
-  its own loaded image instead of from the file system.
+A complete verified chain now needs three independent links:
 
-The unit is the whole archive in both cases. Signing individual members would
-need a manifest inside the archive and a per-launch check, and buys nothing
-while the archive is immutable and fully resident.
+| Link | Natural verifier | Unit that must be authenticated |
+| --- | --- | --- |
+| firmware → kernel | UEFI Secure Boot | `BOOTX64.EFI` |
+| kernel → boot archive | kernel before first archive lookup | whole `initramfs.tar`, or an archive embedded in the signed kernel |
+| boot/archive trust → installed system | a trusted verifier whose result is enforced at every executable/index read | the normal-mode `/system` contents and metadata that grant authority |
 
-**Services.** Once the archive is verified, no further check is needed for
-the programs in it, because of properties the system already has:
+### Kernel
 
-- every executable the kernel will run comes from the archive, resolved by
-  the kernel, not by a userspace component that could be compromised;
-- the archive pages are never writable by a process: `ImageMap` maps them
-  read-only for VFS, and the shared image frames built from them are never
-  mapped writable (ADR 0070, 0081);
-- the grants of each command come from the command index inside the same
-  archive, so authority is covered by the same signature as code. PID 1 reads
-  the index through VFS, so a compromised VFS could misreport it, but the only
-  grant it decides is a session with VFS itself;
-- PID 1's service definitions and their capability manifests are compiled into
-  `system/init`, which is itself in the archive.
+UEFI Secure Boot remains the natural first verifier. The owner enrolls the
+keys they choose; GoOS must not require a project/vendor key. The build would
+sign the final kernel PE before it is placed in the EFI system partition.
 
-What verification cannot cover is modification after the check by something
-that can already write kernel memory: the kernel itself, or a DMA-capable
-device. Without an IOMMU, a compromised storage driver can rewrite the archive
-in memory (see [threat-model.md](threat-model.md#compromised-driver)). A
-verified boot chain protects the system at rest and at boot, not against a
-driver that is part of the effective TCB.
+### Boot archive
 
-## Owner-controlled keys, no lock-in
+The archive is read through firmware filesystem services, which Secure Boot
+does not authenticate. Verification therefore belongs after the kernel has
+read the complete archive and before the first `initramfs.Find`.
 
-The keys must belong to the owner of the machine, not to the project or a
-firmware vendor:
+Two viable shapes remain:
 
-- the firmware side uses standard UEFI Secure Boot. The owner puts the
-  firmware in setup mode and enrolls their own `PK`, `KEK`, and `db`, or
-  enrolls the GoOS project certificate if they choose to trust release builds.
-  GoOS must not depend on a third-party CA being present in `db`, and must not
-  ship a shim that pins a vendor key;
-- the system-image key must be replaceable without the project's cooperation.
-  With a key built into the kernel, the owner builds the kernel with their own
-  key and signs it with their own Secure Boot key, so both links in the chain
-  are theirs. Reading trusted keys from the UEFI `db` instead would let the
-  owner manage one key store, at the cost of X.509 parsing in the kernel;
-- a machine with Secure Boot disabled must still boot GoOS. Verification is a
-  property the owner turns on, and the boot banner should say whether it is in
-  effect, rather than the system refusing to run.
+- a detached signature beside `initramfs.tar`, checked by the kernel with a
+  public key covered by the signed kernel;
+- embedding the archive in the signed kernel PE so the kernel signature covers
+  both.
 
-## What exists and what is missing
+Either design authenticates one immutable archive before any archive-backed
+code executes.
 
-Already in place:
+### Installed system
 
-- a single, immutable system image that holds every program, the command
-  index, and the static configuration of PID 1 (ADR 0070, 0080);
-- launch resolution in the kernel, confined to that image (ADR 0022, 0030);
-- read-only mappings of the image for the one service that serves it, and
-  never-writable shared image pages (ADR 0070, 0081);
-- a single point in the kernel, between `LoadInitramfs` and the first lookup,
-  where the archive is complete and not yet parsed;
-- mutable state kept apart from the image on `/state` and user data on
-  `/home`, so a signed image does not have to cover data that changes
-  (ADR 0071);
-- deterministic artifacts: the archive is written with fixed metadata and
-  epoch timestamps, and the kernel is linked without a PE timestamp, so an
-  owner can rebuild a release from source, compare it, and sign it with their
-  own keys.
+Authenticating only the boot archive is no longer enough after ADR 0175:
+normal-mode services and commands are read later from FAT32.
 
-Missing:
+A correct design must authenticate the installed system **and bind later
+launches to the authenticated bytes**. A one-time hash performed by PID 1
+through an untrusted filesystem service is insufficient: the backend could
+return different data later.
 
-- a Secure Boot-capable OVMF build and a variable store in the QEMU
-  configuration, and instructions for enrolling keys;
-- key generation and a signing step in the build for `goos.efi`;
-- a signature format for the system image, a signing step in
-  `tools/initramfs`, and a verifier in the kernel. It would run once at boot,
-  where ADR 0065 permits allocation;
-- rollback protection (a version the kernel refuses to go below) and
-  revocation beyond what `dbx` gives for the kernel;
-- a recovery path when verification fails, which today would simply be a
-  halted boot;
-- measured boot (TPM PCR extension) for remote attestation, which spec §40
-  does not require.
+Acceptable future designs include, for example:
+
+- a signed manifest containing content hashes, with those hashes enforced by a
+  trusted executable-source/launch path on every installed executable and on
+  the command index; or
+- an immutable signed system-image/container format whose authenticated pages
+  are the executable origin.
+
+The exact representation is not selected yet. Whatever is chosen must cover
+at least the release record, command index, normal-mode service images,
+commands, Linux programs that are part of the installed system, and security
+policy/trust inputs whose contents affect execution or authority.
+
+Verification failure must prevent normal mode. Recovery should remain
+archive-backed so an installed-system failure does not require trusting the
+failed volume.
+
+## Owner-controlled keys and no lock-in
+
+The owner of the machine must control the verification keys.
+
+- Firmware verification should use standard UEFI Secure Boot with owner-managed
+  `PK`, `KEK`, `db` and `dbx`.
+- A kernel-embedded key for the boot archive is acceptable only because the
+  owner can build/sign the kernel with their own key. Reusing owner-managed
+  UEFI trust is also possible but would require the corresponding parser in
+  the kernel.
+- Installed-system signing must follow the same rule: no mandatory
+  vendor/project key and no network service required to authorize local boot.
+- Secure Boot may be disabled by the owner; the system should report the
+  resulting verification state rather than silently pretending verified boot
+  exists.
+
+The signed trust-store update mechanism used by native TLS is separate from
+this boot-chain problem. It authenticates CA bundle updates, not the kernel or
+installed operating system.
+
+## What already helps
+
+The present design provides useful structure even without authenticity:
+
+- deterministic kernel, archive and installed-system build artifacts;
+- one bounded boot archive with a 6 MiB loader/build limit;
+- a stable boot-archive executable origin and sealed file-backed executable
+  origins for installed/user programs;
+- executable-format, W^X, address and capability validation in the kernel;
+- a protected installed `system` directory and a strict compatibility record
+  before normal mode is published;
+- recovery whose executable set is archive-backed and independent of the
+  installed system;
+- separation of mutable `/state` and `/home` from installed `/system`.
+
+These properties make verification easier to add, but none is a signature.
+
+## Still missing
+
+- Secure-Boot-capable QEMU/OVMF setup and build signing for the kernel;
+- a boot-archive signature format and kernel verifier;
+- an installed-system signature/manifest or immutable authenticated image, plus
+  enforcement that binds later executable reads to authenticated bytes;
+- rollback/revocation policy for installed-system versions;
+- a defined recovery/user interface for verification failure;
+- TPM measured boot and remote attestation, which are separate from signature
+  verification.
+
+Without an IOMMU, a malicious DMA-capable driver also remains inside the
+effective TCB: verified boot authenticates what started, not arbitrary memory
+writes after boot.
