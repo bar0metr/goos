@@ -163,7 +163,9 @@ no leak: a page per round is inside the noise this paragraph describes. Seven me
 within one page. Three rounds in a band cannot show a slow leak in a process,
 so `make test-memory` adds a twenty-round run of a mixed workload that
 compares the kernel's pages exactly and process pages between the first and
-second half.
+second half. It compares the halves' medians: comparing their highest rounds
+failed a run that read 4103 to 4105 process pages in every round but one,
+which read 4109 before the next round fell back to 4104.
 
 A service starts with `arena.InitService`. A program started from a file loads
 each image page the first time it touches it (ADR 0121), through the VFS,
