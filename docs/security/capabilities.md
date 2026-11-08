@@ -418,7 +418,7 @@ device, or a smaller resource profile refuses the launch.
 | fork and exec create no authority | a forked child gets the parent's VFS channel capability and nothing else; `execve` loads only a static Linux image, never a native image or manifest (ADR 0157, ADR 0158) |
 | a forked child cannot reach the native gate | `abi-probe hardening` runs the isolation check in a child |
 | `kill` cannot cross families | the target must be in the caller's family registry; another family or a native process is `ESRCH` (ADR 0166) |
-| a fork bomb stays bounded | 16 processes per family, 48 for all families, 16 native slots reserved; `abi-probe limits` stops at 15 children (ADR 0155) |
+| a fork bomb stays bounded | 64 processes per family, 224 for all families, 32 native slots reserved; `abi-probe limits` stops at 63 children (ADR 0155, docs/architecture/resource-policy.md) |
 | a forged signal frame cannot escalate | `rt_sigreturn` refuses a return address or stack outside the user half, and every return filters RFLAGS (ADR 0164) |
 
 Linux user and group numbers, mode bits, and PIDs are presentation. No GoOS
