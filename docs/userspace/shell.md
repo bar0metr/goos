@@ -506,11 +506,11 @@ with each step timed, 64-byte UDP request-reply, and a WaitReady woken by a
 write. It prints `bench native-NAME key=value` lines and `bench native ok`.
 `make bench-pve-linux-network` sets them beside the Linux socket numbers.
 
-`netbench3 [MiB]` measures the same TCP steps on a GTCP 3 session, the
-protocol `linuxsockd` speaks: 16 KiB slots, four writes in flight that each
-name their stream offset, and four reads parked on the receiving end. Its
-lines start with `native-v3-`; those of `netbench` start with `native-v2-`,
-apart from the UDP line, which only `netbench` prints.
+`netbench3 [MiB]` keeps the GTCP 3 path as a legacy/intermediate comparison:
+16 KiB slots, four writes in flight that each name their stream offset, and
+four reads parked on the receiving end. `linuxsockd` used this path before
+GTCP 4. Its lines start with `native-v3-`; those of `netbench` start with
+`native-v2-`, apart from the UDP line, which only `netbench` prints.
 
 `netbench4 [MiB]` runs the stream, a one-byte request-reply and a
 connect-accept-close loop on a GTCP 4 session (ADR 0214), where stream data
@@ -539,12 +539,17 @@ goos> /system/linux/musl-hello | write /tmp/out
 goos> /system/linux/dirprobe /persist
 ```
 
-A Linux program has no terminal: its libc buffers output in blocks, so lines
-appear when the buffer fills or the program exits. It may fork and run other
-Linux programs; a static BusyBox `sh` runs command lines, pipelines, and
-scripts that way. The shell waits for the program it started. Ctrl-C ends that
-program and every process it forked; no signal reaches them (ADR 0170). [linux-x86_64-abi.md](../architecture/linux-x86_64-abi.md)
-lists what such a program can call.
+A Linux program launched alone in the foreground from the native shell gets
+the Linux terminal role (ADR 0206): descriptors 0, 1 and 2 refer to one
+terminal, and termios, sessions/process groups, foreground ownership,
+terminal-generated Ctrl-C/Ctrl-Z signals, resize/SIGWINCH and job control are
+implemented for the gated subset. A pipeline stage, redirected command or
+background job does not get that role, so `isatty` remains false there. A
+static BusyBox `sh` can run command lines, pipelines and scripts, and its
+interactive mode plus GNU nano are covered by the terminal gates. The shell
+waits for the foreground job and regains the terminal when it stops or exits.
+[linux-x86_64-abi.md](../architecture/linux-x86_64-abi.md) lists the exact
+supported calls and remaining terminal limits.
 
 ## Trust store command
 

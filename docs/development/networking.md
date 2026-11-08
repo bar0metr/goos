@@ -26,12 +26,12 @@ congestion control, close states and TIME_WAIT remain in `userspace/network`.
 The resolver now repeats a truncated UDP answer over a GTCP1 session
 (ADR 0194, ADR 0196). Linux programs reach TCP and UDP through `linuxsockd`
 (ADR 0210). IPv6 and persistent DNS-over-TCP connections remain out of scope.
-`linuxsockd`'s TCP session speaks GTCP 3 (16 KiB slots, ordered pipelined
-writes, queued reads), which PID 1 selects through GNETCTL version 6; other
-sessions keep GTCP 2. `net status` reports GTCP requests and replies per
-version (GNETAPI version 5). The protocol tests are in
-`userspace/tcpapi/version3_test.go` and `userspace/tcpserve/version3_test.go`;
-see the GTCP 3 section of [the networking architecture](../architecture/networking.md).
+Current `linuxsockd` uses GTCP 4 for TCP and GUDP 3 for UDP, selected through
+GNETCTL1 version 8; their payload data paths use shared rings (ADR 0214,
+ADR 0216). Ordinary native command/resolver sessions remain on GTCP 2/GUDP 2
+unless they explicitly request a ring protocol. `net status` uses the current
+GNETAPI1 version 8 status layout. GTCP 3 remains documented as the intermediate
+pipelined protocol in [the networking architecture](../architecture/networking.md).
 
 ADR 0198 selects native TLS 1.3 above GTCP1, with explicit system roots,
 kernel entropy and REALTIME. TLS and X.509 remain application parsers; network
@@ -45,7 +45,7 @@ for 0.2.6 and 0.2.8. See
 [the evidence report](crypto-feasibility.md) and
 [ADR 0198](../adr/0198-native-tls-and-system-trust.md).
 
-Baseline: `main` at `18f659e`Baseline: `main` at `18f659e` (2026-10-06). Implementation must reconcile this
+Baseline: `main` at `18f659e` (2026-10-06). The remainder of this document is the original ADR 0190/0191 milestone specification; numeric limits and "current source" statements below describe that baseline unless a later-work note explicitly supersedes them. Implementation must reconcile this
 specification with the source at the time of the change. The milestone is complete
 only when an installed GoOS system sends ICMP echo requests from its own `ping`
 command, receives replies over its own network driver and stack, and answers
@@ -90,7 +90,7 @@ deadline. A missing NIC must not put the system in recovery mode.
 | [Command grants](../../userspace/commands/commands.go), [launch path](../../userspace/cmd/init/applications.go) | PID 1 grants only declared command capabilities from a trusted command index. | Add separate network-use and network-admin grants; make one private session per launched client. |
 | [Linux ABI matrix](../architecture/linux-x86_64-abi.md) | Linux network calls are unsupported. | Leave the compatibility layer unchanged for this milestone. |
 
-The source currently allows 32 supervised services, seven grants per launch,
+The baseline source allowed 32 supervised services, seven grants per launch,
 16 interests per `WaitAny`, and 16 configuration sessions. Do not copy older
 numeric limits from narrative documentation without checking current code.
 

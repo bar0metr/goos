@@ -312,7 +312,7 @@ and receive buffer sizes and the TTL.
 GTCP version 3 serves a client that needs `Peek` or per-read lengths on
 pipelined reads and writes; `linuxsockd` used it before GTCP 4 (see below)
 and commands use version 2. PID 1 names the version in byte 3 of
-`ControlAddTCPSession` (GNETCTL version 6), and the version fixes the pools
+`ControlAddTCPSession` (GNETCTL1 version 8 in the current control protocol), and the version fixes the pools
 (`tcpapi.LayoutFor`): version 2 has four TX and eight RX slots of 4 KiB,
 version 3 eight TX and eight RX slots of 16 KiB, 128 KiB a pool. `netd`
 checks that each mapped pool holds its layout, decodes every message of the
