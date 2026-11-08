@@ -28,7 +28,8 @@ document states the security properties and who holds what.
 - **Generation-safe IDs.** A handle ID is `generation << 32 | (slot + 1)`
   (`kernel/handle/table.go`). Close clears the slot and increments the
   generation, so stale and forged IDs fail lookup after slot reuse. Zero
-  index, index above 128, and generation 0 are rejected before indexing.
+  index, index above `handle.MaxHandles` (256), and generation 0 are rejected
+  before indexing.
 - **Typed lookup.** A channel handle cannot be used as a stream, device, IRQ,
   memory, or process handle. Stream endpoints additionally encode their direction.
 - **Complete rights match.** `Capability.Allows` requires every requested bit.
@@ -50,31 +51,31 @@ document states the security properties and who holds what.
 
 | Right | Bit | Meaning |
 | --- | --- | --- |
-| Read | `0x01` | receive IPC, read stream, read console and wait on it (the console object), read the log (the log object), read ports, map shared memory or the system image |
-| Write | `0x02` | send IPC, write stream, write console and the log, write ports, allocate DMA, map shared memory writable, stop a process, reset the machine |
-| Execute | `0x04` | launch a native image from the system image object (PID 1 only, ADR 0093) |
+| Read | `0x01` | receive IPC, read stream, read console and wait on it (the console object), read the log (the log object), read ports, map shared memory or the boot-archive image |
+| Write | `0x02` | send IPC, write stream, write console and the log, write ports, allocate DMA, map shared memory writable, stop a process, reset/power off the machine |
+| Execute | `0x04` | launch a native image from the boot-archive image object (PID 1 only, ADR 0093) |
 | Transfer | `0x08` | derive into another process (manifest or IPC attachment) |
-| Wait | `0x10` | block on a channel, stream, process, or IRQ |
+| Wait | `0x10` | block on a channel, stream, process, IRQ, or other waitable object |
+| ClockSet | `0x20` | authorize setting realtime on the clock object; defined but granted to no process, and `ClockSet` currently returns `Unsupported` |
 
 ## Spawn manifests
 
 Only PID 1 can reach the kernel launch path: launch requests arrive on the
-lifecycle channel, whose only endpoint is in PID 1. A request names its
-executable as an extent of an image object, together with the handle that
-authorizes executing from it, and carries at most seven grants of
-`{source handle, type, rights, name}` (ADR 0024, 0031, 0093). The kernel
-resolves no path: PID 1 found the executable in its own read-only mapping of
-the system image, or opened a stable VFS object and converted its sealed header
-object into a file-backed source using the non-transferable loader capability
-(ADR 0121). The request also names one kernel-defined resource profile; PID 1
+lifecycle channel, whose only endpoint is in PID 1. A request names its executable source and carries at most ten grants of
+`{source handle, type, rights, name}` (`userspace/init.MaxCapabilities`;
+ADR 0024, ADR 0031, ADR 0197). The kernel resolves no path: a bootstrap
+executable is an extent of the boot-archive image object, while an installed
+or user executable is a whole sealed file-backed executable source prepared
+through VFS with the non-transferable loader capability (ADR 0093, ADR 0121,
+ADR 0175). The request also names one kernel-defined resource profile; PID 1
 cannot submit numeric limits (ADR 0122).
 
 Before creating the address space the kernel:
 
-0. requires the image handle in PID 1's table to be the system image with
-   Execute and the extent to lie inside the image, or a sealed executable
-   source with Execute named whole; the native image validator then decides
-   whether the bytes are a program;
+0. requires either the boot-archive image handle with Execute and an extent
+   wholly inside it, or a sealed executable source with Execute named whole;
+   the native/Linux image validators then decide whether the bytes are an
+   accepted program;
 1. resolves each source in PID 1's table with Transfer authority;
 2. checks that the requested rights derive from the source;
 3. installs derived handles into the empty child table in manifest order,
@@ -83,10 +84,10 @@ Before creating the address space the kernel:
 5. binds the handle IDs into the child's startup object by role name.
 
 A grant marked `Consume` closes PID 1's source handle after a successful
-launch. Exclusive endpoints (service channel ends, pipeline streams) are consumed, so
-PID 1 does not keep a second copy. The system image is not: PID 1 keeps it with
-Execute to launch from, and the filesystem service receives a Read-only copy
-that cannot launch anything. The storage
+launch. Exclusive endpoints (service channel ends, pipeline streams) are
+consumed, so PID 1 does not keep a second copy. The boot-archive image is not:
+PID 1 keeps it with Execute to launch bootstrap/recovery programs, and VFS
+receives a Read-only copy that cannot launch anything. The storage
 driver's device authority is the exception: PID 1 keeps it to relaunch the
 driver (ADR 0078). Startup role names locate handles; they do not grant
 authority.
@@ -103,7 +104,7 @@ uses slot 9 for a block-service probe (ADR 0058).
 | PID 1 slot | Object | PID 1 rights | Derived to | Child rights | Consumed |
 | --- | --- | --- | --- | --- | --- |
 | 1 | lifecycle channel | R W Wait | PID 1 only | - | - |
-| 2 | console device | R W T | VFS, block, virtio-blk, fat32, config, log, netd, virtio-net, resolved | W | no |
+| 2 | console device | R W T | VFS, block, virtio-blk, fat32, config, log, netd, virtio-net, resolved, linuxsockd | W | no |
 | | | | tty `console` | R W | no |
 | 3 | VFS session, client end | R W Wait T | shell `vfs` | R W Wait | yes |
 | 4 | VFS session, server end | R W Wait T | VFS `session` | R W Wait | yes |
@@ -123,7 +124,7 @@ uses slot 9 for a block-service probe (ADR 0058).
 | 18 | system control | W | PID 1 only | - | - |
 | 19 | launch staging page (memory) | R W | PID 1 only; mapped by the kernel at `0x401ff000` | - | - |
 | 20 | exec area (memory) | R W T | shell `execpage` | R W | no |
-| 21 | system image | R X T | VFS `image` | R | no; PID 1 keeps it to launch from (ADR 0093) |
+| 21 | boot-archive image | R X T | VFS `image` | R | no; PID 1 keeps it to launch bootstrap/recovery extents (ADR 0093, ADR 0175) |
 | 22 | log | R T | log `log`, shell `log` | R | no |
 | 28 | virtio-net port range | R W T | virtio-net `ports` | R W | no |
 | 29 | network IRQ line | Wait T | virtio-net `irq` | Wait | no |
@@ -433,17 +434,18 @@ check reads them.
 | --- | --- | --- | --- |
 | `GLNXCTL2` control channel, service end | the other end | R W Wait | yes |
 | console device | yes | W | no |
-| TCP session channel, pools, quota 64, in `SetTCP` | - | as for a command | yes |
-| UDP session channel, pools, quota 64, in `SetUDP` | - | as for a command | yes |
+| TCP session channel and GTCP 4 pools, quota 512, in `SetTCP` | - | same rights pattern as a native TCP client | yes |
+| UDP session channel and GUDP 3 pools, quota 512, in `SetUDP` | - | same rights pattern as a native UDP client | yes |
 | family channel, service end, in `AddFamily` | - | R W Wait | yes |
 | family pool, 17 pages, in `AddFamily` | - | R W | yes |
 
-It holds no VFS session, configuration session, network administration
-session, device other than the console, IRQ, DMA, or launch channel. Its
-native sessions carry the same rights as a command's; only the endpoint
-quota and the TCP session's GTCP version differ, and PID 1 names both in
-GNETCTL version 6. The GTCP 3 session's pools hold 128 KiB each. A compromised
-`linuxsockd` reaches every Linux socket and the TCP and UDP endpoints it
+It holds no VFS session, configuration session, network-administration
+session, device other than the write-only console grant, IRQ, DMA, or launch
+channel. PID 1 asks `netd` for the largest per-session endpoint quota
+(`netapi.MaxSessionQuota = 512`), GTCP 4 for TCP and GUDP 3 for UDP through
+the current GNETCTL1 control protocol. The ring pool layouts are fixed by
+GTCP 4/GUDP 3 and generation/ownership checked on both sides. A compromised
+`linuxsockd` reaches every Linux socket and the native TCP/UDP endpoints it
 backs, and nothing else.
 
 PID 1 makes one family session per Linux launch while the service runs:
@@ -451,7 +453,8 @@ the launch receives `linux-net` and `linux-net-pool`, the service the other
 channel end and a second pool handle. After a `linuxsockd` restart PID 1
 gives each running launch a fresh session with `LinuxNetAttach`, which needs
 PID 1's process handle to the launch root. The kernel checks the handle
-types, the rights, and the pool size before it replaces the old session.
+types, rights, pool layout and target Linux-family state before accepting the
+new session.
 
 ## Tests
 

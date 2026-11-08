@@ -12,13 +12,14 @@ and requests beyond the bounded table capacity are rejected.
 
 Capability transfer requires explicit Transfer authority on the source handle.
 The destination receives a new process-local handle and a derived rights mask
-that cannot exceed the source rights. Transfer does not revoke the source;
-move semantics will be defined by the IPC protocol rather than hidden inside
-the handle primitive.
+that cannot exceed the source rights. A plain handle duplication/manifest
+derivation does not revoke the source. IPC handle attachment is an explicit
+move: the sender's handle is closed and Transfer is stripped from the delivered
+capability, so the receiver cannot forward it again.
 
 PID 1 service definitions identify source handles, expected object types, and
-the exact rights to derive. Lifecycle launch requests serialize at most seven
-such entries. The kernel resolves every source in PID 1's table with Transfer
+the exact rights to derive. Lifecycle launch requests serialize at most ten
+such entries (`userspace/init.MaxCapabilities`). The kernel resolves every source in PID 1's table with Transfer
 authority before process creation, rejects rights escalation, and rolls back
 all installed child handles if any derivation fails. Child handle slots follow
 manifest order in the initially empty process table.

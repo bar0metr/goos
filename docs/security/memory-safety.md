@@ -35,7 +35,7 @@ In userspace, `unsafe` lives in two packages (ADR 0095):
 
 | Package | Use |
 | --- | --- |
-| `userspace/runtime/sys` | the native-call stubs of `userspace/runtime/amd64.S`, descriptor addresses, slices over kernel-mapped windows (system image, shared pages, DMA, the launch staging page), zero-copy string/byte views |
+| `userspace/runtime/sys` | the native-call stubs of `userspace/runtime/amd64.S`, descriptor addresses, slices over kernel-mapped windows (boot archive image, shared pages, DMA, the launch staging page), zero-copy string/byte views |
 | `userspace/runtime/arena` | the reclaiming per-process allocator/collector over the heap it reserves with `VMMap` (ADR 0104, ADR 0201), scoped regions, and the TinyGo runtime hooks |
 
 Programs, services, commands, and libraries call typed wrappers instead
@@ -74,17 +74,19 @@ existing site follows this yet: the UEFI protocol calls in
   executable segments and fills pages through the kernel's physical view before
   installing the final user mappings (docs/kernel/native-images.md).
 - Shared-memory and DMA mappings are always NX.
-- `MemoryMap` installs shared pages only inside the shared window
-  `[0x40180000, 0x401c0000)` and only after every target leaf is free. The
-  leaves are not owned, so an exiting process never frees shared storage
-  (ADR 0063).
+- `MemoryMap` maps a whole shared-memory object at a free caller-selected
+  user address, or with `MemoryMapAnywhere` at a kernel-selected address in
+  `[vm.UserMapBase, vm.UserMapLimit)`. Shared mappings are always NX; the
+  mapped object retains its own lifetime after handles close (ADR 0063,
+  ADR 0104).
 - `ImageMap` maps the boot archive user-readable, never writable and never
-  executable, unowned, inside `[0x40200000, 0x40600000)` (ADR 0070, ADR 0087).
-- Read-only segments of images from the system image are backed by frames
-  shared between the processes running the image. They are mapped with the
-  segment's permissions, which never include write, and without the owned bit;
-  `CopyOut` needs a writable leaf, so the kernel cannot write them for a
-  process either (ADR 0081).
+  executable, unowned, inside
+  `[0x0000082000000000, 0x0000082040000000)` (ADR 0070, ADR 0087).
+- Read-only native-image pages with the same stable origin may use the shared
+  image cache: boot-archive extents key by archive origin, and file-backed
+  executables by their sealed executable object. They are mapped with the
+  segment's final permissions, never writable when shared; `CopyOut` still
+  requires a writable leaf (ADR 0081, ADR 0121).
 
 ## Guard pages
 
@@ -100,24 +102,25 @@ existing site follows this yet: the UEFI protocol calls in
 - A double fault is delivered on its own stack (TSS IST 1), so an overflow of
   any kernel stack is reported with the guard address it hit instead of
   resetting the machine (ADR 0091).
-- User address space starts at 1 GiB; low addresses are unmapped in every
-  process, so null dereferences fault.
+- The null page stays unmapped: user pointers are confined to
+  `[0x1000, 0x00007ffffffff000)`. Native images normally live near 1 GiB,
+  while Linux `ET_EXEC` may use conventional lower addresses such as
+  `0x400000` and static PIE is randomized inside its bounded 1–2 GiB window.
 - Every user stack has 64 KiB of unmapped address space directly below it
   (`loader.StackGuardSize`, ADR 0083, ADR 0088). The kernel reserves every
   program's stack itself, below the top of the user range, with that guard
   recorded as a guard region no mapping may enter (ADR 0104); an image that
   carries its own stack segment must leave the same gap, which `ParseNative`
   checks, and `LoadImage` rejects a gap the kernel maps pages into (the probe
-  and startup pages). Userspace code has no stack probes, so the gap
-  is sound only because no frame can step over it: `tools/stackframes`
-  computes every function's stack depth from `go tool objdump` and fails the
-  build for a depth over 65400 bytes (the gap less the return address and the
-  128-byte red zone) or for any stack-pointer change it cannot bound. An
-  overflow therefore takes a page fault in the gap, which retires the process
-  like any other user fault; the kernel does not panic. The validation
-  build's fault-probe overflows its stack through a 12 KiB frame on every run,
-  and the kernel requires a not-present fault in the gap more than a page
-  below the stack (`USER_STACK_GUARD_OK`).
+  and startup pages). Userspace code has no reliable stack probes, so the gap is sound only when
+compiled stack movement cannot skip it. `tools/stackframes` computes bounded
+SP/frame depth and effective SP-relative reach from `go tool objdump`; an
+unknown SP change fails closed, guard reach may not jump the 64 KiB gap, and
+preemptible goroutine images retain the 128-byte below-SP red-zone rule
+(ADR 0088, ADR 0217). An overflow therefore faults in the guard and retires
+the process rather than corrupting another region. The validation fault-probe
+crosses the guard on every run and requires the expected user-stack fault
+(`USER_STACK_GUARD_OK`).
 
 ## User pointers
 
@@ -203,15 +206,17 @@ caller:
 | log record | 181 B encoded, 240 B as text | `kcall.MaxLogRecord`, `kcall.LogText` |
 | console input | 8 KiB ring | filled by the UART interrupt handler; overruns are counted, not stored (ADR 0075) |
 
-Every table has a fixed system-wide limit, but the large entries are not
-static: a registry holds a pointer per slot and takes an entry's pages when
-the entry is created (ADR 0111). The limits are 256 handles per process, 64
-processes, 256 tasks (four-word task sets), 256 channels with
-16-message queues, 256 streams with 8176-byte rings, a waiter per task slot,
-64 log records, 256 shared-memory objects (16 per paying process), 64
-executable objects, 128 regions per address space, and a shared image cache
-of 128 segments and 1024 frames. Objects index their pages in page
-lists allocated as they grow (ADR 0106, ADR 0107). On top of
+Every table has a bounded system-wide limit, but the large entries are not
+reserved at their maximum: registries keep compact slot metadata and allocate
+page-backed records as objects appear (ADR 0111). The current limits are 256
+handles per process, 256 processes and tasks, 256 channels with 16-message
+queues, 256 streams with 8176-byte rings, one waiter per task slot, 2048 log
+records, 256 shared-memory objects, 256 executable objects, 128 regions per
+address space, and a shared image cache of 128 segments and 1024 frames.
+Per-process launch profiles further bound channels, streams, tasks and pages;
+shared-memory objects are 16 per ordinary payer and 32 for PID 1. Objects
+index payload pages in page lists allocated as they grow (ADR 0106, ADR 0107,
+ADR 0211, ADR 0215). On top of
 the tables, each process is charged for the channels, streams, tasks, and
 pages it causes to exist, up to its quota (ADR 0072). Exhaustion returns
 `ResourceExhausted` or `PermissionDenied`.

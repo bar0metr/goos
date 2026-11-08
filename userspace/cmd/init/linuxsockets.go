@@ -140,7 +140,7 @@ func linuxSockRunning() bool {
 
 // bindLinuxSockBackends hands the service a TCP and a UDP session, each
 // under a new generation. openLinuxSocketSessions asks netd for both with
-// netd's largest per-session endpoint quota and GTCP 4 for TCP (GNETCTL 6).
+// netd's largest per-session endpoint quota and GTCP 4 for TCP (GNETCTL1 version 8).
 // The service's socket quotas reach past it.
 func bindLinuxSockBackends() {
 	tcp, udp, ok := openLinuxSocketSessions()
