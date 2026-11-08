@@ -210,7 +210,7 @@ no collection runs while one is entered. The kernel keeps the separate
 discipline of ADR 0065: a leaking boot-time heap and no allocation on repeating
 paths.
 
-**Threads.** A native process may run up to 16 threads (ADR 0203). The kernel
+**Threads.** A native process may run up to 64 threads (ADR 0203). The kernel
 makes each thread's 512 KiB stack, pinned above its own 64 KiB guard, in a
 fixed slot below the main stack. Once a second thread exists, heap operations
 take the heap lock or run on the slabs the calling thread owns, without a

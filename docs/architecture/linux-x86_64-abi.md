@@ -792,8 +792,8 @@ a terminal with termios, sessions, process groups, and job control
 | one `execve` string | 32 KiB |
 | copied `execve` strings | 64 KiB including terminators |
 | concurrent `execve` preparation | 4 system-wide |
-| Linux processes per family | 16, zombies included |
-| Linux processes, all families | 48, so 16 of 64 process slots stay native |
+| Linux processes per family | 64, zombies included |
+| Linux processes, all families | 224, so 32 of 256 process slots stay native |
 | `poll` and `ppoll` entries | the soft `RLIMIT_NOFILE` |
 | `select` and `pselect6` descriptors | the table's capacity, at most 4096 |
 | sockets per family, TCP and UDP together | 512, and 1024 across families |

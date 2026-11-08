@@ -12,7 +12,7 @@ validated Linux ELF selects `LinuxX8664`. All tasks in a process share the ABI.
 Entry gates authorize this field explicitly and never infer an ABI from a call
 number (ADR 0132).
 
-Process IDs and Task IDs reject zero. Each Process currently supports up to 32
+Process IDs and Task IDs reject zero. Each Process currently supports up to 64
 Tasks and rejects duplicate ownership. A bounded registry maps architecture
 Task exits back to their owning Process. It emits process death only when the
 last owned Task exits. Exited registry entries and architecture scheduler slots
@@ -126,7 +126,7 @@ reclamation, so a late VFS reply cannot wake a replacement task.
 A native process may also add sibling Tasks through the native thread ABI
 (ADR 0203). They share the Process address space, handles, capabilities,
 resource account and native ABI while keeping task identity, guarded stacks,
-FS-based runtime state and saved CPU context per thread. The runtime has 16
+FS-based runtime state and saved CPU context per thread. The runtime has 64
 native thread slots including the main thread; the selected launch profile's
 task quota can bind first. A normal thread exit retires one sibling, while a
 fatal fault or process-wide Exit retires the group.
@@ -157,11 +157,11 @@ identity is a PID between 2 and 32767, allocated at launch and unique among
 running and zombie Linux processes. A bounded family record maps it to the
 generation-safe GoOS Process ID and retains parentage plus wait status after
 resource teardown (ADR 0154). Running and zombie records count against a
-16-process family limit and a 48-process global compatibility limit. No Linux
-process, launch root or descendant, may take one of the last 16 of the 64
+64-process family limit and a 224-process global compatibility limit. No Linux
+process, launch root or descendant, may take one of the last 32 of the 256
 process slots, which stay for native processes
 (ADR 0155). Tasks have a separate reserve: no Linux launch, `fork`, or
-`clone` may take one of the last 16 scheduler slots, which stay for native
+`clone` may take one of the last 32 scheduler slots, which stay for native
 tasks (ADR 0179). Linux programs never see a native process or task ID.
 
 The working directory starts as the one the launch supplied, held in canonical
@@ -213,7 +213,7 @@ raise its own or another's.
 | --- | ---: | ---: | ---: | ---: | --- |
 | channels | 2 | 4 | 8 | 256 | `ChannelCreate`, released when the registry frees the channel |
 | streams | 8 | 16 | 32 | 64 | `StreamCreate`, released when the registry frees the stream |
-| tasks | 1 | 4 | 8 | 8 | task binding, released when the task exits |
+| tasks | 1 | 16 | 64 | 16 | task binding, released when the task exits |
 | pages | 2048 | 8192 | 16384 | 16384 | launch, demand-zero faults and the page tables they need, `MemoryMap`, `DMAAllocate`, `ImageMap`; released by `VMUnmap`, `VMDiscard`, and teardown |
 
 PID 1 chooses a profile in each launch request. Commands and services default
