@@ -55,8 +55,9 @@ A task can block itself and be woken by another task on any processor.
 Native Exit retires the current user task and schedules its successor without
 returning through a global boot context.
 
-`WaitAny` registers up to 16 readiness interests against the full generation-safe
-Task ID. A matching channel, stream, or process event completes the operation and
+`WaitAny` registers up to 64 readiness interests against the full generation-safe
+Task ID and returns a 64-bit ready mask. A matching channel, stream, process,
+console, IRQ, log-cursor, or native-thread event completes the operation and
 sets the task's runnable bit.
 
 ## Wakeups and safe-return rescheduling

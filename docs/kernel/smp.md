@@ -81,7 +81,9 @@ Boot measures the TSC and the bootstrap processor's APIC timer over the same
 100 ms of PIT ticks, then masks the PIT and starts the APIC timer at the
 scheduler rate. Every processor uses that count. Only the bootstrap
 processor's tick advances kernel time and wakes the housekeeping task, so
-four processors still tick time at 100 Hz.
+adding processors does not multiply the configured time rate. The default
+build advances time at 250 Hz; `HZ=100` and `HZ=1000` select the other
+supported rates.
 
 Device interrupts stay on the bootstrap processor, routed to its APIC ID.
 A handler that wakes a task on another processor asks that processor to

@@ -1,7 +1,7 @@
 # Architecture overview
 
-GoOS follows a pragmatic microkernel/hybrid design. The privileged kernel will
-own CPU state, address spaces, scheduling, interrupts, timers, IPC primitives,
+GoOS follows a pragmatic microkernel/hybrid design. The privileged kernel owns
+CPU state, address spaces, scheduling, interrupts, timers, IPC primitives,
 handles, capability enforcement, and a dedicated Linux x86_64 ABI
 translation subsystem. Linux applications enter through a separate SYSCALL
 gate; their supported syscalls are translated in the kernel into native
@@ -13,7 +13,7 @@ userspace services.
 
 Authority is explicit. Kernel objects are named by process-local opaque handles
 and operations require capabilities carrying a rights mask. Derived
-capabilities may remove rights but never add them. IPC protocols will carry an
+capabilities may remove rights but never add them. IPC protocols carry an
 explicit protocol identifier and version; Go structure layout is not an ABI.
 
 The current kernel leaves UEFI boot services, owns its physical allocator and
@@ -40,14 +40,20 @@ an image capability with Execute, or, for every other program, the installed
 system on the disk included, from a file-backed executable source tied to a
 stable VFS open object; the kernel resolves no application path (ADR 0093,
 ADR 0121, ADR 0175).
-A userspace network service runs Ethernet, ARP, IPv4, ICMP echo and a DHCP
-client over a second isolated driver, for one legacy virtio-net function;
-the kernel's part is discovery, a dedicated interrupt route, a wait on that
-line, and a DMA domain per device ([networking](networking.md), ADR 0190,
-ADR 0191). The same service owns a loopback interface, and a separate
-resolver service, `resolved`, answers host names from the hosts table, its
-cache and DNS servers it reaches only through the network service
-(ADR 0193, ADR 0194).
+A userspace network service runs Ethernet, ARP, IPv4, ICMP, DHCP, UDP and TCP
+over a second isolated driver, for one legacy virtio-net function; the
+kernel's part is discovery, a dedicated interrupt route, a wait on that line,
+and a DMA domain per device ([networking](networking.md), ADR 0190, ADR 0191).
+The same service owns loopback. A separate resolver, `resolved`, answers host
+names from the hosts table, cache and DNS servers it reaches only through
+`netd` (ADR 0193, ADR 0194). Native programs receive capability-scoped UDP
+and TCP sessions. Static Linux programs use the Linux socket ABI in the
+kernel, a per-family GLNXSOCK3 session to `linuxsockd`, and GTCP 4/GUDP 3
+shared rings from `linuxsockd` to `netd` (ADR 0210, ADR 0214, ADR 0216).
+Remote administration is likewise split: `remoted` owns listener and host
+identity authority, workers own individual SSH sessions without filesystem
+authority, and a separate `sftpd` process receives a rooted VFS session for
+each admitted SFTP channel (ADR 0199, ADR 0209).
 Native composition also has bounded unidirectional byte-stream objects with
 separate read and write capabilities, backpressure, and close-driven EOF. These
 objects are the non-POSIX foundation for standard-stream redirection and carry

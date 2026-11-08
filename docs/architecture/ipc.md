@@ -66,31 +66,31 @@ while the ring is full and a reader still exists. Data movement, peer closure,
 or timeout wakes the registered task, which retries the original operation.
 
 Native operation 22, `WaitAny`, generalizes readiness waits without consuming
-data. Userspace supplies one to 16 fixed-size `(handle, event mask)` interests
-and receives a 16-bit ready mask. The kernel validates every handle generation,
-object type, event mask, endpoint direction, and required capability rights
-before registering the complete generation-safe Task ID. Current interests cover
-channels, streams, processes, console input, and the network function's
-interrupt line, whose readiness `IRQTake` consumes (ADR 0190). A channel
-interest may also ask for writable: a sender holding Write waits until its
-peer's queue has room, which every receive on the peer's side announces
-(ADR 0210). Existing one-object receive, stream, process, and IRQ waits remain
-available.
+data. Userspace supplies up to 64 fixed-size `(handle, event mask)` interests
+and receives a 64-bit ready mask; a zero-interest call is the bounded sleep
+form. The kernel validates every handle generation, object type, event mask,
+endpoint direction, and required capability rights before registering the
+complete generation-safe Task ID. Current interests cover channels, streams,
+processes, console input, the routed network interrupt, log cursors, and native
+thread wake/end events. A channel interest may also ask for writable: a sender
+holding Write waits until its peer's queue has room, which every receive on the
+peer's side announces (ADR 0210). Existing one-object receive, stream, process,
+and IRQ waits remain available.
 
-The network service's protocols, `GNETDRV1` with its driver, `GNETCTL1`
-version 2 with PID 1, `GNETAPI1` version 3 with commands and `GUDP1` with
-programs that use UDP, are fixed-size bodies on this envelope. Frames travel
-in two shared pools, and a message names only a slot and a length
-([networking](networking.md), ADR 0191). A UDP session's datagrams travel the
-same way, in a TX pool the program writes and an RX pool the service writes
-(ADR 0195). The resolver service speaks `GNETCTL1` with PID 1, `GRESOLV1`
-with commands, and `GUDP1` and `GNETAPI1` with the network service like any
-other program (ADR 0194, ADR 0195). `GHST1`, the hosts protocol, runs on a configuration
-session next to the configuration protocol `GCF1` (ADR 0193).
+The network stack uses the same typed IPC envelope for control messages and
+doorbells, while bulk data stays out of the channel. `GNETDRV1` exchanges
+frame-slot ownership with the driver; native UDP/TCP sessions use shared pools;
+the Linux family protocol `GLNXSOCK3` uses a shared family pool; and GTCP 4
+and GUDP 3 move the Linux socket data path through shared rings. The current
+protocol versions, ownership rules, and quotas are documented in
+[networking](networking.md) and ADRs 0191, 0195, 0196, 0210, 0214, and 0216.
+The resolver speaks `GRESOLV1` to clients and uses its own bounded UDP/TCP
+sessions to `netd`; `GHST1`, the hosts protocol, runs on a configuration
+session next to `GCF1` (ADR 0193, ADR 0194).
 
 ## PID 1 lifecycle channel
 
-The `GINITLIF` version 5 protocol uses a dedicated channel capability installed
+The `GINITLIF` version 7 protocol uses a dedicated channel capability installed
 only in PID 1. Process-exit notifications carry the PID and typed exit code.
 Launch requests and results are correlated, so each pending request is retired
 by exactly one reply. Launch requests also carry bounded startup data and may
