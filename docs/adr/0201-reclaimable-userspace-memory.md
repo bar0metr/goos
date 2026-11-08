@@ -157,7 +157,9 @@ repeated workloads. Idle heaps still move by a page or two as slabs fill at
 different points, so `mem -p` now also reports the pages processes hold and
 the pages the kernel holds for itself. The kernel's count must stay identical
 across rounds; the total may move within eight pages but must not rise every
-round. Seven measured rounds kept the kernel at 1099 pages and the total
+round by more than two pages. A first version failed on any rise in every
+round, and 5321, 5322, 5323 pages after rounds 3 to 5 then failed a run with
+no leak: a page per round is inside the noise this paragraph describes. Seven measured rounds kept the kernel at 1099 pages and the total
 within one page. Three rounds in a band cannot show a slow leak in a process,
 so `make test-memory` adds a twenty-round run of a mixed workload that
 compares the kernel's pages exactly and process pages between the first and

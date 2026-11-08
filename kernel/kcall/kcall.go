@@ -607,6 +607,12 @@ const (
 const SystemInfoPageSize = uint64(4096)
 const MaxStreamIO = uint64(256)
 
+// StreamCapacity is how many bytes a stream holds unread. A writer that sent
+// a message after its last write has every byte of that write in the ring
+// or already read, so a reader that takes StreamCapacity bytes has passed all
+// of them.
+const StreamCapacity = 8176
+
 // ClockTimeSize is signed seconds, uint32 nanoseconds, then four reserved
 // zero bytes.
 const ClockTimeSize = uint64(16)

@@ -1168,8 +1168,11 @@ require_regex vm.system-survives '^after-vm-faults$' 'the system carries on afte
 # processes hold can move by a page or two between identical rounds as slabs
 # fill at different points. The pages the kernel holds for itself must not
 # move at all: a leaked channel, stream, executable object, or startup object
-# shows up there. The total may vary within a small band but must not grow
-# round after round.
+# shows up there. The total may vary within a small band, and it fails as a
+# leak only when every round adds more than that noise. Three samples a page
+# apart, such as 5321, 5322, 5323, lie inside it; make test-memory looks for
+# slower leaks over twenty rounds.
+leak_noise=2
 leak_window=$(log_lines "$log" | sed -n '/goos> echo leak-round-3/,$p')
 leak_counts=$(printf '%s\n' "$leak_window" | grep -a '^pages used: ' | sed -n '1,3s/^pages used: //p')
 kernel_counts=$(printf '%s\n' "$leak_window" | grep -a '^pages in the kernel: ' | sed -n '1,3s/^pages in the kernel: //p')
@@ -1191,11 +1194,11 @@ else
 	fail_check leaks.kernel-steady-state 'the same kernel pages in use after rounds 3, 4, and 5' "${kernel_third:-none}, ${kernel_fourth:-none}, ${kernel_fifth:-none}" "$log" 'goos> echo leak-round-3'
 fi
 if [ -n "$leak_third" ] && [ -n "$leak_fourth" ] && [ -n "$leak_fifth" ] &&
-	! { [ "$leak_third" -lt "$leak_fourth" ] && [ "$leak_fourth" -lt "$leak_fifth" ]; } &&
+	! { [ $((leak_fourth - leak_third)) -gt "$leak_noise" ] && [ $((leak_fifth - leak_fourth)) -gt "$leak_noise" ]; } &&
 	[ $(( $(printf '%s\n' "$leak_counts" | sort -n | tail -n 1) - $(printf '%s\n' "$leak_counts" | sort -n | head -n 1) )) -le 8 ]; then
 	checks=$((checks + 1))
 else
-	fail_check leaks.steady-state 'total pages after rounds 3, 4, and 5 within 8 of each other and not rising every round' "${leak_third:-none}, ${leak_fourth:-none}, ${leak_fifth:-none}" "$log" 'goos> echo leak-round-3'
+	fail_check leaks.steady-state "total pages after rounds 3, 4, and 5 within 8 of each other and not rising by more than $leak_noise every round" "${leak_third:-none}, ${leak_fourth:-none}, ${leak_fifth:-none}" "$log" 'goos> echo leak-round-3'
 fi
 count_window leaks.rounds '^pages used: ' 5 "$log" 'goos> echo leak-round-1' 'goos> cat /missing'
 pass_group vm

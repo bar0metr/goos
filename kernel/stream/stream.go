@@ -6,10 +6,13 @@
 // the first to exit does not close it for the others.
 package stream
 
+import "goos/kernel/kcall"
+
 // Capacity is the ring's size: with the stream's counters it fills two pages,
 // which is what the registry allocates for a stream (ADR 0111). The ring holds
 // more than the 4096 bytes a Linux program may write to a pipe in one piece.
-const Capacity = 8176
+// Readers outside the kernel see it as kcall.StreamCapacity.
+const Capacity = kcall.StreamCapacity
 
 // AtomicWrite is the largest write that is never split. A write of at most
 // this many bytes lands whole or not at all, so writers sharing an endpoint
