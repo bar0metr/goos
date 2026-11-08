@@ -11,7 +11,7 @@ Creating a stream returns two opaque process-local handles:
 
 The endpoints encode object identity and direction independently of handle slot
 numbers. The kernel validates handle type, direction, and rights for every
-operation. Each stream owns a fixed 4096-byte ring buffer. One operation moves
+operation. Each stream owns a fixed 8176-byte ring buffer. One operation moves
 at most 256 bytes and reports the exact transferred size through a validated
 descriptor. A write of at most 256 bytes — every write a native call can make —
 lands whole or not at all, so writers sharing an end never interleave inside
@@ -35,9 +35,11 @@ end closes only when the last of them does:
 
 So an end can be shared: PID 1 grants the terminal's writing end to the shell
 and to every stage of every pipeline, and a stage exiting closes only its own
-copies. Counts are 16-bit and bounded by the handles that exist (64 processes ×
-256 handles); the bound is checked anyway, before anything is installed, and a
-count is never decremented below zero. The counting is in `kernel/stream`
+copies. Counts are 16-bit and bounded explicitly at 65,535 references. The
+system has 256 process tables of 256 handles, 65,536 possible handle slots, so
+the last possible handle to one endpoint is refused rather than wrapping the
+counter. The bound is checked before anything is installed, and a count is
+never decremented below zero. The counting is in `kernel/stream`
 (`Retain`, `Drop`, `Placed`, `CloseHandle`) and host-tested with real handle
 tables and IPC channels.
 

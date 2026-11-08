@@ -2,10 +2,10 @@ package stream
 
 import "goos/kernel/objects"
 
-// MaxStreams is the system-wide stream limit. A stream is one page, its ring
-// and counters; the registry holds a pointer per slot and takes the page when
-// the stream is created and returns it when the stream is released (ADR
-// 0111). PID 1 needs four streams for each job slot plus the terminal's
+// MaxStreams is the system-wide stream limit. A stream occupies two pages:
+// its 8176-byte ring and counters fit in one 8 KiB object. The registry holds
+// a pointer per slot and takes those pages when the stream is created and
+// returns them when the stream is released (ADR 0111). PID 1 needs four streams for each job slot plus the terminal's
 // output stream; the rest are the shares of ordinary processes (ADR 0089).
 const (
 	MaxStreams        = 256

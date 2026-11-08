@@ -180,12 +180,12 @@ records.
 
 | Bound | Default / max | Class | Owner | Memory | At exhaustion | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| `kernel/ipc.MaxChannels` | 256 | profile (build constant) | global; creator charged | a page per live channel (ADR 0111) | `StatusResourceExhausted` | per process `ProcessInfo`; global `DIAG tables` `channels` |
+| `kernel/ipc.MaxChannels` | 256 | profile (build constant) | global; creator charged | three pages per live channel (about 10.5 KiB; ADR 0111) | `StatusResourceExhausted` | per process `ProcessInfo`; global `DIAG tables` `channels` |
 | `kernel/ipc.MaxPayload` | 256 | protocol | n/a | n/a | `StatusInvalidArgument` | n/a |
 | `kernel/ipc.MaxAttachedHandles` | 4 | protocol | n/a | n/a | `StatusInvalidArgument` | n/a |
-| `ipc.QueueCapacity` | 16 messages | profile | channel | in the channel page | sender waits or `StatusResourceExhausted` | none |
+| `ipc.QueueCapacity` | 16 messages | profile | channel | inside the live channel object | sender waits or `StatusResourceExhausted` | none |
 | `kernel/ipc.MaxWaiters` | 256 | protocol (one per task) | global | static | cannot fill | n/a |
-| `kernel/stream.MaxStreams` | 256 | profile (build constant) | global; creator charged | a page per live stream | `StatusResourceExhausted` | per process `ProcessInfo`; global `DIAG tables` `streams` |
+| `kernel/stream.MaxStreams` | 256 | profile (build constant) | global; creator charged | two pages per live stream (8176-byte ring plus counters) | `StatusResourceExhausted` | per process `ProcessInfo`; global `DIAG tables` `streams` |
 | `kernel/stream.MaxReferences` | 65535 | protocol (counter width) | stream | n/a | refused before wrap; 256 tables of 256 handles reach 65536 | n/a |
 | `kernel/handle.MaxHandles` | 256 | policy | process | 24 B a slot, 6 KiB per process record | `StatusResourceExhausted` | `HandleInfo` per slot; count none |
 | `kernel/wait.MaxObjects` | 64 | protocol (ready-mask width) | wait | n/a | `StatusInvalidArgument` | n/a |
