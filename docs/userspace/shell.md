@@ -28,9 +28,10 @@ goos> fetch -L -o /home/user/page.html https://example.org/start
 ```
 
 These are syntax examples, not Internet-dependent release tests. The offline
-native HTTPS gate passed 69 assertions, including authenticated transfers and
-certificate/record rejection. The complete `release-check` passed; see
-[ADR 0198](../adr/0198-native-tls-and-system-trust.md).
+native HTTPS gate recorded with ADR 0198 passed 69 assertions, including
+authenticated transfers and certificate/record rejection. That ADR records
+the validation evidence from the TLS work; release-wide validation is tracked
+separately in the current release notes.
 
 PID 1 launches the shell as a normal supervised native image after the
 terminal service: `/system/services/shell` from the installed system in

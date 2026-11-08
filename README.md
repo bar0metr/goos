@@ -64,9 +64,11 @@ main structure and privilege boundary, not a mandatory call sequence:
 |                                                               |
 |   VFS ----- FAT32 ----- block ----- virtio-blk                |
 |                                                               |
-|   resolved --- netd ---------------- virtio-net               |
+|   resolved -------+                                           |
+|   linuxsockd ------+--- netd -------------- virtio-net        |
 |                                                               |
-|   terminal / config / logging / remoted / other services      |
+|   remoted / remoted-worker / sftpd                            |
+|   terminal / config / logging / other services                |
 +-----------------------------+---------------------------------+
                               |
                          x86_64 hardware
@@ -86,11 +88,14 @@ for selected images, an M:N goroutine scheduler. The runtime is part of each
 native image rather than a shared privileged service; the kernel schedules
 native tasks, while the goroutine runtime multiplexes Gs over those tasks.
 
-Filesystems, terminal services, configuration, logging, networking, and
-complex device drivers run as isolated userspace services with only their
-granted authority. Storage and networking are composed from supervised
+Filesystems, terminal services, configuration, logging, networking, remote
+access, and complex device drivers run as isolated userspace services with only
+their granted authority. Storage and networking are composed from supervised
 service chains such as VFS -> FAT32 -> block -> `virtio-blk` and
-`resolved`/`netd` -> `virtio-net`. UEFI is used during boot, not as a
+`resolved`/`linuxsockd` -> `netd` -> `virtio-net`. Remote access is
+split again: `remoted` owns listener/host-identity authority,
+`remoted-worker` owns one SSH session, and a per-session `sftpd` receives
+the rooted VFS authority needed for SFTP. UEFI is used during boot, not as a
 runtime layer below the kernel.
 
 The central principle:

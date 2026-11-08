@@ -1438,16 +1438,23 @@ help:
 	  '  test-linux-reference run those fixtures on a Linux kernel in Docker' \
 	  '  test-linux-kernel-reference KERNEL=path BUSYBOX=path  run the probe on a Linux kernel in QEMU' \
 	  '  test-linux-all  Linux ABI host tests and the Linux end-to-end boot' \
+	  '  test-linux-aslr static PIE ASLR: repeated launch/fork/exec on qemu64 without RDRAND' \
 	  '  test-linux-busybox BUSYBOX=path  run BusyBox applets from a static busybox' \
 	  '  test-linux-network BUSYBOX=path CURL=path  Linux sockets: netprobe, nc, wget, httpd, curl, service faults' \
 	  '  test-linux-7zip LINUX_EXTRA=path  archive, extract, and hash with a static 7zzs on SMP=4' \
 	  '  profile-locks [LINUX_EXTRA=path]  lock acquisitions and contention per workload on SMP=4' \
+	  '  test-crypto-frames build real SHA-256/ECDSA probe ELFs and run the stack-frame checker' \
+	  '  test-build-concurrency exercise generated-toolchain root locks across independent make processes' \
 	  '  test-race       concurrency tests of handles, channels, Linux tables, waits, and the scheduler under the race detector' \
 	  '  test-linux-bench time Linux calls beside native ones into build/reports' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  release-check   run the release gate: reproducible build, all tests, docs, release checks' \
 	  '  test-all        run the complete validation gate, including QEMU' \
 	  '  test-security   run capability, handle, and VM security tests' \
+	  '  test-tls        run the offline native HTTPS/TLS validation gate' \
+	  '  test-remote     run native SSH/SFTP validation across two boots' \
+	  '  test-trust-update run the signed trust-bundle update validation gate' \
+	  '  test-lscpu      validate CPU topology reporting in QEMU' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
 	  '  test-vfs-serial run test-boot with the serial VFS fallback (VFS_RUNTIME=serial)' \
 	  '  test-goroutines/test-goroutine-gc/test-goroutine-io/test-goroutine-panic  goroutine suites in QEMU' \

@@ -309,21 +309,24 @@ See the [0.2.9 release notes](../releases/0.2.9.md).
 
 Linux runtime and ABI work stays driven by real applications.
 
-## Priority 1 — Linux terminal follow-ups
+## Priority 1 — Linux terminal remaining gaps
 
 [ADR 0206](../adr/0206-linux-terminals-and-job-control.md) records the
-terminal design, and `make test-linux-tty` and `make test-linux-nano` gate
-it. Open items:
+terminal design. The local terminal gate, the BusyBox/nano suspend-and-`fg`
+round trip, and SSH PTY resize/SIGWINCH propagation are already automated in
+`test-linux-tty`, `test-linux-nano`, and `test-remote`.
 
-- a resize gate through an SSH PTY window change;
-- the nano suspend and `fg` round trip from BusyBox `sh` as an automated
-  gate;
-- a framebuffer gate that draws nano and inspects the terminal state;
-- further ioctls, `TOSTOP`, and `VTIME` only when an application needs them.
+Remaining work should be application-driven:
+
+- a framebuffer/nano gate if it catches behavior not already covered by the
+  framebuffer/PS2 and serial terminal gates;
+- further ioctls, `TOSTOP`, and `VTIME` when a real application needs them;
+- PTY pairs and `/dev/pts` only when an application justifies adding that
+  subsystem rather than extending the existing foreground-terminal model.
 
 ## Priority 2 — Linux runtime completeness
 
-After interactive Linux programs work, improve the static Linux environment where concrete programs expose gaps.
+With interactive Linux programs working, improve the static Linux environment where concrete programs expose remaining gaps.
 
 Likely work:
 
