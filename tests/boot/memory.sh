@@ -164,9 +164,9 @@ burst=$(grep '^MEMRECLAIM_BURST ' "$work/output")
 # heap, and counts pages. A step that failed stops the run before its round's
 # pages are taken. From round 3 the kernel's pages may dip by a page or two when a
 # process of the previous command is still being torn down as mem counts, but
-# the second half may never exceed the first half's highest; the median of
-# the second half's process pages may not exceed the first half's by more
-# than 4 pages.
+# kernel pages in the second half may never exceed the first half's highest.
+# Process pages are compared by the medians of the two halves: the second
+# half's median may not exceed the first half's by more than 4 pages.
 rounds=${LEAK_ROUNDS:-20}
 round=1
 : >"$work/leak"
