@@ -12,18 +12,30 @@ discovers the function, routes its interrupt and bounds the driver's
 authority (ADR 0190). Everything that knows what a frame means runs in
 userspace: a driver that moves frames, a network service that runs the
 protocols (ADR 0191) and UDP endpoints for programs (ADR 0195), a resolver
-service that turns names into addresses (ADR 0194), and commands that ask
-them for work. The
-[networking specification](../development/networking.md) records the
+service that turns names into addresses (ADR 0194), `linuxsockd`, which
+serves Linux socket calls (ADR 0210), and commands that ask them for work.
+The [networking specification](../development/networking.md) records the
 requirements the first version was built from.
+
+Static Linux programs reach IPv4 TCP and UDP through ordinary socket calls.
+The kernel's Linux layer keeps the descriptors, errno, signals and
+`poll`/`select`, and talks GLNXSOCK3 to `linuxsockd`, one session per Linux
+family. `linuxsockd` holds the Linux socket objects and speaks GTCP 4
+(ADR 0214) and GUDP 3 (ADR 0216) to `netd`, which move stream bytes and
+datagrams through shared rings without a channel message per slot. Native
+commands keep GTCP 2 and GUDP 2 unless their manifest asks for the ring
+versions. A static C library resolves names through `resolved`'s local DNS
+server on `127.0.0.1:53` (see [Local DNS server](#local-dns-server)).
 
 Implemented: IPv4 with RFC 5227 address-conflict detection, ICMP echo, a
 DHCP client, the loopback interface, a hosts table (ADR 0193), DNS name
-resolution through a stub resolver with a cache, and IPv4 UDP for any
-program PID 1 grants a UDP session (ADR 0195) or TCP session (ADR 0196). Not implemented: IPv4
-fragmentation and reassembly, multicast and broadcast sends, ICMP errors to
-UDP senders (no Port Unreachable for an unbound port), persistent DNS over TCP, multicast DNS, IPv6 transport, DNSSEC, and the
-Linux socket calls. `dnsq` shows AAAA records; nothing sends IPv6.
+resolution through a stub resolver with a cache, IPv4 UDP and TCP for any
+program PID 1 grants a UDP session (ADR 0195) or TCP session (ADR 0196),
+and Linux IPv4 sockets through `linuxsockd` (ADR 0210). Not implemented:
+IPv4 fragmentation and reassembly, multicast and broadcast sends, ICMP
+errors to UDP senders (no Port Unreachable for an unbound port), persistent
+DNS over TCP, multicast DNS, IPv6 transport and IPv6 sockets, and DNSSEC.
+`dnsq` shows AAAA records; nothing sends IPv6.
 
 ## HTTPS
 
@@ -81,7 +93,7 @@ resolve             ping                         net    udp, tcp, dnsq
 resolved  <-- GNETCTL --  PID 1     |  one private session per command
   |  hosts: GHST1 on its configuration session
   |  GUDP 2 session, GTCP 2 session v
-  |  and GNETAPI status     netd  <---- GNETCTL version 6 ----  PID 1
+  |  and GNETAPI status     netd  <---- GNETCTL version 8 ----  PID 1
   +-------------------------------->|  lo, Ethernet, ARP, IPv4, ICMP echo,
                                     |  DHCP client, UDP endpoints, TCP TCBs
                                     |
@@ -94,6 +106,10 @@ virtio-net driver
   v
 legacy virtio-net PCI function (1af4:1000)
 ```
+
+`linuxsockd` sits beside the commands: PID 1 grants it one GTCP 4 and one
+GUDP 3 session to `netd`, each with a 512-endpoint quota, and the service
+side of every Linux family's GLNXSOCK3 session.
 
 PID 1 creates every channel and pool in the picture and is the only holder
 of `netd`'s and `resolved`'s control channels. It keeps the device's three capabilities for
@@ -293,8 +309,9 @@ and receive buffer sizes and the TTL.
 
 ### GTCP 3
 
-`linuxsockd`'s TCP session speaks GTCP version 3; every other session
-speaks version 2. PID 1 names the version in byte 3 of
+GTCP version 3 serves a client that needs `Peek` or per-read lengths on
+pipelined reads and writes; `linuxsockd` used it before GTCP 4 (see below)
+and commands use version 2. PID 1 names the version in byte 3 of
 `ControlAddTCPSession` (GNETCTL version 6), and the version fixes the pools
 (`tcpapi.LayoutFor`): version 2 has four TX and eight RX slots of 4 KiB,
 version 3 eight TX and eight RX slots of 16 KiB, 128 KiB a pool. `netd`
@@ -328,7 +345,18 @@ except for three changes.
 `netd` serves a session's channel until its queue is empty before it waits
 again, so it takes a batch of writes and reads of one endpoint in one
 activation. A version 3 session maps 256 KiB of pools in both `netd` and
-`linuxsockd`, against 48 KiB for version 2.
+its client, against 48 KiB for version 2.
+
+### GTCP 4 and GUDP 3
+
+`linuxsockd`'s TCP session speaks GTCP 4 and its UDP session GUDP 3; a
+command asks for them with `GrantTCPRing` and `GrantUDPRing`. Each pool
+ends in a control page with one writer. Stream bytes and datagrams move
+through rings in those pages, and the channel keeps open, bind, listen,
+connect, accept, options, close and readiness waits. A producer rings a
+doorbell only when the consumer armed one before it slept, so a busy stream
+costs no channel message. ADR 0214 and ADR 0216 hold the slot ownership and
+generation rules.
 
 A bind follows the Linux SO_REUSEADDR rule: it conflicts with any endpoint
 or TIME_WAIT four-tuple on the same port whose address overlaps, equal or

@@ -187,7 +187,13 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 			!linuxcompat.LinuxTaskCreationAllowed(amd64.FreeTaskSlots()) {
 			return 0, 0, supervisor.LaunchResourceExhausted
 		}
-		if linuxelf.ParseInto(linuxImage, image, linuxelf.GoOSConfig()) != linuxelf.OK {
+		switch placeLinuxImage(linuxImage, image) {
+		case linuxPlaced:
+		case linuxPlacementNoRoom:
+			return 0, 0, supervisor.LaunchAddressSpaceFailed
+		case linuxPlacementNoRandom:
+			return 0, 0, supervisor.LaunchResourceExhausted
+		default:
 			return 0, 0, supervisor.LaunchInvalidImage
 		}
 		processABI = process.ABILinuxX8664

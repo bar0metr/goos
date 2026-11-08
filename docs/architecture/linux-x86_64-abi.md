@@ -582,12 +582,24 @@ against their containing loads. `PT_NOTE`, `PT_GNU_EH_FRAME`, and
 malformed arithmetic are rejected. Parsing itself does not map or execute
 images.
 
-A static PIE loads at the fixed base `0x40000000`. The parser adds the base
+A static PIE (`ET_DYN` without `PT_INTERP`) loads at a random base
+(ADR 0219). The base is a multiple of the image's largest alignment: the
+page size, every `PT_LOAD` `p_align`, and the alignments of `PT_PHDR`,
+`PT_TLS`, `PT_GNU_RELRO` and `PT_DYNAMIC`. It lies at or above `0x40000000`,
+and the relocated image end plus the 64 MiB brk reserve stays at or below
+`0x80000000`. The kernel parses the image once at `0x40000000` to learn its
+span and alignment, `linuxelf.PlacePIE` lists the legal bases as an
+arithmetic sequence, one 64-bit draw from the kernel generator (ADR 0185)
+picks one, and the parser runs again at that base. The parser adds the base
 to the entry and to every address a header names, then applies the checks
-above to the moved addresses. `PT_DYNAMIC` is accepted in such an image, once
-and inside a load segment, and refused in an `ET_EXEC` image. The kernel
-applies no relocation: the program's own startup code does, from `AT_PHDR`.
-The base is the same on every launch; GoOS randomizes no layout.
+above to the moved addresses. Every PID 1 launch and successful `execve`
+picks a fresh base; `fork` and threads keep the current one. When the
+generator refuses output, the launch fails; there is no fallback to a fixed
+base. No auxv entry names the base. `PT_DYNAMIC` is accepted in such an
+image, once and inside a load segment, and refused in an `ET_EXEC` image.
+The kernel applies no relocation: the program's own startup code does, from
+`AT_PHDR`. An `ET_EXEC` image loads at its linked addresses, and the stack,
+anonymous maps and every other region keep a fixed layout.
 
 ## Mapping status
 
@@ -599,7 +611,7 @@ after `p_filesz`; its existing quota accounting and W^X checks remain in force.
 
 The mapping boundary rechecks source length, range arithmetic, overlap, entry
 placement, and protections. Linux `ET_EXEC` may start at `0x400000` and a
-static PIE starts at `0x40000000`; load pages
+static PIE starts at its chosen base in `[0x40000000, 0x80000000)`; load pages
 must remain below 2 GiB, away from fixed GoOS user windows. The Linux stack is
 reserved as 8 MiB RW/NX demand-zero memory below `vm.UserStackTop`, with a
 64 KiB guard. PID 1 launch uses this mapping directly.
@@ -726,14 +738,14 @@ its file waits for the page and runs again.
 
 Results a correct Linux program can observe to differ:
 
-| Area | GoOS 0.2.1 | Linux |
+| Area | GoOS 0.2.9 | Linux |
 | --- | --- | --- |
 | terminal | a foreground job's only stage has one; no PTY pairs, flow control, `VTIME`, or `TOSTOP` | PTYs and the full termios set |
 | signals | delivered at system call returns; `kill` reaches any process and group of its family; file I/O is never interrupted; a launch root never stops | sent by UID, delivered at any return to user mode |
 | devices | `/dev/null`, `/dev/zero`, and `/dev/tty` only; `/dev` is no directory | a populated `/dev` |
 | random bytes | 256 bytes per call; seeded from jitter alone on a CPU without RDRAND | 32 MiB per call |
 | positioned I/O | three VFS exchanges per call | one atomic operation |
-| load address | a static PIE always loads at `0x40000000` | randomized |
+| load address | a static PIE loads at a random aligned base in a 1 GiB window; the stack and anonymous maps are fixed | stack, mappings and PIE base randomized |
 | users | every file and process is 1000:1000; mode bits are presentation | enforced ownership and permissions |
 | directory listing | no `.` and `..`; a directory removed while open lists as empty | both entries; `ENOENT` |
 | link count | 1 for files and directories | directories count their subdirectories |
@@ -751,13 +763,15 @@ Results a correct Linux program can observe to differ:
 
 ## Release limits
 
-GoOS 0.2.1 runs x86_64, statically linked ELF programs, position-independent
+GoOS 0.2.9 runs x86_64, statically linked ELF programs, position-independent
 or not, musl or glibc (ADR 0176), with threads (ADR 0177) that have their own
 signal masks and share the process's pending signals. It has no `PT_INTERP` or dynamic
 linker; no copy-on-write and no shared-memory
 `vfork`; no `epoll` or alternate signal stack; no nonblocking pipes;
-no networking; no `/proc` or `/sys`, and of `/dev` three names; no
-file-backed `mmap`; no address-space randomization; no ownership or
+IPv4 TCP and UDP sockets through `linuxsockd` but no IPv6, `AF_UNIX`, raw
+or netlink sockets; no `/proc` or `/sys`, and of `/dev` three names; no
+file-backed `mmap`; no address-space randomization beyond the static PIE
+base; no ownership or
 permission enforcement; no root. A Linux program alone in the foreground has
 a terminal with termios, sessions, process groups, and job control
 (ADR 0206): BusyBox `sh` runs interactively with job control, and GNU nano
@@ -782,13 +796,13 @@ a terminal with termios, sessions, process groups, and job control
 | Linux processes, all families | 48, so 16 of 64 process slots stay native |
 | `poll` and `ppoll` entries | the soft `RLIMIT_NOFILE` |
 | `select` and `pselect6` descriptors | the table's capacity, at most 4096 |
-| sockets per family, TCP and UDP together | 32 |
+| sockets per family, TCP and UDP together | 512, and 1024 across families |
 | socket requests in flight per family | 8 |
 | pending signals | one per standard signal, 31 |
 | VFS requests queued per family | 15 |
 | `execve` arguments and environment entries | 256 each |
 | stack reservation | 8 MiB, 64 KiB guard |
-| static PIE load base | `0x40000000` |
+| static PIE load window | `[0x40000000, 0x80000000)`, image and 64 MiB brk inside |
 | `brk` heap | 64 MiB |
 | page quota | 16384 pages |
 | continuations | 1 per task |
@@ -883,6 +897,14 @@ process, which must then get `EIO` and no new session, and makes the VFS
 answer one request late, which must end in `ETIMEDOUT` with the session still
 usable. Its guest CPU has no RDRAND, so its `abi-probe random` checks that
 `getrandom` and `AT_RANDOM` work from the jitter-seeded generator.
+
+**Static PIE placement.** `make test-linux-aslr` runs
+`tests/boot/linux-aslr.sh` on the default `qemu64` CPU, which has no RDRAND.
+It launches `pie-probe` 32 times from the shell and requires every base
+inside the window and aligned, at least two distinct bases, a fork child at
+its parent's base, an `exec` chain that sees more than one base, a brk
+allocation, `AT_RANDOM`, and a successful `getrandom`. It needs no external
+binaries.
 
 **BusyBox.** `make test-linux-busybox BUSYBOX=path`, also named
 `make test-linux-shell`, requires `echo`, `pwd`, `cat`, `ls`, `mkdir`, and

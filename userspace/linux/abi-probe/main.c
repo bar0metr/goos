@@ -2297,6 +2297,7 @@ static long elapsed_ms(const struct timespec *start)
 static int poll_test(void)
 {
 	struct timespec nap = {0, 50 * 1000 * 1000}, start;
+	struct rlimit files;
 	struct pollfd entries[4];
 	char byte;
 	int fds[2], file, status;
@@ -2306,7 +2307,9 @@ static int poll_test(void)
 	fflush(stdout);
 	if (probe_poll(NULL, 0, 0) != 0 || pipe(fds) != 0)
 		return poll_fail("empty");
-	if (on_goos() && !fails(probe_poll(entries, 65, 0), EINVAL))
+	/* More descriptors than the soft RLIMIT_NOFILE is EINVAL, before the
+	 * array is read. */
+	if (getrlimit(RLIMIT_NOFILE, &files) != 0 || !fails(probe_poll(entries, files.rlim_cur + 1, 0), EINVAL))
 		return poll_fail("too many");
 	entries[0] = (struct pollfd){fds[0], POLLIN, 0};
 	entries[1] = (struct pollfd){fds[1], POLLOUT, 0};
@@ -2997,17 +3000,20 @@ static int hardening_test(void)
 }
 
 /* GoOS only. The family budget ends a fork bomb with EAGAIN, zombies count
- * against it, and reaping returns the slots. */
+ * against it, and reaping returns the slots. A family holds 64 processes
+ * (LinuxFamilyMaxProcesses), so the probe gets 63 children. */
+#define FAMILY_CHILDREN 63
+
 static int limits_test(void)
 {
-	pid_t children[64];
+	pid_t children[FAMILY_CHILDREN + 1];
 	int idle[2], count, index, status;
 	char byte;
 
 	if (!on_goos() || pipe(idle) != 0)
 		return 1;
 	fflush(stdout);
-	for (count = 0; count < 64; count++) {
+	for (count = 0; count <= FAMILY_CHILDREN; count++) {
 		children[count] = fork();
 		if (children[count] == 0) {
 			read(idle[0], &byte, 1);
@@ -3016,7 +3022,7 @@ static int limits_test(void)
 		if (children[count] < 0)
 			break;
 	}
-	if (count == 64 || errno != EAGAIN || count != 15) {
+	if (errno != EAGAIN || count != FAMILY_CHILDREN) {
 		printf("limits failed: %d children, errno=%d\n", count, errno);
 		return 1;
 	}
@@ -3026,14 +3032,14 @@ static int limits_test(void)
 		if (wait4(children[index], &status, 0, NULL) != children[index])
 			return 1;
 	printf("fork bomb bounded at %d\n", count);
-	for (count = 0; count < 64; count++) {
+	for (count = 0; count <= FAMILY_CHILDREN; count++) {
 		children[count] = fork();
 		if (children[count] == 0)
 			_exit(0);
 		if (children[count] < 0)
 			break;
 	}
-	if (count != 15 || errno != EAGAIN || wait4(children[0], &status, 0, NULL) != children[0]) {
+	if (count != FAMILY_CHILDREN || errno != EAGAIN || wait4(children[0], &status, 0, NULL) != children[0]) {
 		printf("limits failed: %d zombies, errno=%d\n", count, errno);
 		return 1;
 	}

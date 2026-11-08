@@ -168,6 +168,10 @@ type Image struct {
 	relroFileSize     uint64
 	dynamicFileOffset uint64
 	dynamicFileSize   uint64
+	// alignment is the largest alignment a header's congruence check uses,
+	// and at least one page. A base that keeps every check true is a
+	// multiple of it away from the base the image was parsed at.
+	alignment uint64
 }
 
 // LoadEnd returns the first page after the highest load segment.
@@ -288,6 +292,7 @@ func (image *Image) parse(source Source, config Config) Error {
 	}
 	image.ProgramHeaderOffset = phoff
 	image.ProgramHeaderCount = count
+	image.alignment = config.PageSize
 
 	var explicitPHDR bool
 	for index := 0; index < int(count); index++ {
@@ -310,6 +315,9 @@ func (image *Image) parse(source Source, config Config) Error {
 			// These name memory, which moves with the image.
 			if !entry.rebase(image.Base) {
 				return BadMemoryRange
+			}
+			if aligned(entry.alignment) && entry.alignment > image.alignment {
+				image.alignment = entry.alignment
 			}
 		}
 		switch entry.typeValue {

@@ -93,6 +93,7 @@ The following foundation is implemented.
 - non-PTY SSH command execution using the native shell parser;
 - separate stdin/stdout/stderr and propagated SSH exit status;
 - PTY `window-change` and live resize for `gfm`, `gview` and `edit`;
+- native SFTP version 3 in a confined per-session service, disabled by default;
 - `remote status` / `remote reload`;
 - transactional `remote keys`, `remote key add` and `remote key remove`;
 - authorized-key changes without exposing host private-key authority;
@@ -106,12 +107,16 @@ ABI but not from the kernel.
 
 Implemented support includes:
 
-- static `ET_EXEC` and static PIE;
+- static `ET_EXEC` and static PIE, with a random base for each static PIE
+  launch and `execve` (ADR 0219);
 - musl and static glibc applications;
 - Linux process families;
 - `fork`, `vfork`, `execve` and supported `clone` forms;
 - Linux threads and TLS;
 - pipes;
+- interactive terminals, sessions, process groups and job control;
+- IPv4 TCP and UDP sockets through `linuxsockd`, with name resolution
+  through the local DNS server;
 - signals and signal frames;
 - futex waits;
 - polling;
@@ -119,7 +124,7 @@ Implemented support includes:
 - anonymous memory;
 - file and directory access through VFS;
 - clocks, sleep, limits and identity calls;
-- static BusyBox non-interactive shell workloads;
+- static BusyBox shell workloads, interactive and scripted, and GNU nano;
 - multithreaded applications such as 7-Zip.
 
 Linux compatibility remains intentionally separate from the native ABI.
@@ -271,25 +276,44 @@ See [ADR 0201](../adr/0201-reclaimable-userspace-memory.md),
 [native concurrency validation report](native-concurrency-validation.md) and
 [0.2.8 release notes](../releases/0.2.8.md).
 
+### 0.2.9 — Linux interactivity, IPv4 sockets and build workflow
+
+Implemented:
+
+- thread caches of several slabs and collection pacing by allocating threads
+  (ADR 0205);
+- Linux terminals, sessions, process groups and job control; interactive
+  BusyBox `sh` and GNU nano run (ADR 0206);
+- VFS directory-listing authority fixes and batched enumeration (ADR 0207,
+  ADR 0208);
+- native SFTP version 3 in a confined per-session service (ADR 0209);
+- Linux IPv4 TCP and UDP sockets through `linuxsockd`, and a local DNS
+  server for static C libraries (ADR 0210);
+- shared-ring network data planes: Linux family rings, GTCP 4 and GUDP 3
+  (ADR 0214, ADR 0216);
+- production capacity and resource policy: TCP capacity paid by live
+  connections, Linux descriptor tables that grow in pages, and classified
+  resource bounds (ADR 0212, ADR 0213, ADR 0215);
+- production-sized persistent logging (ADR 0211);
+- incremental builds and installed-disk updates;
+- a project-local TinyGo cache and reusable compatibility roots;
+- interprocess locks on generated toolchain roots (ADR 0218);
+- stack-reach and crypto-frame checker hardening (ADR 0217);
+- bounded load randomization for Linux static PIE images (ADR 0219).
+
+See the [0.2.9 release notes](../releases/0.2.9.md).
+
 ---
 
 # Next priorities
 
-Linux programs now have a terminal, sessions, process groups, and job
-control (ADR 0206): interactive BusyBox `sh` and GNU nano 9.2 run. Linux
-runtime and ABI work stays driven by real applications.
+Linux runtime and ABI work stays driven by real applications.
 
-## Done: Linux terminal support
+## Priority 1 — Linux terminal follow-ups
 
 [ADR 0206](../adr/0206-linux-terminals-and-job-control.md) records the
-design. A Linux program alone in a foreground job gets a terminal built on
-the native session; `isatty`, termios, `TIOCGWINSZ` with `SIGWINCH`,
-`/dev/tty`, sessions, process groups, the foreground group, `SIGINT`,
-`SIGTSTP`, `SIGSTOP`, `SIGCONT`, `SIGTTIN`, and `wait4` with `WUNTRACED` and
-`WCONTINUED` work, and `fsync` reaches the volume flush. `make test-linux-tty`
-and `make test-linux-nano` are the gates.
-
-Still open from that milestone:
+terminal design, and `make test-linux-tty` and `make test-linux-nano` gate
+it. Open items:
 
 - a resize gate through an SSH PTY window change;
 - the nano suspend and `fg` round trip from BusyBox `sh` as an automated
@@ -314,19 +338,19 @@ The rule remains:
 
 > Add Linux ABI surface because a useful program requires it, not because Linux has the syscall.
 
-## Priority 3 — Entropy and load randomization
+## Priority 3 — Further address-space randomization
 
-Two security/portability items are independent of the terminal milestone and can be done separately.
+The kernel generator of ADR 0185 works on every CPU, and Linux static PIE
+images load at a random base (ADR 0219). Everything else keeps a fixed
+layout. Not implemented:
 
-### CPU-independent random source
+- Linux and native stack randomization;
+- anonymous mapping randomization;
+- native image randomization, which needs relocatable native images;
+- kernel image randomization.
 
-Add a native entropy source path that also works when RDRAND is unavailable, while preserving fail-closed behavior for cryptographic consumers.
-
-### Randomized executable load base
-
-Add bounded randomized base selection for compatible executable mappings.
-
-This is not a full ASLR project. Do not expand it into complete Linux/macOS-style address-space randomization before the simpler mechanism is measured and validated.
+Take each one as its own measured step. Do not expand them into complete
+Linux-style address-space randomization at once.
 
 ## Priority 4 — Native shell/application polish
 
@@ -445,7 +469,7 @@ Build/test scratch data belongs under ignored repository-local `build/` paths an
 
 Do not move these ahead of the milestones above unless a concrete blocker requires them:
 
-- full ASLR;
+- full ASLR beyond the bounded static PIE placement;
 - broad POSIX conversion of the native ABI;
 - full Linux TTY emulation before the minimal interactive contract is proven;
 - IOMMU work beyond keeping DMA APIs ready for it;

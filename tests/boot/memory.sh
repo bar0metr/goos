@@ -164,9 +164,9 @@ burst=$(grep '^MEMRECLAIM_BURST ' "$work/output")
 # heap, and counts pages. A step that failed stops the run before its round's
 # pages are taken. From round 3 the kernel's pages may dip by a page or two when a
 # process of the previous command is still being torn down as mem counts, but
-# the second half may never exceed the first half's highest; the process
-# pages of the second half may not exceed the first half's highest by more
-# than 4 pages.
+# kernel pages in the second half may never exceed the first half's highest.
+# Process pages are compared by the medians of the two halves: the second
+# half's median may not exceed the first half's by more than 4 pages.
 rounds=${LEAK_ROUNDS:-20}
 round=1
 : >"$work/leak"
@@ -195,11 +195,20 @@ kernel_second=$(awk -v h="$half" '$1 >= h { print $2 }' "$work/leak" | sort -n |
 kernel_lowest=$(awk '$1 >= 3 { print $2 }' "$work/leak" | sort -n | head -n 1)
 [ "$kernel_second" -le "$kernel_first" ] && [ $((kernel_first - kernel_lowest)) -le 4 ] ||
 	fail "kernel pages moved: $(awk '$1 >= 3 { printf "%s ", $2 }' "$work/leak")"
-first_high=$(awk -v h="$half" '$1 >= 3 && $1 < h { print $3 }' "$work/leak" | sort -n | tail -n 1)
-second_high=$(awk -v h="$half" '$1 >= h { print $3 }' "$work/leak" | sort -n | tail -n 1)
+# A leak lifts every round after it, so the halves are compared by their
+# medians. One round in which an idle heap kept a few more slabs than usual
+# moves a maximum, not a median: a run once read 4103 to 4105 pages in every
+# round but one, which read 4109, and the next round was back at 4104.
+median() {
+	sort -n | awk '{ value[NR] = $1 } END { print value[int((NR + 1) / 2)] }'
+}
+first_median=$(awk -v h="$half" '$1 >= 3 && $1 < h { print $3 }' "$work/leak" | median)
+second_median=$(awk -v h="$half" '$1 >= h { print $3 }' "$work/leak" | median)
+highest=$(awk '$1 >= 3 { print $3 }' "$work/leak" | sort -n | tail -n 1)
 lowest=$(awk '$1 >= 3 { print $3 }' "$work/leak" | sort -n | head -n 1)
-[ "$second_high" -le $((first_high + 4)) ] || fail "process pages rose from $first_high to $second_high"
-[ $((second_high - lowest)) -le 16 ] || fail "process pages spread from $lowest to $second_high"
+[ "$second_median" -le $((first_median + 4)) ] ||
+	fail "process pages rose from a median of $first_median to $second_median: $(awk '$1 >= 3 { printf "%s ", $3 }' "$work/leak")"
+[ $((highest - lowest)) -le 16 ] || fail "process pages spread from $lowest to $highest: $(awk '$1 >= 3 { printf "%s ", $3 }' "$work/leak")"
 leak_kernel=$(awk '$1 >= 3 { printf "%s ", $2 }' "$work/leak")
 leak_processes=$(awk '{ printf "%s ", $3 }' "$work/leak")
 

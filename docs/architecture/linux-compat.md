@@ -46,9 +46,15 @@ Linux ELF is a distinct format from the native envelope
 6. checks the file range of `PT_NOTE`, `PT_GNU_EH_FRAME`, and
    `PT_GNU_PROPERTY` and otherwise ignores them.
 
-A static PIE loads at one fixed base, `0x40000000`. The parser adds the base
-to every address the image names before it validates them, so the mapper and
-the fault path see an ordinary plan. The kernel applies no relocation; the
+A static PIE loads at a random base (ADR 0219). The loader parses the image
+once at `0x40000000` to learn its span and largest alignment, lists the
+aligned bases that keep the image and its 64 MiB brk below `0x80000000`,
+picks one with a draw from the kernel generator, and parses again at that
+base. The parser adds the base to every address the image names before it
+validates them, so the mapper and the fault path see an ordinary plan. When
+the generator refuses output, the launch fails; there is no fallback to a
+fixed base. `fork` and threads keep the parent's base, and `ET_EXEC` images
+load at their linked addresses. The kernel applies no relocation; the
 program's startup code relocates itself from `AT_PHDR`.
 
 The mapper records that plan as pinned `region.Image` reservations backed by the same
@@ -508,7 +514,8 @@ or not, with threads (ADR 0176, ADR 0177). A thread has its own TID, TLS, and
 signal mask and shares the process's pending signals; all threads share one
 CPU, and a process holds at most 8 tasks. Dynamic linking,
 nonblocking pipes, IPv6 and other socket families, `/proc`, file-backed `mmap`, and
-address-space randomization are outside it. BusyBox `sh` runs programs,
+address-space randomization beyond the static PIE base (ADR 0219) are
+outside it. BusyBox `sh` runs programs,
 pipelines, redirections, scripts, and background jobs without a terminal
 (ADR 0172), and interactively with job control on one, where GNU nano runs
 too (ADR 0206). `fork`, `vfork`, and two process forms of `clone` create a child from

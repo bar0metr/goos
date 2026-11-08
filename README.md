@@ -110,8 +110,11 @@ with DHCP or static settings and answers and sends ICMP echo; `ping` and
 DNS stub resolver let `ping` and `resolve` take host names. Native programs
 granted a UDP or TCP session use IPv4 datagrams or bounded byte streams, as
 the `udp` and `tcp` commands do. `dnsq` queries a DNS server directly, and
-`fetch` transfers HTTP/1.1 responses through the resolver and TCP sessions.
-There is no IPv6 or Linux socket interface.
+`fetch` transfers HTTP/1.1 and HTTPS responses through the resolver and TCP
+sessions. `remoted` serves native SSH shells and SFTP for remote
+administration. Static Linux programs get IPv4 TCP and UDP sockets through
+the `linuxsockd` service, and a static C library resolves names through
+`resolved` on `127.0.0.1:53`. There is no IPv6.
 
 The kernel supports preemptive SMP on up to 64 processors, per-process address
 spaces, typed capability-checked handles, IPC, shared memory, fine-grained
@@ -134,8 +137,11 @@ goroutines.
 GoOS also runs unmodified statically linked Linux x86_64 ELF programs through
 the kernel-resident Linux ABI compatibility subsystem. Static musl and glibc
 programs, Linux threads,
-`fork`/`execve`, pipes, signals, futexes, polling, and multithreaded workloads
-such as 7-Zip work without making the native ABI POSIX.
+`fork`/`execve`, pipes, signals, futexes, polling, interactive terminals with
+job control, IPv4 sockets, and multithreaded workloads such as 7-Zip work
+without making the native ABI POSIX. Each static PIE launch and `execve`
+loads the image at a random base between 1 GiB and 2 GiB, aligned for its
+segments; `ET_EXEC` programs keep their linked addresses.
 
 For the detailed implementation state, see the
 [roadmap](docs/development/roadmap.md), [architecture docs](docs/architecture/),

@@ -332,7 +332,7 @@ expect '^threads ok$' 'exit_group from a thread ends the process'
 clean 'pthreads'
 
 run '/system/linux/abi-probe limits'
-expect '^fork bomb bounded at 15$' 'the family budget bounds a fork bomb'
+expect '^fork bomb bounded at 63$' 'the family budget bounds a fork bomb'
 expect '^limits ok$' 'zombies count against the family budget'
 clean 'zombies count against the family budget'
 

@@ -36,6 +36,7 @@ var (
 )
 
 // Bound each output pass so streaming output cannot starve console interrupts.
+// A pass takes up to outputBatch reads of outputBuffer.
 const outputBatch = 16
 
 // probeTicks is half the period of the terminal size probe.
@@ -144,25 +145,33 @@ func serveConsole() {
 	reportLineDelivery()
 }
 
-func serveOutput() {
-	relayed := false
-	for batch := 0; batch < outputBatch && !outputClosed; batch++ {
-		count, status := sys.StreamRead(outputHandle, outputBuffer[:])
-		if status == kcall.StatusResourceExhausted {
-			break
-		}
-		if status != kcall.StatusOK || count == 0 || count > len(outputBuffer) {
-			outputClosed = true
-			syslog.Warn("output stream closed")
-			break
-		}
-		engine.Output(outputBuffer[:count])
-		relayed = true
+// serveOutput relays one bounded pass of output; see tty.Engine.Relay.
+func serveOutput() { relayOutput(outputBatch * len(outputBuffer)) }
+
+func relayOutput(limit int) {
+	if outputClosed {
+		return
+	}
+	relayed, closed := engine.Relay(outputStream{}, outputBuffer[:], limit)
+	if closed {
+		outputClosed = true
+		syslog.Warn("output stream closed")
 	}
 	if relayed && !outputReported && !engine.Raw() {
 		outputReported = true
 		mark("TTY_OUTPUT_OK\n")
 	}
+}
+
+// outputStream reads the terminal's output stream for tty.Engine.Relay.
+type outputStream struct{}
+
+func (outputStream) ReadOutput(buffer []byte) (int, bool, bool) {
+	count, status := sys.StreamRead(outputHandle, buffer)
+	if status == kcall.StatusResourceExhausted {
+		return 0, true, false
+	}
+	return count, false, status != kcall.StatusOK
 }
 
 func serveSession() {
@@ -180,8 +189,9 @@ func serveSession() {
 		if !valid {
 			continue
 		}
-		// Output written before a request precedes its prompt.
-		serveOutput()
+		// Output written before a request precedes its prompt. The client
+		// wrote it before sending, so it is all in the ring.
+		relayOutput(kcall.StreamCapacity)
 		wasRaw := engine.Raw()
 		engine.Request(&message)
 		reportLineDelivery()

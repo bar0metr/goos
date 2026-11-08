@@ -80,11 +80,10 @@ const (
 // BuildInitialStack writes a Linux x86_64 process-entry stack into target.
 // It includes argc, argv, envp and the required static-ELF auxv entries.
 //
-// random is 16 bytes from a hardware generator, which the stack carries
-// behind AT_RANDOM. A caller without such a source passes nil and the entry
-// is left out: a constant or a guessable value there would be read as a
-// secret. The C library then derives its stack-protector canary from
-// addresses, as it does on a Linux kernel too old to supply the entry.
+// random is 16 bytes of kernel generator output (ADR 0185), which the stack
+// carries behind AT_RANDOM. The kernel passes nil only when the generator
+// refuses output, and the entry is then left out: a constant or a guessable
+// value there would be read as a secret.
 func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Startup, random *[RandomSize]byte) (InitialStack, StackError) {
 	if startup == nil || image == nil || top == 0 || top%16 != 0 || image.Entry == 0 || image.ProgramHeaderAddress == 0 ||
 		image.ProgramHeaderCount == 0 || image.ProgramHeaderCount > elf.MaxProgramHeaders {

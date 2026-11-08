@@ -327,8 +327,10 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   `orphan`, `wait`, `pipe`, `signal`, `kill`, `eintr`, `poll`, `ppoll`,
   `select`, `hardening`, `fpstate`, and `limits`. Last come two injected failures: a fork that
   fails mid-copy and an `execve` whose VFS dies (ADR 0173). Its guest CPU has RDRAND
-  (`-cpu qemu64,+rdrand`), so `getrandom` must work there; the general boot
-  test keeps the default CPU, where it must return `ENOSYS`.
+  (`-cpu qemu64,+rdrand`). The general boot test keeps the default `qemu64`
+  CPU, which has no RDRAND; the kernel generator seeds from timing jitter
+  there (ADR 0185), so `AT_RANDOM` must be present and `getrandom` must
+  succeed on both CPUs.
   `test-linux-musl`, `test-linux-vfs`, `test-linux-security`,
   `test-linux-process`, `test-linux-exec`, `test-linux-fork`,
   `test-linux-pipe`, `test-linux-signals`, and `test-linux-poll` are the same
@@ -399,6 +401,14 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   Logs go to `build/logs/linux-network.log` and
   `build/logs/linux-network-netpeer.log`. The repository carries neither
   binary, so the target is no part of `test-all`.
+- `make test-linux-aslr` runs `tests/boot/linux-aslr.sh` (ADR 0219). It
+  boots the default `qemu64` CPU without RDRAND and launches
+  `/system/linux/pie-probe` 32 times from the shell. Every base must lie in
+  `[0x40000000, 0x80000000)` and be aligned for the image, at least two
+  bases must differ, a fork child must report its parent's base, an exec
+  chain must observe more than one base, and brk allocation, `AT_RANDOM` and
+  `getrandom` must work. It needs no external binaries, and `test-all` and
+  `release-check` run it.
 - `make test-linux-tty` boots a validation guest and drives
   `/system/linux/tty-probe` on its terminal through the serial console
   (ADR 0206): `tty-probe identity` checks descriptor identity, `/dev/tty`,

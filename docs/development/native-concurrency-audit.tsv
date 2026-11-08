@@ -927,3 +927,4 @@ CA-1149	goos/userspace/cmd/shell	logStatus	process	owned	none
 CA-1151	goos/userspace/cmd/linuxsockd	udpRing	process	owned	none
 CA-1152	goos/userspace/cmd/netd	udpDoorbells	process	owned	none
 CA-1153	goos/userspace/runtime/sys	HostVMMap	process	owned	TestVMReserveBytesRoundsToPages
+CA-1154	goos/userspace/linux	pieProbe	process	immutable	none

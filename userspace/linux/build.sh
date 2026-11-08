@@ -91,6 +91,27 @@ library=$(sed -e 's|/|_|g' -e "s|^|$obj/|" -e 's|$|.o|' "$sources")
 "$tinygo" ld.lld -static -nostdlib -pie --no-dynamic-linker --strip-all --build-id=none \
 	-z noexecstack -z max-page-size=4096 -e _start -o "$out/hello-pie" "$work/hello-pie.o"
 
+# pie-probe is a static musl program linked position-independent. musl's own
+# static-PIE start code comes with its dynamic linker, which TinyGo leaves
+# out, so the probe carries its own; the library is compiled a second time as
+# position-independent code for it alone.
+piecflags=$(echo "$cflags" | sed 's/-fno-pic -fno-pie/-fPIE/')
+pieobj=$work/pieobj
+mkdir -p "$pieobj"
+cat > "$work/compile-pie.sh" <<EOF
+#!/bin/sh
+exec "$tinygo" clang $piecflags -c "$musl/\$1" -o "$pieobj/\$(echo "\$1" | tr / _).o"
+EOF
+xargs -P "$jobs" -n 1 sh "$work/compile-pie.sh" < "$sources"
+pielibrary=$(sed -e 's|/|_|g' -e "s|^|$pieobj/|" -e 's|$|.o|' "$sources")
+# shellcheck disable=SC2086
+"$tinygo" clang $piecflags -c "$here/pie-probe/main.c" -o "$work/pie-probe.o"
+# shellcheck disable=SC2086
+"$tinygo" ld.lld -static -pie --no-dynamic-linker --gc-sections --strip-all \
+	--build-id=none -z noexecstack -z max-page-size=4096 -z relro -z now \
+	-o "$out/pie-probe" "$work/pie-probe.o" \
+	--start-lib $pielibrary --end-lib
+
 for fixture in musl-hello fsprobe dirprobe abi-probe tty-probe netprobe; do
 	# shellcheck disable=SC2086
 	"$tinygo" clang $cflags -c "$here/$fixture/main.c" -o "$work/$fixture.o"
@@ -101,4 +122,4 @@ for fixture in musl-hello fsprobe dirprobe abi-probe tty-probe netprobe; do
 		--start-lib $library --end-lib
 done
 
-(cd "$out" && shasum -a 256 hello hello-pie musl-hello fsprobe dirprobe abi-probe tty-probe netprobe)
+(cd "$out" && shasum -a 256 hello hello-pie musl-hello fsprobe dirprobe abi-probe tty-probe netprobe pie-probe)

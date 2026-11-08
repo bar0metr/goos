@@ -1,6 +1,8 @@
 package elf
 
 import (
+	"math/bits"
+
 	"goos/kernel/loader"
 	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
@@ -11,12 +13,13 @@ const (
 	// are supplied on demand; the stack installer populates the initial image.
 	DefaultStackReserve = uint64(8 << 20)
 	StackGuardSize      = uint64(64 << 10)
-	// StaticPIEBase is where every position-independent image loads. The
-	// address is fixed: GoOS randomizes no layout, so a program that prints
-	// its addresses prints the same ones on each run. It leaves the lower
-	// half of the image area to ET_EXEC images and the upper half to the
-	// image and its heap.
-	StaticPIEBase = uint64(1 << 30)
+	// A static position-independent image loads at a base the kernel picks
+	// at random for each new image (ADR 0219) inside
+	// [StaticPIEWindowStart, StaticPIEWindowEnd). The image and its brk
+	// reservation both fit below the window's end. The lower gigabyte stays
+	// with ET_EXEC images, which load where they are linked.
+	StaticPIEWindowStart = uint64(1 << 30)
+	StaticPIEWindowEnd   = vm.UserImageAreaLimit
 )
 
 // Layout is the entry state reserved by MapImage. StackTop points just past
@@ -29,11 +32,56 @@ type Layout struct {
 // GoOSConfig is the address policy for Linux images. Executable loads use
 // the ordinary low-address image area: an ET_EXEC image at the addresses it
 // names, conventional ones such as 0x400000 included, and a static
-// position-independent image at StaticPIEBase. Kernel-selected mappings and
-// fixed GoOS user windows live above this limit and therefore cannot collide
-// with a load segment.
-func GoOSConfig() Config {
-	return Config{PageSize: vm.PageSize, UserStart: vm.UserAddressStart, UserEnd: vm.UserImageAreaLimit, PIEBase: StaticPIEBase}
+// position-independent image at pieBase. Kernel-selected mappings and fixed
+// GoOS user windows live above this limit and therefore cannot collide with
+// a load segment.
+func GoOSConfig(pieBase uint64) Config {
+	return Config{PageSize: vm.PageSize, UserStart: vm.UserAddressStart, UserEnd: vm.UserImageAreaLimit, PIEBase: pieBase}
+}
+
+// Placement is the set of bases a static position-independent image may
+// load at: Count bases, starting at First, Step apart.
+type Placement struct {
+	First uint64
+	Step  uint64
+	Count uint64
+}
+
+// PlacePIE lists the bases in the static-PIE window that hold image and a
+// tail of bytes above its page-aligned end, the brk reservation. The image
+// must come from a successful parse at StaticPIEWindowStart: that parse
+// proved every congruence rule there, and a base a multiple of the image's
+// largest alignment away keeps all of them. The result is exact, so a
+// launch draws one slot and never retries.
+func PlacePIE(image *Image, tail uint64) (Placement, bool) {
+	return place(image, Range{Start: StaticPIEWindowStart, End: StaticPIEWindowEnd}, tail)
+}
+
+func place(image *Image, window Range, tail uint64) (Placement, bool) {
+	if image == nil || image.Base != window.Start || image.Base == 0 || window.End <= window.Start ||
+		image.alignment == 0 || image.alignment&(image.alignment-1) != 0 {
+		return Placement{}, false
+	}
+	end := image.LoadEnd()
+	if end <= image.Base {
+		return Placement{}, false
+	}
+	// span is the window room the image and its tail need above a base.
+	span, ok := add(end-image.Base, tail)
+	if !ok || span > window.End-window.Start {
+		return Placement{}, false
+	}
+	slots := (window.End - window.Start - span) / image.alignment
+	return Placement{First: window.Start, Step: image.alignment, Count: slots + 1}, true
+}
+
+// Base maps a uniform 64-bit draw to one of the placement's bases. The high
+// half of draw*Count is a slot below Count; each slot gets the share of
+// draws within one of every other's, so no slot is more likely than another
+// by more than Count/2^64.
+func (placement Placement) Base(draw uint64) uint64 {
+	slot, _ := bits.Mul64(draw, placement.Count)
+	return placement.First + slot*placement.Step
 }
 
 // MapImage records a validated Linux ELF image in a process region map. The

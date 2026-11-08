@@ -123,7 +123,7 @@ User addresses are canonical lower-half addresses in `[0x1000,
 | `0x00400000` | self-test probe page (validation build) |
 | `0x00402000` | low-address self-test code (validation build) |
 | `0x00404000` | low-address self-test data (validation build) |
-| `0x1000` – `2 GiB` | image segments; native images normally start at `0x40002000`, Linux `ET_EXEC` may use conventional low addresses such as `0x400000`, a Linux static PIE loads at `0x40000000` |
+| `0x1000` – `2 GiB` | image segments; native images normally start at `0x40002000`, Linux `ET_EXEC` may use conventional low addresses such as `0x400000`, a Linux static PIE loads at a random aligned base in `[0x40000000, 0x80000000)` with its 64 MiB brk above it (ADR 0219) |
 | `0x0000080000000000` | shared-memory window for callers that pass a fixed address (file cache, exec area) |
 | `0x0000081000000000` | DMA window |
 | `0x0000082000000000` | system image window |
@@ -275,8 +275,9 @@ work.
 
 ## ASLR readiness
 
-GoOS has no address-space layout randomization of any kind. Every address
-below is the same on every boot and in every process. The specification
+GoOS randomizes one address: the load base of a Linux static PIE
+(ADR 0219). Every address below is the same on every boot and in every
+process. The specification
 (§11.4) allows full ASLR to come after the first milestone, provided the API
 and the memory layout do not prevent it. This section records what is fixed,
 what each kind of randomization would have to change, and whether anything
@@ -305,19 +306,31 @@ decided so far is in the way.
 | System image window | `[0x0000082000000000, 0x0000082040000000)` | `vm.UserImageAddress`/`UserImageLimit`; `ImageMap` refuses any other address |
 | Shared image frames | one physical copy per read-only segment | keyed by the image's offset in the boot archive (ADR 0081); mapped at the segment's link address |
 
-There is no source of randomness in the kernel. The TSC is read for the clock
-(ADR 0054), the kernel does not probe for `RDRAND` or `RDSEED`, it does not use
-the UEFI RNG protocol before `ExitBootServices`, and there is no virtio-rng
-device.
+A Linux static PIE is the one exception to the table. Each PID 1 launch
+and each successful `execve` of an `ET_DYN` image without `PT_INTERP` picks
+a base, a multiple of the image's largest alignment, such that the image
+and its 64 MiB brk fit in `[0x40000000, 0x80000000)` (ADR 0219). `fork`
+and thread creation keep the parent's layout. `ET_EXEC` images, native
+images, stacks, anonymous maps, shared memory and the kernel stay where the
+table puts them.
+
+The kernel has one random generator (`kernel/random`, ADR 0185): a ChaCha20
+stream keyed from an entropy pool, rekeyed after every request so earlier
+output cannot be recomputed. Boot fills the pool before the first process
+exists, with up to 32 RDRAND draws when the CPU has the instruction and at
+least 4096 cycle-counter samples of timing jitter. The generator refuses
+output until the pool has taken those samples, and it needs no RDRAND. It
+serves `AT_RANDOM`, `getrandom`, the native `RandomRead` call and the
+static PIE base. The kernel does not use `RDSEED`, the UEFI RNG protocol or
+a virtio-rng device.
 
 ### What each kind of randomization would need
 
-**Entropy.** Every item below needs a seed before the first process exists.
-The candidates are the UEFI RNG protocol, called before `ExitBootServices`
-where the firmware provides it, and `RDSEED`/`RDRAND` where CPUID reports
-them, with TSC jitter as a weak supplement and never as the only source. A
-kernel CSPRNG seeded from these would serve every later choice. Kernel ASLR
-needs its entropy even earlier, in the loader stage that picks the slide.
+**Entropy.** The ADR 0185 generator is seeded before the first process
+exists and can serve every per-process choice below. Kernel ASLR needs its
+entropy earlier, in the loader stage that picks the slide, before that
+generator runs; the UEFI RNG protocol and `RDSEED`/`RDRAND` are the
+candidates there.
 
 **Kernel ASLR.** This is the largest change. The kernel is linked at a fixed
 base, marked non-relocatable (the PE has a `.reloc` section but not
@@ -339,7 +352,7 @@ it needs:
   low kernel image, but they retain the minimal high transition mappings and
   the shared direct map required by the current entry design.
 
-**Executable ASLR.** Programs are static non-PIE executables. `elf2native`
+**Native executable ASLR.** Native programs are static non-PIE executables. `elf2native`
 accepts only `ET_EXEC` and refuses `PT_DYNAMIC`, and the `GOOSNAT` format
 carries absolute segment addresses, an absolute entry, and an absolute stack
 top, with no relocation table. A per-process base needs:
@@ -408,9 +421,8 @@ the userspace linker script, and the `DMAAllocate`/`ImageMap` address checks,
 and none of them is part of a declared stable ABI.
 
 What does stand in the way is implementation, in this order of cost: the
-kernel's fixed, identity-mapped placement; the native image format's lack of
-relocations together with the untested PIE build of TinyGo programs; and the
-missing entropy source. Two
+kernel's fixed, identity-mapped placement, and the native image format's lack
+of relocations together with the untested PIE build of TinyGo programs. Two
 decisions should keep this open: a new fixed user address should be returned
 by the call that maps it rather than assumed by the caller, and a new wire
 format should keep carrying slots or offsets rather than pointers.
