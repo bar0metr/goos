@@ -9,15 +9,14 @@ interrupts. This document covers the native calls defined by
 ## Entry path
 
 The operation number is in `EAX`; up to three arguments follow in
-general-purpose registers (stubs in `userspace/runtime/amd64.S`). The assembly
-bridge in `kernel/arch/amd64/io.S` routes the five blocking operations (5, 12,
-17, 21, 22) to dedicated dispatchers in `kernel/ipccalls.go`, `kernel/streamcalls.go`
-and `kernel/waits.go`. Everything else goes through `kcall.Dispatch`, which checks
-fixed sizes before calling the handler in the file for its area: `devicecalls.go`,
-`ipccalls.go`, `streamcalls.go`, `launch.go`, `lifecycle.go`, `diagnostics.go`,
-`timing.go`, `logging.go`, `sysinfo.go`, `memory.go`, `processkill.go`,
-`imagemap.go`, `randomness.go`.
-Unknown numbers return `Unsupported`.
+general-purpose registers (stubs in `userspace/runtime/amd64.S`). The legacy
+wait operations 5, 12, 17, 21 and 22 use dedicated blocking dispatch paths;
+other calls go through `kcall.Dispatch`, which can also return a block action
+(for example a blocking `ThreadJoin`). Fixed-size checks happen in the
+dispatcher or operation-specific handler before state is committed. Handlers
+are split by area across the kernel, including IPC/streams, VM and memory
+objects, logging/timing, thread calls and Linux-family reattachment. Unknown
+operation numbers return `Unsupported`.
 
 Every call runs with interrupts disabled and takes the locks of the state it touches (ADR 0184, ADR 0187). The caller is identified by its CR3 root, and blocking calls also
 receive the task slot. Results are a `kcall.Status` in `RAX`. Blocking calls
@@ -35,30 +34,30 @@ table with type, generation, and rights checks.
 | 2 | retired (`DebugWrite`) | none: refused with `Unsupported` in every build, never reaches a handler (ADR 0094) | — | — | no |
 | 3 | `IPCSend` | channel handle, Write | wire length 32..320; `CopyIn`; `ipc.Decode` checks header and sizes; each attached handle (≤ 4) needs Transfer; an attached stream end must have room for four more references, checked before anything moves | 16-message queue; full → `ResourceExhausted` | no |
 | 4 | `IPCReceive` | channel handle, Read | capacity ≥ 320; `CopyOut` | static wire buffer | no; empty → `NotFound` |
-| 5 | `IPCWaitReceive` | channel handle, Read + Wait | 24-byte descriptor `{buffer, capacity, timeout}`; `now + timeout` wrap check | 64 waiters; per-task status slot | yes, tick deadline; 0 → `Timeout` |
+| 5 | `IPCWaitReceive` | channel handle, Read + Wait | 24-byte descriptor `{buffer, capacity, timeout}`; `now + timeout` wrap check | 256 wait registrations globally, one per task slot | yes, tick deadline; 0 → `Timeout` |
 | 6 | `ConsoleWrite` | device handle, Write, console object | length 1..4096; `CopyIn` | static 4 KiB buffer | no |
 | 7 | `ConsoleRead` | device handle, Read, console object | length exactly 1; `CopyOut` | one byte from the 8 KiB ring the UART interrupt fills | no; no input → `NotFound`; wait with `WaitAny` |
 | 8 | `ClockRead` | — | length exactly 8; `CopyOut` | none | no |
 | 9 | `StartupRead` | registered | length 1..64 KiB; `CopyIn` of the caller's own read-only startup pages in 512-byte chunks, zeros past them, `CopyOut` | none | no |
 | 10 | `ChannelCreate` | caller is PID 1 | length exactly 16; two free handle slots; `CopyOut` with rollback | 256 channels, global, three pages each while they live (ADR 0111); charged to PID 1's channel quota | no |
 | 11 | `HandleClose` | own handle | generation and slot; a stream handle drops one reference, refused below zero | none | no; wakes peers when a stream end's last handle closes |
-| 12 | `ProcessWait` | process handle, Wait | result address range (8 B); `now + timeout` wrap check | 64 waiters | yes, tick deadline; 0 → `Timeout` |
+| 12 | `ProcessWait` | process handle, Wait | result address range (8 B); `now + timeout` wrap check | 256 wait registrations globally, one per task slot | yes, tick deadline; 0 → `Timeout` |
 | 13 | `SystemInfo` | registered | length exactly 40; `CopyOut` | none | no |
 | 14 | `PortRead` | device handle, Read, port object | spec: width 1/2/4, bits 24+ zero, `offset + width ≤ BAR size` (32-bit sum); `CopyOut` | one port access | no |
 | 15 | `PortWrite` | device handle, Write, port object | as `PortRead`; value must fit the width | one port access | no |
 | 16 | `DMAAllocate` | device handle, Write, DMA object of a discovered device's domain | virtual address must equal the fixed DMA address; 24-byte descriptor `CopyIn`, its size a whole number of pages up to 256 KiB (zero for 16 KiB); the window must be free in the region map | up to 64 contiguous low pages, charged with their page tables to the page quota; a pinned region; at most once per address space | no |
 | 17 | `IRQWait` | IRQ handle, Wait, IRQ 11 | none beyond the handle | one waiter slot | yes, **no deadline** |
-| 18 | `StreamCreate` | registered | length exactly 16; two free handle slots; `CopyOut` with rollback | 256 streams of one page each, global; 8/16/32 by launch profile, 64 for PID 1 (ADR 0111, 0122) | no |
+| 18 | `StreamCreate` | registered | length exactly 16; two free handle slots; `CopyOut` with rollback | 256 streams, two pages each while live; 8/16/32 by launch profile, 64 for PID 1 (ADR 0111, 0122) | no |
 | 19 | `StreamRead` | reader handle, Read | 24-byte descriptor; size 1..256; result field must be 0; `CanCopyOut` before consuming | static 256 B buffer | no; empty → `ResourceExhausted` |
 | 20 | `StreamWrite` | writer handle, Write | as `StreamRead`; `CopyIn` of payload; a write that does not fit whole is refused, never split | static 256 B buffer | no; full → `ResourceExhausted` |
-| 21 | `StreamWait` | stream handle, Wait | timeout must be non-zero; wrap check | 64 waiters | yes, tick deadline; a writer wakes when 256 bytes are free |
+| 21 | `StreamWait` | stream handle, Wait | timeout must be non-zero; wrap check | 256 wait registrations globally, one per task slot | yes, tick deadline; a writer wakes when 256 bytes are free |
 | 22 | `WaitAny` | per interest: type-specific rights + Wait; the console device needs Read only | count 0..64, where 0 is a timed sleep and needs a finite deadline; interest array and 16-byte result validated; per-interest handle, type, event mask, rights, and live object; an IRQ interest must name the routed network line or line 11, Readable only; a thread-end interest (`WaitAnyThreadEnd`) must name a running or unjoined thread of the caller's native process, Completed only; wrap check | fixed table, one operation per task slot | yes; deadline or infinite (`^0`) |
 | 23 | `Diagnostics` | device handle, Write, console object; `goos_diag` build only | optional address, only for the caller's own address space | output proportional to kernel state | no |
 | 24 | `ClockReadNanos` | — | length exactly 8; `CopyOut` | none | no |
-| 25 | `LogWrite` | device handle, Write, console object | length 1..181; `CopyIn`; `logfmt.Decode` checks version, level, printable ASCII, component and field syntax (failure → `CorruptData`); time and PID are set by the kernel | 64-record ring, oldest overwritten | no |
-| 26 | `LogRead` | device handle, Read, log object (ADR 0082) | index < 64; 240-byte `CopyOut` | none | no |
-| 27 | `HandleInfo` | registered; own table only | slot < 128; 16-byte `CopyOut` of ID, type, rights | none | no |
-| 28 | `ProcessInfo` | registered | index < 32; 80-byte `CopyOut` of PID, state, task count, name, CPU ticks, and the held and permitted resource counts | none | no |
+| 25 | `LogWrite` | device handle, Write, console object | length 1..181; `CopyIn`; `logfmt.Decode` checks version, level, printable ASCII, component and field syntax; time and PID are kernel-owned | 2048-record ring; oldest overwritten | no |
+| 26 | `LogRead` | device handle, Read, log object (ADR 0082) | index < 2048; 240-byte `CopyOut` | none | no |
+| 27 | `HandleInfo` | registered; own table only | slot < 256; 16-byte `CopyOut` of ID, type, rights | none | no |
+| 28 | `ProcessInfo` | registered | index < 256 or `ProcessInfoSelf`; 80-byte `CopyOut` of PID, state, task count, name, CPU ticks, and resource use/limits | none | no |
 | 29 | `SystemReset` | device handle, Write, system-control object (PID 1 only) | handle lookup | none | resets the machine |
 | 30 | `MemoryMap` | memory handle, Read (+ Write when writable), shared-memory object | flags: writable, anywhere; a named address page-aligned, in the user range, and free in the region map; with anywhere, an 8-byte result `CopyOut` | whole object, NX, non-owned, recorded as a region and counted as a reference to the object; page tables charged to the page quota | no |
 | 31 | `ProcessKill` | process handle, Write | handle lookup; refuses PID 1 and the caller's own process | none | retires the target's tasks |
@@ -67,17 +66,17 @@ table with type, generation, and rights checks.
 | 34 | `ConsoleInterrupt` | device handle, Read, console object | handle lookup only | consumes one pending Ctrl-C flag | no; none pending → `NotFound` |
 | 35 | `ValidationFault` | validation build only (`Unsupported` otherwise); device handle, Write, system-control object (PID 1 only) | handle lookup only | none: overflows the caller's kernel stack on purpose and ends the machine with a double-fault report (ADR 0091) | no |
 | 36 | `SystemPowerOff` | device handle, Write, system-control object (PID 1 only) | handle lookup only; the port and value come from ACPI tables checked at boot (`kernel/acpi`, ADR 0092) | none: one port write that switches the machine off; `Unsupported` without usable tables | no |
-| 37 | `ExecutableCreate` | device handle, Write, loader object (PID 1 only, not transferable) | size 1..256 MiB; 8-byte result probed with `CopyOut` before anything is allocated; a free handle slot | 64 objects, global; `ceil(size/4096)` zeroed pages and their page-list index pages charged to the page quota, moved to the first process launched from the object; freed with the last reference — the handle or a process started from it (ADR 0097, ADR 0106) | no |
+| 37 | `ExecutableCreate` | loader device, Write | size 1..256 MiB; 8-byte result probed before allocation; one free handle | 256 objects globally; one page initially, payload pages charged as written/faulted | no |
 | 38 | `ExecutableWrite` | memory handle, Write, executable object | length 1..1 MiB in `Dispatch`; append only, refused whole past the object's end or once sealed; `CopyIn` page by page, the length advanced only after the whole copy | none beyond the object's own pages | no |
-| 39 | `VMMap` | registered | protection read/write only (execute refused); flags: fixed only; 16-byte descriptor `CopyIn`; length page-aligned, nonzero, bounded; a fixed address page-aligned, in the user range, free in the region map | address space only: pages are demand-zero, each charged on first touch with its page tables; 128 regions per process | no |
+| 39 | `VMMap` | registered; own map only | 16-byte `{address,length}` descriptor; page-sized nonzero length; execute refused; without `VMMapFixed` the kernel chooses a free address; `VMMapStacks` requires RW and a whole 320 KiB guard+stack stride | address-space reservation; pages demand-zero and charged on touch; 128 regions/process | no |
 | 40 | `VMUnmap` | registered; own map only | range page-aligned, non-wrapping, in the user range; pinned regions refused; a split needs a free region slot, checked before anything changes | frees and uncharges owned pages | no |
 | 41 | `VMProtect` | registered; own map only | range wholly covered by unpinned anonymous regions; protection valid and never executable | none | no |
 | 42 | `VMDiscard` | registered; own map only | range wholly covered by unpinned anonymous regions | frees and uncharges the pages; the reservation stays | no |
 | 43 | `VMQuery` | registered; own map only | 24-byte `CopyOut` of the region at an address | none | no |
-| 44 | `MemoryCreate` | registered | page count 1..65536; 8-byte result probed with `CopyOut` before anything is allocated; a free handle slot | pages plus page-list index pages charged to the page quota before allocation; 64 objects system-wide, 16 per payer; freed with the last handle or mapping (ADR 0107) | no |
+| 44 | `MemoryCreate` | registered | page count 1..65536; 8-byte result probed before allocation; a free handle slot | pages/index pages charged before allocation; 256 objects globally, 16 per ordinary process, 32 for PID 1 | no |
 | 45 | `HandleDuplicate` | a memory handle; rights must be a subset of the original's | handle lookup; rights derivation; 8-byte result probed before insertion; a free handle slot | one handle-table slot; one reference to the object | no |
 | 46 | `ClockNow` | registered | clock ID; 16-byte result; monotonic or realtime only | none | no |
-| 47 | `ClockSet` | device handle, Write, system-control object | realtime value and validity bounds | none | changes the realtime offset |
+| 47 | `ClockSet` | device capability with `CLOCK_SET`, clock object | 16-byte realtime record and bounds | none | no; currently `Unsupported` because no such capability is issued and setting is not implemented |
 | 48 | `ExecutableSource` | loader device with Write; prepared VFS channel with Read, Write, Wait; sealed executable header object with Execute and Write | 32-byte descriptor; file handle nonzero; file size 1..256 MiB; header object size `min(file size, 4096)`; live channel endpoint | consumes the channel; converts the existing one-page object without allocating payload pages; later faults allocate and charge one process page at a time | no |
 | 49 | `ConsoleInfo` | device handle, Read, console object | length exactly 16; `CopyOut` | columns, rows, availability flags, and a zero reserved word; no hardware address | no |
 | 50 | `CPUInfo` | registered | length exactly 320; version and size fixed; `CopyOut` | immutable normalized CPUID and topology summary collected at boot | no |
@@ -87,12 +86,27 @@ table with type, generation, and rights checks.
 | 54 | `TaskAffinity` | handle zero for the calling task; otherwise a process handle with Wait to read, Write to set | mask must name an online processor; kernel tasks stay on the housekeeping processor; optional 8-byte `CopyOut` | the processors a task may run on; a scheduling constraint, not authority | no |
 | 55 | `IRQTake` | IRQ handle, Wait, the routed network line or line 11 | none beyond the handle | clears one pending flag | no; nothing pending → `NotFound` |
 | 56 | `RandomRead` | — | length 1..64, checked in `Dispatch`; `CopyOut` of generator output, after which the kernel clears its copy | at most 64 bytes from a per-CPU buffer; stirs the pool with the cycle counter | no; no generator output → `Unsupported` |
+| 57 | `PowerOffReady` | device handle, Write, system-control object (PID 1) | handle lookup; checked ACPI S5 state | none | no; no usable method → `Unsupported` |
+| 58 | `LogReadSequence` | device handle, Read, log object | cursor plus fixed snapshot buffer; copies at most 64 records and reports oldest/end/first/count/gap | one per-CPU snapshot buffer | no |
+| 59 | `ThreadCreate` | native process; own thread group | entry must be executable/non-writable; 16-byte result; thread/task/page quota and 64-slot runtime bound | guarded user-stack reservation plus charged kernel task stack | no |
+| 60 | `ThreadExit` | native caller | exit code | one task | ends calling thread; process survives while siblings remain |
+| 61 | `ThreadJoin` | native process; target sibling thread | 8-byte result/token; generation-safe ID; modes block, poll, claim, collect, release; single join ownership | bounded thread table | block mode may park; other modes do not |
+| 62 | `ThreadSelf` | native caller | 16-byte result | current thread ID and slot only | no |
+| 63 | `ThreadYield` | native caller | none | scheduler request only | yields/reschedules |
+| 64 | `ThreadSuspend` | native process | snapshot capacity 1..63; 416-byte records; one suspender; target siblings must quiesce | fixed per-CPU snapshot area and thread slots | no; quiesce failure → `Timeout` |
+| 65 | `ThreadResume` | native process that owns the suspension | no user buffer | releases held sibling threads | no |
+| 66 | `ThreadSetBase` | native caller | FS base zero or valid canonical user address | current task register state | no |
+| 67 | `ThreadPreempt` | native caller | entry executable/non-writable and ticks 1..1000, or both zero to disable | per-thread runtime preemption state | no |
+| 68 | `ThreadPreemptTake` | native caller | 8-byte result | one pending interrupted RIP | no; none pending → `NotFound` |
+| 69 | `ThreadWake` | native process; target sibling thread | generation-safe thread ID in caller's group | one wake flag per task slot; publishes `WaitAny` readiness | no |
+| 70 | `ThreadWakeTake` | native caller | none | clears caller's wake flag | no; none set → `NotFound` |
 
 | 71 | `IRQPoll` | IRQ handle, Wait, line 11, checked by the same validator as `IRQWait` | ignores unused arguments | atomically consumes one pending flag; registers no waiter | no; nothing pending → `NotFound` |
 | 72 | `ThreadHoldRange` | validation build only (`Unsupported` otherwise, for any arguments); native caller; target another live thread of the caller's process with no hold armed (`AlreadyExists`) | range nonempty and at most 4096 bytes, checked in the handler; first and last byte in read-execute, non-writable regions | one hold per task slot: DR0 and DR7 loaded for that task only (ADR 0204) | no |
 | 73 | `ThreadHoldWait` | as 72 | 24-byte `CopyOut` of RIP, state and RSP; after a step into a call, 8-byte `CopyIn` from the held thread's stack | none | no; a running target → `Timeout` |
 | 74 | `ThreadHoldStep` | as 72 | target stopped and off its processor; `CopyIn` of up to 15 bytes at the held RIP, a byte at a time; MOV SS, POP SS, IRET and undecodable code refused with `InvalidArgument` | sets TF or DR0 in the target's saved state | no; target not stopped → `Timeout` |
 | 75 | `ThreadHoldCancel` | as 72 | target hold armed | clears TF and DR7 for the target | no |
+| 76 | `LinuxNetAttach` | process handle with Write to a Linux root; transferable channel and memory pool with exact rights | target must be a root Linux process; GLNXSOCK3 pool size/layout validated; a live session is not replaced; two target handle slots required | one family network session; moved handles and cached pool record | no |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording
@@ -173,8 +187,8 @@ completes the registration or is seen by the re-check (ADR 0190).
 
 ### Capabilities
 
-See [capabilities.md](capabilities.md). Thirteen calls authorize by caller
-identity or need nothing: `Exit`, `ClockRead`, `StartupRead`,
+See [capabilities.md](capabilities.md). Calls that authorize by caller
+identity or need no object capability include: `Exit`, `ClockRead`, `StartupRead`,
 `SystemInfo`, `ChannelCreate`, `StreamCreate`, `ClockReadNanos`,
 `HandleInfo` (own table only), `ProcessInfo`, `CPUInfo`, `CPUEntry`,
 `CPUCacheInfo`, and `RandomRead`.
@@ -188,13 +202,15 @@ identity or need nothing: `Exit`, `ClockRead`, `StartupRead`,
   message (including the same handle twice), and, from PID 1, launch grants.
   A handle is resolved in the caller's own table with type and rights before
   its count is touched, so a forged or stale ID changes nothing.
-- *Overflow*: counts are 16-bit; no end can have more handles than the
-  32 × 128 slots that exist, which a test holds below the bound, and every path
-  that adds a reference checks the headroom it needs before installing anything.
-  A drop with nothing counted is refused rather than wrapping.
+- *Overflow*: counts are 16-bit and capped at 65,535. The system has 256
+  process tables of 256 handles (65,536 slots), so the last possible handle to
+  one endpoint is refused rather than wrapping the counter. Every path that
+  adds references checks headroom before installing anything; a drop with
+  nothing counted is refused.
 - *Waits*: none added. Writers are woken only when a whole 256-byte write fits,
   so a woken writer is not refused again.
-- *Resources*: two 16-bit counters per stream; the registry is 256 streams, each a page taken when it is created.
+- *Resources*: two 16-bit counters per stream; the registry is 256 streams,
+  each an 8 KiB/two-page object with an 8176-byte ring.
 
 ### Network parsers outside the kernel
 
@@ -211,9 +227,9 @@ or from other processes:
   length against the IPv4 payload and verifies a nonzero checksum; a bad
   one is dropped and counted before any other use. Only datagrams to the
   interface's own address reach endpoints, and a connected endpoint drops
-  any source but its peer. Received payloads share 32 buffers of 4096
-  bytes, at most 16 per session, so a flood toward one session's ports
-  leaves the other half to the rest (ADR 0195).
+  any source but its peer. Received payloads use a pool of 512 4 KiB
+  buffers; one owner can hold at most 256 and one endpoint queue at most 16,
+  so one flooded owner cannot consume the whole pool (ADR 0195, ADR 0215).
 - `GUDP1` carries programs' UDP requests to `netd` over sessions PID 1 opens
   for commands whose index entry asks for `GrantUDP`, and for `resolved`.
   The decoder, fuzzed, refuses an unknown opcode or version, a wrong size,
@@ -223,14 +239,15 @@ or from other processes:
   only `netd` writes; `netd` checks the exact rights through `HandleInfo`
   and closes a session that sends a malformed request or hands back a slot
   it does not hold. An endpoint answers only the session that opened it,
-  and a stale endpoint ID matches nothing. A session holds at most eight of
-  the 32 endpoints (ADR 0195).
+  and a stale endpoint ID matches nothing. An ordinary session holds at most
+  eight endpoints; the global registry defaults to 1024 and is bounded at
+  4096 (ADR 0195, ADR 0215).
 - `resolved` parses DNS replies. Before any of a reply is used it checks QR,
   opcode, transaction ID and server, exactly one question equal to the one
   asked, counts and lengths against the message, compression pointers that
   point backwards with at most 64 hops, labels of 63 bytes and names of 255.
   A reply that fails is dropped whole, and a truncated reply is not used.
-  The parser in `userspace/dns` has fixed tables and fuzz tests (ADR 0194).
+  The parser in `userspace/dns` has bounded tables and fuzz tests (ADR 0194).
 - `GRESOLV1` carries commands' requests to `resolved`: an opcode and a name
   of at most 253 bytes. Sessions are opened by PID 1 for commands whose index
   entry asks for `GrantResolve` or `GrantResolveAdmin`, and the resolver
@@ -240,11 +257,14 @@ or from other processes:
   The configuration service parses `/state/hosts` at restore, skipping and
   counting malformed and duplicate lines, and keeps at most 64 records
   (ADR 0193).
-- `GTCP1` exposes TCP only to sessions PID 1 creates for `GrantTCP`. `netd`
-  checks endpoint ownership, TX and RX slot transitions, request sizes and
-  correlations. Remote TCP input is checksum- and bounds-checked before TCB
-  lookup. Endpoint, backlog, stream and reorder storage are fixed, and stale
-  endpoint IDs carry the wrong generation (ADR 0196).
+- GTCP exposes TCP only to sessions PID 1 creates for `GrantTCP` or to
+  supervised services such as `resolved` and `linuxsockd`. `netd` checks
+  endpoint ownership, slot/ring transitions, request sizes and correlations.
+  Remote input is checksum- and bounds-checked before indexed TCB lookup.
+  Endpoint capacity defaults to 1024 with a 4096 ceiling; stream/reassembly
+  storage grows on demand inside global/owner memory budgets, and TIME_WAIT
+  normally uses bounded tombstones. Stale endpoint IDs carry the wrong
+  generation (ADR 0196, ADR 0213, ADR 0214).
 
 - Native HTTPS adds TLS records, handshake messages and X.509 DER parsing to
   the `fetch` process, not to the kernel, driver, `netd` or `resolved`. The pinned
@@ -266,40 +286,46 @@ or from other processes:
   gate passed 69 assertions, including certificate, CertificateVerify, Finished
   and record-MAC rejection. Certificate and handshake failures reached no HTTP
   request. Production-root loading allocated 1360864 bytes; the arena high-water
-  mark was 1363216 bytes. The complete release-check matrix passed.
+  mark was 1363216 bytes. ADR 0198 records the TLS validation evidence from its introduction; current release validation is recorded separately.
 
 ### Resource limits
 
-Global fixed arrays bound the system; launch profiles bound each process's
-share of them (ADR 0072, ADR 0122). A `tiny` command receives limits of two
-channels, eight streams, one task and 2048 pages. A `normal` service receives
-4, 16, 4 and 8192; `large` receives 8, 32, 8 and 16384. PID 1 chooses among
-those names, while the kernel owns the numeric limits. PID 1 keeps a separate
-bounded system quota of 256 channels, 64 streams, eight tasks and 16384 pages.
+Bounded registries and launch profiles limit shared resources; large entries
+are allocated in page-backed chunks rather than reserved at their maximum
+(ADR 0111, ADR 0122, ADR 0215). A `tiny` process gets 2 channels, 8
+streams, 1 task and 2048 pages; `normal` gets 4, 16, 16 tasks and 8192
+pages; `large` gets 8, 32, 64 tasks and 16384 pages. PID 1 has 256 channels,
+64 streams, 16 tasks and 16384 pages.
 
-The shared image cache (ADR 0081) is not charged to any process. It grows only
-when PID 1 launches an image from the immutable system image, it is keyed by
-the launch extent in that archive, and it is bounded at 128 segments and 1024
-frames, past which launches load private copies. PID 1 chooses the extent, but
-an extent always names the same immutable bytes, which must validate as a native
-image before anything is cached, and no other process can reach the launch
-path (ADR 0093).
+The global process and task tables have 256 slots. A process handle table has
+256 slots. Channels and streams are bounded at 256 live objects; a live
+channel occupies three pages and a live stream two. Shared-memory and
+executable-object registries are bounded at 256 entries. One `WaitAny`
+names at most 64 interests; wait registration is bounded by the 256 task
+slots.
 
-`StreamCreate` still needs no capability, because a stream is a primitive any
-process may need, but a process calling it in a loop is refused at its share and
-leaves the rest of the registry for other processes. A launch whose address space
-would exceed the page quota fails rather than running over. A process can still
-fill its own 256-entry handle table, which costs only itself.
+The shared native-image cache (ADR 0081) is not charged to a process and is
+bounded at 128 segments and 1024 pages (4 MiB); past the cache bound a launch
+uses private image pages. Bootstrap images key immutable boot-archive extents;
+installed-system/user executables use stable file-backed sources (ADR 0093,
+ADR 0121, ADR 0175).
 
-A component holding the console capability can fill the 64-record log ring and,
-with warning-level records, the console; logging is bounded by record size, not
-rate. Process and task slots are consumed only through PID 1 launches.
+`StreamCreate` still needs no capability because a stream is a primitive any
+process may need, but the caller's launch quota and the global 256-stream
+registry bound abuse. A launch whose address space exceeds its page quota
+fails instead of running over. A process can fill its own 256-entry handle
+table, which costs only itself.
 
-CPU is accounted, not limited: the timer charges a tick to the task it
-interrupted, and `ps` reports the total per process. Nothing refuses a process
-that never yields. Under round-robin on one CPU that costs throughput, not
-progress, on each processor alike.
+The kernel log retains 2048 records (416 KiB BSS). A holder of log-write or
+console authority can drive overwrite or console output; logging is bounded by
+record size, not by a per-writer rate. Persistent log retention is separately
+bounded on disk (ADR 0211).
 
+The authoritative current inventory, including network, Linux, remote and
+runtime limits, is [resource-policy.md](../architecture/resource-policy.md).
+CPU time is accounted rather than limited: a runnable process can consume its
+scheduler share indefinitely, while preemption and SMP scheduling preserve
+progress for other runnable tasks.
 ### Work with interrupts disabled
 
 Each call runs to completion with interrupts off on its processor, holding
