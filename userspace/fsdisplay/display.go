@@ -12,6 +12,8 @@ func TypeName(value ramfs.FilesystemType) string {
 		return "image"
 	case ramfs.FilesystemFAT32:
 		return "fat32"
+	case ramfs.FilesystemExt4:
+		return "ext4"
 	default:
 		return "unknown"
 	}

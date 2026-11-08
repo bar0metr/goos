@@ -20,7 +20,8 @@ const (
 	FilesystemRAMFS FilesystemType = iota + 1
 	FilesystemSystemImage
 	FilesystemFAT32
-	LastFilesystemType = FilesystemFAT32
+	FilesystemExt4
+	LastFilesystemType = FilesystemExt4
 )
 
 // FilesystemInfo describes one mounted backend. CapacityAvailable separates a

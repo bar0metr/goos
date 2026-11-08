@@ -928,3 +928,10 @@ CA-1151	goos/userspace/cmd/linuxsockd	udpRing	process	owned	none
 CA-1152	goos/userspace/cmd/netd	udpDoorbells	process	owned	none
 CA-1153	goos/userspace/runtime/sys	HostVMMap	process	owned	TestVMReserveBytesRoundsToPages
 CA-1154	goos/userspace/linux	pieProbe	process	immutable	none
+CA-1155	goos/userspace/ext4	Features	process	immutable	TestFeatureMatrixUnique
+CA-1156	goos/userspace/ext4	crc32cTable	process	immutable	none
+CA-1157	goos/userspace/ext4	errIO	process	immutable	none
+CA-1158	goos/userspace/ext4	kindNames	process	immutable	none
+CA-1159	goos/userspace/ext4	requiredForWrite	process	immutable	none
+CA-1160	goos/userspace/ext4	stateNames	process	immutable	none
+CA-1161	goos/userspace/ext4	xattrPrefixes	process	immutable	none

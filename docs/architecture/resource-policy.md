@@ -353,6 +353,7 @@ fields from `OpStatus` and the TCP fields from `OpTCPStatus`.
 | `userspace/init.MaxEvents` | 32 | profile | PID 1 | static | events wait | none |
 | `userspace/init.MaxRestarts` | 3 | policy | service | none | service stays failed | `services` |
 | `userspace/init.MaxName`, `userspace/init.MaxExecutable`, `userspace/init.MaxProcessName`, `userspace/init.MaxBootText` | 31, 127, 16, 64 | protocol | n/a | n/a | refused | n/a |
+| `userspace/ext4.MaxNameLength` | 255 | protocol (ext4 on-disk format) | n/a | n/a | lookup `KindNameTooLong`; longer stored names are corrupt | n/a |
 | `userspace/exec.MaxStages` | 4 | policy | shell job | none | pipeline refused | n/a |
 | `userspace/exec.MaxPath`, `userspace/exec.MaxLaunchObject`, `userspace/exec.MaxServiceEntries`, `userspace/exec.MaxServiceIndex`, `userspace/exec.MaxServiceName` | path, slot, 11, 32, 15 | protocol | n/a | n/a | refused or paged | n/a |
 | `userspace/config.MaxEntries` | 96 | profile | `configd` | static | declaration refused | none |
