@@ -214,7 +214,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: stress-linux-stream FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-aslr test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware bench-pve-linux-network bench-pve-linux-network-diag bench-pve-linux-network-hz
+.PHONY: stress-linux-stream FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-ext4-unit test-ext4-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-aslr test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware bench-pve-linux-network bench-pve-linux-network-diag bench-pve-linux-network-hz
 
 all: iso
 
@@ -699,7 +699,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnsstub ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes ./userspace/cryptosys ./userspace/tlsclient ./userspace/fetch ./tools/truststore ./tools/sysimage ./tools/cryptocompat ./tools/tlscompat ./tools/tlsfixture ./tools/tlspeer ./userspace/truststore ./userspace/truststate ./userspace/trustupdate ./tools/trustfixture ./tools/trustpeer ./tools/trustscan ./userspace/remoteapi ./userspace/remotepolicy ./userspace/remoteservice ./userspace/sftp ./userspace/sshserver ./userspace/runtime/arena ./userspace/tcpdispatch ./tools/sshcompat
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/ext4 ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnsstub ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes ./userspace/cryptosys ./userspace/tlsclient ./userspace/fetch ./tools/truststore ./tools/sysimage ./tools/cryptocompat ./tools/tlscompat ./tools/tlsfixture ./tools/tlspeer ./userspace/truststore ./userspace/truststate ./userspace/trustupdate ./tools/trustfixture ./tools/trustpeer ./tools/trustscan ./userspace/remoteapi ./userspace/remotepolicy ./userspace/remoteservice ./userspace/sftp ./userspace/sshserver ./userspace/runtime/arena ./userspace/tcpdispatch ./tools/sshcompat
 
 # The storage stress test (ADR 0102): the model-based FAT32 workload at a
 # larger scale than the default suite, and the host FAT checker over volumes
@@ -713,6 +713,15 @@ test-storage-stress: test-fat32-stress
 # corruptions, and a directory of 8000 long names.
 test-fat32:
 	$(BUILD_ENV) go test -count=1 ./userspace/fat32
+
+# The ext4 reader (ADR 0220): every pinned Linux-built fixture against its
+# manifest, the feature matrix, and the corruption corpus. The stress
+# variant flips bytes in 3000 damaged images instead of 60.
+test-ext4-unit:
+	$(BUILD_ENV) go test -count=1 ./userspace/ext4
+
+test-ext4-stress:
+	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -timeout 60m -run 'RandomMetadataDamage' ./userspace/ext4
 
 test-partitions:
 	$(BUILD_ENV) go test -count=1 ./userspace/partition ./userspace/block ./internal/imagefixture
@@ -1467,6 +1476,7 @@ help:
 	  '  test-stress     run parallel QEMU command stress (STRESS_RUNS, STRESS_ROUNDS)' \
 	  '  test-storage-stress run the FAT32 model, failure, and fsck workload at scale' \
 	  '  test-fat32         run the FAT32 format tests, host FAT tools included' \
+	  '  test-ext4-unit     run the ext4 reader tests against pinned Linux images' \
 	  '  test-fat32-stress  run them at scale: huge files and clusters, fuzzing' \
 	  '  test-partitions    run the MBR/GPT partition and block-slice tests' \
 	  '  test-latency    measure command latency in QEMU into build/reports (LATENCY_REPEATS)' \
