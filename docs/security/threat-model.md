@@ -1,8 +1,10 @@
 # Threat model
 
-Scope: GoOS 0.1 on one x86_64 CPU under QEMU q35 with OVMF, booted from
-the project ISO. This document states what is protected, from whom, and which
-mechanisms enforce it. Mechanism details live in the linked documents.
+Scope: GoOS 0.2.9 on x86_64 UEFI. The release supports SMP (up to 64 online
+processors by the current architecture bound); the primary validation platform
+is QEMU q35 with OVMF, with selected KVM/Proxmox gates. This document states
+what is protected, from whom, and which mechanisms enforce it. Mechanism
+details live in the linked documents.
 
 ## Assets
 
@@ -13,7 +15,8 @@ mechanisms enforce it. Mechanism details live in the linked documents.
 | Handle tables and registries | per-process `handle.Table`, channel, stream, process registries | They *are* the authority model |
 | Resource accounts | per-process quota counters (ADR 0072) | Stop one process from starving the rest |
 | PID 1 authority | PID 1 handle table | Root of every capability granted after boot |
-| System image | initramfs USTAR on the ESP, held in firmware-reserved pages and mounted read-only at `/system` | Defines every program the kernel will run and the command index that decides their grants |
+| Boot archive | initramfs USTAR on the ESP, held in firmware-reserved pages and exposed read-only at `/bootstrap` and `/etc` | Defines PID 1, bootstrap/recovery services and recovery commands; it is replaced with the ISO |
+| Installed system | protected `system` directory on the FAT32 volume, published read-only through VFS as `/system` | Defines normal-mode services, Linux fixtures, native commands and their command index; compatibility is checked, authenticity is not |
 | Persistent data | FAT32 image on the virtio-blk disk (`/persist`, with `/home` and `/state` on the same volume) | Survives reboot; reachable only through VFS |
 | System log and configuration | kernel log ring, `/state/system.log`, `/state/config` | Diagnostics and the settings components act on |
 | Console | COM1 through the console device capability, and the terminal output stream the terminal service relays | Operator I/O, warning echo, and read access to the log ring |
@@ -24,47 +27,53 @@ mechanisms enforce it. Mechanism details live in the linked documents.
 ## Trust boundaries
 
 ```text
-host (QEMU, OVMF, ISO, disk image file)
+host (QEMU/firmware, ISO, disk image file)
  └─ kernel (ring 0)                        trusted computing base
-     ├─ PID 1 (ring 3)                     holds all initial authority
-     │   ├─ VFS service                    holds VFS sessions, the system image mapping (read-only), a channel to the FAT32 service
-     │   ├─ FAT32 service                  holds a channel to the VFS and a block client endpoint; parses the untrusted volume
-     │   ├─ block service                  holds block endpoints, driver client endpoint
-     │   ├─ virtio-blk driver              holds port, IRQ, DMA authority
-     │   ├─ virtio-net driver              holds port, IRQ, DMA authority for the NIC, a channel to netd, both frame pools
-     │   ├─ netd                           holds the frame pools (receive read-only), a driver channel, a read-only system.net. config session, command and UDP sessions (TX pools read-only); no device
-     │   ├─ resolved                       holds a UDP session and a TCP session (RX pools read-only) and a network status session, a system.dns. config session that may read settings and the hosts table, command sessions; no device
+     ├─ PID 1 (ring 3)                     holds initial policy authority
+     │   ├─ VFS service                    maps the boot archive read-only and serves RAMFS plus the FAT32-backed namespace
+     │   ├─ FAT32 service                  parses the volume and serves /persist, /system, /apps, /home and /state through a partition-scoped block endpoint
+     │   ├─ block service                  owns block endpoints and the storage-driver client endpoint
+     │   ├─ virtio-blk driver              holds storage port, IRQ and DMA authority
+     │   ├─ virtio-net driver              holds NIC port, IRQ and DMA authority, the netd channel and frame pools
+     │   ├─ netd                           owns Ethernet/ARP/IPv4/ICMP/DHCP/UDP/TCP state and bounded native sessions; no device authority
+     │   ├─ linuxsockd                     owns Linux-family socket state and bounded GTCP 4/GUDP 3 sessions to netd; no VFS or device authority
+     │   ├─ resolved                       owns bounded UDP/TCP sessions, network status, DNS configuration/hosts read access and resolver client sessions
      │   ├─ config service                 holds the configuration store and a VFS session
-     │   ├─ log service                    holds the log (read), console write, and a VFS session
-     │   ├─ terminal service               the only holder of console read and of the terminal output stream's reader; a session with the shell
-     │   └─ shell                          holds a terminal output writer, the terminal session, the log (read), a VFS session, exec endpoint and page, a config session; no console
-     └─ utilities (ring 3, per command)    hold only stdin/stdout/stderr (streams) and optionally one VFS session, one network session, one resolver session and one UDP session
+     │   ├─ log service                    holds log-read, console-write and a VFS session
+     │   ├─ terminal service               holds console-read and the terminal output stream reader; a session with the shell
+     │   ├─ remoted / workers / sftpd      split listener/signing, SSH-session and rooted-SFTP filesystem authority
+     │   └─ shell                          holds terminal, log, VFS, exec and configuration sessions; no console-read authority
+     └─ applications (ring 3)              always receive bounded standard streams; optional VFS/network/resolver authority is granted by launch policy
 ```
 
 | Boundary | Crossing | Enforcement |
 | --- | --- | --- |
-| user → kernel | `int 0x80` native calls, CPU faults | bounded `kcall` contract, handle lookup with type and rights, `CopyIn`/`CopyOut` ([attack-surface.md](attack-surface.md)) |
+| user → kernel | native `int 0x80`, Linux `SYSCALL`, CPU faults | ABI-specific dispatch, bounded native/Linux call contracts, handle/type/right checks, `CopyIn`/`CopyOut` ([attack-surface.md](attack-surface.md), ADR 0132) |
 | process ↔ process | typed IPC, streams, handle transfer, shared pages | per-process address spaces, generation-safe handles, non-escalating transfer ([capabilities.md](capabilities.md)); shared image pages are never writable (ADR 0081) |
 | shell, commands → terminal | terminal output stream (write-only copies) | only the terminal service holds a reading end besides PID 1; stream ends are reference counted, so no holder can close the stream for the others (ADR 0089) |
-| PID 1 → kernel launch | lifecycle channel | only PID 1 holds the lifecycle endpoint; the kernel validates every grant against PID 1's table and accepts only a kernel-defined resource profile; executables come from a system-image extent or a file-backed source (ADR 0024, 0121, 0122) |
+| PID 1 → kernel launch | lifecycle channel | only PID 1 holds the lifecycle endpoint; the kernel validates every grant and resource profile; bootstrap images are archive extents and installed/user images are stable file-backed executable sources (ADR 0093, ADR 0121, ADR 0175) |
 | shell → PID 1 | exec channel and exec area | PID 1 copies the request out of the shared page before validating it, accepts only `/system/bin/<name>` paths, and grants a VFS session only when the command's entry in the command index asks for one (ADR 0030, 0064, 0080) |
 | VFS → storage | `GBLK001` IPC | block service validates ranges and overflow; VFS never holds device authority (ADR 0033, 0036) |
-| VFS → system image | `ImageMap` | read-only, non-executable, unowned mapping of the archive; the capability is held only by VFS (ADR 0070) |
+| VFS → boot archive | `ImageMap` | read-only, non-executable, unowned mapping of the boot archive; the capability is held only by VFS and serves `/bootstrap` and `/etc` (ADR 0070, ADR 0175) |
 | client → config service | `GCF1` session | scope and rights are fixed by PID 1 when it creates the session (ADR 0074, 0076) |
 | driver → hardware | port, IRQ, DMA calls | BAR-bounded ports, one line per driver, fixed DMA window, a DMA domain per device (ADR 0034, 0035, 0190) |
-| link → `netd` | frames the driver copies into the receive pool | the driver checks length and header; `netd` parses every frame and keeps fixed tables (ADR 0191) |
+| link → `netd` | frames the driver copies into the receive pool | the driver bounds slot/length ownership; `netd` validates every protocol field and uses bounded fixed or capacity-controlled state (ADR 0191, ADR 0192, ADR 0213) |
 | `netd` ↔ driver | `GNETDRV1` and two shared pools | slot numbers only, exact slot ownership, a generation per binding; the driver copies frames out of the pool before the device sees them (ADR 0191) |
 | commands → `netd` | `GNETAPI1` session | rights class fixed by PID 1 at `AddSession`; one echo in flight per session (ADR 0191) |
-| programs, `resolved` → `netd` | `GUDP1` session and two shared pools | opened by PID 1 for `GrantUDP` or for the resolver; exact pool rights and slot ownership; endpoints owned by the session; 8 endpoints and 16 receive buffers per session (ADR 0195) |
-| programs, `resolved` → `netd` | `GTCP1` session and two shared pools | opened by PID 1 for `GrantTCP` or for the resolver's DNS fallback; exact pool rights and slot ownership; generation-safe endpoints owned by the session; fixed TCB, stream and reassembly storage; TIME_WAIT four-tuples protected until expiry, by the TCB or by a bounded per-session tombstone when the slot is recycled; strict TCP checksum, option, sequence and reset validation (ADR 0196) |
+| programs, `resolved` → `netd` | GUDP 2 session and two shared pools | PID 1 fixes session quota and pool rights; endpoint IDs are generation-safe; an ordinary session holds at most 8 endpoints, while the global endpoint table defaults to 1024 (ceiling 4096); receive payloads come from a 512-buffer pool with at most 256 held by one owner (ADR 0195, ADR 0215) |
+| programs, `resolved` → `netd` | GTCP 2 session and two shared pools | PID 1 fixes session quota and pool rights; endpoint IDs are generation-safe; live endpoint storage and stream rings grow on demand inside endpoint, memory and TIME_WAIT budgets; indexed lookup replaces full-table receive scans (ADR 0196, ADR 0213) |
+| Linux family → `linuxsockd` | GLNXSOCK3 channel and shared family pool | one session per Linux family; kernel validates the pool and generation-safe socket identities; family/service/reserve quotas bound sockets and in-flight operations (ADR 0210) |
+| `linuxsockd` → `netd` | GTCP 4 and GUDP 3 sessions | control stays on typed IPC; stream/datagram payload moves through shared rings with generation and ownership checks; `netd` grants up to 512 endpoints per protocol to the service (ADR 0210, ADR 0214, ADR 0216) |
 | `resolved` → `netd` | `GNETAPI1` status session | `RightsResolveStatus`: status and the lease's DNS servers only; handed over with the UDP session under a growing generation (ADR 0195) |
 | commands → `resolved` | `GRESOLV1` session | rights class fixed by PID 1 at `AddSession`, from `GrantResolve` or `GrantResolveAdmin`; separate from the network session (ADR 0194) |
 | shell, `resolved` → hosts table | `GHST1` on a configuration session | `HostsRead` and `HostsWrite` session rights fixed by PID 1; the shell holds both, the resolver only `HostsRead` (ADR 0193) |
-| host → guest | firmware, ISO, disk image | trusted, except disk *contents*, which are treated as untrusted input |
+| host → guest | firmware, ISO, disk image | firmware/ISO are trusted inputs to this model; disk bytes are untrusted parser input and are not authenticated, so a syntactically compatible installed `/system` can influence what normal mode executes (ADR 0175) |
 
-The kernel and the host (QEMU, OVMF, the ISO build) are trusted. Nothing in the
-boot path verifies the kernel or the system image; see
-[boot-chain.md](boot-chain.md) for the planned verified boot chain. PID 1 is
+The kernel and the host/firmware/ISO build are trusted. Nothing in the boot
+path cryptographically verifies the kernel, boot archive, or installed system;
+the installed-system checks establish compatibility and in-guest write
+protection, not provenance. See [boot-chain.md](boot-chain.md) for the planned
+verified boot chain. PID 1 is
 trusted to apply policy but is still subject to kernel checks. Services, the
 driver, and utilities are untrusted relative to each other.
 
@@ -75,17 +84,17 @@ driver, and utilities are untrusted relative to each other.
 A program launched from the shell, for example a compromised command image in
 `/system/bin` or a command fed hostile arguments.
 
-- Holds only `in`, `stdout`, `stderr` and, when its manifest in the command
-  index asks for one, a private VFS session channel (ADR 0080). All three are
-  streams; `stdout` and `stderr` are write only, and where they reach the
-  terminal they are copies of one writing end shared with the shell and every
-  other command (ADR 0089). It cannot read what is typed except the lines the
-  shell writes to its input (ADR 0082), cannot read what other processes print,
-  and holds no console capability. No Transfer right on any of them.
+- Always holds only bounded standard streams plus the optional authorities its
+  command-index entry names: a private VFS session and/or bounded network and
+  resolver sessions. `stdout` and `stderr` are write only, and where they
+  reach the terminal they are copies of one writing end shared with the shell
+  and other commands (ADR 0080, ADR 0089). It cannot read what other processes
+  print, holds no console capability, and receives no Transfer right on these
+  grants.
 - Sharing the terminal's writing end lets it write into the same stream as
   everything else that prints, as the shared console did before: it can spoof
   another command's output on the screen, and a command that writes without
-  pause fills the 4 KiB stream so that other writers wait. It cannot close the
+  pause fills the 8176-byte stream ring so that other writers wait. It cannot close the
   stream for anyone else, and the terminal service keeps serving the keyboard
   while it relays (ADR 0089).
 - A command whose index entry asks for a network session can, by its class,
@@ -99,9 +108,11 @@ A program launched from the shell, for example a compromised command image in
   (ADR 0194).
 - A command whose index entry asks for `GrantUDP` can bind any free port,
   well-known ports included, and send datagrams to any unicast IPv4 address
-  and port, at most one link MTU less 28 bytes each off the host. It holds
-  at most 8 endpoints and 16 queued datagrams, cannot reach another
-  session's endpoints, builds no IPv4 header and reads no status (ADR 0195).
+  and port, at most one link MTU less 28 bytes each off the host. An ordinary
+  session holds at most 8 endpoints; each endpoint's receive queue has hard
+  capacity 16, and one owner can hold at most 256 of the global 512 receive
+  buffers. It cannot reach another session's endpoints, builds no IPv4 header
+  and reads no status (ADR 0195, ADR 0215).
 - `dnsq` asks for `GrantUDP | GrantTCP`, so a compromised `dnsq` can do what
   `udp` and `tcp` can together and no more: it holds no resolver session and
   cannot touch the cache, the hosts table or the server list.
@@ -130,19 +141,17 @@ attacker-controlled code.
   volume through the FAT32 protocol, but not the raw disk: it holds no block
   endpoint (ADR 0096). It gains no device, port, IRQ, or DMA authority.
 - FAT32 service compromise, for example through a malformed volume, exposes
-  the persistent volume and the disk through its block endpoint, and the file
-  cache it shares with the VFS, which holds only pages of that volume
-  (ADR 0098). It gains no namespace, session, other mount, or device authority, and a crash in it is
-  restarted without taking down the VFS. It also serves `/system/commands`, which PID 1 reads to decide
-  which commands get a VFS session; a lying VFS can only change who receives a
-  session it serves itself. It cannot change which services and system
-  commands execute: PID 1 resolves those in its own mapping of the archive,
-  the kernel loads them only as extents of that archive, and the image
-  capability VFS holds is Read-only, without the Execute right a launch
-  requires (ADR 0093). It can change what runs for a program path outside
-  `/system`, which PID 1 reads through the VFS, as a compromised FAT32 service
-  can for a program on the volume; such a program gets only its standard
-  streams (ADR 0097).
+  the persistent volume through its partition-scoped block endpoint and the
+  file cache it shares with VFS (ADR 0098, ADR 0115). It gains no namespace
+  control outside that backend and no port, IRQ, or DMA authority. Because the
+  installed system has lived on that same volume since ADR 0175, a malicious
+  FAT32 service can lie about the protected `/system` bytes it serves: it can
+  affect normal-mode session-service images, commands and the installed command
+  index on later reads/restarts. PID 1 still applies index format,
+  architecture/release compatibility checks and kernel launch/capability
+  validation, but those checks are not authenticity. Bootstrap/recovery
+  services and commands under `/bootstrap` remain archive-backed and outside
+  the FAT32 service's authority.
 - Block service compromise exposes the disk through the driver channel. It
   gains no hardware authority.
 - Config service compromise exposes and can rewrite every setting, including
@@ -225,8 +234,7 @@ A static Linux program that calls the socket ABI with hostile arguments.
 - One family holds at most 512 sockets and eight requests in flight, and
   `linuxsockd` holds 16 families and 1024 sockets. Each live family keeps 32
   sockets that no other family can take, so one family that fills its quota
-  leaves room for the rest. `netd` gives `linuxsockd` a quota of 64
-  endpoints per protocol, apart from the 8 of each command session.
+  leaves room for the rest. `netd` grants `linuxsockd` up to 512 endpoints per protocol; ordinary native command sessions remain at 8 by policy.
 - Ports below 1024 are `EACCES`, so a program cannot take the resolver's
   stub on `127.0.0.1:53`.
 
@@ -240,15 +248,17 @@ Anything on the link can send the guest arbitrary frames.
   receive slot.
 - `netd` checks every length and offset before reading a field and refuses
   oversized frames, IPv4 options and fragments, bad checksums, and DHCP
-  replies for another transaction or MAC. Its tables are fixed: 16 ARP
-  entries, 4 resolutions, an 8-frame transmit ring, 8 sessions, 32 UDP
-  endpoints and 32 UDP receive buffers.
+  replies for another transaction or MAC. Fixed control state includes 16 ARP
+  entries, 4 resolutions and an 8-frame transmit ring. UDP/TCP capacity is
+  separately bounded: UDP endpoints default to 1024 with a 4096 ceiling and
+  512 receive buffers; TCP endpoints default to 1024 with a 4096 ceiling and
+  grow-on-demand stream storage inside explicit memory and TIME_WAIT budgets.
 - UDP reaches only endpoints bound to the port on the interface's own
-  address, after the length and checksum checks. A peer can fill the queues
-  of the ports it reaches and one session's half of the receive buffers,
-  which drops later datagrams for that session; the other half stays for
-  every other session, the resolver's among them. No ICMP error answers a
-  datagram to an unbound port (ADR 0195).
+  address, after the length and checksum checks. An endpoint queue has hard
+  capacity 16, and one owner can hold at most 256 of the global 512 receive
+  buffers, so flooding one owner cannot consume the entire pool. Later
+  datagrams are dropped at those bounds. No ICMP error answers a datagram to
+  an unbound port (ADR 0195, ADR 0215).
 - The ARP table learns a sender only when it is on the prefix and talking to
   us, or already known or being resolved. A peer on the link can still
   answer for another address, as on any ARP network, and so take traffic
@@ -324,9 +334,7 @@ Anything on the link can send the guest arbitrary frames.
   downgrade fails before connecting; cross-origin redirects strip credentials,
   cookies and a custom Host header. The native HTTPS gate passed 69 assertions,
   including bad CertificateVerify, Finished and record-MAC failures. Certificate
-  and handshake rejection produced zero HTTP requests. The complete
-  `release-check` passed; [ADR 0198](../adr/0198-native-tls-and-system-trust.md)
-  records the implementation and evidence.
+  and handshake rejection produced zero HTTP requests. `ADR 0198` records the TLS implementation and its validation evidence; the current release gate is tracked separately.
 
 ### Malformed storage image
 
@@ -365,7 +373,7 @@ The raw disk image is host-provided and persists across boots.
   authority on every attached handle (docs/architecture/ipc.md).
 - Protocol decoders (`GVF1`, `GRF1`, `GBLK001`, lifecycle, exec and its
   control protocol, `GCF1` and its control protocol, `GHST1`, `GNETDRV1`,
-  `GNETAPI1`, `GNETCTL1`, `GUDP1` and `GRESOLV1`) check protocol ID,
+  `GNETAPI1`, `GNETCTL1`, GUDP/GTCP, `GLNXSOCK3`, `GRESOLV1` and the remote/SFTP protocols) check protocol ID,
   version, sizes, and require reserved fields to be zero.
 - Services answer unparsable but attributable requests with an
   invalid-argument reply instead of dropping them (ADR 0048). A request whose
@@ -439,13 +447,13 @@ as it can for any session (ADR 0117); scopes on that target still apply by node.
 | corrupt persistent volume | mount refused, system runs without persistent storage (ADR 0077) |
 | driver exit with DMA armed | teardown masks that device's line and resets that device before freeing pages (ADR 0035, 0190) |
 
-## Out of scope for 0.1
+## Out of scope for 0.2.9
 
 - IOMMU. DMA is not confined for either driver (see compromised driver).
-- ASLR. Kernel and user layouts are fixed (kernel image at `0x400000`, user
-  code at `0x40002000`). The one exception is the base of a Linux static
-  PIE, which each launch and `execve` picks at random inside
-  `[0x40000000, 0x80000000)` (ADR 0219). What would have to change for the
+- Full ASLR. Most kernel/native-user, stack and anonymous-map layouts remain
+  fixed. Linux static PIE is the implemented exception: each launch and
+  `execve` picks a bounded random base in `[0x40000000, 0x80000000)`
+  (ADR 0219). What would have to change for the
   rest is described in [memory.md](../architecture/memory.md#aslr-readiness).
 - Signed or measured images, Secure Boot, and initramfs integrity. The planned
   chain is described in [boot-chain.md](boot-chain.md).
@@ -471,10 +479,12 @@ as it can for any session (ADR 0117); scopes on that target still apply by node.
   typed (ADR 0089).
 - The `goos_diag` build prints other processes' handle tables and physical
   addresses. It is for diagnosis only (ADR 0052).
-- Some lock domains are wide (ADR 0184). Most Linux file and process calls
-  share one lock, and so do all channels, so a program that spends its time
-  in such calls delays others on those calls; it cannot see or change their
-  state. The lock watchdog reports a spin longer than four seconds.
+- Some lock domains remain deliberately wider than one object (ADR 0184,
+  ADR 0187). Linux compatibility state is partitioned by family/process where
+  the current design permits, and each IPC channel has its own queue/state
+  lock, so unrelated channels do not serialize on one global channel lock.
+  Contention can still delay callers within a shared domain; the validation
+  lock watchdog reports a spin longer than four seconds.
 - Every kernel stack has an unmapped guard below it, including the boot
   task's since ADR 0091. Only the early boot, before paging is up, runs on the
   unguarded goroutine stack TinyGo allocated for `main`. A kernel stack
