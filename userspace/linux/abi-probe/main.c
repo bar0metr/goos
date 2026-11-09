@@ -936,6 +936,40 @@ static int listed_as(const char *path, const char *name, unsigned char type)
 	return found == 1;
 }
 
+/* Returns the d_ino getdents64 reports for name in path, or 0. */
+static unsigned long long listed_inode(const char *path, const char *name)
+{
+	static char records[4096];
+	unsigned long long inode = 0;
+	int fd = open(path, O_RDONLY | O_DIRECTORY);
+	long size;
+
+	if (fd < 0)
+		return 0;
+	while (!inode && (size = syscall(SYS_getdents64, fd, records, sizeof records)) > 0) {
+		for (long offset = 0; offset < size;) {
+			unsigned short length;
+
+			memcpy(&length, records + offset + 16, sizeof length);
+			if (!strcmp(records + offset + 19, name)) {
+				memcpy(&inode, records + offset, sizeof inode);
+				break;
+			}
+			offset += length;
+		}
+	}
+	close(fd);
+	return inode;
+}
+
+/* Sets the modification and access times of path to seconds. */
+static int set_times(const char *path, long seconds, int flags)
+{
+	struct timespec times[2] = {{seconds, 0}, {seconds, 0}};
+
+	return (int)syscall(SYS_utimensat, AT_FDCWD, path, times, flags);
+}
+
 /* links checks the symbolic-link calls in a scratch directory: symlink and
  * symlinkat, readlink with a short buffer, lstat beside stat, O_NOFOLLOW, a
  * loop, a dangling link, O_CREAT|O_EXCL over a link, d_type, and rename and
@@ -943,36 +977,129 @@ static int listed_as(const char *path, const char *name, unsigned char type)
  * keeps no hard links and refuses it with EPERM. */
 static int links_test(void)
 {
+	int failed_line = 0;
 	char target[64];
 	struct stat followed, itself, hard;
 	int fd, ok = enter_scratch();
 
 	ok = ok && (fd = open("file", O_CREAT | O_WRONLY, 0644)) >= 0 && write(fd, "data", 4) == 4 && close(fd) == 0;
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
 	ok = ok && symlink("file", "rel") == 0 && symlinkat("missing", AT_FDCWD, "dangling") == 0 && symlink("loop", "loop") == 0;
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
 	ok = ok && readlink("rel", target, sizeof target) == 4 && !memcmp(target, "file", 4) &&
 	     readlink("rel", target, 2) == 2 && !memcmp(target, "fi", 2) &&
 	     syscall(SYS_readlinkat, AT_FDCWD, "dangling", target, sizeof target) == 7 &&
 	     fails(readlink("file", target, sizeof target), EINVAL) && fails(readlink("rel/", target, sizeof target), ENOTDIR);
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
 	ok = ok && probe_stat("rel", &followed) == 0 && S_ISREG(followed.st_mode) && followed.st_size == 4 &&
 	     probe_lstat("rel", &itself) == 0 && S_ISLNK(itself.st_mode) && itself.st_size == 4 && itself.st_ino != followed.st_ino &&
 	     syscall(SYS_newfstatat, AT_FDCWD, "rel", &itself, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(itself.st_mode);
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
 	ok = ok && fails(open("rel", O_RDONLY | O_NOFOLLOW), ELOOP) && fails(open("loop", O_RDONLY), ELOOP) &&
 	     fails(probe_stat("loop", &itself), ELOOP) && fails(open("dangling", O_RDONLY), ENOENT) &&
 	     fails(symlink("other", "rel"), EEXIST) && fails(open("rel", O_CREAT | O_EXCL | O_WRONLY, 0644), EEXIST) &&
 	     fails(symlink("", "empty"), ENOENT);
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
 	ok = ok && (fd = open("rel", O_RDONLY)) >= 0 && read(fd, target, sizeof target) == 4 && close(fd) == 0;
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
 	ok = ok && listed_as(".", "rel", DT_LNK) && listed_as(".", "file", DT_REG);
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
 	if (ok && link("file", "hard") == 0) {
 		ok = !on_goos() && probe_stat("hard", &hard) == 0 && hard.st_ino == followed.st_ino && hard.st_nlink == 2 && unlink("hard") == 0;
+		if (!ok && !failed_line)
+			failed_line = __LINE__;
 	} else if (ok) {
 		ok = on_goos() && errno == EPERM;
+		if (!ok && !failed_line)
+			failed_line = __LINE__;
 		errno = 0;
 	}
 	ok = ok && fails(syscall(SYS_linkat, AT_FDCWD, "file", AT_FDCWD, "x", 0x8000), EINVAL);
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
+	/* linkat follows a source link only with AT_SYMLINK_FOLLOW. */
+	if (ok && syscall(SYS_linkat, AT_FDCWD, "rel", AT_FDCWD, "followed", AT_SYMLINK_FOLLOW) == 0) {
+		ok = !on_goos() && probe_stat("followed", &hard) == 0 && hard.st_ino == followed.st_ino &&
+		     syscall(SYS_linkat, AT_FDCWD, "rel", AT_FDCWD, "itself", 0) == 0 &&
+		     probe_lstat("itself", &hard) == 0 && S_ISLNK(hard.st_mode) && unlink("followed") == 0 && unlink("itself") == 0;
+		     if (!ok && !failed_line)
+		     	failed_line = __LINE__;
+	} else if (ok) {
+		ok = on_goos() && errno == EPERM && fails(syscall(SYS_linkat, AT_FDCWD, "rel", AT_FDCWD, "itself", 0), EPERM);
+		if (!ok && !failed_line)
+			failed_line = __LINE__;
+		errno = 0;
+	}
+	/* open(O_CREAT) through a dangling link makes its target; O_EXCL and
+	 * O_NOFOLLOW stop at the link. */
+	ok = ok && symlink("made", "toward") == 0 && fails(open("toward", O_CREAT | O_EXCL | O_WRONLY, 0644), EEXIST) &&
+	     fails(open("toward", O_CREAT | O_NOFOLLOW | O_WRONLY, 0644), ELOOP) && fails(open("toward", O_NOFOLLOW | O_RDONLY), ELOOP) &&
+	     fails(probe_stat("made", &hard), ENOENT) && (fd = open("toward", O_CREAT | O_WRONLY, 0644)) >= 0 && close(fd) == 0 &&
+	     probe_stat("made", &hard) == 0 && S_ISREG(hard.st_mode) && probe_lstat("toward", &hard) == 0 && S_ISLNK(hard.st_mode);
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
+	/* utimensat with AT_SYMLINK_NOFOLLOW changes the link, without it the
+	 * target, and a dangling link still has times of its own. */
+	ok = ok && set_times("file", 1000, 0) == 0 && set_times("rel", 2000, AT_SYMLINK_NOFOLLOW) == 0 &&
+	     probe_stat("file", &followed) == 0 && followed.st_mtime == 1000 && probe_lstat("rel", &itself) == 0 &&
+	     itself.st_mtime == 2000 && set_times("rel", 3000, 0) == 0 && probe_stat("file", &followed) == 0 &&
+	     followed.st_mtime == 3000 && probe_lstat("rel", &itself) == 0 && itself.st_mtime == 2000 &&
+	     set_times("dangling", 4000, AT_SYMLINK_NOFOLLOW) == 0 && fails(set_times("dangling", 4000, 0), ENOENT);
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
+	ok = ok && unlink("toward") == 0 && unlink("made") == 0;
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
 	ok = ok && rename("rel", "moved") == 0 && probe_lstat("moved", &itself) == 0 && S_ISLNK(itself.st_mode) &&
 	     unlink("moved") == 0 && probe_stat("file", &followed) == 0;
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
 	ok = ok && unlink("dangling") == 0 && unlink("loop") == 0 && unlink("file") == 0 && leave_scratch();
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
+	if (failed_line)
+		printf("%s failed at line %d\n", "links", failed_line);
 	return report("links", ok);
+}
+
+/* hold opens path, reads it, and keeps the descriptor while the test
+ * replaces the filesystem instance behind it. After seconds it reads the
+ * descriptor again, which must fail, and opens path afresh, which must work.
+ * Each step prints one line. */
+static int hold_test(const char *path, int seconds)
+{
+	struct timespec pause = {seconds, 0};
+	char data[16];
+	int fd = open(path, O_RDONLY), fresh;
+
+	if (fd < 0 || pread(fd, data, sizeof data, 0) <= 0) {
+		puts("hold failed");
+		return 1;
+	}
+	puts("hold opened");
+	fflush(stdout);
+	nanosleep(&pause, NULL);
+	if (pread(fd, data, sizeof data, 0) >= 0) {
+		puts("hold stale accepted");
+		return 1;
+	}
+	puts("hold stale rejected");
+	fresh = open(path, O_RDONLY);
+	if (fresh < 0 || pread(fresh, data, sizeof data, 0) <= 0) {
+		puts("hold reopen failed");
+		return 1;
+	}
+	puts("hold reopened");
+	close(fresh);
+	close(fd);
+	return 0;
 }
 
 /* ext4_links checks what Linux made in the links fixture as a Linux program
@@ -980,38 +1107,78 @@ static int links_test(void)
  * hard links sharing an inode, the 40-link bound, O_NOFOLLOW, d_type, and the
  * read-only and cross-filesystem refusals. base is where the volume is
  * mounted read-only. */
-static int ext4_links_test(const char *base)
+static int ext4_links_test(const char *base, unsigned long long want_inode)
 {
-	char target[64];
+	int failed_line = 0;
+	char target[64], moved[96];
 	struct stat file, other, link_stat;
 	int fd, ok = chdir(base) == 0;
 
 	ok = ok && probe_stat("file.txt", &file) == 0 && file.st_mode == (S_IFREG | 0640) && file.st_uid == 1234 &&
 	     file.st_gid == 5678 && file.st_nlink == 3 && file.st_size == 11 && file.st_atime == 1767225600 &&
 	     file.st_mtime == 1767225600;
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
+	/* st_ino is the ext4 inode number, which getdents64 reports too; the
+	 * inode's generation stays out of it. */
+	ok = ok && file.st_ino == want_inode && listed_inode(".", "file.txt") == want_inode &&
+	     probe_stat("sparse", &other) == 0 && other.st_size == 1048577 && other.st_blocks == 8 &&
+	     probe_stat("dir", &other) == 0 && other.st_size == 4096 && listed_inode(".", "dir") == other.st_ino;
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
 	ok = ok && probe_stat("hard-a", &other) == 0 && other.st_ino == file.st_ino && other.st_dev == file.st_dev &&
 	     probe_stat("rel", &other) == 0 && other.st_ino == file.st_ino;
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
 	ok = ok && probe_lstat("rel", &link_stat) == 0 && link_stat.st_mode == (S_IFLNK | 0777) && link_stat.st_uid == 42 &&
 	     link_stat.st_gid == 43 && link_stat.st_size == 8 && link_stat.st_ino != file.st_ino;
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
 	ok = ok && probe_stat("dir", &other) == 0 && other.st_mode == (S_IFDIR | 0750) && other.st_uid == 7 && other.st_gid == 8 &&
 	     other.st_nlink == 3 && probe_stat("setuid", &other) == 0 && other.st_mode == (S_IFREG | 04755);
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
 	ok = ok && probe_lstat("fifo", &other) == 0 && S_ISFIFO(other.st_mode) && probe_lstat("char", &other) == 0 && S_ISCHR(other.st_mode) &&
 	     major(other.st_rdev) == 1 && minor(other.st_rdev) == 3 && probe_lstat("block", &other) == 0 && S_ISBLK(other.st_mode) &&
 	     major(other.st_rdev) == 8 && minor(other.st_rdev) == 1 && probe_lstat("wide", &other) == 0 &&
 	     major(other.st_rdev) == 259 && minor(other.st_rdev) == 300;
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
 	ok = ok && readlink("abs", target, sizeof target) == 9 && !memcmp(target, "/file.txt", 9) &&
 	     readlink("bad-target", target, sizeof target) == 5 && !memcmp(target, "bad-\377", 5) &&
 	     readlink("dir/sub/up", target, sizeof target) == 14;
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
 	ok = ok && fails(open("deep-0", O_RDONLY), ELOOP) && (fd = open("deep-1", O_RDONLY)) >= 0 && close(fd) == 0 &&
 	     fails(open("loop-a", O_RDONLY), ELOOP) && fails(open("self", O_RDONLY), ELOOP) &&
 	     fails(open("rel", O_RDONLY | O_NOFOLLOW), ELOOP) && fails(open("dangling", O_RDONLY), ENOENT) &&
 	     fails(open("abs", O_RDONLY), ENOENT);
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
 	ok = ok && (fd = open("sub-dir/inner.txt", O_RDONLY)) >= 0 && read(fd, target, sizeof target) == 11 &&
 	     !memcmp(target, "inner file\n", 11) && close(fd) == 0;
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
 	ok = ok && listed_as(".", "rel", DT_LNK) && listed_as(".", "dir", DT_DIR) && listed_as(".", "file.txt", DT_REG) &&
 	     (listed_as(".", "fifo", DT_FIFO) || on_goos() && listed_as(".", "fifo", DT_UNKNOWN));
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
 	ok = ok && fails(symlink("file.txt", "new"), EROFS) && fails(link("file.txt", "new"), EROFS) &&
-	     fails(link("file.txt", "/tmp/ext4-links"), EXDEV) && fails(unlink("rel"), EROFS);
+	     fails(link("file.txt", "/tmp/ext4-links"), EXDEV) && fails(unlink("rel"), EROFS) &&
+	     fails(set_times("rel", 5000, AT_SYMLINK_NOFOLLOW), EROFS) && probe_stat("file.txt", &other) == 0 &&
+	     other.st_mtime == 1767225600;
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
+	/* A rename between two filesystems is EXDEV, either way round. */
+	snprintf(moved, sizeof moved, "%s/moved", base);
+	ok = ok && (fd = open("/tmp/ext4-links-file", O_CREAT | O_WRONLY, 0644)) >= 0 && close(fd) == 0 &&
+	     fails(rename("/tmp/ext4-links-file", moved), EXDEV) && fails(rename("file.txt", "/tmp/moved"), EXDEV) &&
+	     fails(syscall(SYS_renameat, AT_FDCWD, "/tmp/ext4-links-file", AT_FDCWD, "file.txt"), EXDEV) &&
+	     unlink("/tmp/ext4-links-file") == 0;
+	     if (!ok && !failed_line)
+	     	failed_line = __LINE__;
+	if (failed_line)
+		printf("%s failed at line %d\n", "ext4 links", failed_line);
 	return report("ext4 links", ok);
 }
 
@@ -4647,8 +4814,10 @@ int main(int argc, char **argv)
 			return hardening_test();
 		if (!strcmp(argv[1], "links"))
 			return links_test();
-		if (!strcmp(argv[1], "ext4-links") && argc >= 3)
-			return ext4_links_test(argv[2]);
+		if (!strcmp(argv[1], "hold") && argc >= 4)
+			return hold_test(argv[2], atoi(argv[3]));
+		if (!strcmp(argv[1], "ext4-links") && argc >= 4)
+			return ext4_links_test(argv[2], strtoull(argv[3], NULL, 10));
 		if (!strcmp(argv[1], "limits"))
 			return limits_test();
 		if (!strcmp(argv[1], "fork-fault"))

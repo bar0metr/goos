@@ -2,12 +2,13 @@
 
 package main
 
-// fsync and fdatasync. GoOS has one durability operation, the VFS sync that
-// flushes every completed write of the persistent volume to its device. A
-// call on a regular file asks for it and succeeds only when the flush did.
-// It covers more than the one file, and the data and metadata alike, so
-// fdatasync is the same call. A file outside the persistent volume has
-// nothing to flush and succeeds once the VFS confirms it is open.
+// fsync and fdatasync. The VFS asks the filesystem that holds the file or
+// directory, and only that one, to make it durable (ADR 0223). FAT32 flushes
+// its device. RAMFS and the boot archive have nothing to write and succeed.
+// A read-only ext4 volume has no pending writes and succeeds. A filesystem
+// with no durability operation is EINVAL, as Linux answers for one that
+// cannot sync; a failed flush is EIO. Each sync covers the data and the
+// metadata alike, so fdatasync is the same call.
 
 import (
 	linuxcompat "goos/kernel/compat/linux"
@@ -29,23 +30,33 @@ func (handler *linuxCallHandler) sync(request linuxcompat.Request) linuxcompat.R
 		if !open {
 			return linuxErrno(linuxabi.EBADF)
 		}
+		var path []byte
+		note := description.Object
 		switch description.Kind {
 		case linuxcompat.FDVFSFile:
 		case linuxcompat.FDVFSDirectory:
-			// A directory's entries are written with the file operations
-			// that change them; there is nothing further to flush.
-			return linuxcompat.Result{}
+			// A directory has no VFS handle; its descriptor keeps the path.
+			named := false
+			path, named = linuxcompat.DirectoryPath(state.FamilyID, description.Object)
+			if !named {
+				return linuxErrno(linuxabi.EBADF)
+			}
+			note = 0
 		default:
 			// Linux refuses fsync on a pipe, a terminal, and a character
 			// device with EINVAL.
 			return linuxErrno(linuxabi.EINVAL)
 		}
-		if errno := handler.vfsBegin(request, nil, nil, description.Object); errno != 0 {
+		if errno := handler.vfsBegin(request, path, nil, note); errno != 0 {
 			return linuxErrno(errno)
 		}
 		pending, _ = linuxcompat.SyscallContinuations.Pending(handler.task)
 	}
-	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationSync, Handle: vfs.Handle(pending.Note)}, attachPaths)
+	operation := vfs.Request{Operation: vfs.OperationSync, Handle: vfs.Handle(pending.Note)}
+	if path, _ := linuxcompat.SyscallContinuations.Paths(handler.task); len(path) != 0 {
+		operation = vfs.Request{Operation: vfs.OperationSync, Path: path}
+	}
+	reply, errno, blocked := handler.vfsExchange(operation, attachPaths)
 	if blocked {
 		return linuxBlocked
 	}
@@ -53,8 +64,5 @@ func (handler *linuxCallHandler) sync(request linuxcompat.Request) linuxcompat.R
 		return linuxErrno(errno)
 	}
 	handler.vfsFinish()
-	if reply.Status != vfs.StatusOK {
-		return linuxErrno(linuxabi.EIO)
-	}
-	return linuxcompat.Result{}
+	return linuxErrno(linuxcompat.SyncErrno(reply.Status))
 }

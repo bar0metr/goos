@@ -106,6 +106,8 @@ mkfifo fifo
 mknod char c 1 3
 mknod block b 8 1
 mknod wide c 259 300
+# One 4 KiB block at 1 MiB: st_blocks well below st_size.
+printf 'S' | dd of=sparse bs=1 seek=1048576 conv=notrunc 2>/dev/null
 find . -exec touch -h -t $STAMP {} +
 chown 1234:5678 file.txt
 chown -h 42:43 rel
@@ -172,7 +174,21 @@ done
 build blockmap-1k /src/blockmap "$EXT3" 1024 2048 16384 1
 finish blockmap-1k
 build links /src/links "$FULL" 4096 4096 8192 4
+# mke2fs -d leaves generations at zero; a nonzero one shows that st_ino is
+# the inode number and not the VFS node identity.
+debugfs -w -R 'set_inode_field /file.txt generation 0x6f6f7367' /tmp/links.img >/dev/null 2>&1
+debugfs -w -R 'set_inode_field /dir generation 0x2a' /tmp/links.img >/dev/null 2>&1
 finish links
+# links.inodes.tsv: what the image itself stores for a few paths, read back
+# by debugfs: inode number, generation, 512-byte block count and size.
+for p in file.txt hard-a dir rel sparse fifo; do
+	debugfs -R "stat /$p" /tmp/links.img 2>/dev/null | awk -v p="$p" '
+		/^Inode:/ { inode = $2 }
+		/Generation:/ { for (i = 1; i <= NF; i++) if ($i == "Generation:") generation = $(i + 1) }
+		/^User:/ { for (i = 1; i <= NF; i++) if ($i == "Size:") size = $(i + 1) }
+		/Blockcount:/ { for (i = 1; i <= NF; i++) if ($i == "Blockcount:") blocks = $(i + 1) }
+		END { printf "%s\t%s\t%s\t%s\t%s\n", p, inode, generation, blocks, size }'
+done >"$out/links.inodes.tsv"
 
 # metadata NAME SOURCE: the inode fields GoOS reports, by path.
 metadata() {

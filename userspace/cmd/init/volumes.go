@@ -550,10 +550,15 @@ func splitFields(value []byte) ([3][]byte, int) {
 	return fields, count
 }
 
-// injectVolumeFault kills the instance of the lowest mounted slot, in the
-// validation build, to show it replaced while the others keep serving.
-func injectVolumeFault() bool {
-	for slot := uint8(1); slot <= volume.Slots; slot++ {
+// injectVolumeFault kills the instance of the lowest mounted slot, or the
+// highest when last is set, in the validation build, to show it replaced
+// while the others keep serving.
+func injectVolumeFault(last bool) bool {
+	for index := uint8(0); index < volume.Slots; index++ {
+		slot := index + 1
+		if last {
+			slot = volume.Slots - index
+		}
 		runtime := runtimeOf(slot)
 		if volumes.Slot(slot).State == volume.Mounted && runtime.process != 0 {
 			mark("VOLUME_FAULT_INJECTED\n")

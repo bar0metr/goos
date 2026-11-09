@@ -89,9 +89,10 @@ const (
 	// empty. Rights carries the Metadata flags; Offset and Size are the new
 	// time's seconds and nanoseconds.
 	OperationSetMetadata
-	// OperationSync makes every completed write durable, as the PID 1 sync
-	// control does, on behalf of the open file Handle. The flush covers the
-	// whole volume, which is more than one file needs and never less.
+	// OperationSync makes the open file Handle durable, or, with no handle,
+	// the file or directory Path. Only the filesystem that holds the object
+	// is asked; one without a durability operation answers
+	// StatusUnsupported (ADR 0223).
 	OperationSync
 	// OperationReadDirBatch lists Path from Offset into the object the request
 	// attaches with NameReturn, at its start. The reply's Size is the bytes of

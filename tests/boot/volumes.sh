@@ -144,8 +144,46 @@ run 'stat /mnt/l/fifo'
 expect '^special$' 'a FIFO the volume stores'
 run 'ls /mnt/l'
 expect '^rel@$' 'a link in a listing'
-run '/system/linux/abi-probe ext4-links /mnt/l'
+inode=$(awk -F '\t' '$1 == "file.txt" { print $2 }' userspace/ext4/testdata/links.inodes.tsv)
+run "/system/linux/abi-probe ext4-links /mnt/l $inode"
 expect '^ext4 links ok$' 'a Linux program sees the inodes Linux made'
+
+# Replace the links volume itself while a Linux program holds a file open
+# through a symbolic link on it. The other volumes keep serving, the old
+# descriptor fails, and the replacement serves the link again only after
+# PID 1 checked its identity and the VFS attached it.
+mounts=$(grep -c 'VOLUME_MOUNT_OK' "$log")
+run '/system/linux/abi-probe hold /mnt/l/rel 20 &'
+held=
+for attempt in $(seq 1 40); do
+	grep -q 'hold opened' "$log" && held=1 && break
+	sleep 0.5
+done
+[ -n "$held" ] || fail 'a descriptor held through a link'
+run 'fault volume-last'
+grep -q 'VOLUME_FAULT_INJECTED' "$log" || fail 'links volume fault not injected'
+run 'cat /mnt/a/hello.txt'
+expect '^hello ext4$' 'the other ext4 volume while the links volume is replaced'
+run 'ls /persist'
+expect 'system' 'the persistent volume while the links volume is replaced'
+recovered=
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+	run 'cat /mnt/l/rel'
+	if grep -q '^owned file$' "$work/output"; then
+		recovered=1
+		break
+	fi
+	sleep 1
+done
+[ -n "$recovered" ] || fail 'replaced links instance does not serve the link'
+[ "$(grep -c 'VOLUME_MOUNT_OK' "$log")" -gt "$mounts" ] || fail 'the links volume came back without a checked attach'
+finished=
+for attempt in $(seq 1 60); do
+	grep -q 'hold reopened' "$log" && finished=1 && break
+	grep -q 'hold stale accepted\|hold reopen failed\|hold failed' "$log" && break
+	sleep 0.5
+done
+[ -n "$finished" ] && grep -q 'hold stale rejected' "$log" || fail 'a descriptor from the replaced instance'
 
 run 'fault volume'
 grep -q 'VOLUME_FAULT_INJECTED' "$log" || fail 'volume fault not injected'

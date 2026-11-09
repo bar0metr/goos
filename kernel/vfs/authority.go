@@ -742,7 +742,7 @@ func (namespace *Namespace) batchRecord(owner Owner, mount uint8, record *ramfs.
 		return scanned, false, status
 	}
 	if namespace.permits(owner, mask, Read) {
-		written := ramfs.AppendDirRecord(target[batch.Used:], &record.Stat, record.Next, record.Name)
+		written := ramfs.AppendDirRecordInode(target[batch.Used:], &record.Stat, record.Inode, record.Next, record.Name)
 		if written == 0 {
 			if batch.Count == 0 {
 				return scanned, false, StatusBackendError

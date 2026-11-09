@@ -218,6 +218,21 @@ func MutationErrno(status vfs.Status) abi.Errno {
 	return VFSErrno(status, VFSPermissionReadOnly, abi.ENOSPC)
 }
 
+// SyncErrno translates the status of fsync and fdatasync. A filesystem
+// without a durability operation is EINVAL, as on Linux; any other failure
+// is EIO, the error a failed flush reports.
+func SyncErrno(status vfs.Status) abi.Errno {
+	switch status {
+	case vfs.StatusOK:
+		return 0
+	case vfs.StatusUnsupported:
+		return abi.EINVAL
+	case vfs.StatusNotFound:
+		return abi.EBADF
+	}
+	return abi.EIO
+}
+
 // LinkErrno translates the status of a symlink or a hard link. A filesystem
 // without the kind of link asked for, and a hard link to a directory, are
 // EPERM on Linux; a refused change is a read-only mount.

@@ -16,7 +16,9 @@ import "encoding/binary"
 //	changed     8 bytes at 32, seconds
 //	accessed    4 bytes at 40, nanoseconds
 //	changed     4 bytes at 44, nanoseconds
-const UnixRecordSize = 48
+//	inode       8 bytes at 48
+//	blocks      8 bytes at 56, 512-byte units
+const UnixRecordSize = 64
 
 const (
 	unixPresent  = 1
@@ -52,6 +54,8 @@ func EncodeUnix(target []byte, unix *Unix) bool {
 	binary.LittleEndian.PutUint64(record[32:], uint64(unix.Changed.Seconds))
 	binary.LittleEndian.PutUint32(record[40:], unix.Accessed.Nanoseconds)
 	binary.LittleEndian.PutUint32(record[44:], unix.Changed.Nanoseconds)
+	binary.LittleEndian.PutUint64(record[48:], unix.Inode)
+	binary.LittleEndian.PutUint64(record[56:], unix.Blocks)
 	return true
 }
 
@@ -71,6 +75,8 @@ func DecodeUnix(data []byte, kind Kind) (Unix, bool) {
 		Links:      binary.LittleEndian.Uint32(data[12:]),
 		Generation: binary.LittleEndian.Uint32(data[16:]),
 		Device:     binary.LittleEndian.Uint32(data[20:]),
+		Inode:      binary.LittleEndian.Uint64(data[48:]),
+		Blocks:     binary.LittleEndian.Uint64(data[56:]),
 		Accessed:   Timestamp{Seconds: int64(binary.LittleEndian.Uint64(data[24:])), Nanoseconds: binary.LittleEndian.Uint32(data[40:]), Available: flags&unixAccessed != 0},
 		Changed:    Timestamp{Seconds: int64(binary.LittleEndian.Uint64(data[32:])), Nanoseconds: binary.LittleEndian.Uint32(data[44:]), Available: flags&unixChanged != 0},
 		Available:  flags&unixPresent != 0,

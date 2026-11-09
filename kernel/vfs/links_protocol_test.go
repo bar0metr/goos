@@ -80,3 +80,34 @@ func TestLinkRequestsAndNoFollow(t *testing.T) {
 		t.Fatal("a listed name past NameMax")
 	}
 }
+
+// plainBackend offers only the Backend methods: no sync, no links.
+type plainBackend struct{ Backend }
+
+func TestSyncWithoutABackendOperationIsUnsupported(t *testing.T) {
+	fs := &ramfs.FileSystem{}
+	root := fs.Init()
+	fs.Create(root, []byte("file"))
+	namespace := &Namespace{}
+	if namespace.Mount([]byte("/"), plainBackend{fs}, root) != StatusOK {
+		t.Fatal("mount")
+	}
+	file, status := namespace.Open(1, []byte("/file"), Read)
+	if status != StatusOK {
+		t.Fatal(status)
+	}
+	if status := namespace.SyncOpen(1, file); status != StatusUnsupported {
+		t.Fatalf("file sync: %v", status)
+	}
+	if status := namespace.SyncPath([]byte("/")); status != StatusUnsupported {
+		t.Fatalf("directory sync: %v", status)
+	}
+	if status := namespace.SyncOpen(2, file); status != StatusNotFound {
+		t.Fatalf("another owner's handle: %v", status)
+	}
+	other := &Namespace{}
+	other.Mount([]byte("/"), fs, root)
+	if status := other.SyncPath([]byte("/")); status != StatusOK {
+		t.Fatalf("RAMFS directory sync: %v", status)
+	}
+}

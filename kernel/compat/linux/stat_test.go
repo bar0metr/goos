@@ -284,3 +284,30 @@ func TestStatxFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestStoredInodeAndBlocks(t *testing.T) {
+	reply := vfs.Reply{Kind: ramfs.KindFile, Node: 0x6f6f7367<<32 | 64, Size: 1048577, MountID: 3,
+		Unix: ramfs.Unix{Mode: 0o100644, Links: 1, Inode: 64, Blocks: 8, Available: true}}
+	status, errno := StatusOfReply(&reply)
+	if errno != 0 || status.Inode != 64 || status.Device != 3 {
+		t.Fatalf("status %+v", status)
+	}
+	var encoded [StatSize]byte
+	EncodeStat(&encoded, status)
+	if binary.LittleEndian.Uint64(encoded[statBlocks:]) != 8 || binary.LittleEndian.Uint64(encoded[statInode:]) != 64 {
+		t.Fatal("st_blocks or st_ino")
+	}
+	var extended [StatxSize]byte
+	EncodeStatx(&extended, status)
+	if binary.LittleEndian.Uint64(extended[statxBlocks:]) != 8 || binary.LittleEndian.Uint64(extended[statxInode:]) != 64 {
+		t.Fatal("stx_blocks or stx_ino")
+	}
+	for status, want := range map[vfs.Status]abi.Errno{vfs.StatusOK: 0, vfs.StatusUnsupported: abi.EINVAL, vfs.StatusBackendError: abi.EIO, vfs.StatusPeerDied: abi.EIO} {
+		if got := SyncErrno(status); got != want {
+			t.Fatalf("sync status %v: errno %d", status, got)
+		}
+	}
+	if VFSErrno(vfs.StatusCrossDevice, VFSPermissionAccess, abi.ENOMEM) != abi.EXDEV || MutationErrno(vfs.StatusCrossDevice) != abi.EXDEV {
+		t.Fatal("EXDEV")
+	}
+}

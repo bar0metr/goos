@@ -1481,10 +1481,8 @@ func (handler *linuxCallHandler) rename(request linuxcompat.Request, fromDirfd i
 			return linuxErrno(errno)
 		}
 		handler.vfsFinish()
-		if reply.Status == vfs.StatusUnsupported {
-			// The VFS moves a name within one filesystem only.
-			return linuxErrno(linuxabi.EXDEV)
-		}
+		// The VFS moves a name within one filesystem only: StatusCrossDevice
+		// is EXDEV.
 		return linuxErrno(linuxcompat.MutationErrno(reply.Status))
 	}
 }

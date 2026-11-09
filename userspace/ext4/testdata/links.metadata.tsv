@@ -59,5 +59,6 @@
 ./rel	a1ff	42	43	1
 ./self	a1ff	0	0	1
 ./setuid	89ed	0	0	1
+./sparse	81a4	0	0	1
 ./sub-dir	a1ff	0	0	1
 ./wide	21a4	0	0	1

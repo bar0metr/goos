@@ -52,10 +52,15 @@ short timeouts, the time left both calls write back, `nfds` above the table,
 `EBADF`, `EINVAL`, `EFAULT`, and a `pselect6` mask; `family` leaves a child asleep
 for the Ctrl-C check of the boot test; `path` prints the `PATH` it got;
 `links` makes, reads, follows and removes symbolic links in a scratch
-directory under `/tmp`; `ext4-links DIR` checks the links fixture Linux built,
+directory under `/tmp`, including `open(O_CREAT)` through a dangling link,
+`linkat` with `AT_SYMLINK_FOLLOW` and `utimensat` with
+`AT_SYMLINK_NOFOLLOW`; `ext4-links DIR INODE` checks the links fixture Linux built,
 mounted read-only at `DIR`: modes, owners, link counts and device numbers as
 the inodes store them, the 40-link bound, `O_NOFOLLOW`, `d_type`, and the
-`EROFS` and `EXDEV` refusals;
+`EROFS` and `EXDEV` refusals, given the inode number `stat` must report for
+`file.txt`; `hold PATH SECONDS` keeps a descriptor open while the test
+replaces the filesystem instance behind it and checks that the old
+descriptor fails and a new open works;
 `fork-fault` and `exec-vfs-loss` serve the validation kernel and VFS, which
 fail a fork mid-copy and die during an `execve`; `fpstate` checks that XMM
 registers, MXCSR, and the x87 control word survive `getpid`, a `nanosleep`
@@ -144,7 +149,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `4a068a52296fca685abc2a6236f66006b6040f80335b7a3e67deadb849e9f0e6` |
-| `prebuilt/abi-probe` | `9bb8ef8ecd3bf12fdcbba9dc2fd2b799cb65745e41fef4773a6d93c6892c16b3` |
+| `prebuilt/abi-probe` | `67b6fc76a5f36cc56fc2b3418db7f00f0eef34c4ac25831d6a72f508d4dca49e` |
 | `prebuilt/tty-probe` | `5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957` |
 | `prebuilt/netprobe` | `dca2339b9c61ea9f190613aa58b6289e6166a58463e1a4441bfd8ba661d742cb` |
 | `prebuilt/pie-probe` | `4e1822fc5fd6c174726c8751cabb0c298e67adfa46e7a82c9b425732b00c7144` |

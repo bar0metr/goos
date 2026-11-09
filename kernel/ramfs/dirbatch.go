@@ -18,7 +18,9 @@ import "encoding/binary"
 //	kind        1 byte at 54
 //	attributes  1 byte at 55
 //	metadata    1 byte at 56
-//	reserved    7 bytes at 57, zero
+//	reserved    3 bytes at 57, zero
+//	inode       4 bytes at 60, the filesystem's inode number when metadata
+//	            has dirInodeAvailable
 const (
 	// MaxDirBatch is the most bytes of records one exchange carries. A
 	// maximum-length name fits, and one page leaves the Linux bridge able to
@@ -34,6 +36,7 @@ const (
 	dirCreatedAvailable    = 1
 	dirModifiedAvailable   = 2
 	dirAttributesAvailable = 4
+	dirInodeAvailable      = 8
 )
 
 // DirBatch describes the records a listing call wrote. Next is the position to
@@ -46,11 +49,14 @@ type DirBatch struct {
 	End   bool
 }
 
-// DirRecord is one decoded record. Name aliases the decoded memory.
+// DirRecord is one decoded record. Name aliases the decoded memory. Inode is
+// the filesystem's inode number, which Linux reports as d_ino, or zero when
+// the filesystem has none.
 type DirRecord struct {
-	Stat Stat
-	Next int
-	Name []byte
+	Stat  Stat
+	Next  int
+	Name  []byte
+	Inode uint64
 }
 
 // DirRecordSize returns the record length for a name of nameSize bytes.
@@ -59,8 +65,20 @@ func DirRecordSize(nameSize int) int {
 }
 
 // AppendDirRecord writes one record at the start of target and returns its
-// length, or zero when the record is invalid or does not fit.
+// length, or zero when the record is invalid or does not fit. The inode
+// number comes from the stat's Unix metadata.
 func AppendDirRecord(target []byte, stat *Stat, next int, name []byte) int {
+	inode := uint64(0)
+	if stat.Unix.Available {
+		inode = stat.Unix.Inode
+	}
+	return AppendDirRecordInode(target, stat, inode, next, name)
+}
+
+// AppendDirRecordInode writes a record with the given inode number, as a
+// record that was decoded and is passed on keeps it. An inode number of zero
+// or one past 32 bits is left out.
+func AppendDirRecordInode(target []byte, stat *Stat, inode uint64, next int, name []byte) int {
 	size := DirRecordSize(len(name))
 	if len(name) == 0 || len(name) > MaxName || size > len(target) || next < 0 || uint64(next) > uint64(^uint32(0)) ||
 		!validDirStat(stat) {
@@ -88,6 +106,10 @@ func AppendDirRecord(target []byte, stat *Stat, next int, name []byte) int {
 	if stat.AttributesAvailable {
 		record[56] |= dirAttributesAvailable
 	}
+	if inode != 0 && inode <= 0xFFFFFFFF {
+		record[56] |= dirInodeAvailable
+		binary.LittleEndian.PutUint32(record[60:], uint32(inode))
+	}
 	copy(record[dirRecordHeader:], name)
 	return size
 }
@@ -102,10 +124,12 @@ func (record *DirRecord) Decode(data []byte) (int, bool) {
 	nameSize := int(binary.LittleEndian.Uint16(data[52:]))
 	size := DirRecordSize(nameSize)
 	metadata := data[56]
-	if nameSize == 0 || nameSize > MaxName || size > len(data) || metadata&^byte(dirCreatedAvailable|dirModifiedAvailable|dirAttributesAvailable) != 0 ||
-		binary.LittleEndian.Uint32(data[57:]) != 0 || binary.LittleEndian.Uint32(data[60:]) != 0 {
+	inode := binary.LittleEndian.Uint32(data[60:])
+	if nameSize == 0 || nameSize > MaxName || size > len(data) || metadata&^byte(dirCreatedAvailable|dirModifiedAvailable|dirAttributesAvailable|dirInodeAvailable) != 0 ||
+		data[57] != 0 || data[58] != 0 || data[59] != 0 || (metadata&dirInodeAvailable != 0) != (inode != 0) {
 		return 0, false
 	}
+	record.Inode = uint64(inode)
 	record.Stat = Stat{
 		ID:                  NodeID(binary.LittleEndian.Uint64(data[0:])),
 		Kind:                Kind(data[54]),

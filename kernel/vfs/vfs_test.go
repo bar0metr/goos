@@ -680,7 +680,7 @@ func TestRenameAcrossMountsIsUnsupported(t *testing.T) {
 	if namespace.Create([]byte("/file"), false) != StatusOK {
 		t.Fatal("create failed")
 	}
-	if status := namespace.Rename([]byte("/file"), []byte("/persist/file")); status != StatusUnsupported {
+	if status := namespace.Rename([]byte("/file"), []byte("/persist/file")); status != StatusCrossDevice {
 		t.Fatalf("cross-mount rename = %d", status)
 	}
 	if _, _, status := namespace.Resolve([]byte("/file")); status != StatusOK {

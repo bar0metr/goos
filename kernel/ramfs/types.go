@@ -134,8 +134,9 @@ const (
 )
 
 // Unix is the POSIX metadata a filesystem keeps for a node: the mode with its
-// type bits, ownership, link count, inode generation, access and change times,
-// and the device number of a device node in Linux's 32-bit encoding. It
+// type bits, ownership, link count, inode number and generation, allocated
+// blocks, access and change times, and the device number of a device node
+// in Linux's 32-bit encoding. It
 // describes what the filesystem stores and grants nothing: GoOS authority is
 // capabilities and VFS rights, never these numbers (ADR 0223). A filesystem
 // without such a model leaves Available false and every field zero.
@@ -146,9 +147,17 @@ type Unix struct {
 	Links      uint32
 	Generation uint32
 	Device     uint32
-	Accessed   Timestamp
-	Changed    Timestamp
-	Available  bool
+	// Inode is the filesystem's own inode number, which Linux reports as
+	// st_ino. The node ID stays the VFS identity: for ext4 it adds the
+	// generation, so a reused inode number never reaches a new file.
+	Inode uint64
+	// Blocks is the storage the inode holds in 512-byte units, as Linux
+	// reports st_blocks: less than the size for a sparse file, more for one
+	// with preallocated or metadata blocks.
+	Blocks    uint64
+	Accessed  Timestamp
+	Changed   Timestamp
+	Available bool
 }
 
 // Valid reports whether the metadata is absent and zero, or present with type

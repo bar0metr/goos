@@ -161,6 +161,44 @@ func (namespace *Namespace) readLink(owner Owner, hit linkHit) (int, Status) {
 	return count, StatusOK
 }
 
+// SyncOpen makes the open file handle durable through the backend that
+// serves it, and no other.
+func (namespace *Namespace) SyncOpen(owner Owner, handle Handle) Status {
+	entry, status := namespace.file(owner, handle, 0)
+	if status != StatusOK {
+		return status
+	}
+	syncer, ok := namespace.mounts[entry.mount].backend.(SyncBackend)
+	if !ok {
+		return StatusUnsupported
+	}
+	return mapStatus(syncer.SyncFile(entry.node))
+}
+
+// SyncPath makes the directory or file path names durable through its own
+// backend. Linux fsync of a directory descriptor arrives here.
+func (namespace *Namespace) SyncPath(path []byte) Status {
+	mountIndex, node, _, status := namespace.resolve(path)
+	if status != StatusOK {
+		return status
+	}
+	backend := namespace.mounts[mountIndex].backend
+	syncer, ok := backend.(SyncBackend)
+	if !ok {
+		return StatusUnsupported
+	}
+	stat, backendStatus := backend.Stat(node)
+	switch {
+	case backendStatus != ramfs.StatusOK:
+		return mapStatus(backendStatus)
+	case stat.Kind == ramfs.KindDirectory:
+		return mapStatus(syncer.SyncDirectory(node))
+	case stat.Kind == ramfs.KindFile:
+		return mapStatus(syncer.SyncFile(node))
+	}
+	return StatusUnsupported
+}
+
 // ReadLink returns the target of the symbolic link path names, without
 // following it. The caller has expanded path with followFinal unset and
 // authorized it. The slice is valid until the next ReadLink or Expand.

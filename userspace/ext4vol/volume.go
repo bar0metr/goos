@@ -205,13 +205,16 @@ func stat(inode *ext4.Inode) ramfs.Stat {
 			Links:      uint32(inode.Links),
 			Generation: inode.Generation,
 			Device:     inode.DeviceNumber(),
+			Inode:      uint64(inode.Number),
+			Blocks:     inode.Blocks512,
 			Accessed:   timestamp(inode.Access, true),
 			Changed:    timestamp(inode.Change, true),
 			Available:  true,
 		},
 	}
-	switch result.Kind {
-	case ramfs.KindDirectory, ramfs.KindSpecial:
+	// A directory keeps its i_size, as Linux reports it; a listing never
+	// reads it as a byte count of entries.
+	if result.Kind == ramfs.KindSpecial {
 		result.Size = 0
 	}
 	return result

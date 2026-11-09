@@ -485,7 +485,7 @@ func (app *App) finishMove(text []byte) {
 		app.afterChange(from)
 		app.afterChange(shell.Parent(target, &app.scratch))
 		app.say("Moved to ", target, "")
-	case vfs.StatusUnsupported:
+	case vfs.StatusCrossDevice:
 		app.fail("Cross-filesystem move is not supported", nil, "")
 	default:
 		app.fail("Move failed: ", nil, shell.VFSReason(status, true))

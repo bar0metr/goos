@@ -25,20 +25,32 @@ node is listed and described, and opening one is `StatusUnsupported`
 (Linux `ENXIO`). Its exact type lives in the Unix mode.
 
 **Unix metadata.** `ramfs.Stat` gains a `Unix` block: mode with type bits,
-UID, GID, link count, inode generation, device number in Linux's 32-bit
-encoding, access time and change time, and an availability flag. ext4
-fills it from the inode. FAT32, RAMFS and the boot archive leave it
-unavailable and zero rather than invent owners. The VFS grants nothing
-from these numbers; rights, scopes and roots stay the authority.
+UID, GID, link count, inode number and generation, allocated 512-byte
+blocks, device number in Linux's 32-bit encoding, access time and change
+time, and an availability flag. ext4 fills it from the inode and reports a
+directory's `i_size` as its size. FAT32, RAMFS and the boot archive leave
+it unavailable and zero rather than invent owners; Linux then sees the
+synthetic presentation below. The VFS grants nothing from these numbers;
+rights, scopes and roots stay the authority.
 
-**Wire.** `GFSPRT01` version 13 widens the reply header by a 48-byte Unix
+**Node ID and inode number.** The VFS node ID identifies an object for the
+VFS: open files, scopes and stale-handle checks compare it. For ext4 it is
+`generation << 32 | inode`, so a handle that outlives its inode cannot
+reach a file that later reuses the number. Linux `st_ino` is the inode
+number alone, taken from `Unix.Inode`, and directory records carry the same
+number for `d_ino`. Two volumes stay apart through `st_dev`, the mount
+identity. Once ext4 writes, a freed and reused inode keeps its `st_ino` and
+gets a new node ID; nothing in the VFS may use `st_ino` as identity.
+
+**Wire.** `GFSPRT01` version 13 widens the reply header by a 64-byte Unix
 record (`ramfs.EncodeUnix`) and adds `ReadLink`, `Symlink` and `Link`. A
 link target travels in the file-cache slot the request names, the way
 write data does, so a 4095-byte target fits. A service without link
 support answers `StatusUnsupported`. `GVF1` version 15 carries the Unix
 record in the data area of a stat reply, adds the same three operations,
 the `NoFollow` right for open, stat, link and metadata changes, and the
-statuses `StatusLoop` and `StatusCrossDevice`. A long `ReadLink` answer
+statuses `StatusLoop` and `StatusCrossDevice`. A directory-batch record
+carries the 32-bit inode number in bytes once reserved. A long `ReadLink` answer
 comes back in the object the request attaches, as a long listed name does.
 Peers of different versions refuse each other's messages.
 
@@ -65,12 +77,29 @@ A walk that reaches a link it was not told to expand stops with
 `StatusNotDirectory`, as a backend would answer, so a code path that
 skips expansion fails closed.
 
-**Follow rules.** Open, stat, truncate, listing, filesystem information,
-metadata changes and the source of a hard link follow the last component
-unless the request carries `NoFollow`. Create, mkdir, unlink, rename,
-replace, read-link and symlink act on the last component itself. Create
-does not make the target of a dangling link; that differs from Linux
-`open(O_CREAT)` and closes the classic `/tmp` link attack.
+**Follow rules.** Open, stat, truncate, listing, sync, filesystem
+information, metadata changes and the source of a hard link follow the
+last component unless the request carries `NoFollow`. Create follows it
+too, so `open(O_CREAT)` through a dangling link makes the target, as on
+Linux; the target faces the caller's root and scopes, and a rooted
+session cannot create outside its root that way. `O_EXCL` and `O_NOFOLLOW`
+stat the name without following it first: an existing link is `EEXIST`
+under `O_EXCL` and `ELOOP` under `O_NOFOLLOW`. Mkdir, unlink, rename,
+replace, read-link and symlink act on the last component itself.
+
+**Cross-filesystem moves.** Rename and replace between two backends are
+`StatusCrossDevice` (`EXDEV`). Two mounts of one backend, `/home` and
+`/persist/home`, are one filesystem: a rename between them works, and the
+open-file and held-file checks compare backends, not mount slots.
+
+**Sync.** A sync names an open file by handle or a file or directory by
+path, and the VFS asks only the backend that owns it, through
+`SyncBackend`. A remote backend sends a flush to its own service: FAT32
+writes its device, and a read-only ext4 volume, which has nothing pending,
+answers at once. RAMFS and the boot archive succeed, since nothing they
+hold outlives the VFS or changes. A backend without `SyncBackend` answers
+`StatusUnsupported`, and Linux `fsync` returns `EINVAL`. ext4 gets a real
+file and directory sync with its journal.
 
 **Hard links.** A hard link must stay inside one filesystem instance: two
 mounts of one backend qualify (`/home` and `/persist/home`), two backends
@@ -86,14 +115,21 @@ backend that lets `/tmp` hold links, which the Linux tests use.
 
 **Linux ABI.** `lstat`, `newfstatat` and `statx` with
 `AT_SYMLINK_NOFOLLOW`, `readlink`, `readlinkat`, `symlink`, `symlinkat`,
-`link`, `linkat` and `O_NOFOLLOW` map onto the operations above. With
-Unix metadata a stat reports the stored mode, owner, link count, device
+`link`, `linkat` (with and without `AT_SYMLINK_FOLLOW`), `O_NOFOLLOW` and
+`utimensat` with `AT_SYMLINK_NOFOLLOW`, which changes the link itself, map
+onto the operations above. `fsync` and `fdatasync` on a file or a
+directory reach the owning backend. With Unix metadata a stat reports the
+stored mode, owner, link count, inode number, allocated blocks, device
 number and times; without it the old presentation stays (0644, 0755, one
-link, UID 1000). `access` still answers from the owner bits, as for the
-file's owner, and enforces nothing. `getdents64` reports `DT_LNK` for links
-and `DT_UNKNOWN` for special files. unlink and rename stat their source
-without following it. `utimensat` with `AT_SYMLINK_NOFOLLOW` still
-follows the link.
+link, UID 1000, blocks from the size). `access` still answers from the
+owner bits, as for the file's owner, and enforces nothing. unlink and
+rename stat their source without following it.
+
+`getdents64` reports `DT_LNK` for links and `DT_UNKNOWN` for device nodes,
+FIFOs and sockets, where Linux reports `DT_CHR`, `DT_BLK`, `DT_FIFO` and
+`DT_SOCK`. Linux allows `DT_UNKNOWN`; `lstat` gives the exact type. Until
+the native kinds name each special type, listings are not field-for-field
+equal to Linux.
 
 ## Consequences
 
@@ -105,6 +141,7 @@ follows the link.
   that can hold links appears.
 - Paths through links follow the lexical `..` rule, which differs from
   Linux's physical one for `link/..`.
+- `DT_UNKNOWN` for special files, above.
 - A crashed ext4 instance still revokes every open handle (ADR 0222);
   links add no recovery path.
 
@@ -115,9 +152,16 @@ follows the link.
 links, and the namespace rules against the `links` fixture that e2fsprogs
 1.47.2 builds: chains of 40 and 41 links, loops, dangling and absolute
 targets, a `..` escape, rooted sessions, scopes, `/system` reached through
-a link, cross-volume links and a restarted instance. `make test-volumes`
-mounts the fixture in a guest and runs `abi-probe ext4-links`;
-`make test-linux-vfs` runs `abi-probe links` on RAMFS.
+a link, cross-volume links and renames, `NoFollow` metadata changes,
+create through a dangling link, sync traffic per backend, and a restarted
+instance. The fixture gives `file.txt` and `dir` nonzero generations and
+holds a sparse file; `links.inodes.tsv` records what debugfs reads back.
+`make test-volumes` mounts the fixture in a guest, runs
+`abi-probe ext4-links`, and replaces the links instance while
+`abi-probe hold` keeps a descriptor open through a link: the other volumes
+keep serving, the old descriptor fails, and a new open works after PID 1
+checked the replacement's identity. `make test-linux-vfs` runs
+`abi-probe links` on RAMFS.
 
 The same two probe modes pass on Linux: `userspace/linux/run-on-linux.sh
 abi-probe links` on Alpine's tmpfs, where `link` makes a second name, and

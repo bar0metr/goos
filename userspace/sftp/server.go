@@ -512,7 +512,7 @@ func (server *Server) vfsStatus(status vfs.Status) uint32 {
 		return fxPermissionDenied
 	case vfs.StatusInvalidArgument:
 		return fxBadMessage
-	case vfs.StatusUnsupported:
+	case vfs.StatusUnsupported, vfs.StatusCrossDevice:
 		return fxOpUnsupported
 	case vfs.StatusPeerDied:
 		server.lost = true

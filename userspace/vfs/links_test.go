@@ -3,6 +3,8 @@ package vfsservice
 import (
 	"testing"
 
+	"goos/userspace/fsproto"
+
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 )
@@ -67,8 +69,12 @@ func TestLinkMetadataMatchesLinux(t *testing.T) {
 	}
 	unix := file.Unix
 	if !unix.Available || unix.Mode != 0x81a0 || unix.UID != 1234 || unix.GID != 5678 || unix.Links != 3 ||
-		unix.Generation != uint32(file.Node>>32) || !unix.Accessed.Available || unix.Accessed.Seconds != 1767225600 {
-		t.Fatalf("file metadata %+v", unix)
+		unix.Generation != 0x6f6f7367 || file.Node != 0x6f6f7367<<32|64 || unix.Inode != 64 || unix.Blocks != 8 ||
+		!unix.Accessed.Available || unix.Accessed.Seconds != 1767225600 {
+		t.Fatalf("file metadata %+v node %#x", unix, file.Node)
+	}
+	if sparse := statPath(service, testSession, "/mnt/l/sparse", 0); sparse.Size != 1048577 || sparse.Unix.Blocks != 8 || sparse.Unix.Inode != 71 {
+		t.Fatalf("sparse file %+v", sparse)
 	}
 	link := statPath(service, testSession, "/mnt/l/rel", vfs.NoFollow)
 	if link.Status != vfs.StatusOK || link.Kind != ramfs.KindSymlink || link.Size != 8 || link.Node == file.Node ||
@@ -76,7 +82,7 @@ func TestLinkMetadataMatchesLinux(t *testing.T) {
 		t.Fatalf("lstat of rel %+v", link)
 	}
 	directory := statPath(service, testSession, "/mnt/l/dir", 0)
-	if directory.Unix.Mode != 0x41e8 || directory.Unix.UID != 7 || directory.Unix.Links != 3 {
+	if directory.Unix.Mode != 0x41e8 || directory.Unix.UID != 7 || directory.Unix.Links != 3 || directory.Size != 4096 || directory.Unix.Inode != 58 {
 		t.Fatalf("directory metadata %+v", directory.Unix)
 	}
 	if setuid := statPath(service, testSession, "/mnt/l/setuid", 0); setuid.Unix.Mode != 0x89ed {
@@ -185,13 +191,18 @@ func TestRAMFSLinksCrossMounts(t *testing.T) {
 	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationSymlink, Path: []byte("/tmp/chain"), Target: []byte("x")}); reply.Status != vfs.StatusAlreadyExists {
 		t.Fatalf("symlink over a name: %v", reply.Status)
 	}
-	// Creating a name never goes through a dangling link.
+	// Create follows a dangling link and makes its target, as open(O_CREAT)
+	// does on Linux; mkdir finds the name taken.
 	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationSymlink, Path: []byte("/tmp/dangling"), Target: []byte("/tmp/made")})
-	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/tmp/dangling")}); reply.Status != vfs.StatusAlreadyExists {
-		t.Fatalf("create through a dangling link: %v", reply.Status)
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/tmp/dangling")})
+	if reply := statPath(service, testSession, "/tmp/made", 0); reply.Status != vfs.StatusOK || reply.Kind != ramfs.KindFile {
+		t.Fatalf("dangling target not made: %v", reply.Status)
 	}
-	if reply := statPath(service, testSession, "/tmp/made", 0); reply.Status != vfs.StatusNotFound {
-		t.Fatalf("dangling target was made: %v", reply.Status)
+	if reply := statPath(service, testSession, "/tmp/dangling", vfs.NoFollow); reply.Kind != ramfs.KindSymlink {
+		t.Fatal("the link itself changed")
+	}
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationMkdir, Path: []byte("/tmp/dangling")}); reply.Status != vfs.StatusAlreadyExists {
+		t.Fatalf("mkdir over a link: %v", reply.Status)
 	}
 	// Removing and renaming act on the link.
 	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationRename, Path: []byte("/tmp/to-ext4"), Target: []byte("/tmp/moved")})
@@ -259,6 +270,25 @@ func TestRootedSessionsStayInsideThroughLinks(t *testing.T) {
 	if target, status := readLink(service, jailed, "/mnt/l/escape"); status != vfs.StatusOK || target != "../../../../../../etc" {
 		t.Fatalf("readlink escape %q %v", target, status)
 	}
+	// A dangling link inside the root cannot create outside it.
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationMkdir, Path: []byte("/tmp/jail")})
+	jail, _ := vfs.RootedAuthority([]byte("/tmp/jail"))
+	const jailedTmp vfs.Owner = 79
+	if service.SetAuthority(jailedTmp, jail) != vfs.StatusOK {
+		t.Fatal("authority")
+	}
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationSymlink, Path: []byte("/tmp/jail/out"), Target: []byte("../escaped")})
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationSymlink, Path: []byte("/tmp/jail/in"), Target: []byte("/made")})
+	deny(t, service, jailedTmp, vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/tmp/jail/out")})
+	if reply := statPath(service, testSession, "/tmp/escaped", 0); reply.Status != vfs.StatusNotFound {
+		t.Fatalf("a rooted create escaped: %v", reply.Status)
+	}
+	if reply := service.Dispatch(jailedTmp, vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/tmp/jail/in")}); reply.Status != vfs.StatusOK {
+		t.Fatalf("rooted create through an absolute link: %v", reply.Status)
+	}
+	if reply := statPath(service, testSession, "/tmp/jail/made", 0); reply.Status != vfs.StatusOK {
+		t.Fatalf("absolute target outside the root: %v", reply.Status)
+	}
 	// A link elsewhere into the root does not let a rooted session out.
 	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationSymlink, Path: []byte("/tmp/outside"), Target: []byte("/mnt/l/file.txt")})
 	deny(t, service, jailed, vfs.Request{Operation: vfs.OperationStat, Path: []byte("/tmp/outside")})
@@ -293,5 +323,160 @@ func TestStaleHandlesAfterRestartWithLinks(t *testing.T) {
 	}
 	if text, status := readPath(t, service, "/mnt/l/rel"); status != vfs.StatusOK || text != "owned file\n" {
 		t.Fatalf("reopen after restart: %q %v", text, status)
+	}
+}
+
+func TestNoFollowMetadataChangesTheLink(t *testing.T) {
+	service, _ := linksService(t)
+	writeFile(t, service, "/tmp/target", "x")
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationSymlink, Path: []byte("/tmp/link"), Target: []byte("target")})
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationSymlink, Path: []byte("/tmp/gone"), Target: []byte("missing")})
+	stamp := func(seconds int64) ramfs.MetadataChange {
+		return ramfs.MetadataChange{SetModified: true, Modified: ramfs.Timestamp{Seconds: seconds, Available: true}}
+	}
+	change := func(path string, rights vfs.Rights, seconds int64) vfs.Status {
+		request := vfs.MetadataRequest([]byte(path), 0, stamp(seconds))
+		request.Rights |= rights
+		return service.Dispatch(testSession, request).Status
+	}
+	if change("/tmp/link", 0, 100) != vfs.StatusOK || change("/tmp/link", vfs.NoFollow, 200) != vfs.StatusOK {
+		t.Fatal("metadata change")
+	}
+	if target := statPath(service, testSession, "/tmp/target", 0); target.Modified.Seconds != 100 {
+		t.Fatalf("followed change set the target to %d", target.Modified.Seconds)
+	}
+	if link := statPath(service, testSession, "/tmp/link", vfs.NoFollow); link.Modified.Seconds != 200 {
+		t.Fatalf("no-follow change set the link to %d", link.Modified.Seconds)
+	}
+	if change("/tmp/gone", vfs.NoFollow, 300) != vfs.StatusOK || change("/tmp/gone", 0, 300) != vfs.StatusNotFound {
+		t.Fatal("dangling link")
+	}
+	before := statPath(service, testSession, "/mnt/l/file.txt", 0)
+	if status := change("/mnt/l/rel", vfs.NoFollow, 400); status != vfs.StatusPermissionDenied {
+		t.Fatalf("ext4 link: %v", status)
+	}
+	if after := statPath(service, testSession, "/mnt/l/file.txt", 0); after.Modified != before.Modified {
+		t.Fatal("ext4 target changed")
+	}
+}
+
+func TestCrossFilesystemRenameIsCrossDevice(t *testing.T) {
+	service, _ := linksService(t)
+	attachExt4(t, service, 2, "canonical", "/mnt/c")
+	writeFile(t, service, "/tmp/file", "x")
+	writeFile(t, service, "/home/user/old", "old")
+	for _, request := range []vfs.Request{
+		{Operation: vfs.OperationRename, Path: []byte("/mnt/l/file.txt"), Target: []byte("/mnt/c/moved")},
+		{Operation: vfs.OperationRename, Path: []byte("/tmp/file"), Target: []byte("/home/user/new")},
+		{Operation: vfs.OperationReplace, Path: []byte("/tmp/file"), Target: []byte("/home/user/old")},
+		{Operation: vfs.OperationReplace, Path: []byte("/tmp/file"), Target: []byte("/mnt/c/hello.txt")},
+	} {
+		if reply := service.Dispatch(testSession, request); reply.Status != vfs.StatusCrossDevice {
+			t.Fatalf("%s -> %s: %v", request.Path, request.Target, reply.Status)
+		}
+	}
+	// /home and /persist/home are one FAT32 instance.
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationRename, Path: []byte("/home/user/old"), Target: []byte("/persist/home/user/renamed")})
+	if text, status := readPath(t, service, "/home/user/renamed"); status != vfs.StatusOK || text != "old" {
+		t.Fatalf("rename between aliases: %q %v", text, status)
+	}
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationRename, Path: []byte("/tmp/file"), Target: []byte("/tmp/same")})
+}
+
+// flushCounter counts the flushes a filesystem service receives.
+type flushCounter struct {
+	inner   Transport
+	flushes int
+}
+
+func (counter *flushCounter) Exchange(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
+	if request.Operation == fsproto.OperationFlush {
+		counter.flushes++
+	}
+	return counter.inner.Exchange(request)
+}
+
+func TestSyncReachesOnlyTheOwningFilesystem(t *testing.T) {
+	service := &Service{}
+	if !service.Init() || !service.MountBootstrap(testSystemImage(t)) || !service.AttachCache(testCache) {
+		t.Fatal("service init failed")
+	}
+	persistent := &flushCounter{inner: newLoopback(installedDevice(t))}
+	if !service.AttachFilesystem(persistent) {
+		t.Fatal("persistent mount failed")
+	}
+	instance := newExt4Service(t, "links")
+	volume := &flushCounter{inner: instance}
+	if status := service.AttachVolume(1, volume, instance.cache, []byte("/mnt/l")); status != vfs.StatusOK {
+		t.Fatal(status)
+	}
+	writeFile(t, service, "/home/user/f", "x")
+	writeFile(t, service, "/tmp/f", "x")
+	sync := func(path string, directory bool) vfs.Status {
+		if directory {
+			return service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationSync, Path: []byte(path)}).Status
+		}
+		opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte(path)})
+		if opened.Status != vfs.StatusOK {
+			return opened.Status
+		}
+		defer service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+		return service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationSync, Handle: opened.Handle}).Status
+	}
+	for _, step := range []struct {
+		path      string
+		directory bool
+		fat, ext4 int
+	}{
+		{"/mnt/l/rel", false, 0, 1},
+		{"/mnt/l/dir", true, 0, 2},
+		{"/home/user/f", false, 1, 2},
+		{"/home/user", true, 2, 2},
+		{"/tmp/f", false, 2, 2},
+		{"/tmp", true, 2, 2},
+		{"/bootstrap", true, 2, 2},
+	} {
+		if status := sync(step.path, step.directory); status != vfs.StatusOK {
+			t.Fatalf("sync %s: %v", step.path, status)
+		}
+		if persistent.flushes != step.fat || volume.flushes != step.ext4 {
+			t.Fatalf("after %s: FAT32 %d flushes, ext4 %d", step.path, persistent.flushes, volume.flushes)
+		}
+	}
+	instance.fail = true
+	if status := sync("/mnt/l/dir", true); status == vfs.StatusOK {
+		t.Fatal("sync of a dead volume succeeded")
+	}
+	if persistent.flushes != 2 {
+		t.Fatal("a dead volume's sync reached FAT32")
+	}
+}
+
+func TestListingCarriesInodeNumbers(t *testing.T) {
+	service, _ := linksService(t)
+	target := make([]byte, vfs.MaxDirBatch)
+	inodes := map[string]uint64{}
+	cursor := uint64(0)
+	for {
+		reply := service.ReadDirBatch(testSession, vfs.Request{Operation: vfs.OperationReadDirBatch, Path: []byte("/mnt/l"), Offset: cursor, NameReturn: true}, target)
+		if reply.Status != vfs.StatusOK {
+			t.Fatal(reply.Status)
+		}
+		var record ramfs.DirRecord
+		for data := target[:reply.Size]; len(data) != 0; {
+			size, ok := record.Decode(data)
+			if !ok {
+				t.Fatal("malformed record")
+			}
+			inodes[string(record.Name)] = record.Inode
+			data = data[size:]
+		}
+		if reply.BatchEnd {
+			break
+		}
+		cursor = uint64(reply.Cursor)
+	}
+	if inodes["file.txt"] != 64 || inodes["hard-a"] != 64 || inodes["dir"] != 58 || inodes["sparse"] != 71 {
+		t.Fatalf("listed inode numbers %v", inodes)
 	}
 }

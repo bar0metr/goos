@@ -370,6 +370,22 @@ func (fs *FileSystem) ReadDir(parent NodeID, cursor int) (Entry, int, Status) {
 	return Entry{}, cursor, StatusNotFound
 }
 
+// SyncFile, SyncDirectory and SyncFilesystem succeed at once. RAMFS keeps
+// nothing past the process that holds it, so there is no device to make a
+// change durable on; a sync promises only that the change is complete,
+// which every RAMFS call already is when it returns.
+func (fs *FileSystem) SyncFile(id NodeID) Status {
+	_, status := fs.lookup(id)
+	return status
+}
+
+func (fs *FileSystem) SyncDirectory(id NodeID) Status {
+	_, status := fs.directory(id)
+	return status
+}
+
+func (fs *FileSystem) SyncFilesystem() Status { return StatusOK }
+
 // SymlinkName makes a symbolic link called name in parent. Its target is
 // kept in one page, the way a file keeps its bytes, and its size is the
 // target's length. The page is counted before the link is made, so a full

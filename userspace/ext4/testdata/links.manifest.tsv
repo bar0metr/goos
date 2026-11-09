@@ -59,5 +59,6 @@ symlink	./loop-b	loop-a
 symlink	./rel	file.txt
 symlink	./self	self
 file	./setuid	7	fcd249947a42433f3ca96fd828ace5d07193ea0d7023210bfffd1453f1860a75
+file	./sparse	1048577	08a1f946267e37602ab3d0a7e3707185d744a0253498c24f82083eeeaaca873f
 symlink	./sub-dir	dir/sub
 device	./wide	103:12c

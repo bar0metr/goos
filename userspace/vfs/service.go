@@ -566,11 +566,12 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 			reply.Status = service.namespace.SetMetadata(request.Path, change)
 		}
 	case vfs.OperationSync:
-		// The handle must be one of the owner's open files.
-		if _, status := service.namespace.StatOpen(owner, request.Handle); status != vfs.StatusOK {
-			reply.Status = status
-		} else if !service.Sync() {
-			reply.Status = vfs.StatusBackendError
+		// The handle must be one of the owner's open files; a path must be
+		// readable by the owner, which authorize checked.
+		if len(request.Path) == 0 {
+			reply.Status = service.namespace.SyncOpen(owner, request.Handle)
+		} else {
+			reply.Status = service.namespace.SyncPath(request.Path)
 		}
 	case vfs.OperationFilesystemInfo:
 		info, mountID, status := service.namespace.FilesystemInfo(request.Path, request.MountID)
@@ -612,20 +613,23 @@ func tooLong(path []byte) bool {
 // expand replaces the paths of request with what they name once symbolic
 // links are followed, before anything authorizes or performs the request
 // (ADR 0223). An operation on a name itself leaves its last component alone:
-// removing, renaming or reading a link acts on the link, and making a name
-// never creates through a link that dangles. A symlink's Target is its
-// content, not a path to resolve.
+// removing, renaming or reading a link acts on the link, and mkdir or
+// symlink over a link finds the name taken. Create follows a last link, as
+// Linux open(O_CREAT) does, so a dangling link makes its target; a caller
+// that must not create through a link checks the name first, as O_EXCL and
+// O_NOFOLLOW do. The target faces the caller's root and scopes like any
+// other path. A symlink's Target is its content, not a path to resolve.
 func (service *Service) expand(owner vfs.Owner, request *vfs.Request) vfs.Status {
 	followPath, target := false, false
 	switch request.Operation {
 	case vfs.OperationOpen, vfs.OperationStat, vfs.OperationSetMetadata, vfs.OperationLink:
 		followPath = request.Rights&vfs.NoFollow == 0
 		target = request.Operation == vfs.OperationLink
-	case vfs.OperationReadDir, vfs.OperationReadDirBatch, vfs.OperationTruncate, vfs.OperationFilesystemInfo:
+	case vfs.OperationReadDir, vfs.OperationReadDirBatch, vfs.OperationTruncate, vfs.OperationFilesystemInfo, vfs.OperationSync, vfs.OperationCreate:
 		followPath = true
 	case vfs.OperationRename, vfs.OperationReplace:
 		target = true
-	case vfs.OperationCreate, vfs.OperationMkdir, vfs.OperationUnlink, vfs.OperationReadLink, vfs.OperationSymlink:
+	case vfs.OperationMkdir, vfs.OperationUnlink, vfs.OperationReadLink, vfs.OperationSymlink:
 	default:
 		return vfs.StatusOK
 	}
@@ -652,7 +656,7 @@ func (service *Service) authorize(owner vfs.Owner, request vfs.Request) vfs.Stat
 	switch request.Operation {
 	case vfs.OperationOpen:
 		rights = request.Rights &^ vfs.NoFollow
-	case vfs.OperationReadDir, vfs.OperationStat:
+	case vfs.OperationReadDir, vfs.OperationStat, vfs.OperationSync:
 		if len(request.Path) == 0 {
 			return vfs.StatusOK
 		}

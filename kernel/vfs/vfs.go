@@ -141,6 +141,18 @@ type HardLinkBackend interface {
 	LinkName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
 }
 
+// SyncBackend makes a backend's completed changes durable. SyncFile covers
+// a file's data and the metadata needed to find it, SyncDirectory a
+// directory's entries, and SyncFilesystem everything the instance holds. A
+// sync reaches only the backend that owns the object, never another
+// filesystem. A backend without this interface answers a sync with
+// StatusUnsupported rather than claim durability it does not have.
+type SyncBackend interface {
+	SyncFile(id ramfs.NodeID) ramfs.Status
+	SyncDirectory(id ramfs.NodeID) ramfs.Status
+	SyncFilesystem() ramfs.Status
+}
+
 // ObjectBackend gives an opened file identity independent of pathname lookup.
 // Backends whose node IDs are already stable need not implement it.
 type ObjectBackend interface {
@@ -728,7 +740,7 @@ func (namespace *Namespace) held(mount uint8, node ramfs.NodeID, executableOnly 
 func (namespace *Namespace) heldDirect(mount uint8, node ramfs.NodeID, executableOnly bool) bool {
 	for index := range namespace.files {
 		entry := &namespace.files[index]
-		if entry.used && (entry.executable || !executableOnly) && entry.mount == mount && entry.node == node {
+		if entry.used && (entry.executable || !executableOnly) && namespace.sameFilesystem(entry.mount, mount) && entry.node == node {
 			return true
 		}
 	}
@@ -1107,10 +1119,11 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 	if status != StatusOK {
 		return status
 	}
-	if sourceMount != targetMount {
+	if !namespace.sameFilesystem(sourceMount, targetMount) {
 		// A rename moves a name within one filesystem; moving between two is
-		// a copy, which is the caller's to make.
-		return StatusUnsupported
+		// a copy, which is the caller's to make. Two mounts of one backend,
+		// such as /home and /persist/home, are one filesystem.
+		return StatusCrossDevice
 	}
 	status = mapStatus(namespace.mounts[sourceMount].backend.RenameName(node, parent, name))
 	namespace.invalidate()
@@ -1131,7 +1144,7 @@ func (namespace *Namespace) follow(mountIndex uint8, previous ramfs.NodeID, targ
 	held := false
 	for index := range namespace.files {
 		entry := &namespace.files[index]
-		if entry.used && entry.mount == mountIndex && entry.identity == previous {
+		if entry.used && namespace.sameFilesystem(entry.mount, mountIndex) && entry.identity == previous {
 			held = true
 			break
 		}
@@ -1140,15 +1153,22 @@ func (namespace *Namespace) follow(mountIndex uint8, previous ramfs.NodeID, targ
 		return
 	}
 	targetMount, moved, status := namespace.Resolve(target)
-	if status != StatusOK || targetMount != mountIndex || moved == previous {
+	if status != StatusOK || !namespace.sameFilesystem(targetMount, mountIndex) || moved == previous {
 		return
 	}
 	for index := range namespace.files {
 		entry := &namespace.files[index]
-		if entry.used && entry.mount == mountIndex && entry.identity == previous {
+		if entry.used && namespace.sameFilesystem(entry.mount, mountIndex) && entry.identity == previous {
 			entry.identity = moved
 		}
 	}
+}
+
+// sameFilesystem reports whether two mounts are served by one backend
+// instance, whose node IDs mean the same thing under either mount.
+func (namespace *Namespace) sameFilesystem(first, second uint8) bool {
+	return int(first) < len(namespace.mounts) && int(second) < len(namespace.mounts) &&
+		namespace.mounts[first].backend == namespace.mounts[second].backend
 }
 
 // Replace moves the regular file path onto target within one filesystem
@@ -1179,8 +1199,8 @@ func (namespace *Namespace) Replace(path []byte, target []byte) Status {
 	if status != StatusOK {
 		return status
 	}
-	if targetMount != sourceMount {
-		return StatusUnsupported
+	if !namespace.sameFilesystem(sourceMount, targetMount) {
+		return StatusCrossDevice
 	}
 	if targetNode == node {
 		return StatusInvalidArgument

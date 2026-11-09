@@ -72,6 +72,21 @@ type FileStatus struct {
 	AccessNanoseconds uint32
 	ChangeSeconds     int64
 	ChangeNanoseconds uint32
+	// Blocks is st_blocks as the filesystem counts it, when Stored.
+	Blocks uint64
+}
+
+// blocks returns st_blocks: what the filesystem allocated, or, for one that
+// does not count, the size rounded up to 512-byte units.
+func (status *FileStatus) blocks() uint64 {
+	if status.Stored {
+		return status.Blocks
+	}
+	blocks := status.Size / statBlockUnits
+	if status.Size%statBlockUnits != 0 {
+		blocks++
+	}
+	return blocks
 }
 
 // times returns the access, modification and change times of status.
@@ -128,6 +143,13 @@ func StatusOfReply(reply *vfs.Reply) (FileStatus, abi.Errno) {
 	}
 	if unix := &reply.Unix; unix.Available {
 		status.Mode, status.RawDevice, status.Stored = uint32(unix.Mode), uint64(unix.Device), true
+		status.Blocks = unix.Blocks
+		if unix.Inode != 0 {
+			// st_ino is the filesystem's inode number. The node ID adds the
+			// generation, which Linux never shows; st_dev still tells two
+			// volumes apart.
+			status.Inode = unix.Inode
+		}
 		status.Links, status.UID, status.GID = unix.Links, unix.UID, unix.GID
 		status.AccessSeconds, status.AccessNanoseconds = unix.Accessed.Seconds, unix.Accessed.Nanoseconds
 		status.ChangeSeconds, status.ChangeNanoseconds = unix.Changed.Seconds, unix.Changed.Nanoseconds
@@ -178,11 +200,7 @@ func EncodeStat(target *[StatSize]byte, status FileStatus) {
 	put(target[statRawDevice:], status.RawDevice)
 	put(target[statLength:], status.Size)
 	put(target[statBlockSize:], StatBlockSize)
-	blocks := status.Size / statBlockUnits
-	if status.Size%statBlockUnits != 0 {
-		blocks++
-	}
-	put(target[statBlocks:], blocks)
+	put(target[statBlocks:], status.blocks())
 	times := status.times()
 	for index, offset := range [...]int{statAccessed, statModified, statChanged} {
 		put(target[offset:], times[index][0])
@@ -280,11 +298,7 @@ func EncodeStatx(target *[StatxSize]byte, status FileStatus) {
 	binary.LittleEndian.PutUint16(target[statxMode:], uint16(status.Mode))
 	put64(target[statxInode:], status.Inode)
 	put64(target[statxLength:], status.Size)
-	blocks := status.Size / statBlockUnits
-	if status.Size%statBlockUnits != 0 {
-		blocks++
-	}
-	put64(target[statxBlocks:], blocks)
+	put64(target[statxBlocks:], status.blocks())
 	times := status.times()
 	for index, offset := range [...]int{statxAccessed, statxModified, statxChanged} {
 		put64(target[offset:], times[index][0])

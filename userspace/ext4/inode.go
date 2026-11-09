@@ -179,7 +179,10 @@ func (fs *FS) decodeInode(number uint32, raw []byte) (*Inode, error) {
 		inode.Create = decodeTime(le32(raw, 0x90), raw, 0x94, true)
 		inode.HasCreate = true
 	}
-	if inode.Flags&inodeFlagHugeFile != 0 && fs.sb.Features.ROCompat&roCompatHugeFile != 0 {
+	// Without huge_file Linux reads only the low 32 bits of i_blocks.
+	if fs.sb.Features.ROCompat&roCompatHugeFile == 0 {
+		inode.Blocks512 &= 0xFFFFFFFF
+	} else if inode.Flags&inodeFlagHugeFile != 0 {
 		inode.Blocks512 *= uint64(fs.blockSize / 512)
 	}
 	return inode, nil

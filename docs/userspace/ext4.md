@@ -50,8 +50,8 @@ error.
 
 - Regular files and directories, with sizes, modification times and
   creation times.
-- The mode, owner, link count, device number and access and change times
-  each inode stores (ADR 0223). A Linux program sees them in `stat`; GoOS
+- The mode, owner, link count, inode number, allocated blocks, device
+  number and access and change times each inode stores (ADR 0223). A Linux program sees them in `stat`; GoOS
   grants nothing from them.
 - Names exactly as Linux stored them: up to 255 bytes, case-sensitive, not
   necessarily UTF-8.
@@ -60,8 +60,9 @@ error.
 - Symbolic links, followed by the VFS under the caller's root and scopes,
   at most 40 in one lookup (ADR 0223). `stat` in the shell and `lstat` in a
   Linux program describe the link itself; `readlink` returns its target.
-- Device nodes, FIFOs and sockets in listings and `stat`. Opening one fails:
-  GoOS has nothing behind them.
+- Device nodes, FIFOs and sockets in listings and `stat`. A listing gives
+  their type as unknown (`DT_UNKNOWN`); `stat` gives the exact one.
+  Opening one fails: GoOS has nothing behind them.
 - Every mutation fails with permission denied, the read-only backend
   status, including new symbolic and hard links.
 

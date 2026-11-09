@@ -13,8 +13,8 @@ Inode count:              4096
 Block count:              8192
 Reserved block count:     409
 Overhead clusters:        1350
-Free blocks:              6831
-Free inodes:              4024
+Free blocks:              6830
+Free inodes:              4023
 First block:              0
 Block size:               4096
 Fragment size:            4096
@@ -27,12 +27,12 @@ Inode blocks per group:   128
 Flex block group size:    16
 Filesystem created:       Thu Jan  1 00:00:00 2026
 Last mount time:          n/a
-Last write time:          Mon Nov  9 17:04:51 2026
+Last write time:          Mon Nov  9 18:21:39 2026
 Mount count:              0
 Maximum mount count:      -1
-Last checked:             Mon Nov  9 17:04:51 2026
+Last checked:             Mon Nov  9 18:21:39 2026
 Check interval:           0 (<none>)
-Lifetime writes:          229 kB
+Lifetime writes:          237 kB
 Reserved blocks uid:      0 (user root)
 Reserved blocks gid:      0 (group root)
 First inode:              11
@@ -44,7 +44,7 @@ Default directory hash:   half_md4
 Directory Hash Seed:      6f6f7367-6578-7434-0000-0000000000aa
 Journal backup:           inode blocks
 Checksum type:            crc32c
-Checksum:                 0x99ac5d0f
+Checksum:                 0x19c22226
 Journal features:         (none)
 Total journal size:       4096k
 Total journal blocks:     1024

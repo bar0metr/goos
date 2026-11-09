@@ -243,6 +243,35 @@ func TestLinksMetadata(t *testing.T) {
 	}
 }
 
+// TestLinksInodes compares the inode number, generation, block count and
+// size debugfs read from the links image with what the reader decodes.
+func TestLinksInodes(t *testing.T) {
+	fs := mount(t, fixture(t, "links"))
+	data, err := os.ReadFile(filepath.Join("testdata", "links.inodes.tsv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	generations := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Split(line, "\t")
+		number, _ := strconv.ParseUint(fields[1], 10, 32)
+		generation, _ := strconv.ParseUint(fields[2], 10, 32)
+		blocks, _ := strconv.ParseUint(fields[3], 10, 64)
+		size, _ := strconv.ParseUint(fields[4], 10, 64)
+		inode := resolve(t, fs, "/"+fields[0])
+		if uint64(inode.Number) != number || uint64(inode.Generation) != generation || inode.Blocks512 != blocks || inode.Size != size {
+			t.Fatalf("%s: inode %d generation %d blocks %d size %d, debugfs printed %s",
+				fields[0], inode.Number, inode.Generation, inode.Blocks512, inode.Size, line)
+		}
+		if generation != 0 {
+			generations++
+		}
+	}
+	if generations < 2 {
+		t.Fatal("the fixture lost its nonzero generations")
+	}
+}
+
 // TestHashVariants looks up every name of the indexed directory on volumes
 // whose index uses each hash Linux offers, with names whose bytes above
 // 0x7f make the signed variants differ from the unsigned ones.

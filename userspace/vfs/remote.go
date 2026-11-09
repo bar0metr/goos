@@ -133,9 +133,20 @@ func (remote *Remote) Root() (ramfs.NodeID, ramfs.Status) {
 
 // Flush asks the service to make completed writes durable.
 func (remote *Remote) Flush() bool {
-	_, status := remote.call(fsproto.Request{Operation: fsproto.OperationFlush})
-	return status == ramfs.StatusOK
+	return remote.SyncFilesystem() == ramfs.StatusOK
 }
+
+// SyncFilesystem asks this backend's own service, and no other, to make its
+// completed writes durable. The protocol has one flush for the whole
+// instance, which covers any one file or directory of it.
+func (remote *Remote) SyncFilesystem() ramfs.Status {
+	_, status := remote.call(fsproto.Request{Operation: fsproto.OperationFlush})
+	return status
+}
+
+func (remote *Remote) SyncFile(ramfs.NodeID) ramfs.Status { return remote.SyncFilesystem() }
+
+func (remote *Remote) SyncDirectory(ramfs.NodeID) ramfs.Status { return remote.SyncFilesystem() }
 
 func (remote *Remote) FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status) {
 	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationFilesystemInfo})
