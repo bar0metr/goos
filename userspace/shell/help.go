@@ -27,6 +27,8 @@ var Commands = [...]CommandInfo{
 	{Name: "config", Usage: "config [list] | config get KEY | config set KEY VALUE", Summary: "read and change typed settings", MaxArgs: 3},
 	{Name: "hosts", Usage: "hosts | hosts get NAME | hosts set IPV4 NAME | hosts remove NAME", Summary: "read and change the local hosts table", MaxArgs: 3},
 	{Name: "log", Usage: LogUsage, Summary: "print newest matching logs (64 retained); -f waits, Ctrl-C stops", MaxArgs: Unbounded},
+	{Name: "mount", Usage: "mount | mount [-t TYPE] SOURCE PATH", Summary: "list mounts, or mount a partition (part:N, guid:GUID, name:LABEL) at /mnt/NAME", MaxArgs: 4},
+	{Name: "umount", Usage: "umount PATH", Summary: "unmount an additional volume", MinArgs: 1, MaxArgs: 1},
 	{Name: "diag", Usage: "diag", Summary: "dump kernel diagnostics (diagnostic builds only)"},
 	{Name: "reboot", Usage: "reboot", Summary: "flush storage and restart the machine"},
 	{Name: "poweroff", Usage: "poweroff", Summary: "flush storage and switch the machine off"},

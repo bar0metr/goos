@@ -98,7 +98,7 @@ func TestFATHoldsFilesUnderTheirNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(image) != fatImageSize || image[510] != 0x55 || image[511] != 0xaa {
-		t.Fatal("not an 8 MiB volume with a boot signature")
+		t.Fatal("not a 16 MiB volume with a boot signature")
 	}
 	if string(image[54:62]) != "FAT16   " {
 		t.Fatalf("file system type = %q", image[54:62])
@@ -196,7 +196,7 @@ func TestISOBootsTheEFIPartitionOnUEFI(t *testing.T) {
 	if catalog[32] != 0x88 || catalog[33] != 0 {
 		t.Fatal("default entry is not a bootable no-emulation entry")
 	}
-	if got := binary.LittleEndian.Uint16(catalog[38:]); got != 0x4000 {
+	if got := binary.LittleEndian.Uint16(catalog[38:]); got != isoBootImageSectors {
 		t.Fatalf("sector count = %#x", got)
 	}
 	at := int(binary.LittleEndian.Uint32(catalog[40:])) * isoSectorSize

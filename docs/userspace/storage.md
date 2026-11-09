@@ -123,6 +123,48 @@ comes up to a prompt with `/persist`, `/home` and `/state` simply absent. With
 no volume there is no installed system either, so PID 1 runs in recovery mode
 from the archive (ADR 0175). That prompt is where the volume gets looked at.
 
+## Additional volumes
+
+Besides the persistent volume, up to four more partitions of the disk can be
+mounted below `/mnt` (ADR 0222). Each runs as its own supervised instance,
+`volume1` to `volume4`, of the driver its filesystem needs, so a damaged ext4
+partition crashes its own process and nothing else.
+
+```text
+goos> mount -t auto name:data /mnt/data
+goos> cat /mnt/data/hello.txt
+goos> umount /mnt/data
+```
+
+A source names a partition: `part:N` by number, `guid:GUID` by GPT unique
+GUID, `name:LABEL` by GPT name. The path is `/mnt/` and one name. `mount`
+with no arguments still lists the mount table.
+
+PID 1 asks the block service for a read-only endpoint on the partition,
+reads its first 4 KiB, and lets `userspace/fsdetect` recognize the
+filesystem. The probe only picks a driver from a static registry (ext4,
+FAT32); the driver checks the volume before it serves anything and refuses
+what it cannot read safely. A partition whose signatures match two
+filesystems is refused, and no second driver is tried after a refusal.
+The endpoint PID 1 probed through goes to the driver, so the driver gets a
+read-only slice and nothing more. The block service refuses a slot whose
+partition overlaps another slot's, the persistent volume's included.
+
+Each launch gets a file cache of its own, which PID 1 creates and the VFS
+drops when the instance goes. An instance that crashes or stops answering is
+replaced up to three times; the replacement must probe the same filesystem
+type and identity (ext4 UUID, FAT32 serial), or the volume goes offline.
+Its mount stays in the namespace and answers errors until `umount`. Other
+volumes and the persistent one keep running throughout.
+
+`umount` refuses while files are open on the volume. Otherwise it removes
+the mount, ends the instance, and frees its slot, block endpoint and cache.
+
+Configuration mounts volumes at boot, once the configuration service runs:
+`system.mount.1` to `system.mount.4` each hold `TYPE SOURCE PATH`, such as
+`auto name:data /mnt/data`, or nothing. Recovery mode mounts none. A
+partition that is present on the disk but named nowhere is never mounted.
+
 ## The FAT32 volume
 
 The volume is mounted at `/persist`, and its `home` and `state` directories are

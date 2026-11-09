@@ -19,7 +19,7 @@ func TestControlRequestRoundTrip(t *testing.T) {
 	for _, bad := range []struct {
 		operation ControlOperation
 		argument  uint8
-	}{{ControlOperation(9), 0}, {ControlReboot, 1}, {ControlKill, Slots}, {ControlDiagnostics, 1}, {ControlFault, 0}, {ControlFault, FaultLinuxSockets + 1}} {
+	}{{ControlOperation(9), 0}, {ControlReboot, 1}, {ControlKill, Slots}, {ControlDiagnostics, 1}, {ControlFault, 0}, {ControlFault, FaultVolume + 1}} {
 		if _, ok := EncodeControl(bad.operation, bad.argument, 7); ok {
 			t.Fatalf("encoded %#v", bad)
 		}
@@ -110,5 +110,41 @@ func TestShutdownStatusRoundTrip(t *testing.T) {
 	}
 	if _, ok := EncodeControlStatus(ControlAccepted+1, 9); ok {
 		t.Fatal("unknown status encoded")
+	}
+}
+
+func TestVolumeCommands(t *testing.T) {
+	mount := VolumeCommand{Mount: true, Type: []byte("auto"), Source: []byte("name:data"), Path: []byte("/mnt/data")}
+	message, ok := EncodeVolumeCommand(mount, 4)
+	decoded, valid := DecodeVolumeCommand(&message)
+	if !ok || !valid || !decoded.Mount || string(decoded.Type) != "auto" || string(decoded.Source) != "name:data" || string(decoded.Path) != "/mnt/data" {
+		t.Fatalf("mount: %+v %v", decoded, valid)
+	}
+	if _, _, ok := DecodeControl(message); ok {
+		t.Fatal("a mount decoded as a plain control")
+	}
+	unmount, ok := EncodeVolumeCommand(VolumeCommand{Path: []byte("/mnt/data")}, 5)
+	decoded, valid = DecodeVolumeCommand(&unmount)
+	if !ok || !valid || decoded.Mount || string(decoded.Path) != "/mnt/data" {
+		t.Fatalf("unmount: %+v %v", decoded, valid)
+	}
+	trailing := unmount
+	trailing.PayloadSize++
+	if _, ok := DecodeVolumeCommand(&trailing); ok {
+		t.Fatal("trailing byte accepted")
+	}
+	if _, ok := EncodeVolumeCommand(VolumeCommand{Mount: true, Path: []byte("/mnt/x")}, 5); ok {
+		t.Fatal("mount without a source")
+	}
+	if _, ok := EncodeVolumeCommand(VolumeCommand{Mount: true, Source: make([]byte, MaxVolumeArgument+1), Path: []byte("/mnt/x")}, 5); ok {
+		t.Fatal("oversized source")
+	}
+	reply, _ := EncodeVolumeReply(11, 13, 9)
+	status, detail, ok := DecodeVolumeReply(reply)
+	if !ok || status != 11 || detail != 13 {
+		t.Fatalf("reply %d %d %v", status, detail, ok)
+	}
+	if _, ok := DecodeControlStatus(reply); ok {
+		t.Fatal("a volume reply decoded as a control status")
 	}
 }

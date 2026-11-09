@@ -16,7 +16,7 @@ import (
 
 // usage names the fixed images in order, then the directory of command images
 // and the command index the build generated from them.
-const usage = "usage: initramfs [-validation] [-force-recovery] INIT FAULT_PROBE VFS SHELL BLOCK VIRTIO_BLOCK TTY FAT32 COMMAND_DIR COMMAND_INDEX OUTPUT"
+const usage = "usage: initramfs [-validation] [-force-recovery] INIT FAULT_PROBE VFS SHELL BLOCK VIRTIO_BLOCK TTY FAT32 EXT4 COMMAND_DIR COMMAND_INDEX OUTPUT"
 
 // RecoveryCommands are the commands the archive carries for recovery mode
 // (ADR 0175): enough to look at, edit, copy, and check a volume. The shell
@@ -29,8 +29,10 @@ var RecoveryCommands = []string{"cat", "cp", "df", "echo", "edit", "fsck-fat", "
 var ValidationCommands = []string{"ps"}
 
 // The services the archive carries: everything PID 1 starts before there is
-// a volume, and the terminal and shell recovery runs.
-var services = []string{"init", "fault-probe", "vfs", "shell", "block", "virtio-blk", "tty", "fat32"}
+// a volume, the terminal and shell recovery runs, and the filesystem
+// drivers. A driver serves the VFS, so it cannot page its code in through
+// the VFS as a program on the volume does (ADR 0121, ADR 0222).
+var services = []string{"init", "fault-probe", "vfs", "shell", "block", "virtio-blk", "tty", "fat32", "ext4"}
 
 func main() {
 	validation := flag.Bool("validation", false, "add the validation probes")

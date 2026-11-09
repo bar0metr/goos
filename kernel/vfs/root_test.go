@@ -232,13 +232,13 @@ func TestRootDoesNotExcludeMountBelowIt(t *testing.T) {
 }
 
 func TestAddSessionWireVersionAndShape(t *testing.T) {
-	if ControlVersion != 10 {
+	if ControlVersion != 11 {
 		t.Fatalf("control version %d", ControlVersion)
 	}
 	plain := Authority{Confined: true}
 	plain.Grants[2] = Read
 	message, ok := AddSessionWithAuthorityRequest(5, plain, 1)
-	if !ok || message.Version != 10 {
+	if !ok || message.Version != ControlVersion {
 		t.Fatalf("encode %+v", message)
 	}
 	if _, decoded, ok := DecodeAddSessionAuthority(message); !ok || decoded != plain {
@@ -260,7 +260,7 @@ func TestAddSessionWireVersionAndShape(t *testing.T) {
 	if _, decoded, ok := DecodeAddSessionAuthority(message); !ok || decoded != rooted {
 		t.Fatalf("rooted round trip %+v %v", decoded, ok)
 	}
-	for _, version := range []uint16{9, 11, 0} {
+	for _, version := range []uint16{ControlVersion - 1, ControlVersion + 1, 0} {
 		old := message
 		old.Version = version
 		if _, _, ok := DecodeAddSessionAuthority(old); ok {

@@ -6,7 +6,9 @@ import (
 )
 
 const (
-	MaxMounts = 8
+	// MaxMounts holds the eight mounts of the boot archive and the
+	// persistent volume and one for each additional volume (ADR 0222).
+	MaxMounts = 16
 	// MaxOpenFiles is the files open at once in one namespace, a few dozen
 	// bytes each (ADR 0111).
 	MaxOpenFiles = 256
@@ -560,6 +562,15 @@ func (namespace *Namespace) ReacquireObjects(backend Backend) int {
 		file.node = node
 	}
 	return lost
+}
+
+// InvalidateBackendObjects revokes open handles without contacting a failed backend.
+func (namespace *Namespace) InvalidateBackendObjects(backend Backend) {
+	for index := range namespace.files {
+		if file := &namespace.files[index]; namespace.openOn(file, backend) {
+			file.release()
+		}
+	}
 }
 
 func (namespace *Namespace) openOn(file *openFile, backend Backend) bool {

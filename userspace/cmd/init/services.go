@@ -145,6 +145,9 @@ func startServices(ticks uint64) {
 	// the volume a check needs to itself.
 	if boot.Mode() == supervisor.ModeNormal {
 		startConfigService(ticks)
+		// Additional volumes are configuration, so they mount once the
+		// configuration service answers, and never in recovery (ADR 0222).
+		mountConfiguredVolumes()
 		startLogService(ticks)
 		// The network reads its settings, so it starts after the
 		// configuration service; nothing before the shell waits for it.

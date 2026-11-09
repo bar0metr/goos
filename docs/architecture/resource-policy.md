@@ -110,7 +110,7 @@ defect to fix or to reclassify with a reason.
 | `kernel/mm/region.MaxRegions` | 128 | Fixed region table per process; Linux allows 65530 maps. A native thread takes one entry for its stack and guard, so 63 threads hold 63 (ADR 0203). |
 | `kernel/cpu.MaxCPUs`, `kernel/sched.MaxCPUs`, `kernel/arch/amd64.MaxCPUs` | 64 | One 64-bit mask per processor set. |
 | `kernel/sched.MaxKernelTasks` | 64 | One-word mask in `Bootstrap`. |
-| `kernel/boot.MaxInitramfs` | 6 MiB | Follows the 8 MiB EFI partition the build makes. |
+| `kernel/boot.MaxInitramfs` | 12 MiB | Follows the 16 MiB EFI partition the build makes. |
 | `kernel/compat/linux.MaxOpenDirectories` | 32 | One global table for every Linux process. |
 | `kernel/compat/linux.MaxEventCounters` | 64 | One global table for every Linux process. |
 | `kernel/compat/linux.MaxIOVec` | 16 | Per-CPU copy area; Linux `IOV_MAX` is 1024. |
@@ -208,7 +208,7 @@ records.
 | `kernel/mm/pagelist.MaxFrames` | 65536 | profile | object | n/a | as above | n/a |
 | `kernel/mm/region.MaxRegions` | 128 | artifact | process | fixed table in the process; one entry a native thread | `StatusResourceExhausted`, Linux `ENOMEM` | none |
 | `kernel/boot.MaxRegions` | 256 | hardware (firmware map after merging) | global | static | boot fails | n/a |
-| `kernel/boot.MaxInitramfs` | 6 MiB | artifact | build | n/a | build and boot refuse | n/a |
+| `kernel/boot.MaxInitramfs` | 12 MiB | artifact | build | n/a | build and boot refuse | n/a |
 | `kernel/boot.MaxFramebufferWidth`, `kernel/boot.MaxFramebufferHeight`, `kernel/boot.MaxFramebufferSize` | 8192, 8192, 256 MiB | hardware | n/a | n/a | framebuffer refused, serial only | n/a |
 | `kernel/acpi.MaxProcessors` | 256 | hardware (MADT parse bound) | global | static | extra entries ignored | n/a |
 | `kernel/cpu.MaxCPUs` | 64 | artifact | global | static | processors stay offline | `CPUInfo` |
@@ -353,6 +353,11 @@ fields from `OpStatus` and the TCP fields from `OpTCPStatus`.
 | `userspace/init.MaxEvents` | 32 | profile | PID 1 | static | events wait | none |
 | `userspace/init.MaxRestarts` | 3 | policy | service | none | service stays failed | `services` |
 | `userspace/init.MaxName`, `userspace/init.MaxExecutable`, `userspace/init.MaxProcessName`, `userspace/init.MaxBootText` | 31, 127, 16, 64 | protocol | n/a | n/a | refused | n/a |
+| `userspace/ext4.MaxNameLength` | 255 | protocol (ext4 on-disk format) | n/a | n/a | lookup `KindNameTooLong`; longer stored names are corrupt | n/a |
+| `kernel/vfs.MaxVolumes`, `kernel/vfs.MaxVolumePath` | 4, 64 | profile (ADR 0222) | system | VFS volume slots, block slots, PID 1 slots: static | mount refused, no slot | `mount` listing, `services` |
+| `userspace/exec.MaxVolumeArgument` | 120 | protocol | n/a | n/a | mount request refused | n/a |
+| `userspace/fsdetect.MaxIdentity`, `userspace/fsdetect.MaxLabel` | 16, 16 | protocol (on-disk identity sizes) | n/a | n/a | n/a | n/a |
+| `userspace/volume.MaxRestarts` | 3 | policy (ADR 0222) | volume | n/a | volume offline until unmounted | log `volume offline` |
 | `userspace/exec.MaxStages` | 4 | policy | shell job | none | pipeline refused | n/a |
 | `userspace/exec.MaxPath`, `userspace/exec.MaxLaunchObject`, `userspace/exec.MaxServiceEntries`, `userspace/exec.MaxServiceIndex`, `userspace/exec.MaxServiceName` | path, slot, 11, 32, 15 | protocol | n/a | n/a | refused or paged | n/a |
 | `userspace/config.MaxEntries` | 96 | profile | `configd` | static | declaration refused | none |

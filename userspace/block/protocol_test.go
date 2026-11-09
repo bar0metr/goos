@@ -125,7 +125,7 @@ func TestControlReplacesTheDriverEndpoint(t *testing.T) {
 		t.Fatal("decoded a data request as control")
 	}
 	reply, ok := SetDriverReply(StatusIOError, 4)
-	if status, valid := DecodeSetDriverReply(reply); !ok || !valid || status != StatusIOError {
+	if status, valid := DecodeSetDriverReply(reply, 4); !ok || !valid || status != StatusIOError {
 		t.Fatalf("reply round trip: %d %v", status, valid)
 	}
 }
@@ -144,9 +144,9 @@ func TestSetFilesystemControl(t *testing.T) {
 		if !ok {
 			t.Fatalf("%+v: encode failed", selector.Kind)
 		}
-		server, decoded, valid := DecodeSetFilesystem(message)
-		if !valid || server != 12 || decoded != selector {
-			t.Fatalf("%+v: decoded %d %+v %v", selector.Kind, server, decoded.Kind, valid)
+		grant, valid := DecodeSetFilesystem(message)
+		if !valid || grant.Server != 12 || grant.Selector != selector || grant.Slot != PersistentSlot || !grant.Writable {
+			t.Fatalf("%+v: decoded %+v %v", selector.Kind, grant, valid)
 		}
 		if _, ok := DecodeSetDriver(message); ok {
 			t.Fatal("a filesystem endpoint was taken for a driver")
@@ -168,20 +168,69 @@ func TestSetFilesystemControl(t *testing.T) {
 	}
 	message, _ := SetFilesystemRequest(12, partition.Selector{Kind: partition.SelectIndex, Index: 1}, 5)
 	for name, corrupt := range map[string]func(message *ipc.Message){
-		"no endpoint":        func(message *ipc.Message) { message.HandleCount = 0 },
-		"old layout":         func(message *ipc.Message) { message.PayloadSize = 1 },
-		"old version":        func(message *ipc.Message) { message.Version = 2 },
-		"unknown kind":       func(message *ipc.Message) { message.Payload[selectorKind] = 9 },
-		"stray GUID byte":    func(message *ipc.Message) { message.Payload[selectorGUID] = 1 },
-		"name past its size": func(message *ipc.Message) { message.Payload[selectorName+3] = 'x' },
-		"name too long":      func(message *ipc.Message) { message.Payload[selectorNameSize] = partition.MaxName + 1 },
+		"no endpoint":         func(message *ipc.Message) { message.HandleCount = 0 },
+		"old layout":          func(message *ipc.Message) { message.PayloadSize = 1 },
+		"old version":         func(message *ipc.Message) { message.Version = 3 },
+		"slot past the table": func(message *ipc.Message) { message.Payload[volumeSlot] = MaxVolumeSlots },
+		"unknown flag":        func(message *ipc.Message) { message.Payload[volumeFlags] = 2 },
+		"unknown kind":        func(message *ipc.Message) { message.Payload[selectorKind] = 9 },
+		"stray GUID byte":     func(message *ipc.Message) { message.Payload[selectorGUID] = 1 },
+		"name past its size":  func(message *ipc.Message) { message.Payload[selectorName+3] = 'x' },
+		"name too long":       func(message *ipc.Message) { message.Payload[selectorNameSize] = partition.MaxName + 1 },
 	} {
 		damaged := message
 		corrupt(&damaged)
-		if _, _, ok := DecodeSetFilesystem(damaged); ok {
+		if _, ok := DecodeSetFilesystem(damaged); ok {
 			t.Errorf("decoded a request with %s", name)
 		}
 	}
+}
+
+func TestSetVolumeSlots(t *testing.T) {
+	disk, _ := partition.ParseGUID("11111111-1111-1111-1111-111111111111")
+	part, _ := partition.ParseGUID("22222222-2222-2222-2222-222222222222")
+	identity := partition.Identity{Scheme: partition.SchemeGPT, DiskGUID: disk, PartitionGUID: part,
+		Start: 1 << 20, Length: 64 << 20, Index: 2}
+	for slot := uint8(0); slot < MaxVolumeSlots; slot++ {
+		for _, writable := range []bool{false, true} {
+			grant := VolumeGrant{Server: 40, Slot: slot, Selector: partition.Selector{Kind: partition.SelectIndex, Index: 2}, Identity: identity, Writable: writable}
+			message, ok := SetVolumeRequest(grant, 7)
+			decoded, valid := DecodeSetFilesystem(message)
+			if !ok || !valid || decoded != grant {
+				t.Fatalf("slot %d writable %v: %+v %v", slot, writable, decoded, valid)
+			}
+		}
+	}
+	if _, ok := SetVolumeRequest(VolumeGrant{Server: 40, Slot: MaxVolumeSlots}, 7); ok {
+		t.Fatal("encoded a slot past the table")
+	}
+}
+
+func TestVolumeReplyPinsIdentityAndCorrelation(t *testing.T) {
+	disk, _ := partition.ParseGUID("11111111-1111-1111-1111-111111111111")
+	part, _ := partition.ParseGUID("22222222-2222-2222-2222-222222222222")
+	identity := partition.Identity{Scheme: partition.SchemeGPT, DiskGUID: disk, PartitionGUID: part,
+		Start: 1 << 20, Length: 64 << 20, Index: 2}
+	reply, ok := SetVolumeReply(StatusOK, identity, 41)
+	status, decoded, valid := DecodeSetVolumeReply(reply, 41)
+	if !ok || !valid || status != StatusOK || decoded != identity {
+		t.Fatalf("round trip: %v %v %v %+v", ok, valid, status, decoded)
+	}
+	if _, _, valid := DecodeSetVolumeReply(reply, 42); valid {
+		t.Fatal("late reply from the previous slot use was accepted")
+	}
+	if status, valid := DecodeSetDriverReply(mustControlReply(t, StatusOK, 51), 52); valid || status != 0 {
+		t.Fatal("late driver reply was accepted")
+	}
+}
+
+func mustControlReply(t *testing.T, status Status, correlation uint64) ipc.Message {
+	t.Helper()
+	reply, ok := SetDriverReply(status, correlation)
+	if !ok {
+		t.Fatal("control reply encode")
+	}
+	return reply
 }
 
 func TestBulkRequestsCarryExactlyOneObject(t *testing.T) {

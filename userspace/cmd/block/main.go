@@ -120,15 +120,14 @@ func (backend *driverBackend) Flush() blockproto.Status {
 }
 
 var (
-	backend          driverBackend
-	service          blockproto.Service
-	consoleHandle    handle.ID
-	serviceHandle    handle.ID
-	filesystemHandle handle.ID
-	driverHandle     handle.ID
-	controlHandle    handle.ID
-	controlWire      [ipc.WireMaxSize]byte
-	controlMessage   ipc.Message
+	backend        driverBackend
+	service        blockproto.Service
+	consoleHandle  handle.ID
+	serviceHandle  handle.ID
+	driverHandle   handle.ID
+	controlHandle  handle.ID
+	controlWire    [ipc.WireMaxSize]byte
+	controlMessage ipc.Message
 	// driverLive is cleared when the driver's endpoint reports its peer gone.
 	// Requests are then refused at once rather than each waiting out a deadline
 	// for a process that is not there.
@@ -146,17 +145,35 @@ var (
 	transferred bool
 )
 
-// The filesystem service reaches one volume of the device, not the device
-// (ADR 0115). The partition table is read when the device is first
-// described, and again whenever PID 1 hands over a filesystem endpoint with a
-// selector; filesystemSlice is what the selector chose, and until a volume is
-// chosen the filesystem endpoint is answered with I/O errors.
+// Each filesystem service reaches one volume of the device, not the device
+// (ADR 0115). The slots hold one endpoint each: slot 0 the persistent
+// volume's service, the others additional volumes (ADR 0222). The partition
+// table is read when the device is first described, and again whenever PID 1
+// hands over an endpoint with a selector; a slot's slice is what its selector
+// chose, and until a volume is chosen its endpoint is answered with I/O
+// errors.
+type volumeSlot struct {
+	endpoint handle.ID
+	selector partition.Selector
+	slice    blockproto.Slice
+	expected partition.Identity
+	identity partition.Identity
+	writable bool
+	chosen   bool
+	// overlap marks a selection refused because another slot holds the
+	// same bytes.
+	overlap         bool
+	identityChanged bool
+}
+
+func overlaps(first, second blockproto.Slice) bool {
+	return first.Start < second.Start+second.Length && second.Start < first.Start+first.Length
+}
+
 var (
-	scanner            partition.Scanner
-	table              partition.Table
-	filesystemSelector partition.Selector
-	filesystemSlice    blockproto.Slice
-	sliceChosen        bool
+	scanner partition.Scanner
+	table   partition.Table
+	volumes [blockproto.MaxVolumeSlots]volumeSlot
 )
 
 // deviceReader reads the device for the partition scanner, through the bulk
@@ -186,12 +203,14 @@ func (deviceReader) ReadAt(offset uint64, target []byte) bool {
 	return true
 }
 
-// chooseVolume reads the partition table and resolves the filesystem
-// service's selector against it. What it finds is logged; a device with no
-// usable volume leaves the filesystem endpoint without one, and the service
-// behind it reports its volume refused (ADR 0077).
-func chooseVolume() {
-	sliceChosen = false
+// chooseVolumes reads the partition table and resolves every slot's
+// selector against it. What it finds is logged; a slot with no usable volume
+// keeps its endpoint without one, and the service behind it reports its
+// volume refused (ADR 0077).
+func chooseVolumes() {
+	for slot := range volumes {
+		volumes[slot].chosen = false
+	}
 	status := scanner.Scan(deviceReader{}, backend.capacity, backend.blockSize, &table)
 	if status != partition.StatusOK {
 		syslog.Error("partition table unusable", syslog.Uint("status", uint64(status)))
@@ -205,17 +224,61 @@ func chooseVolume() {
 			syslog.Uint("backup-differs", boolValue(table.GPT.BackupDiffers)),
 			syslog.Uint("backup-misplaced", boolValue(table.GPT.BackupMisplaced)))
 	}
-	volume, status := partition.Select(&table, &filesystemSelector)
+	for slot := range volumes {
+		if volumes[slot].endpoint != 0 || slot == blockproto.PersistentSlot {
+			chooseVolume(slot)
+		}
+	}
+}
+
+// chooseVolume resolves one slot's selector against the scanned table.
+func chooseVolume(slot int) {
+	entry := &volumes[slot]
+	entry.chosen = false
+	entry.overlap = false
+	entry.identityChanged = false
+	entry.identity = partition.Identity{}
+	volume, status := partition.Select(&table, &entry.selector)
 	if status != partition.StatusOK {
-		syslog.Error("no volume for the filesystem", syslog.Str("table", table.Scheme.String()),
+		syslog.Error("no volume for the filesystem", syslog.Uint("slot", uint64(slot)), syslog.Str("table", table.Scheme.String()),
 			syslog.Uint("partitions", uint64(table.Count)), syslog.Uint("status", uint64(status)))
-		mark("BLOCK_VOLUME_NONE\n")
+		if slot == blockproto.PersistentSlot {
+			mark("BLOCK_VOLUME_NONE\n")
+		}
 		return
 	}
-	filesystemSlice = blockproto.Slice{Start: volume.Start, Length: volume.Length, Writable: true}
-	sliceChosen = service.Contains(filesystemSlice)
-	syslog.Info("volume chosen", syslog.Str("table", table.Scheme.String()), syslog.Uint("partition", uint64(volume.Index)),
-		syslog.Uint("start-kib", volume.Start>>10), syslog.Uint("size-mib", volume.Length>>20))
+	entry.slice = blockproto.Slice{Start: volume.Start, Length: volume.Length, Writable: entry.writable}
+	entry.chosen = service.Contains(entry.slice)
+	if slot != blockproto.PersistentSlot {
+		entry.identity = partition.IdentityOf(&table, volume)
+		if !entry.identity.Valid() || entry.expected != (partition.Identity{}) && !entry.expected.Same(entry.identity) {
+			syslog.Error("volume partition identity changed", syslog.Uint("slot", uint64(slot)))
+			entry.chosen = false
+			entry.identity = partition.Identity{}
+			entry.identityChanged = true
+			return
+		}
+	}
+	// Two slots never reach overlapping bytes: an additional volume cannot
+	// be a second view of the persistent one or of another volume, so no
+	// two filesystem services ever interpret the same blocks (ADR 0222).
+	for other := range volumes {
+		if other != slot && volumes[other].chosen && overlaps(volumes[other].slice, entry.slice) {
+			syslog.Error("volume already served by another slot", syslog.Uint("slot", uint64(slot)), syslog.Uint("other", uint64(other)))
+			entry.chosen = false
+			entry.overlap = true
+			return
+		}
+	}
+	if slot != blockproto.PersistentSlot && entry.chosen && entry.expected == (partition.Identity{}) {
+		entry.expected = entry.identity
+	}
+	syslog.Info("volume chosen", syslog.Uint("slot", uint64(slot)), syslog.Str("table", table.Scheme.String()), syslog.Uint("partition", uint64(volume.Index)),
+		syslog.Uint("start-kib", volume.Start>>10), syslog.Uint("size-mib", volume.Length>>20), syslog.Uint("writable", boolValue(entry.writable)))
+	if slot != blockproto.PersistentSlot {
+		mark("BLOCK_VOLUME_SLOT_OK\n")
+		return
+	}
 	switch table.Scheme {
 	case partition.SchemeGPT:
 		mark("BLOCK_VOLUME_GPT_OK\n")
@@ -258,7 +321,10 @@ func userspaceMain() {
 	// service. A restarted one starts with neither: PID 1 hands over the
 	// endpoint of each as it starts again after this one (ADR 0101).
 	driverHandle, driverLive = data.Handle("driver")
-	filesystemHandle, _ = data.Handle("filesystem")
+	// The boot grant is the persistent volume's endpoint; it may reach the
+	// automatically chosen volume and write to it.
+	volumes[blockproto.PersistentSlot].endpoint, _ = data.Handle("filesystem")
+	volumes[blockproto.PersistentSlot].writable = true
 	// The bulk buffer comes first: describing the device reads its
 	// partition table through it.
 	setUpBulk()
@@ -268,17 +334,24 @@ func userspaceMain() {
 	mark("BLOCK_SERVICE_OK\n")
 	syslog.Info("ready")
 	for {
-		// The filesystem endpoint is absent while the filesystem service is
-		// being restarted: waiting on a closed one would wake at once, forever.
-		endpoints := [...]handle.ID{controlHandle, serviceHandle, filesystemHandle}
-		count := len(endpoints)
-		if filesystemHandle == 0 {
-			count--
+		// A slot without an endpoint is not waited on: its filesystem service
+		// is being restarted or was unmounted, and waiting on a closed
+		// endpoint would wake at once, forever.
+		var endpoints [2 + blockproto.MaxVolumeSlots]handle.ID
+		var owners [2 + blockproto.MaxVolumeSlots]int
+		endpoints[0], endpoints[1] = controlHandle, serviceHandle
+		owners[0], owners[1] = -1, -1
+		count := 2
+		for slot := range volumes {
+			if volumes[slot].endpoint != 0 {
+				endpoints[count], owners[count] = volumes[slot].endpoint, slot
+				count++
+			}
 		}
 		// A restarted service has no driver until PID 1 hands one over,
-		// and the restarted filesystem service may ask for its volume
-		// first. Requests wait in their channels until the driver is here,
-		// so the volume is not refused for a device that is on its way.
+		// and a restarted filesystem service may ask for its volume first.
+		// Requests wait in their channels until the driver is here, so the
+		// volume is not refused for a device that is on its way.
 		if driverHandle == 0 {
 			count = 1
 		}
@@ -298,21 +371,27 @@ func userspaceMain() {
 				control()
 				continue
 			}
+			// A control above may have replaced or closed this slot's
+			// endpoint; the old one is not served.
+			slot := owners[index]
+			if slot >= 0 && volumes[slot].endpoint != endpoint {
+				continue
+			}
 			// A client that has gone is not a reason to stop serving the
 			// others: this service outlives the processes that use it. A
-			// filesystem service that has died is dropped until PID 1 hands
-			// over its replacement's endpoint.
+			// filesystem service that has died, or a volume PID 1 unmounted,
+			// frees its slot until PID 1 hands over another endpoint.
 			if status := sys.IPCReceive(endpoint, wire[:]); status != ipc.StatusOK {
-				if status == ipc.StatusPeerDied && endpoint == filesystemHandle {
-					sys.HandleClose(filesystemHandle)
-					filesystemHandle = 0
-					syslog.Warn("filesystem endpoint closed")
+				if status == ipc.StatusPeerDied && slot >= 0 {
+					sys.HandleClose(endpoint)
+					volumes[slot] = volumeSlot{}
+					syslog.Warn("filesystem endpoint closed", syslog.Uint("slot", uint64(slot)))
 				} else if status != ipc.StatusNotFound {
 					syslog.Warn("client endpoint closed")
 				}
 				continue
 			}
-			serve(endpoint)
+			serve(endpoint, slot)
 		}
 	}
 }
@@ -324,23 +403,46 @@ func control() {
 	if sys.IPCReceive(controlHandle, controlWire[:]) != ipc.StatusOK {
 		return
 	}
-	payloadSize := int(controlWire[24]) | int(controlWire[25])<<8
-	if !ipc.DecodeInto(controlWire[:ipc.WireHeaderSize+payloadSize+int(controlWire[26])*8], &controlMessage) {
+	if !ipc.DecodeBuffer(controlWire[:], &controlMessage) {
 		return
 	}
 	status := blockproto.StatusOK
-	if filesystem, selector, valid := blockproto.DecodeSetFilesystem(controlMessage); valid {
-		if filesystemHandle != 0 {
-			sys.HandleClose(filesystemHandle)
+	volumeReply := false
+	identity := partition.Identity{}
+	if grant, valid := blockproto.DecodeSetFilesystem(controlMessage); valid {
+		entry := &volumes[grant.Slot]
+		if entry.endpoint != 0 {
+			sys.HandleClose(entry.endpoint)
 		}
-		filesystemHandle, filesystemSelector = filesystem, selector
-		syslog.Info("filesystem client replaced")
-		mark("BLOCK_FILESYSTEM_REPLACED_OK\n")
+		*entry = volumeSlot{endpoint: grant.Server, selector: grant.Selector, expected: grant.Identity, writable: grant.Writable}
+		volumeReply = grant.Slot != blockproto.PersistentSlot
+		syslog.Info("filesystem client replaced", syslog.Uint("slot", uint64(grant.Slot)))
+		if grant.Slot == blockproto.PersistentSlot {
+			mark("BLOCK_FILESYSTEM_REPLACED_OK\n")
+		}
 		// The volume is chosen again, from the table as it is now; a
 		// restarted service without a driver chooses once it describes
 		// the device.
 		if backend.capacity != 0 {
-			chooseVolume()
+			if partition.StatusOK == scanner.Scan(deviceReader{}, backend.capacity, backend.blockSize, &table) {
+				chooseVolume(int(grant.Slot))
+			}
+			// An additional volume learns at once that its selector found
+			// nothing usable; the persistent one reports through its
+			// service as before (ADR 0077).
+			if grant.Slot != blockproto.PersistentSlot && !entry.chosen {
+				status = blockproto.StatusOutOfRange
+				if entry.identityChanged {
+					status = blockproto.StatusStale
+				} else if entry.overlap {
+					status = blockproto.StatusInvalidArgument
+				}
+			}
+			if entry.chosen {
+				identity = entry.identity
+			}
+		} else if volumeReply {
+			status = blockproto.StatusIOError
 		}
 	} else if replacement, valid := blockproto.DecodeSetDriver(controlMessage); !valid {
 		status = blockproto.StatusInvalidArgument
@@ -349,6 +451,19 @@ func control() {
 			sys.HandleClose(driverHandle)
 		}
 		driverHandle, driverLive = replacement, true
+		// Geometry and partition data belonged to the old device endpoint.
+		// The first request to the replacement describes and scans it again;
+		// additional slots retain only their expected physical identities.
+		backend = driverBackend{}
+		service = blockproto.Service{}
+		table = partition.Table{}
+		for slot := range volumes {
+			volumes[slot].chosen = false
+			volumes[slot].identity = partition.Identity{}
+			volumes[slot].slice = blockproto.Slice{}
+			volumes[slot].overlap = false
+			volumes[slot].identityChanged = false
+		}
 		// The endpoint is installed without probing it. PID 1 hands it over
 		// before the replacement driver exists, so a probe here would time out
 		// against a process that has not started; the next real request is what
@@ -356,16 +471,24 @@ func control() {
 		syslog.Info("driver replaced")
 		mark("BLOCK_DRIVER_REPLACED_OK\n")
 	}
-	if message, ok := blockproto.SetDriverReply(status, controlMessage.Correlation); ok {
+	var message ipc.Message
+	var ok bool
+	if volumeReply {
+		message, ok = blockproto.SetVolumeReply(status, identity, controlMessage.Correlation)
+	} else {
+		message, ok = blockproto.SetDriverReply(status, controlMessage.Correlation)
+	}
+	if ok {
 		if size, encoded := ipc.EncodeFrom(&message, controlWire[:]); encoded {
 			sys.IPCSend(controlHandle, controlWire[:size])
 		}
 	}
 }
 
-func serve(endpoint handle.ID) {
-	payloadSize := int(wire[24]) | int(wire[25])<<8
-	valid := ipc.DecodeInto(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8], &requestMessage)
+// serve answers one request. slot is the volume slot the endpoint belongs
+// to, or -1 for a whole-device client.
+func serve(endpoint handle.ID, slot int) {
+	valid := ipc.DecodeBuffer(wire[:], &requestMessage)
 	if !valid {
 		return
 	}
@@ -384,10 +507,10 @@ func serve(endpoint handle.ID) {
 	transferred = false
 	var reply blockproto.Reply
 	switch {
-	case endpoint != filesystemHandle:
+	case slot < 0:
 		reply = service.Dispatch(request)
-	case sliceChosen:
-		reply = service.DispatchIn(request, filesystemSlice)
+	case volumes[slot].chosen:
+		reply = service.DispatchIn(request, volumes[slot].slice)
 	default:
 		reply = blockproto.Reply{Operation: request.Operation, Status: blockproto.StatusIOError}
 	}
@@ -433,7 +556,7 @@ func describeDevice() bool {
 	}
 	backend.capacity, backend.blockSize = info.Capacity, info.BlockSize
 	if service, ok = blockproto.NewService(&backend); ok {
-		chooseVolume()
+		chooseVolumes()
 	}
 	return ok
 }
@@ -458,8 +581,7 @@ func exchange(request blockproto.Request) (blockproto.Reply, bool) {
 		}
 		return blockproto.Reply{}, false
 	}
-	payloadSize := int(driverWire[24]) | int(driverWire[25])<<8
-	valid := ipc.DecodeInto(driverWire[:ipc.WireHeaderSize+payloadSize+int(driverWire[26])*8], &driverReply)
+	valid := ipc.DecodeBuffer(driverWire[:], &driverReply)
 	reply, validReply := blockproto.DecodeReplyFrom(&driverReply)
 	return reply, valid && validReply && driverReply.Correlation == correlation
 }

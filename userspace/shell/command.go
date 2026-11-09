@@ -112,6 +112,16 @@ func IsBuiltin(name []byte) bool {
 	return found
 }
 
+// IsBuiltinCall reports whether name with arguments arguments runs as a
+// builtin. mount without arguments lists the mount table, which the mount
+// program does; with arguments it asks PID 1 to mount a volume.
+func IsBuiltinCall(name []byte, arguments int) bool {
+	if equal(name, "mount") && arguments == 0 {
+		return false
+	}
+	return IsBuiltin(name)
+}
+
 // SplitBackground removes an unquoted trailing '&' that asks for the line to
 // run as a background job.
 func SplitBackground(line []byte) ([]byte, bool) {

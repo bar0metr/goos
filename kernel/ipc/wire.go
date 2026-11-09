@@ -51,6 +51,23 @@ func Decode(data []byte) (Message, bool) {
 	return message, ok
 }
 
+// DecodeBuffer decodes a message from the start of a receive buffer.
+func DecodeBuffer(data []byte, message *Message) bool {
+	if len(data) < WireHeaderSize {
+		return false
+	}
+	payload := int(binary.LittleEndian.Uint16(data[24:]))
+	handles := int(data[26])
+	if payload > MaxPayload || handles > MaxAttachedHandles {
+		return false
+	}
+	size := WireHeaderSize + payload + handles*8
+	if size > len(data) {
+		return false
+	}
+	return DecodeInto(data[:size], message)
+}
+
 func DecodeInto(data []byte, message *Message) bool {
 	if message == nil {
 		return false

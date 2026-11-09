@@ -22,6 +22,9 @@ type ownedVFS[T clockTransport, P requestPaths] struct {
 	// lost is the attachment generation of the latest filesystem
 	// replacement notice the control endpoint delivered, or zero.
 	lost uint64
+	// volumesLost is the generation of the latest replacement notice of
+	// each additional volume slot, indexed by slot (ADR 0222).
+	volumesLost [vfs.MaxVolumes + 1]uint64
 }
 
 func (s *ownedVFS[T, P]) callOn(channel handle.ID, request vfs.Request, attached handle.ID, correlation, budget uint64) (vfs.Reply, bool) {
@@ -200,8 +203,28 @@ func (s *ownedVFS[T, P]) noteLost() bool {
 	if ok {
 		s.lost = generation
 		s.incoming = ipc.Message{}
+		return true
+	}
+	slot, generation, ok := vfs.DecodeVolumeLostNotice(&s.incoming)
+	if ok {
+		s.volumesLost[slot] = generation
+		s.incoming = ipc.Message{}
 	}
 	return ok
+}
+
+// takeVolumeLost returns and clears one additional volume's replacement
+// notice.
+func (s *ownedVFS[T, P]) takeVolumeLost() (uint8, uint64, bool) {
+	s.hold()
+	defer s.end()
+	for slot := uint8(1); slot <= vfs.MaxVolumes; slot++ {
+		if generation := s.volumesLost[slot]; generation != 0 {
+			s.volumesLost[slot] = 0
+			return slot, generation, true
+		}
+	}
+	return 0, 0, false
 }
 
 // pollControlOn drains, without waiting, the messages a control endpoint

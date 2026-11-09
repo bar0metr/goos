@@ -87,13 +87,14 @@ func renewFilesystemChannels(spec *supervisor.LaunchSpec) bool {
 		return false
 	}
 	correlation++
+	requestCorrelation := correlation
 	request, ok := blockproto.SetFilesystemRequest(handle.ID(toBlock[1]), filesystemVolume, correlation)
 	if !ok || !sendMessage(uint64(blockControl[0]), request) {
 		closePair(toBlock)
 		return false
 	}
 	reply, status := receive(uint64(blockControl[0]), vfsSessionDeadline)
-	blockStatus, valid := blockproto.DecodeSetDriverReply(reply)
+	blockStatus, valid := blockproto.DecodeSetDriverReply(reply, requestCorrelation)
 	if status != ipc.StatusOK || !valid || blockStatus != blockproto.StatusOK {
 		sys.HandleClose(handle.ID(toBlock[0]))
 		syslog.Error("block service refused the filesystem service")
@@ -153,6 +154,7 @@ func pollFilesystemNotices() bool {
 	if generation, lost := vfsRecoveryRequests.FilesystemLost(); lost {
 		replaceFilesystem(generation)
 	}
+	pollVolumeNotices()
 	return usable
 }
 

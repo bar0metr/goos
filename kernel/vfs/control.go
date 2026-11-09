@@ -11,8 +11,9 @@ const (
 	ControlProtocolID = uint64(0x4756465343544c31)
 	// Version 9 adds the attach generation and fence to SetFilesystem and
 	// the notice that a filesystem service must be replaced. Version 10 adds an
-	// optional rooted path to AddSession authority.
-	ControlVersion      = uint16(10)
+	// optional rooted path to AddSession authority. Version 11 adds the
+	// additional volume controls (ADR 0222).
+	ControlVersion      = uint16(11)
 	operationAddSession = byte(1)
 	operationSync       = byte(2)
 	// operationSetFilesystem hands the service the client end of a channel to
@@ -34,7 +35,144 @@ const (
 	// service it attached last left an exchange unanswered.
 	operationFilesystemLost = byte(9)
 	operationReplaceControl = byte(10)
+	// operationAttachVolume hands the VFS an additional volume's filesystem
+	// service and file cache; operationDetachVolume unmounts it; and
+	// operationVolumeLost is the VFS telling PID 1 that one stopped
+	// answering (ADR 0222).
+	operationAttachVolume = byte(11)
+	operationDetachVolume = byte(12)
+	operationVolumeLost   = byte(13)
 )
+
+// MaxVolumes is the number of additional volume slots, numbered from 1. Slot
+// 0 is the persistent volume, attached with SetFilesystem.
+const MaxVolumes = 4
+
+// MaxVolumePath bounds the path an additional volume is mounted at.
+const MaxVolumePath = 64
+
+// VolumeRoot is the directory additional volumes are mounted below. A mount
+// path is VolumeRoot followed by one name, so an additional volume can never
+// cover /system, /bootstrap, /persist or another volume.
+const VolumeRoot = "/mnt/"
+
+// ValidVolumePath reports whether path may hold an additional volume: the
+// volume root, then one name that is not "." or "..", with no slash after
+// it.
+func ValidVolumePath(path []byte) bool {
+	if len(path) <= len(VolumeRoot) || len(path) > MaxVolumePath || string(path[:len(VolumeRoot)]) != VolumeRoot {
+		return false
+	}
+	name := path[len(VolumeRoot):]
+	if string(name) == "." || string(name) == ".." {
+		return false
+	}
+	for _, value := range name {
+		if value == '/' || value == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// VolumeAttach is what PID 1 hands the VFS with an additional volume: the
+// slot, the client end of the channel to its filesystem service, the file
+// cache the two share, the launch generation, and the mount path.
+type VolumeAttach struct {
+	Slot       uint8
+	Client     handle.ID
+	Cache      handle.ID
+	Generation uint64
+	Path       [MaxVolumePath]byte
+	PathSize   uint8
+}
+
+// SetPath stores path, which must be absolute, not the root, and short
+// enough.
+func (attach *VolumeAttach) SetPath(path []byte) bool {
+	if len(path) < 2 || len(path) > MaxVolumePath || path[0] != '/' {
+		return false
+	}
+	attach.PathSize = uint8(copy(attach.Path[:], path))
+	return true
+}
+
+func validVolumeSlot(slot uint8) bool { return slot >= 1 && slot <= MaxVolumes }
+
+const volumeHeader = 11 // operation, slot, generation, path size
+
+func AttachVolumeRequest(attach VolumeAttach, correlation uint64) (ipc.Message, bool) {
+	if !validVolumeSlot(attach.Slot) || attach.Client == 0 || attach.Cache == 0 || attach.Generation == 0 || correlation == 0 ||
+		attach.PathSize < 2 || attach.PathSize > MaxVolumePath || attach.Path[0] != '/' {
+		return ipc.Message{}, false
+	}
+	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest,
+		Correlation: correlation, PayloadSize: uint16(volumeHeader) + uint16(attach.PathSize),
+		Handles: [ipc.MaxAttachedHandles]handle.ID{attach.Client, attach.Cache}, HandleCount: 2}
+	message.Payload[0], message.Payload[1] = operationAttachVolume, attach.Slot
+	binary.LittleEndian.PutUint64(message.Payload[2:], attach.Generation)
+	message.Payload[10] = attach.PathSize
+	copy(message.Payload[volumeHeader:], attach.Path[:attach.PathSize])
+	return message, true
+}
+
+func DecodeAttachVolume(message ipc.Message) (VolumeAttach, bool) {
+	var attach VolumeAttach
+	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindRequest || message.Correlation == 0 ||
+		message.PayloadSize < volumeHeader || message.Payload[0] != operationAttachVolume || message.HandleCount != 2 {
+		return attach, false
+	}
+	attach.Slot, attach.PathSize = message.Payload[1], message.Payload[10]
+	attach.Generation = binary.LittleEndian.Uint64(message.Payload[2:])
+	attach.Client, attach.Cache = message.Handles[0], message.Handles[1]
+	if int(message.PayloadSize) != volumeHeader+int(attach.PathSize) || !attach.SetPath(message.Payload[volumeHeader:message.PayloadSize]) {
+		return VolumeAttach{}, false
+	}
+	return attach, validVolumeSlot(attach.Slot) && attach.Generation != 0 && attach.Client != 0 && attach.Cache != 0
+}
+
+// DetachVolumeRequest asks the VFS to flush and unmount the volume of slot,
+// which must still be the attachment of generation.
+func DetachVolumeRequest(slot uint8, generation uint64, correlation uint64) (ipc.Message, bool) {
+	if !validVolumeSlot(slot) || generation == 0 || correlation == 0 {
+		return ipc.Message{}, false
+	}
+	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: 10}
+	message.Payload[0], message.Payload[1] = operationDetachVolume, slot
+	binary.LittleEndian.PutUint64(message.Payload[2:], generation)
+	return message, true
+}
+
+func DecodeDetachVolume(message ipc.Message) (uint8, uint64, bool) {
+	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindRequest || message.Correlation == 0 ||
+		message.PayloadSize != 10 || message.Payload[0] != operationDetachVolume || message.HandleCount != 0 {
+		return 0, 0, false
+	}
+	slot, generation := message.Payload[1], binary.LittleEndian.Uint64(message.Payload[2:])
+	return slot, generation, validVolumeSlot(slot) && generation != 0
+}
+
+// VolumeLostNotice tells PID 1 that the filesystem service of an additional
+// volume left an exchange unanswered. The VFS has detached it; its mount
+// answers errors until PID 1 attaches a replacement or unmounts it.
+func VolumeLostNotice(slot uint8, generation uint64) (ipc.Message, bool) {
+	if !validVolumeSlot(slot) || generation == 0 {
+		return ipc.Message{}, false
+	}
+	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindNotification, PayloadSize: 10}
+	message.Payload[0], message.Payload[1] = operationVolumeLost, slot
+	binary.LittleEndian.PutUint64(message.Payload[2:], generation)
+	return message, true
+}
+
+func DecodeVolumeLostNotice(message *ipc.Message) (uint8, uint64, bool) {
+	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindNotification ||
+		message.Correlation != 0 || message.PayloadSize != 10 || message.Payload[0] != operationVolumeLost || message.HandleCount != 0 {
+		return 0, 0, false
+	}
+	slot, generation := message.Payload[1], binary.LittleEndian.Uint64(message.Payload[2:])
+	return slot, generation, validVolumeSlot(slot) && generation != 0
+}
 
 // SessionNotice hands a client of a restarted VFS the client end of a new
 // session. It is a notification: PID 1 sends it over a channel the client

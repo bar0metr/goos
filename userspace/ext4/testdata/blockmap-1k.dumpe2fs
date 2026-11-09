@@ -1,0 +1,50 @@
+Filesystem volume name:   blockmap-1k
+Last mounted on:          <not available>
+Filesystem UUID:          6f6f7367-6578-7434-0000-000000000001
+Filesystem magic number:  0xEF53
+Filesystem revision #:    1 (dynamic)
+Filesystem features:      has_journal ext_attr resize_inode dir_index filetype sparse_super large_file
+Filesystem flags:         signed_directory_hash 
+Default mount options:    user_xattr acl
+Filesystem state:         clean
+Errors behavior:          Continue
+Filesystem OS type:       Linux
+Inode count:              4096
+Block count:              16384
+Reserved block count:     819
+Overhead clusters:        3350
+Free blocks:              12097
+Free inodes:              3781
+First block:              1
+Block size:               1024
+Fragment size:            1024
+Reserved GDT blocks:      255
+Blocks per group:         2048
+Fragments per group:      2048
+Inodes per group:         512
+Inode blocks per group:   128
+Filesystem created:       Thu Jan  1 00:00:00 2026
+Last mount time:          n/a
+Last write time:          Sun Nov  8 21:12:08 2026
+Mount count:              0
+Maximum mount count:      -1
+Last checked:             Sun Nov  8 21:12:08 2026
+Check interval:           0 (<none>)
+Reserved blocks uid:      0 (user root)
+Reserved blocks gid:      0 (group root)
+First inode:              11
+Inode size:               256
+Required extra isize:     32
+Desired extra isize:      32
+Journal inode:            8
+Default directory hash:   half_md4
+Directory Hash Seed:      6f6f7367-6578-7434-0000-0000000000aa
+Journal backup:           inode blocks
+Journal features:         (none)
+Total journal size:       1024k
+Total journal blocks:     1024
+Max transaction length:   1024
+Fast commit length:       0
+Journal sequence:         0x00000001
+Journal start:            0
+
