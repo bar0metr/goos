@@ -69,13 +69,20 @@ func ext4Probe(identity byte) fsdetect.Result {
 	return result
 }
 
+func physical(identity byte) partition.Identity {
+	var disk, part partition.GUID
+	disk[0], part[0] = 1, identity
+	return partition.Identity{Scheme: partition.SchemeGPT, DiskGUID: disk, PartitionGUID: part,
+		Start: 1 << 20, Length: 64 << 20, Index: 2}
+}
+
 func TestMountLifecycle(t *testing.T) {
 	var table Table
 	slot, status := table.Reserve(request(t, "auto", "part:2", "/mnt/a"))
 	if status != OK || slot != 1 {
 		t.Fatalf("reserve: %d %v", slot, status)
 	}
-	if status := table.Probed(slot, ext4Probe(1)); status != OK || table.Slot(slot).Driver.Name != "ext4" {
+	if status := table.Probed(slot, ext4Probe(1), physical(1)); status != OK || table.Slot(slot).Driver.Name != "ext4" {
 		t.Fatalf("probe: %v", status)
 	}
 	generation := table.Launching(slot)
@@ -90,7 +97,7 @@ func TestMountLifecycle(t *testing.T) {
 		if !table.Lost(slot, generation) {
 			t.Fatalf("restart %d refused", restart)
 		}
-		if status := table.Probed(slot, ext4Probe(1)); status != OK {
+		if status := table.Probed(slot, ext4Probe(1), physical(1)); status != OK {
 			t.Fatalf("reprobe: %v", status)
 		}
 		generation = table.Launching(slot)
@@ -110,15 +117,17 @@ func TestMountLifecycle(t *testing.T) {
 func TestReplacementMustFindTheSameVolume(t *testing.T) {
 	var table Table
 	slot, _ := table.Reserve(request(t, "auto", "name:data", "/mnt/a"))
-	table.Probed(slot, ext4Probe(1))
+	table.Probed(slot, ext4Probe(1), physical(1))
 	generation := table.Launching(slot)
 	table.Attached(slot, generation, vfs.StatusOK)
 	table.Lost(slot, generation)
-	if status := table.Probed(slot, ext4Probe(2)); status != TypeMismatch || table.Slot(slot).State != Offline {
-		t.Fatalf("another volume accepted: %v", status)
+	// A replacement image can copy the ext4 UUID. Its partition identity must
+	// still keep it out of the old mount.
+	if status := table.Probed(slot, ext4Probe(1), physical(2)); status != IdentityMismatch || table.Slot(slot).State != Offline {
+		t.Fatalf("replacement image accepted: %v", status)
 	}
 	fat := fsdetect.Result{Status: fsdetect.Recognized, Type: ramfs.FilesystemFAT32, IdentitySize: 4}
-	if status := table.Probed(slot, fat); status != TypeMismatch {
+	if status := table.Probed(slot, fat, physical(1)); status != TypeMismatch {
 		t.Fatalf("another type accepted: %v", status)
 	}
 }
@@ -148,13 +157,13 @@ func TestReserveConflicts(t *testing.T) {
 func TestProbeRefusals(t *testing.T) {
 	var table Table
 	slot, _ := table.Reserve(request(t, "fat32", "part:2", "/mnt/a"))
-	if status := table.Probed(slot, ext4Probe(1)); status != TypeMismatch {
+	if status := table.Probed(slot, ext4Probe(1), physical(1)); status != TypeMismatch {
 		t.Fatalf("type forced: %v", status)
 	}
-	if status := table.Probed(slot, fsdetect.Result{Status: fsdetect.Ambiguous}); status != Ambiguous {
+	if status := table.Probed(slot, fsdetect.Result{Status: fsdetect.Ambiguous}, physical(1)); status != Ambiguous {
 		t.Fatalf("ambiguous: %v", status)
 	}
-	if status := table.Probed(slot, fsdetect.Result{Status: fsdetect.Unknown}); status != Unrecognized {
+	if status := table.Probed(slot, fsdetect.Result{Status: fsdetect.Unknown}, physical(1)); status != Unrecognized {
 		t.Fatalf("unknown: %v", status)
 	}
 	generation := table.Launching(slot)

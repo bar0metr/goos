@@ -156,11 +156,14 @@ type volumeSlot struct {
 	endpoint handle.ID
 	selector partition.Selector
 	slice    blockproto.Slice
+	expected partition.Identity
+	identity partition.Identity
 	writable bool
 	chosen   bool
 	// overlap marks a selection refused because another slot holds the
 	// same bytes.
-	overlap bool
+	overlap         bool
+	identityChanged bool
 }
 
 func overlaps(first, second blockproto.Slice) bool {
@@ -232,6 +235,9 @@ func chooseVolumes() {
 func chooseVolume(slot int) {
 	entry := &volumes[slot]
 	entry.chosen = false
+	entry.overlap = false
+	entry.identityChanged = false
+	entry.identity = partition.Identity{}
 	volume, status := partition.Select(&table, &entry.selector)
 	if status != partition.StatusOK {
 		syslog.Error("no volume for the filesystem", syslog.Uint("slot", uint64(slot)), syslog.Str("table", table.Scheme.String()),
@@ -243,6 +249,16 @@ func chooseVolume(slot int) {
 	}
 	entry.slice = blockproto.Slice{Start: volume.Start, Length: volume.Length, Writable: entry.writable}
 	entry.chosen = service.Contains(entry.slice)
+	if slot != blockproto.PersistentSlot {
+		entry.identity = partition.IdentityOf(&table, volume)
+		if !entry.identity.Valid() || entry.expected != (partition.Identity{}) && !entry.expected.Same(entry.identity) {
+			syslog.Error("volume partition identity changed", syslog.Uint("slot", uint64(slot)))
+			entry.chosen = false
+			entry.identity = partition.Identity{}
+			entry.identityChanged = true
+			return
+		}
+	}
 	// Two slots never reach overlapping bytes: an additional volume cannot
 	// be a second view of the persistent one or of another volume, so no
 	// two filesystem services ever interpret the same blocks (ADR 0222).
@@ -253,6 +269,9 @@ func chooseVolume(slot int) {
 			entry.overlap = true
 			return
 		}
+	}
+	if slot != blockproto.PersistentSlot && entry.chosen && entry.expected == (partition.Identity{}) {
+		entry.expected = entry.identity
 	}
 	syslog.Info("volume chosen", syslog.Uint("slot", uint64(slot)), syslog.Str("table", table.Scheme.String()), syslog.Uint("partition", uint64(volume.Index)),
 		syslog.Uint("start-kib", volume.Start>>10), syslog.Uint("size-mib", volume.Length>>20), syslog.Uint("writable", boolValue(entry.writable)))
@@ -384,17 +403,19 @@ func control() {
 	if sys.IPCReceive(controlHandle, controlWire[:]) != ipc.StatusOK {
 		return
 	}
-	payloadSize := int(controlWire[24]) | int(controlWire[25])<<8
-	if !ipc.DecodeInto(controlWire[:ipc.WireHeaderSize+payloadSize+int(controlWire[26])*8], &controlMessage) {
+	if !ipc.DecodeBuffer(controlWire[:], &controlMessage) {
 		return
 	}
 	status := blockproto.StatusOK
+	volumeReply := false
+	identity := partition.Identity{}
 	if grant, valid := blockproto.DecodeSetFilesystem(controlMessage); valid {
 		entry := &volumes[grant.Slot]
 		if entry.endpoint != 0 {
 			sys.HandleClose(entry.endpoint)
 		}
-		*entry = volumeSlot{endpoint: grant.Server, selector: grant.Selector, writable: grant.Writable}
+		*entry = volumeSlot{endpoint: grant.Server, selector: grant.Selector, expected: grant.Identity, writable: grant.Writable}
+		volumeReply = grant.Slot != blockproto.PersistentSlot
 		syslog.Info("filesystem client replaced", syslog.Uint("slot", uint64(grant.Slot)))
 		if grant.Slot == blockproto.PersistentSlot {
 			mark("BLOCK_FILESYSTEM_REPLACED_OK\n")
@@ -411,10 +432,17 @@ func control() {
 			// service as before (ADR 0077).
 			if grant.Slot != blockproto.PersistentSlot && !entry.chosen {
 				status = blockproto.StatusOutOfRange
-				if entry.overlap {
+				if entry.identityChanged {
+					status = blockproto.StatusStale
+				} else if entry.overlap {
 					status = blockproto.StatusInvalidArgument
 				}
 			}
+			if entry.chosen {
+				identity = entry.identity
+			}
+		} else if volumeReply {
+			status = blockproto.StatusIOError
 		}
 	} else if replacement, valid := blockproto.DecodeSetDriver(controlMessage); !valid {
 		status = blockproto.StatusInvalidArgument
@@ -423,6 +451,19 @@ func control() {
 			sys.HandleClose(driverHandle)
 		}
 		driverHandle, driverLive = replacement, true
+		// Geometry and partition data belonged to the old device endpoint.
+		// The first request to the replacement describes and scans it again;
+		// additional slots retain only their expected physical identities.
+		backend = driverBackend{}
+		service = blockproto.Service{}
+		table = partition.Table{}
+		for slot := range volumes {
+			volumes[slot].chosen = false
+			volumes[slot].identity = partition.Identity{}
+			volumes[slot].slice = blockproto.Slice{}
+			volumes[slot].overlap = false
+			volumes[slot].identityChanged = false
+		}
 		// The endpoint is installed without probing it. PID 1 hands it over
 		// before the replacement driver exists, so a probe here would time out
 		// against a process that has not started; the next real request is what
@@ -430,7 +471,14 @@ func control() {
 		syslog.Info("driver replaced")
 		mark("BLOCK_DRIVER_REPLACED_OK\n")
 	}
-	if message, ok := blockproto.SetDriverReply(status, controlMessage.Correlation); ok {
+	var message ipc.Message
+	var ok bool
+	if volumeReply {
+		message, ok = blockproto.SetVolumeReply(status, identity, controlMessage.Correlation)
+	} else {
+		message, ok = blockproto.SetDriverReply(status, controlMessage.Correlation)
+	}
+	if ok {
 		if size, encoded := ipc.EncodeFrom(&message, controlWire[:]); encoded {
 			sys.IPCSend(controlHandle, controlWire[:size])
 		}
@@ -440,8 +488,7 @@ func control() {
 // serve answers one request. slot is the volume slot the endpoint belongs
 // to, or -1 for a whole-device client.
 func serve(endpoint handle.ID, slot int) {
-	payloadSize := int(wire[24]) | int(wire[25])<<8
-	valid := ipc.DecodeInto(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8], &requestMessage)
+	valid := ipc.DecodeBuffer(wire[:], &requestMessage)
 	if !valid {
 		return
 	}
@@ -534,8 +581,7 @@ func exchange(request blockproto.Request) (blockproto.Reply, bool) {
 		}
 		return blockproto.Reply{}, false
 	}
-	payloadSize := int(driverWire[24]) | int(driverWire[25])<<8
-	valid := ipc.DecodeInto(driverWire[:ipc.WireHeaderSize+payloadSize+int(driverWire[26])*8], &driverReply)
+	valid := ipc.DecodeBuffer(driverWire[:], &driverReply)
 	reply, validReply := blockproto.DecodeReplyFrom(&driverReply)
 	return reply, valid && validReply && driverReply.Correlation == correlation
 }

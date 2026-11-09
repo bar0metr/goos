@@ -22,6 +22,7 @@ import (
 	"goos/userspace/fsproto"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
+	"goos/userspace/partition"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/volume"
 )
@@ -105,8 +106,7 @@ func blockCall(endpoint handle.ID, request blockproto.Request) (blockproto.Reply
 	if sys.IPCWaitReceive(endpoint, volumeWire[:], blockproto.RequestDeadline) != kcall.StatusOK {
 		return blockproto.Reply{}, false
 	}
-	payloadSize := int(volumeWire[24]) | int(volumeWire[25])<<8
-	if !ipc.DecodeInto(volumeWire[:ipc.WireHeaderSize+payloadSize+int(volumeWire[26])*8], &volumeMessage) {
+	if !ipc.DecodeBuffer(volumeWire[:], &volumeMessage) {
 		return blockproto.Reply{}, false
 	}
 	reply, valid := blockproto.DecodeReplyFrom(&volumeMessage)
@@ -116,40 +116,45 @@ func blockCall(endpoint handle.ID, request blockproto.Request) (blockproto.Reply
 // probeVolume asks the block service for a read-only endpoint on the slot's
 // partition and reads the probe window through it. The endpoint is kept for
 // the instance: the driver gets no more than the probe had.
-func probeVolume(slot uint8) (fsdetect.Result, volume.Status) {
+func probeVolume(slot uint8) (fsdetect.Result, partition.Identity, volume.Status) {
 	runtime := runtimeOf(slot)
 	closeHandle(&runtime.blockClient)
 	var pair [2]uint64
 	if !createChannel(&pair) {
-		return fsdetect.Result{}, volume.Failed
+		return fsdetect.Result{}, partition.Identity{}, volume.Failed
 	}
 	correlation++
-	grant := blockproto.VolumeGrant{Server: handle.ID(pair[1]), Slot: slot, Selector: volumes.Slot(slot).Request.Source}
+	requestCorrelation := correlation
+	grant := blockproto.VolumeGrant{Server: handle.ID(pair[1]), Slot: slot, Selector: volumes.Slot(slot).Request.Source,
+		Identity: volumes.Slot(slot).Physical}
 	request, ok := blockproto.SetVolumeRequest(grant, correlation)
 	if !ok || !sendMessage(uint64(blockControl[0]), request) {
 		closePair(pair)
-		return fsdetect.Result{}, volume.Failed
+		return fsdetect.Result{}, partition.Identity{}, volume.Failed
 	}
 	reply, received := receive(uint64(blockControl[0]), vfsSessionDeadline)
-	status, valid := blockproto.DecodeSetDriverReply(reply)
+	status, physical, valid := blockproto.DecodeSetVolumeReply(reply, requestCorrelation)
 	if received != ipc.StatusOK || !valid {
 		sys.HandleClose(handle.ID(pair[0]))
-		return fsdetect.Result{}, volume.Failed
+		return fsdetect.Result{}, partition.Identity{}, volume.Failed
 	}
 	client := handle.ID(pair[0])
 	switch status {
 	case blockproto.StatusOK:
+	case blockproto.StatusStale:
+		sys.HandleClose(client)
+		return fsdetect.Result{}, partition.Identity{}, volume.IdentityMismatch
 	case blockproto.StatusInvalidArgument:
 		sys.HandleClose(client)
-		return fsdetect.Result{}, volume.PartitionInUse
+		return fsdetect.Result{}, partition.Identity{}, volume.PartitionInUse
 	default:
 		sys.HandleClose(client)
-		return fsdetect.Result{}, volume.NoPartition
+		return fsdetect.Result{}, partition.Identity{}, volume.NoPartition
 	}
 	info, ok := blockCall(client, blockproto.Request{Operation: blockproto.OperationInfo})
 	if !ok || info.Status != blockproto.StatusOK {
 		sys.HandleClose(client)
-		return fsdetect.Result{}, volume.NoPartition
+		return fsdetect.Result{}, partition.Identity{}, volume.NoPartition
 	}
 	window := volumeWindow[:min(uint64(len(volumeWindow)), info.Capacity)]
 	for done := 0; done < len(window); {
@@ -157,13 +162,13 @@ func probeVolume(slot uint8) (fsdetect.Result, volume.Status) {
 		read, ok := blockCall(client, blockproto.Request{Operation: blockproto.OperationRead, Offset: uint64(done), Length: uint32(chunk)})
 		if !ok || read.Status != blockproto.StatusOK || len(read.Data) != chunk {
 			sys.HandleClose(client)
-			return fsdetect.Result{}, volume.Failed
+			return fsdetect.Result{}, partition.Identity{}, volume.Failed
 		}
 		copy(window[done:], read.Data)
 		done += chunk
 	}
 	runtime.blockClient = client
-	return fsdetect.Probe(window, info.Capacity), volume.OK
+	return fsdetect.Probe(window, info.Capacity), physical, volume.OK
 }
 
 // prepareVolumeLaunch gets a slot ready to launch: a probed block endpoint,
@@ -175,9 +180,9 @@ func prepareVolumeLaunch(slot uint8) volume.Status {
 		return volume.OK
 	}
 	if runtime.blockClient == 0 {
-		result, status := probeVolume(slot)
+		result, physical, status := probeVolume(slot)
 		if status == volume.OK {
-			status = volumes.Probed(slot, result)
+			status = volumes.Probed(slot, result, physical)
 		}
 		if status != volume.OK {
 			closeHandle(&runtime.blockClient)

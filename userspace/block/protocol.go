@@ -58,6 +58,9 @@ const (
 	StatusOutOfRange
 	StatusReadOnly
 	StatusIOError
+	// StatusStale is a control-plane refusal: a resolved partition lacks the
+	// pinned identity or no longer matches it.
+	StatusStale
 )
 
 type Request struct {
@@ -226,8 +229,9 @@ func zero(value []byte) bool {
 const (
 	ControlProtocolID = uint64(0x47424c4b43)
 	// Version 3 adds the volume selector to SetFilesystem (ADR 0115);
-	// version 4 adds the volume slot and the writable flag (ADR 0222).
-	ControlVersion     = uint16(4)
+	// version 4 adds the volume slot and writable flag; version 5 pins the
+	// resolved partition identity across additional-volume restarts (ADR 0222).
+	ControlVersion     = uint16(5)
 	operationSetDriver = byte(1)
 	// operationSetFilesystem replaces the endpoint the filesystem service
 	// reaches this service over, after that service restarts (ADR 0096).
@@ -246,7 +250,17 @@ const (
 	selectorSize     = selectorName + partition.MaxName
 	volumeSlot       = selectorSize
 	volumeFlags      = selectorSize + 1
-	volumePayload    = selectorSize + 2
+	identityScheme   = selectorSize + 2
+	identityDiskGUID = identityScheme + 1
+	identityPartGUID = identityDiskGUID + 16
+	identityStart    = identityPartGUID + 16
+	identityLength   = identityStart + 8
+	identityIndex    = identityLength + 8
+	identityMBRSig   = identityIndex + 4
+	identityMBRType  = identityMBRSig + 4
+	identityEnd      = identityMBRType + 1
+	volumePayload    = identityEnd
+	volumeReplySize  = 1 + identityEnd - identityScheme
 	flagWritable     = 1
 )
 
@@ -265,6 +279,9 @@ type VolumeGrant struct {
 	Server   handle.ID
 	Slot     uint8
 	Selector partition.Selector
+	// Identity is zero on the first attach. A replacement supplies the
+	// identity returned for the first selection and must resolve to it again.
+	Identity partition.Identity
 	Writable bool
 }
 
@@ -277,7 +294,7 @@ func SetFilesystemRequest(server handle.ID, selector partition.Selector, correla
 // SetVolumeRequest hands the block service the endpoint of one volume slot,
 // replacing and closing the endpoint the slot had.
 func SetVolumeRequest(grant VolumeGrant, correlation uint64) (ipc.Message, bool) {
-	if grant.Server == 0 || correlation == 0 || grant.Slot >= MaxVolumeSlots || !validSelector(&grant.Selector) {
+	if grant.Server == 0 || correlation == 0 || grant.Slot >= MaxVolumeSlots || !validSelector(&grant.Selector) || !validIdentity(grant.Identity) {
 		return ipc.Message{}, false
 	}
 	selector := &grant.Selector
@@ -294,6 +311,7 @@ func SetVolumeRequest(grant VolumeGrant, correlation uint64) (ipc.Message, bool)
 	if grant.Writable {
 		message.Payload[volumeFlags] = flagWritable
 	}
+	encodeIdentity(message.Payload[identityScheme:identityEnd], grant.Identity)
 	return message, true
 }
 
@@ -320,11 +338,39 @@ func DecodeSetFilesystem(message ipc.Message) (VolumeGrant, bool) {
 	}
 	grant.Slot = message.Payload[volumeSlot]
 	flags := message.Payload[volumeFlags]
-	if !validSelector(selector) || grant.Slot >= MaxVolumeSlots || flags&^flagWritable != 0 {
+	grant.Identity = decodeIdentity(message.Payload[identityScheme:identityEnd])
+	if !validSelector(selector) || !validIdentity(grant.Identity) || grant.Slot >= MaxVolumeSlots || flags&^flagWritable != 0 {
 		return grant, false
 	}
 	grant.Server, grant.Writable = message.Handles[0], flags&flagWritable != 0
 	return grant, true
+}
+
+func validIdentity(identity partition.Identity) bool {
+	return identity == (partition.Identity{}) || identity.Valid()
+}
+
+func encodeIdentity(data []byte, identity partition.Identity) {
+	data[0] = byte(identity.Scheme)
+	copy(data[1:17], identity.DiskGUID[:])
+	copy(data[17:33], identity.PartitionGUID[:])
+	binary.LittleEndian.PutUint64(data[33:41], identity.Start)
+	binary.LittleEndian.PutUint64(data[41:49], identity.Length)
+	binary.LittleEndian.PutUint32(data[49:53], identity.Index)
+	binary.LittleEndian.PutUint32(data[53:57], identity.MBRSignature)
+	data[57] = identity.MBRType
+}
+
+func decodeIdentity(data []byte) partition.Identity {
+	identity := partition.Identity{Scheme: partition.Scheme(data[0])}
+	copy(identity.DiskGUID[:], data[1:17])
+	copy(identity.PartitionGUID[:], data[17:33])
+	identity.Start = binary.LittleEndian.Uint64(data[33:41])
+	identity.Length = binary.LittleEndian.Uint64(data[41:49])
+	identity.Index = binary.LittleEndian.Uint32(data[49:53])
+	identity.MBRSignature = binary.LittleEndian.Uint32(data[53:57])
+	identity.MBRType = data[57]
+	return identity
 }
 
 // validSelector accepts a selector whose kind is defined and whose unused
@@ -363,7 +409,7 @@ func DecodeSetDriver(message ipc.Message) (handle.ID, bool) {
 }
 
 func SetDriverReply(status Status, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || status > StatusIOError {
+	if correlation == 0 || status > StatusStale {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: 1}
@@ -371,10 +417,38 @@ func SetDriverReply(status Status, correlation uint64) (ipc.Message, bool) {
 	return message, true
 }
 
-func DecodeSetDriverReply(message ipc.Message) (Status, bool) {
+func DecodeSetDriverReply(message ipc.Message, correlation uint64) (Status, bool) {
 	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindReply ||
-		message.Correlation == 0 || message.PayloadSize != 1 || message.HandleCount != 0 || Status(message.Payload[0]) > StatusIOError {
+		correlation == 0 || message.Correlation != correlation || message.PayloadSize != 1 || message.HandleCount != 0 || Status(message.Payload[0]) > StatusStale {
 		return 0, false
 	}
 	return Status(message.Payload[0]), true
+}
+
+// SetVolumeReply returns both the selection result and the physical partition
+// identity that PID 1 must present when reusing this slot.
+func SetVolumeReply(status Status, identity partition.Identity, correlation uint64) (ipc.Message, bool) {
+	if correlation == 0 || status > StatusStale || status == StatusOK && !identity.Valid() || status != StatusOK && identity != (partition.Identity{}) {
+		return ipc.Message{}, false
+	}
+	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindReply,
+		Correlation: correlation, PayloadSize: volumeReplySize}
+	message.Payload[0] = byte(status)
+	encodeIdentity(message.Payload[1:volumeReplySize], identity)
+	return message, true
+}
+
+// DecodeSetVolumeReply rejects delayed replies from an earlier use of the
+// shared control channel by requiring the exact expected correlation.
+func DecodeSetVolumeReply(message ipc.Message, correlation uint64) (Status, partition.Identity, bool) {
+	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindReply ||
+		correlation == 0 || message.Correlation != correlation || message.PayloadSize != volumeReplySize || message.HandleCount != 0 {
+		return 0, partition.Identity{}, false
+	}
+	status := Status(message.Payload[0])
+	identity := decodeIdentity(message.Payload[1:volumeReplySize])
+	if status > StatusStale || status == StatusOK && !identity.Valid() || status != StatusOK && identity != (partition.Identity{}) {
+		return 0, partition.Identity{}, false
+	}
+	return status, identity, true
 }

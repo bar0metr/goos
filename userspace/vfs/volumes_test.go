@@ -150,16 +150,23 @@ func TestVolumeFailureStaysInItsSlot(t *testing.T) {
 		t.Fatalf("other volume: %q %v", text, status)
 	}
 	writePersistent(t, service, "/persist/after", "persistent volume unaffected")
-	// A replacement serving the same volume takes over the open file, with
-	// a cache of its own.
+	// A replacement has a fresh cache; old handles remain revoked.
 	replacement := newExt4Service(t, "canonical")
 	if status := service.AttachVolume(1, replacement, replacement.cache, []byte("/mnt/a")); status != vfs.StatusOK {
 		t.Fatalf("reattach: %v", status)
 	}
 	read := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64})
-	if read.Status != vfs.StatusOK || string(read.Data) != "hello ext4\n" {
-		t.Fatalf("open file after reattach: %q %v", read.Data, read.Status)
+	if read.Status != vfs.StatusNotFound {
+		t.Fatalf("old handle after reattach: %q %v", read.Data, read.Status)
 	}
+	newOpen := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/mnt/a/hello.txt")})
+	if newOpen.Status != vfs.StatusOK || newOpen.Handle == opened.Handle {
+		t.Fatalf("new handle: %+v", newOpen)
+	}
+	if stale := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64}); stale.Status != vfs.StatusNotFound {
+		t.Fatalf("reused slot accepted old handle: %v", stale.Status)
+	}
+	service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationClose, Handle: newOpen.Handle})
 	// The old service's cache is never read again.
 	for index := range first.cache {
 		first.cache[index] = 'X'

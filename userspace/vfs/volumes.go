@@ -31,8 +31,7 @@ func (service *Service) volume(slot uint8) *volumeBackend {
 // AttachVolume connects the filesystem service of an additional volume and
 // the file cache it shares with this one. The first attach of a slot mounts
 // the volume at path. A later one, after the service was restarted, must
-// name the same path and serve the same root, and keeps the open files of
-// the mount, each reacquired from the new instance.
+// name the same path and serve the same root. Open handles are revoked.
 func (service *Service) AttachVolume(slot uint8, transport Transport, cache []byte, path []byte) vfs.Status {
 	volume := service.volume(slot)
 	if volume == nil || transport == nil || !ValidVolumePath(path) {
@@ -56,7 +55,7 @@ func (service *Service) AttachVolume(slot uint8, transport Transport, cache []by
 			service.dropVolumeTransport(volume)
 			return vfs.StatusBusy
 		}
-		service.namespace.ReacquireObjects(&volume.remote)
+		service.namespace.InvalidateBackendObjects(&volume.remote)
 		return vfs.StatusOK
 	}
 	if status := service.namespace.Mount(path, &volume.remote, root); status != vfs.StatusOK {
@@ -83,6 +82,7 @@ func (service *Service) dropVolumeTransport(volume *volumeBackend) {
 // or the volume is unmounted.
 func (service *Service) VolumeOffline(slot uint8) {
 	if volume := service.volume(slot); volume != nil {
+		service.namespace.InvalidateBackendObjects(&volume.remote)
 		service.dropVolumeTransport(volume)
 	}
 }

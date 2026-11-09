@@ -51,13 +51,14 @@ func replaceDriverChannel(spec *supervisor.LaunchSpec) bool {
 		return false
 	}
 	correlation++
+	requestCorrelation := correlation
 	request, ok := blockproto.SetDriverRequest(handle.ID(pair[0]), correlation)
 	if !ok || !sendMessage(uint64(blockControl[0]), request) {
 		closePair(pair)
 		return false
 	}
 	reply, status := receive(uint64(blockControl[0]), vfsSessionDeadline)
-	blockStatus, valid := blockproto.DecodeSetDriverReply(reply)
+	blockStatus, valid := blockproto.DecodeSetDriverReply(reply, requestCorrelation)
 	if status != ipc.StatusOK || !valid || blockStatus != blockproto.StatusOK {
 		sys.HandleClose(handle.ID(pair[1]))
 		syslog.Error("block service refused the replacement driver")

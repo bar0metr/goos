@@ -61,8 +61,9 @@ archive members, `/bootstrap/fat32` and `/bootstrap/ext4`, whose pages the
 kernel copies from the archive.
 
 **Policy.** Detection never mounts. PID 1 mounts an additional volume only
-when configuration (`system.mount.N.source`, `.path`, `.type`) or an
-administrator's `mount` command names it. A source names a partition by GPT
+when a configuration entry (`system.mount.1` through `system.mount.4`, each
+containing `TYPE SOURCE PATH`) or an administrator's `mount` command names it.
+A source names a partition by GPT
 name, GPT unique GUID or number. Configuration is read once the
 configuration service runs, after the persistent volume.
 
@@ -77,8 +78,19 @@ fence.
 **Identity.** PID 1 records the volume identity the probe reports (the ext4
 UUID, the FAT32 serial) at the first mount. After a crash it probes again
 and reattaches only a volume with the same type and identity. The VFS also
-requires the same root node. A different volume in the same partition stays
-offline, and open handles of the old one fail.
+requires the same root node. UUIDs, serials and root inode numbers can be
+reused, so they do not prove that the contents or open objects are unchanged.
+The block service therefore returns the resolved partition identity with the
+first grant. PID 1 presents it on every replacement: GPT identity includes the
+disk GUID, unique partition GUID and geometry; MBR identity includes a nonzero
+disk signature, entry type and geometry. A changed identity, or an MBR disk
+without a stable signature, fails closed before the filesystem probe. Driver
+replacement discards cached geometry and rescans the table before any slot is
+served.
+VFS revokes open handles for an additional volume when its service goes
+offline; callers must reopen files after reattachment. Control replies are
+accepted only for the exact request correlation, so a delayed reply from an
+earlier use of a slot cannot authorize its replacement.
 
 **Failure.** A transport failure on an additional volume detaches its
 backend in the VFS, which keeps the mount and answers I/O errors, and sends

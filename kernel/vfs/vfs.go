@@ -564,6 +564,15 @@ func (namespace *Namespace) ReacquireObjects(backend Backend) int {
 	return lost
 }
 
+// InvalidateBackendObjects revokes open handles without contacting a failed backend.
+func (namespace *Namespace) InvalidateBackendObjects(backend Backend) {
+	for index := range namespace.files {
+		if file := &namespace.files[index]; namespace.openOn(file, backend) {
+			file.release()
+		}
+	}
+}
+
 func (namespace *Namespace) openOn(file *openFile, backend Backend) bool {
 	return file.used && int(file.mount) < len(namespace.mounts) && namespace.mounts[file.mount].used &&
 		namespace.mounts[file.mount].backend == backend

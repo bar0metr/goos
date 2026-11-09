@@ -135,14 +135,17 @@ type Table struct {
 	Count      int
 	Partitions [MaxPartitions]Partition
 	DiskGUID   GUID
-	GPT        GPTHealth
+	// MBRSignature is the disk signature at byte 440 of sector zero. A zero
+	// signature cannot distinguish one MBR disk image from another.
+	MBRSignature uint32
+	GPT          GPTHealth
 }
 
 // reset empties the table field by field: it is large, and TinyGo builds a
 // composite literal of it on the heap.
 func (table *Table) reset(blockSize uint32, capacity uint64) {
 	table.Scheme, table.BlockSize, table.Capacity, table.Count = SchemeNone, blockSize, capacity, 0
-	table.DiskGUID, table.GPT = GUID{}, GPTHealth{}
+	table.DiskGUID, table.MBRSignature, table.GPT = GUID{}, 0, GPTHealth{}
 	for index := range table.Partitions {
 		table.Partitions[index] = Partition{}
 	}
@@ -187,6 +190,7 @@ func (scanner *Scanner) Scan(reader Reader, capacity uint64, blockSize uint32, t
 	if first[510] != 0x55 || first[511] != 0xaa {
 		return StatusOK
 	}
+	table.MBRSignature = get32(first[440:])
 	var mbr [4]mbrEntry
 	for slot := range mbr {
 		mbr[slot] = readMBREntry(first[mbrTable+slot*mbrEntrySize:])

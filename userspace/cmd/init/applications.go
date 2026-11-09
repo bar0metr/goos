@@ -624,6 +624,7 @@ func openCheckBlock() (handle.ID, string) {
 		return 0, "APP_FSCK_CHANNEL_CREATE_FAILED"
 	}
 	correlation++
+	requestCorrelation := correlation
 	control, ok := blockproto.SetFilesystemRequest(handle.ID(pair[1]), partition.Selector{Kind: partition.SelectAuto}, correlation)
 	if !ok || !sendMessage(uint64(blockControl[0]), control) {
 		manager.CancelStop(filesystemName)
@@ -631,7 +632,7 @@ func openCheckBlock() (handle.ID, string) {
 		return 0, "APP_FSCK_BLOCK_SEND_FAILED"
 	}
 	blockReply, receiveStatus := receive(uint64(blockControl[0]), vfsSessionDeadline)
-	blockStatus, valid := blockproto.DecodeSetDriverReply(blockReply)
+	blockStatus, valid := blockproto.DecodeSetDriverReply(blockReply, requestCorrelation)
 	if receiveStatus != ipc.StatusOK || !valid || blockStatus != blockproto.StatusOK {
 		manager.CancelStop(filesystemName)
 		sys.HandleClose(handle.ID(pair[0]))

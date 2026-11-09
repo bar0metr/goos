@@ -125,7 +125,7 @@ func TestControlReplacesTheDriverEndpoint(t *testing.T) {
 		t.Fatal("decoded a data request as control")
 	}
 	reply, ok := SetDriverReply(StatusIOError, 4)
-	if status, valid := DecodeSetDriverReply(reply); !ok || !valid || status != StatusIOError {
+	if status, valid := DecodeSetDriverReply(reply, 4); !ok || !valid || status != StatusIOError {
 		t.Fatalf("reply round trip: %d %v", status, valid)
 	}
 }
@@ -187,9 +187,13 @@ func TestSetFilesystemControl(t *testing.T) {
 }
 
 func TestSetVolumeSlots(t *testing.T) {
+	disk, _ := partition.ParseGUID("11111111-1111-1111-1111-111111111111")
+	part, _ := partition.ParseGUID("22222222-2222-2222-2222-222222222222")
+	identity := partition.Identity{Scheme: partition.SchemeGPT, DiskGUID: disk, PartitionGUID: part,
+		Start: 1 << 20, Length: 64 << 20, Index: 2}
 	for slot := uint8(0); slot < MaxVolumeSlots; slot++ {
 		for _, writable := range []bool{false, true} {
-			grant := VolumeGrant{Server: 40, Slot: slot, Selector: partition.Selector{Kind: partition.SelectIndex, Index: 2}, Writable: writable}
+			grant := VolumeGrant{Server: 40, Slot: slot, Selector: partition.Selector{Kind: partition.SelectIndex, Index: 2}, Identity: identity, Writable: writable}
 			message, ok := SetVolumeRequest(grant, 7)
 			decoded, valid := DecodeSetFilesystem(message)
 			if !ok || !valid || decoded != grant {
@@ -200,6 +204,33 @@ func TestSetVolumeSlots(t *testing.T) {
 	if _, ok := SetVolumeRequest(VolumeGrant{Server: 40, Slot: MaxVolumeSlots}, 7); ok {
 		t.Fatal("encoded a slot past the table")
 	}
+}
+
+func TestVolumeReplyPinsIdentityAndCorrelation(t *testing.T) {
+	disk, _ := partition.ParseGUID("11111111-1111-1111-1111-111111111111")
+	part, _ := partition.ParseGUID("22222222-2222-2222-2222-222222222222")
+	identity := partition.Identity{Scheme: partition.SchemeGPT, DiskGUID: disk, PartitionGUID: part,
+		Start: 1 << 20, Length: 64 << 20, Index: 2}
+	reply, ok := SetVolumeReply(StatusOK, identity, 41)
+	status, decoded, valid := DecodeSetVolumeReply(reply, 41)
+	if !ok || !valid || status != StatusOK || decoded != identity {
+		t.Fatalf("round trip: %v %v %v %+v", ok, valid, status, decoded)
+	}
+	if _, _, valid := DecodeSetVolumeReply(reply, 42); valid {
+		t.Fatal("late reply from the previous slot use was accepted")
+	}
+	if status, valid := DecodeSetDriverReply(mustControlReply(t, StatusOK, 51), 52); valid || status != 0 {
+		t.Fatal("late driver reply was accepted")
+	}
+}
+
+func mustControlReply(t *testing.T, status Status, correlation uint64) ipc.Message {
+	t.Helper()
+	reply, ok := SetDriverReply(status, correlation)
+	if !ok {
+		t.Fatal("control reply encode")
+	}
+	return reply
 }
 
 func TestBulkRequestsCarryExactlyOneObject(t *testing.T) {

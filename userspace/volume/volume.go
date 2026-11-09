@@ -35,6 +35,7 @@ const (
 	Unrecognized
 	Ambiguous
 	TypeMismatch
+	IdentityMismatch
 	// Refused: the driver refused the volume; Detail says why.
 	Refused
 	NotMounted
@@ -45,22 +46,23 @@ const (
 )
 
 var statusText = [...]string{
-	OK:             "ok",
-	InvalidSource:  "invalid source: use part:N, guid:GUID or name:LABEL",
-	InvalidPath:    "invalid mount path: use " + vfs.VolumeRoot + "NAME",
-	InvalidType:    "unknown filesystem type",
-	NoSlot:         "every volume slot is in use",
-	PathInUse:      "a volume is already mounted there",
-	PartitionInUse: "the partition is already mounted",
-	NoPartition:    "no such partition",
-	Unrecognized:   "unsupported filesystem",
-	Ambiguous:      "ambiguous filesystem signatures",
-	TypeMismatch:   "the partition holds another filesystem type",
-	Refused:        "the driver refused the volume",
-	NotMounted:     "nothing is mounted there",
-	Busy:           "files are open on the volume",
-	LaunchFailed:   "the filesystem service did not start",
-	Failed:         "the volume failed",
+	OK:               "ok",
+	InvalidSource:    "invalid source: use part:N, guid:GUID or name:LABEL",
+	InvalidPath:      "invalid mount path: use " + vfs.VolumeRoot + "NAME",
+	InvalidType:      "unknown filesystem type",
+	NoSlot:           "every volume slot is in use",
+	PathInUse:        "a volume is already mounted there",
+	PartitionInUse:   "the partition is already mounted",
+	NoPartition:      "no such partition",
+	Unrecognized:     "unsupported filesystem",
+	Ambiguous:        "ambiguous filesystem signatures",
+	TypeMismatch:     "the partition holds another filesystem type",
+	IdentityMismatch: "the partition identity changed or is not stable",
+	Refused:          "the driver refused the volume",
+	NotMounted:       "nothing is mounted there",
+	Busy:             "files are open on the volume",
+	LaunchFailed:     "the filesystem service did not start",
+	Failed:           "the volume failed",
 }
 
 func (status Status) String() string {
@@ -168,6 +170,7 @@ type Slot struct {
 	Request    Request
 	Driver     fsdetect.Driver
 	Probe      fsdetect.Result
+	Physical   partition.Identity
 	Generation uint64
 	Restarts   uint8
 	// Detail is the VFS status of the last refused attach.
@@ -237,10 +240,16 @@ func (table *Table) Release(index uint8) {
 // replacement instance must find the same type and identity; otherwise the
 // partition holds another volume now, and the slot goes offline rather than
 // serving it under the old mount's open handles.
-func (table *Table) Probed(index uint8, result fsdetect.Result) Status {
+func (table *Table) Probed(index uint8, result fsdetect.Result, physical partition.Identity) Status {
 	slot := table.Slot(index)
 	if slot == nil {
 		return Failed
+	}
+	if !physical.Valid() {
+		if slot.Generation != 0 {
+			slot.State = Offline
+		}
+		return IdentityMismatch
 	}
 	switch result.Status {
 	case fsdetect.Recognized:
@@ -250,6 +259,10 @@ func (table *Table) Probed(index uint8, result fsdetect.Result) Status {
 		return Unrecognized
 	}
 	if slot.Generation != 0 {
+		if !slot.Physical.Same(physical) {
+			slot.State = Offline
+			return IdentityMismatch
+		}
 		if !slot.Probe.SameVolume(&result) {
 			slot.State = Offline
 			return TypeMismatch
@@ -263,7 +276,7 @@ func (table *Table) Probed(index uint8, result fsdetect.Result) Status {
 		}
 		return Unrecognized
 	}
-	slot.Driver, slot.Probe = driver, result
+	slot.Driver, slot.Probe, slot.Physical = driver, result, physical
 	return OK
 }
 
