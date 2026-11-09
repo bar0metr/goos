@@ -60,20 +60,56 @@ type FileStatus struct {
 	Born            bool
 	BirthSeconds    int64
 	BirthNanosecond uint32
+	// Stored reports that the filesystem keeps Unix metadata: then Links,
+	// UID and GID are its values and the access and change times its own.
+	// Without it every file shows one link, the StatUID owner, and the
+	// modification time in all three time fields.
+	Stored            bool
+	Links             uint32
+	UID               uint32
+	GID               uint32
+	AccessSeconds     int64
+	AccessNanoseconds uint32
+	ChangeSeconds     int64
+	ChangeNanoseconds uint32
+}
+
+// times returns the access, modification and change times of status.
+func (status *FileStatus) times() [3][2]uint64 {
+	modified := [2]uint64{uint64(status.Seconds), uint64(status.Nanoseconds)}
+	if !status.Stored {
+		return [3][2]uint64{modified, modified, modified}
+	}
+	return [3][2]uint64{
+		{uint64(status.AccessSeconds), uint64(status.AccessNanoseconds)},
+		modified,
+		{uint64(status.ChangeSeconds), uint64(status.ChangeNanoseconds)},
+	}
+}
+
+// owner returns the link count and owner status reports.
+func (status *FileStatus) owner() (uint32, uint32, uint32) {
+	if !status.Stored {
+		return 1, StatUID, StatGID
+	}
+	return status.Links, status.UID, status.GID
 }
 
 // StatusOfReply turns a VFS stat reply into Linux file status.
 //
-// The mode is presentation: a regular file is 0644 and a directory 0755, with
-// the write bits cleared when the VFS reports the read-only attribute. GoOS
-// enforces none of it. The inode is the node identity the VFS returned and
-// the device the mount identity, so two names of one file compare equal and
-// files of different mounts never do. Zero is not a usable inode, because
-// programs read it as "no entry".
+// A filesystem that keeps Unix metadata, ext4, supplies the mode, owner,
+// link count, device number and access and change times as it stores them
+// (ADR 0223). They describe the file; GoOS grants nothing from them.
+// Elsewhere the mode is presentation: a regular file is 0644, a directory
+// 0755 and a symbolic link 0777, with the write bits cleared when the VFS
+// reports the read-only attribute. The inode is the node identity the VFS
+// returned and the device the mount identity, so two names of one file
+// compare equal and files of different mounts never do. Zero is not a usable
+// inode, because programs read it as "no entry".
 //
-// GoOS keeps one time per file that Linux has three names for. All three
-// show the modification time, or the creation time when the filesystem has
-// only that, or zero when it has neither.
+// Without Unix metadata GoOS keeps one time per file that Linux has three
+// names for. All three show the modification time, or the creation time
+// when the filesystem has only that, or zero when it has neither.
 func StatusOfReply(reply *vfs.Reply) (FileStatus, abi.Errno) {
 	status := FileStatus{Device: uint64(reply.MountID), Inode: reply.Node, Size: reply.Size}
 	switch reply.Kind {
@@ -81,10 +117,21 @@ func StatusOfReply(reply *vfs.Reply) (FileStatus, abi.Errno) {
 		status.Mode = abi.ModeRegular | 0o644
 	case ramfs.KindDirectory:
 		status.Mode = abi.ModeDirectory | 0o755
+	case ramfs.KindSymlink:
+		status.Mode = abi.ModeSymlink | 0o777
+	case ramfs.KindSpecial:
+		if !reply.Unix.Available {
+			return FileStatus{}, abi.EIO
+		}
 	default:
 		return FileStatus{}, abi.EIO
 	}
-	if reply.AttributesAvailable && reply.Attributes&ramfs.AttrReadOnly != 0 {
+	if unix := &reply.Unix; unix.Available {
+		status.Mode, status.RawDevice, status.Stored = uint32(unix.Mode), uint64(unix.Device), true
+		status.Links, status.UID, status.GID = unix.Links, unix.UID, unix.GID
+		status.AccessSeconds, status.AccessNanoseconds = unix.Accessed.Seconds, unix.Accessed.Nanoseconds
+		status.ChangeSeconds, status.ChangeNanoseconds = unix.Changed.Seconds, unix.Changed.Nanoseconds
+	} else if reply.AttributesAvailable && reply.Attributes&ramfs.AttrReadOnly != 0 {
 		status.Mode &^= 0o222
 	}
 	if status.Inode == 0 {
@@ -121,12 +168,13 @@ func StreamStatus(identity uint64) FileStatus {
 func EncodeStat(target *[StatSize]byte, status FileStatus) {
 	*target = [StatSize]byte{}
 	put := binary.LittleEndian.PutUint64
+	links, uid, gid := status.owner()
 	put(target[statDevice:], status.Device)
 	put(target[statInode:], status.Inode)
-	put(target[statLinks:], 1)
+	put(target[statLinks:], uint64(links))
 	binary.LittleEndian.PutUint32(target[statMode:], status.Mode)
-	binary.LittleEndian.PutUint32(target[statUID:], StatUID)
-	binary.LittleEndian.PutUint32(target[statGID:], StatGID)
+	binary.LittleEndian.PutUint32(target[statUID:], uid)
+	binary.LittleEndian.PutUint32(target[statGID:], gid)
 	put(target[statRawDevice:], status.RawDevice)
 	put(target[statLength:], status.Size)
 	put(target[statBlockSize:], StatBlockSize)
@@ -135,21 +183,23 @@ func EncodeStat(target *[StatSize]byte, status FileStatus) {
 		blocks++
 	}
 	put(target[statBlocks:], blocks)
-	for _, offset := range [...]int{statAccessed, statModified, statChanged} {
-		put(target[offset:], uint64(status.Seconds))
-		put(target[offset+8:], uint64(status.Nanoseconds))
+	times := status.times()
+	for index, offset := range [...]int{statAccessed, statModified, statChanged} {
+		put(target[offset:], times[index][0])
+		put(target[offset+8:], times[index][1])
 	}
 }
 
-// StatFlags checks the flags of newfstatat. AT_SYMLINK_NOFOLLOW and
-// AT_NO_AUTOMOUNT change nothing: GoOS has no symbolic links and no
-// automounts. emptyPath reports AT_EMPTY_PATH, which makes an empty path
-// name the descriptor itself.
-func StatFlags(flags uint64) (emptyPath bool, errno abi.Errno) {
+// StatFlags checks the flags of newfstatat. AT_NO_AUTOMOUNT changes
+// nothing: GoOS has no automounts. emptyPath reports AT_EMPTY_PATH, which
+// makes an empty path name the descriptor itself, and noFollow
+// AT_SYMLINK_NOFOLLOW, which describes a link the path ends in rather than
+// its target.
+func StatFlags(flags uint64) (emptyPath bool, noFollow bool, errno abi.Errno) {
 	if flags&^(abi.AtSymlinkNoFollow|abi.AtNoAutomount|abi.AtEmptyPath) != 0 {
-		return false, abi.EINVAL
+		return false, false, abi.EINVAL
 	}
-	return flags&abi.AtEmptyPath != 0, 0
+	return flags&abi.AtEmptyPath != 0, flags&abi.AtSymlinkNoFollow != 0, 0
 }
 
 // AccessErrno answers access and faccessat from the mode stat reports, as
@@ -194,9 +244,9 @@ const (
 // flags change nothing, because a GoOS stat always asks the filesystem. The
 // mask is a request Linux may exceed, and GoOS returns the same fields
 // whatever it names. emptyPath is AT_EMPTY_PATH, as in StatFlags.
-func StatxFlags(flags uint64, mask uint64) (emptyPath bool, errno abi.Errno) {
+func StatxFlags(flags uint64, mask uint64) (emptyPath bool, noFollow bool, errno abi.Errno) {
 	if mask&abi.StatxReservedMask != 0 || flags&abi.AtStatxSyncType == abi.AtStatxSyncType {
-		return false, abi.EINVAL
+		return false, false, abi.EINVAL
 	}
 	return StatFlags(flags &^ abi.AtStatxSyncType)
 }
@@ -221,11 +271,12 @@ func EncodeStatx(target *[StatxSize]byte, status FileStatus) {
 		put64(target[statxBorn:], uint64(status.BirthSeconds))
 		put32(target[statxBorn+8:], status.BirthNanosecond)
 	}
+	links, uid, gid := status.owner()
 	put32(target[statxMask:], mask)
 	put32(target[statxBlockSize:], StatBlockSize)
-	put32(target[statxLinks:], 1)
-	put32(target[statxUID:], StatUID)
-	put32(target[statxGID:], StatGID)
+	put32(target[statxLinks:], links)
+	put32(target[statxUID:], uid)
+	put32(target[statxGID:], gid)
 	binary.LittleEndian.PutUint16(target[statxMode:], uint16(status.Mode))
 	put64(target[statxInode:], status.Inode)
 	put64(target[statxLength:], status.Size)
@@ -234,9 +285,10 @@ func EncodeStatx(target *[StatxSize]byte, status FileStatus) {
 		blocks++
 	}
 	put64(target[statxBlocks:], blocks)
-	for _, offset := range [...]int{statxAccessed, statxChanged, statxModified} {
-		put64(target[offset:], uint64(status.Seconds))
-		put32(target[offset+8:], status.Nanoseconds)
+	times := status.times()
+	for index, offset := range [...]int{statxAccessed, statxModified, statxChanged} {
+		put64(target[offset:], times[index][0])
+		put32(target[offset+8:], uint32(times[index][1]))
 	}
 	major, minor := DeviceParts(status.RawDevice)
 	put32(target[statxRawMajor:], major)

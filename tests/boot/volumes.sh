@@ -49,6 +49,7 @@ go run ./tools/diskcompose \
 	-part goos-ext4-a:linux:userspace/ext4/testdata/canonical.img.gz \
 	-part goos-ext4-b:linux:userspace/ext4/testdata/blockmap-1k.img.gz \
 	-part goos-junk:linux:zero:4 \
+	-part goos-ext4-l:linux:userspace/ext4/testdata/links.img.gz \
 	"$work/disk.img"
 rm -f "$work/system.img"
 
@@ -121,6 +122,30 @@ run 'mount -t fat32 name:goos-junk /mnt/x'
 expect 'unsupported filesystem\|another filesystem type' 'a forced type'
 run 'mkdir /mnt/a/new'
 expect 'mkdir:' 'a write to a read-only volume'
+
+# Symbolic links Linux made are followed by the VFS, under the caller's
+# authority; the volume only stores them.
+run 'mount name:goos-ext4-l /mnt/l'
+refuse '^mount:' 'mount of the link volume'
+run 'cat /mnt/l/rel'
+expect '^owned file$' 'a relative symbolic link'
+run 'cat /mnt/l/sub-dir/inner.txt'
+expect '^inner file$' 'a link to a directory in the middle of a path'
+run 'cat /mnt/l/deep-0'
+expect 'too many levels of symbolic links' 'a chain longer than the expansion bound'
+run 'cat /mnt/l/loop-a'
+expect 'too many levels of symbolic links' 'a link loop'
+run 'stat /mnt/l/rel'
+expect '^symlink -> file.txt$' 'a link described as itself'
+expect 'uid=42 gid=43' 'the owner of a link'
+run 'stat /mnt/l/hard-a'
+expect 'mode=0640 uid=1234 gid=5678 links=3' 'ownership, mode and link count of a hard link'
+run 'stat /mnt/l/fifo'
+expect '^special$' 'a FIFO the volume stores'
+run 'ls /mnt/l'
+expect '^rel@$' 'a link in a listing'
+run '/system/linux/abi-probe ext4-links /mnt/l'
+expect '^ext4 links ok$' 'a Linux program sees the inodes Linux made'
 
 run 'fault volume'
 grep -q 'VOLUME_FAULT_INJECTED' "$log" || fail 'volume fault not injected'

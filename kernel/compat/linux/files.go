@@ -17,6 +17,26 @@ type OpenIntent struct {
 	Directory   bool
 	CloseOnExec bool
 	NonBlock    bool
+	// NoFollow is O_NOFOLLOW: an open of a symbolic link fails with ELOOP.
+	NoFollow bool
+}
+
+// StatRights are the rights of the stat an open starts with. O_NOFOLLOW,
+// and O_CREAT with O_EXCL, which must not create through a link, describe
+// the link itself.
+func (intent OpenIntent) StatRights() vfs.Rights {
+	if intent.NoFollow || intent.Create && intent.Exclusive {
+		return vfs.NoFollow
+	}
+	return 0
+}
+
+// OpenRights are the rights of the VFS open.
+func (intent OpenIntent) OpenRights() vfs.Rights {
+	if intent.NoFollow {
+		return intent.Rights | vfs.NoFollow
+	}
+	return intent.Rights
 }
 
 // StatusFlags is what the open-file description keeps of the intent: the
@@ -33,8 +53,9 @@ func (intent OpenIntent) StatusFlags() uint32 {
 }
 
 // DecodeOpen accepts the documented open flags. O_LARGEFILE is always in
-// effect on x86_64. O_NOCTTY and O_NOFOLLOW change nothing here: no GoOS
-// file is a terminal device or a symbolic link. O_NONBLOCK changes nothing
+// effect on x86_64. O_NOCTTY changes nothing here: no GoOS file is a
+// terminal device. O_NOFOLLOW refuses a path that ends in a symbolic link.
+// O_NONBLOCK changes nothing
 // either: a path names a file, a directory, or a device that never blocks,
 // and Linux ignores the flag for the first two. Every other flag is refused,
 // because ignoring it would claim a behavior the open does not have.
@@ -54,6 +75,7 @@ func DecodeOpen(flags uint64) (OpenIntent, abi.Errno) {
 		Directory:   value&abi.OpenDirectory != 0,
 		CloseOnExec: value&abi.OpenCloseExec != 0,
 		NonBlock:    value&abi.OpenNonBlock != 0,
+		NoFollow:    value&abi.OpenNoFollow != 0,
 	}
 	switch intent.Access {
 	case abi.OpenReadOnly:
@@ -121,7 +143,16 @@ func PlanOpen(intent OpenIntent, trailing bool, status vfs.Status, kind ramfs.Ki
 		}
 		return OpenExistingDirectory, 0
 	}
-	if kind != ramfs.KindFile {
+	switch kind {
+	case ramfs.KindFile:
+	case ramfs.KindSymlink:
+		// Only a stat that did not follow the last link sees one.
+		return OpenFail, abi.ELOOP
+	case ramfs.KindSpecial:
+		// A device, FIFO or socket node a filesystem stores has nothing
+		// behind it in GoOS.
+		return OpenFail, abi.ENXIO
+	default:
 		return OpenFail, abi.EIO
 	}
 	if trailing || intent.Directory {
@@ -172,9 +203,9 @@ func RemovalErrno(removeDirectory bool, trailing bool, kind ramfs.Kind) abi.Errn
 	switch {
 	case kind == ramfs.KindDirectory && !removeDirectory:
 		return abi.EISDIR
-	case kind == ramfs.KindFile && (removeDirectory || trailing):
+	case kind != ramfs.KindDirectory && (removeDirectory || trailing):
 		return abi.ENOTDIR
-	case kind != ramfs.KindFile && kind != ramfs.KindDirectory:
+	case kind < ramfs.KindFile || kind > ramfs.LastKind:
 		return abi.EIO
 	}
 	return 0
@@ -185,6 +216,16 @@ func RemovalErrno(removeDirectory bool, trailing bool, kind ramfs.Kind) abi.Errn
 // mount; a full filesystem is the only exhaustion a mutation meets.
 func MutationErrno(status vfs.Status) abi.Errno {
 	return VFSErrno(status, VFSPermissionReadOnly, abi.ENOSPC)
+}
+
+// LinkErrno translates the status of a symlink or a hard link. A filesystem
+// without the kind of link asked for, and a hard link to a directory, are
+// EPERM on Linux; a refused change is a read-only mount.
+func LinkErrno(status vfs.Status) abi.Errno {
+	if status == vfs.StatusUnsupported {
+		return abi.EPERM
+	}
+	return MutationErrno(status)
 }
 
 // StatusFlagsOf is what F_GETFL reports for a description. A regular file or

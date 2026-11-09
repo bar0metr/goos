@@ -370,6 +370,54 @@ func (fs *FileSystem) ReadDir(parent NodeID, cursor int) (Entry, int, Status) {
 	return Entry{}, cursor, StatusNotFound
 }
 
+// SymlinkName makes a symbolic link called name in parent. Its target is
+// kept in one page, the way a file keeps its bytes, and its size is the
+// target's length. The page is counted before the link is made, so a full
+// instance refuses the link whole.
+func (fs *FileSystem) SymlinkName(parent NodeID, name Name, target []byte) (NodeID, Status) {
+	if !name.valid() || !ValidLinkTarget(target) {
+		return 0, StatusInvalidArgument
+	}
+	if fs.ready && fs.pages >= fs.limits.Pages {
+		return 0, StatusNoSpace
+	}
+	id, status := fs.createName(parent, name, KindSymlink)
+	if status != StatusOK {
+		return 0, status
+	}
+	entry, _ := fs.lookup(id)
+	ref, status := fs.ensurePage(entry, 0)
+	if status != StatusOK {
+		fs.UnlinkName(parent, name)
+		return 0, StatusNoSpace
+	}
+	copy(fs.store.Page(ref)[:], target)
+	entry.size = uint64(len(target))
+	return id, StatusOK
+}
+
+// ReadLink copies the target of the symbolic link id into target and returns
+// its length. A node that is not a link is StatusInvalidArgument, as Linux
+// readlink answers EINVAL; a target too small for it is
+// StatusResourceExhausted.
+func (fs *FileSystem) ReadLink(id NodeID, target []byte) (int, Status) {
+	entry, status := fs.lookup(id)
+	if status != StatusOK {
+		return 0, status
+	}
+	if entry.kind != KindSymlink {
+		return 0, StatusInvalidArgument
+	}
+	if uint64(len(target)) < entry.size {
+		return 0, StatusResourceExhausted
+	}
+	ref := fs.pageRef(entry, 0)
+	if ref == 0 || entry.size == 0 || entry.size > MaxLinkTarget {
+		return 0, StatusCorrupt
+	}
+	return copy(target, fs.store.Page(ref)[:entry.size]), StatusOK
+}
+
 func (fs *FileSystem) Rename(id NodeID, parent NodeID, name []byte) Status {
 	value, ok := MakeName(name)
 	if !ok {

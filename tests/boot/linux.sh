@@ -308,6 +308,10 @@ run '/system/linux/abi-probe hardening'
 expect '^hardening ok$' 'failed exec, fork memory, descriptors, pipes, and signal frames'
 clean 'failed exec, fork memory, descriptors, pipes, and signal frames'
 
+run '/system/linux/abi-probe links'
+expect '^links ok$' 'symbolic links in RAMFS: symlink, readlink, lstat, O_NOFOLLOW, loops'
+clean 'symbolic links in RAMFS: symlink, readlink, lstat, O_NOFOLLOW, loops'
+
 run '/system/linux/abi-probe fpstate'
 expect '^fpstate ok$' 'x87 and SSE state survives a signal handler'
 clean 'x87 and SSE state survives a signal handler'

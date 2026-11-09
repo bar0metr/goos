@@ -78,6 +78,11 @@ func EncodeDirent(target []byte, inode uint64, next uint64, kind ramfs.Kind, nam
 	case ramfs.KindFile:
 	case ramfs.KindDirectory:
 		entryType = abi.DirentDirectory
+	case ramfs.KindSymlink:
+		entryType = abi.DirentSymlink
+	case ramfs.KindSpecial:
+		// A listing does not say which special kind; lstat does.
+		entryType = abi.DirentUnknown
 	default:
 		return 0, false
 	}

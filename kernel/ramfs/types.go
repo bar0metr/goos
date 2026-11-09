@@ -108,7 +108,84 @@ type Kind uint8
 const (
 	KindFile Kind = iota + 1
 	KindDirectory
+	// KindSymlink is a symbolic link. Its target is a path the VFS resolves
+	// under the caller's own authority; no backend follows one (ADR 0223).
+	KindSymlink
+	// KindSpecial is a device node, FIFO or socket that a filesystem stores.
+	// GoOS lists and describes it but opens nothing through it.
+	KindSpecial
+	LastKind = KindSpecial
 )
+
+// MaxLinkTarget is the longest symbolic-link target: a path without the
+// terminating NUL Linux counts in PATH_MAX.
+const MaxLinkTarget = limits.PathMax - 1
+
+// The file-type bits of Unix.Mode, as Linux stores them.
+const (
+	ModeTypeMask  = 0xF000
+	ModeFIFO      = 0x1000
+	ModeCharacter = 0x2000
+	ModeDirectory = 0x4000
+	ModeBlock     = 0x6000
+	ModeRegular   = 0x8000
+	ModeSymlink   = 0xA000
+	ModeSocket    = 0xC000
+)
+
+// Unix is the POSIX metadata a filesystem keeps for a node: the mode with its
+// type bits, ownership, link count, inode generation, access and change times,
+// and the device number of a device node in Linux's 32-bit encoding. It
+// describes what the filesystem stores and grants nothing: GoOS authority is
+// capabilities and VFS rights, never these numbers (ADR 0223). A filesystem
+// without such a model leaves Available false and every field zero.
+type Unix struct {
+	Mode       uint16
+	UID        uint32
+	GID        uint32
+	Links      uint32
+	Generation uint32
+	Device     uint32
+	Accessed   Timestamp
+	Changed    Timestamp
+	Available  bool
+}
+
+// Valid reports whether the metadata is absent and zero, or present with type
+// bits that agree with kind.
+func (unix Unix) Valid(kind Kind) bool {
+	if !unix.Available {
+		return unix == Unix{}
+	}
+	if !unix.Accessed.Valid() || !unix.Changed.Valid() {
+		return false
+	}
+	device := false
+	switch unix.Mode & ModeTypeMask {
+	case ModeRegular:
+		if kind != KindFile {
+			return false
+		}
+	case ModeDirectory:
+		if kind != KindDirectory {
+			return false
+		}
+	case ModeSymlink:
+		if kind != KindSymlink {
+			return false
+		}
+	case ModeCharacter, ModeBlock:
+		device = true
+		fallthrough
+	case ModeFIFO, ModeSocket:
+		if kind != KindSpecial {
+			return false
+		}
+	default:
+		return false
+	}
+	return device || unix.Device == 0
+}
 
 type NodeID uint64
 
@@ -164,11 +241,12 @@ type Stat struct {
 	// MountID is assigned by VFS. Backends and the filesystem-service wire
 	// protocol leave it zero because it describes namespace placement.
 	MountID uint64
+	Unix    Unix
 }
 
 func (stat Stat) Valid() bool {
-	return stat.Kind >= KindFile && stat.Kind <= KindDirectory && stat.Created.Valid() && stat.Modified.Valid() &&
-		stat.Attributes <= (LastAttribute*2-1) && (stat.AttributesAvailable || stat.Attributes == 0)
+	return stat.Kind >= KindFile && stat.Kind <= LastKind && stat.Created.Valid() && stat.Modified.Valid() &&
+		stat.Attributes <= (LastAttribute*2-1) && (stat.AttributesAvailable || stat.Attributes == 0) && stat.Unix.Valid(stat.Kind)
 }
 
 type Entry struct {
@@ -199,6 +277,21 @@ func MakeName(value []byte) (Name, bool) {
 	copy(name.data[:], value)
 	name.size = uint16(len(value))
 	return name, true
+}
+
+// ValidLinkTarget accepts a symbolic-link target: one to MaxLinkTarget bytes
+// without NUL. A target is a path, absolute or relative, and is not checked
+// further here; the VFS resolves it under the caller's authority.
+func ValidLinkTarget(target []byte) bool {
+	if len(target) == 0 || len(target) > MaxLinkTarget {
+		return false
+	}
+	for _, value := range target {
+		if value == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func validName(name []byte) bool {

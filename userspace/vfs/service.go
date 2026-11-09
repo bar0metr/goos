@@ -32,6 +32,10 @@ type Service struct {
 	volumes [vfs.MaxVolumes]volumeBackend
 	// copyFault, when set, checks read-path copies (SetCopyFault).
 	copyFault CopyFaultHandler
+	// expandedPath and expandedTarget hold a request's paths once symbolic
+	// links are followed (ADR 0223).
+	expandedPath   [vfs.MaxPath]byte
+	expandedTarget [vfs.MaxPath]byte
 }
 
 // MountBootstrap mounts the boot archive read-only at /bootstrap, the
@@ -427,6 +431,10 @@ func (service *Service) ReadDirBatch(owner vfs.Owner, request vfs.Request, targe
 		reply.Status = vfs.StatusInvalidArgument
 		return reply
 	}
+	if status := service.expand(owner, &request); status != vfs.StatusOK {
+		reply.Status = status
+		return reply
+	}
 	if len(target) > vfs.MaxDirBatch {
 		target = target[:vfs.MaxDirBatch]
 	}
@@ -462,6 +470,10 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 		reply.Status = vfs.StatusNameTooLong
 		return reply
 	}
+	if status := service.expand(owner, &request); status != vfs.StatusOK {
+		reply.Status = status
+		return reply
+	}
 	if status := service.authorize(owner, request); status != vfs.StatusOK {
 		reply.Status = status
 		return reply
@@ -472,7 +484,7 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 			reply.Status = vfs.StatusPermissionDenied
 			break
 		}
-		reply.Handle, reply.Status = service.namespace.Open(owner, request.Path, request.Rights)
+		reply.Handle, reply.Status = service.namespace.Open(owner, request.Path, request.Rights&^vfs.NoFollow)
 	case vfs.OperationClose:
 		reply.Status = service.namespace.Close(owner, request.Handle)
 	case vfs.OperationRead:
@@ -519,6 +531,24 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 		reply.Created, reply.Modified = stat.Created, stat.Modified
 		reply.Attributes, reply.AttributesAvailable = stat.Attributes, stat.AttributesAvailable
 		reply.MountID = vfs.MountID(stat.MountID)
+		if status == vfs.StatusOK {
+			reply.Unix = stat.Unix
+		}
+	case vfs.OperationReadLink:
+		target, status := service.namespace.ReadLink(owner, request.Path)
+		reply.Status, reply.Name = status, target
+	case vfs.OperationSymlink:
+		if service.onImage(request.Path) {
+			reply.Status = vfs.StatusPermissionDenied
+			break
+		}
+		reply.Status = service.namespace.Symlink(request.Path, request.Target)
+	case vfs.OperationLink:
+		if service.onImage(request.Target) {
+			reply.Status = vfs.StatusPermissionDenied
+			break
+		}
+		reply.Status = service.namespace.Link(request.Path, request.Target)
 	case vfs.OperationTruncate:
 		reply.Status = service.namespace.Truncate(request.Path, request.Offset)
 	case vfs.OperationSetMetadata:
@@ -579,12 +609,49 @@ func tooLong(path []byte) bool {
 	return false
 }
 
+// expand replaces the paths of request with what they name once symbolic
+// links are followed, before anything authorizes or performs the request
+// (ADR 0223). An operation on a name itself leaves its last component alone:
+// removing, renaming or reading a link acts on the link, and making a name
+// never creates through a link that dangles. A symlink's Target is its
+// content, not a path to resolve.
+func (service *Service) expand(owner vfs.Owner, request *vfs.Request) vfs.Status {
+	followPath, target := false, false
+	switch request.Operation {
+	case vfs.OperationOpen, vfs.OperationStat, vfs.OperationSetMetadata, vfs.OperationLink:
+		followPath = request.Rights&vfs.NoFollow == 0
+		target = request.Operation == vfs.OperationLink
+	case vfs.OperationReadDir, vfs.OperationReadDirBatch, vfs.OperationTruncate, vfs.OperationFilesystemInfo:
+		followPath = true
+	case vfs.OperationRename, vfs.OperationReplace:
+		target = true
+	case vfs.OperationCreate, vfs.OperationMkdir, vfs.OperationUnlink, vfs.OperationReadLink, vfs.OperationSymlink:
+	default:
+		return vfs.StatusOK
+	}
+	if len(request.Path) != 0 {
+		expanded, status := service.namespace.Expand(owner, request.Path, followPath)
+		if status != vfs.StatusOK {
+			return status
+		}
+		request.Path = service.expandedPath[:copy(service.expandedPath[:], expanded)]
+	}
+	if target && len(request.Target) != 0 {
+		expanded, status := service.namespace.Expand(owner, request.Target, false)
+		if status != vfs.StatusOK {
+			return status
+		}
+		request.Target = service.expandedTarget[:copy(service.expandedTarget[:], expanded)]
+	}
+	return vfs.StatusOK
+}
+
 func (service *Service) authorize(owner vfs.Owner, request vfs.Request) vfs.Status {
 	rights := vfs.Rights(0)
 	moving := false
 	switch request.Operation {
 	case vfs.OperationOpen:
-		rights = request.Rights
+		rights = request.Rights &^ vfs.NoFollow
 	case vfs.OperationReadDir, vfs.OperationStat:
 		if len(request.Path) == 0 {
 			return vfs.StatusOK
@@ -601,6 +668,17 @@ func (service *Service) authorize(owner vfs.Owner, request vfs.Request) vfs.Stat
 		rights = vfs.Write
 	case vfs.OperationUnlink, vfs.OperationRename, vfs.OperationReplace:
 		rights, moving = vfs.Write, true
+	case vfs.OperationReadLink:
+		rights = vfs.Read
+	case vfs.OperationSymlink:
+		rights = vfs.Write
+	case vfs.OperationLink:
+		// The new name reaches the same object, so making it takes the
+		// right to change that object as well as the directory it goes in.
+		if status := service.namespace.AuthorizePath(owner, request.Path, vfs.Write, false); status != vfs.StatusOK {
+			return status
+		}
+		return service.namespace.AuthorizePath(owner, request.Target, vfs.Write, false)
 	case vfs.OperationFilesystemInfo, vfs.OperationReadMount:
 		if service.namespace.Rooted(owner) {
 			return vfs.StatusPermissionDenied

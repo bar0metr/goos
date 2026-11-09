@@ -61,7 +61,13 @@ const (
 	StatusTimeout
 	StatusPeerDied
 	StatusUnsupported
-	lastStatus = StatusUnsupported
+	// StatusLoop is a path that met more than MaxLinkExpansions symbolic
+	// links, or an open that refused to follow one (ADR 0223).
+	StatusLoop
+	// StatusCrossDevice refuses a hard link between two filesystem
+	// instances.
+	StatusCrossDevice
+	lastStatus = StatusCrossDevice
 )
 
 type Rights uint8
@@ -121,6 +127,20 @@ type MetadataBackend interface {
 	SetMetadata(id ramfs.NodeID, change ramfs.MetadataChange) ramfs.Status
 }
 
+// LinkBackend holds symbolic links. ReadLink copies a link's target and
+// returns its length; SymlinkName makes a link. The VFS follows links itself
+// and never asks a backend to (ADR 0223).
+type LinkBackend interface {
+	ReadLink(id ramfs.NodeID, target []byte) (int, ramfs.Status)
+	SymlinkName(parent ramfs.NodeID, name ramfs.Name, target []byte) (ramfs.NodeID, ramfs.Status)
+}
+
+// HardLinkBackend gives the existing node id a further name in parent. A
+// backend without it answers Link with StatusUnsupported.
+type HardLinkBackend interface {
+	LinkName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
+}
+
 // ObjectBackend gives an opened file identity independent of pathname lookup.
 // Backends whose node IDs are already stable need not implement it.
 type ObjectBackend interface {
@@ -136,7 +156,10 @@ type mount struct {
 	generation     uint32
 	filesystemType ramfs.FilesystemType
 	readOnly       bool
-	used           bool
+	// links reports a backend that can hold symbolic links, so a walk
+	// through it checks the kind of every node it reaches.
+	links bool
+	used  bool
 }
 
 // MountInfo is one bounded mount-table entry.
@@ -173,7 +196,10 @@ type cacheEntry struct {
 	path      [maxCachedPath]byte
 	size      uint16
 	protected bool
-	used      bool
+	// link marks a path whose last component is a symbolic link. A walk
+	// that meets a link earlier stops there and caches nothing.
+	link bool
+	used bool
 }
 
 type Namespace struct {
@@ -217,6 +243,11 @@ type Namespace struct {
 	// one per scope slot. Every change to a name, mount, or scope clears them
 	// through invalidate.
 	scopeMembers [MaxScopes]scopeMembers
+	// hit is the symbolic link the last resolve met, and links the buffers
+	// expansion builds paths in. links is allocated when a mount that can
+	// hold links first appears.
+	hit   linkHit
+	links *linkState
 }
 
 const maxReserved = 4
@@ -339,10 +370,15 @@ func (namespace *Namespace) Mount(path []byte, backend Backend, root ramfs.NodeI
 				entry.generation = 1
 			}
 			entry.backend, entry.root, entry.size, entry.used = backend, root, uint16(size), true
+			entry.filesystemType, entry.readOnly = 0, false
 			if filesystem, supported := backend.(filesystemBackend); supported {
 				if info, status := filesystem.FilesystemInfo(); status == ramfs.StatusOK && info.Valid() && info.Type != 0 {
 					entry.filesystemType, entry.readOnly = info.Type, info.ReadOnly
 				}
+			}
+			entry.links = holdsLinks(backend, entry.filesystemType)
+			if entry.links && namespace.links == nil {
+				namespace.links = new(linkState)
 			}
 			copy(entry.path[:], canonical[:size])
 			namespace.invalidate()
@@ -434,11 +470,15 @@ func (namespace *Namespace) Resolve(path []byte) (uint8, ramfs.NodeID, Status) {
 // protected directory, so the node is it or lies below it.
 func (namespace *Namespace) resolve(path []byte) (uint8, ramfs.NodeID, bool, Status) {
 	canonical := &namespace.resolved
+	namespace.hit = linkHit{}
 	size, ok := canonicalPath(canonical, path)
 	if !ok {
 		return 0, 0, false, StatusInvalidArgument
 	}
-	if mountIndex, node, protected, found := namespace.cached(canonical[:size]); found {
+	if mountIndex, node, protected, link, found := namespace.cached(canonical[:size]); found {
+		if link {
+			namespace.hit = linkHit{mount: mountIndex, node: node, start: lastComponent(canonical[:size]), end: size, final: true, valid: true}
+		}
 		return mountIndex, node, protected, StatusOK
 	}
 	mountIndex, relative, status := namespace.selectMount(canonical[:size])
@@ -460,9 +500,25 @@ func (namespace *Namespace) resolve(path []byte) (uint8, ramfs.NodeID, bool, Sta
 			return 0, 0, false, mapStatus(backendStatus)
 		}
 		protected = protected || namespace.guards(mounted, node)
+		start := relative
 		relative = size - len(rest)
+		if mounted.links {
+			stat, statStatus := mounted.backend.Stat(node)
+			if statStatus != ramfs.StatusOK {
+				return 0, 0, false, mapStatus(statStatus)
+			}
+			if stat.Kind == ramfs.KindSymlink {
+				final := relative >= size
+				namespace.hit = linkHit{mount: mountIndex, node: node, start: start, end: start + len(component), final: final, valid: true}
+				if !final {
+					// The link is not a directory. A caller that did not
+					// expand the path gets the backend's answer for that.
+					return 0, 0, false, StatusNotDirectory
+				}
+			}
+		}
 	}
-	namespace.remember(canonical[:size], mountIndex, node, protected)
+	namespace.remember(canonical[:size], mountIndex, node, protected, namespace.hit.valid)
 	return mountIndex, node, protected, StatusOK
 }
 
@@ -491,7 +547,13 @@ func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handl
 		return 0, StatusPermissionDenied
 	}
 	stat, backendStatus := namespace.mounts[mountIndex].backend.Stat(node)
-	if backendStatus != ramfs.StatusOK || stat.Kind != ramfs.KindFile {
+	switch {
+	case backendStatus == ramfs.StatusOK && stat.Kind == ramfs.KindSymlink:
+		// The path was expanded without its last link, as O_NOFOLLOW asks.
+		return 0, StatusLoop
+	case backendStatus == ramfs.StatusOK && stat.Kind == ramfs.KindSpecial:
+		return 0, StatusUnsupported
+	case backendStatus != ramfs.StatusOK || stat.Kind != ramfs.KindFile:
 		return 0, StatusBackendError
 	}
 	identity := node
@@ -1230,17 +1292,17 @@ func (namespace *Namespace) file(owner Owner, handle Handle, required Rights) (*
 	return entry, StatusOK
 }
 
-func (namespace *Namespace) cached(path []byte) (uint8, ramfs.NodeID, bool, bool) {
+func (namespace *Namespace) cached(path []byte) (uint8, ramfs.NodeID, bool, bool, bool) {
 	for index := range namespace.cache {
 		entry := &namespace.cache[index]
 		if entry.used && equal(entry.path[:entry.size], path) {
-			return entry.mount, entry.node, entry.protected, true
+			return entry.mount, entry.node, entry.protected, entry.link, true
 		}
 	}
-	return 0, 0, false, false
+	return 0, 0, false, false, false
 }
 
-func (namespace *Namespace) remember(path []byte, mountIndex uint8, node ramfs.NodeID, protected bool) {
+func (namespace *Namespace) remember(path []byte, mountIndex uint8, node ramfs.NodeID, protected bool, link bool) {
 	if len(path) > maxCachedPath {
 		return
 	}
@@ -1248,6 +1310,7 @@ func (namespace *Namespace) remember(path []byte, mountIndex uint8, node ramfs.N
 		entry := &namespace.cache[index]
 		if !entry.used {
 			entry.used, entry.mount, entry.node, entry.size, entry.protected = true, mountIndex, node, uint16(len(path)), protected
+			entry.link = link
 			copy(entry.path[:], path)
 			return
 		}

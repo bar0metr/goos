@@ -187,6 +187,7 @@ func route(request Request, handler Handler) Result {
 		case abi.SysAccess, abi.SysFaccessat, abi.SysGetdents64, abi.SysStat, abi.SysFstat, abi.SysLstat, abi.SysNewfstatat, abi.SysLseek, abi.SysGetcwd, abi.SysChdir, abi.SysRename, abi.SysMkdir, abi.SysRmdir, abi.SysUnlink,
 			abi.SysMkdirat, abi.SysUnlinkat, abi.SysRenameat, abi.SysRenameat2, abi.SysStatx,
 			abi.SysReadlink, abi.SysReadlinkat, abi.SysChmod, abi.SysFchmod, abi.SysFchmodat, abi.SysUtimensat,
+			abi.SysSymlink, abi.SysSymlinkat, abi.SysLink, abi.SysLinkat,
 			abi.SysFsync, abi.SysFdatasync:
 			return handler.Filesystem(request)
 		case abi.SysBrk:

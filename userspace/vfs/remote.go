@@ -223,6 +223,51 @@ func (remote *Remote) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Sta
 	return status
 }
 
+// ReadLink asks the service for the target of the symbolic link id. The
+// service writes it to the scratch slot, and it is copied out of the shared
+// cache before anyone checks it.
+func (remote *Remote) ReadLink(id ramfs.NodeID, target []byte) (int, ramfs.Status) {
+	if !remote.pages.Ready() {
+		return 0, ramfs.StatusUnsupported
+	}
+	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationReadLink, Node: id, Slot: scratchSlot, Size: ramfs.MaxLinkTarget})
+	if status != ramfs.StatusOK {
+		return 0, status
+	}
+	if reply.Value == 0 || reply.Value > ramfs.MaxLinkTarget || reply.Value > uint64(len(target)) {
+		remote.forgetAll()
+		return 0, ramfs.StatusIOError
+	}
+	return copy(target[:reply.Value], remote.pages.Slot(scratchSlot)), ramfs.StatusOK
+}
+
+// SymlinkName passes the target through the scratch slot, as a write passes
+// bytes it does not cache.
+func (remote *Remote) SymlinkName(parent ramfs.NodeID, name ramfs.Name, target []byte) (ramfs.NodeID, ramfs.Status) {
+	if !ramfs.ValidLinkTarget(target) {
+		return 0, ramfs.StatusInvalidArgument
+	}
+	if !remote.pages.Ready() {
+		return 0, ramfs.StatusUnsupported
+	}
+	size := name.CopyTo(remote.name[:])
+	if size == 0 {
+		return 0, ramfs.StatusInvalidArgument
+	}
+	remote.forget(parent)
+	copy(remote.pages.Slot(scratchSlot), target)
+	return remote.looked(remote.call(fsproto.Request{Operation: fsproto.OperationSymlink, Parent: parent, Name: remote.name[:size], Slot: scratchSlot, Size: uint32(len(target))}))
+}
+
+// LinkName gives id a further name. Its link count changes, so its cached
+// attributes go.
+func (remote *Remote) LinkName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
+	remote.forget(id)
+	remote.forget(parent)
+	_, status := remote.named(fsproto.OperationLink, id, parent, name)
+	return status
+}
+
 // Read serves target from the file cache, asking the service for each page it
 // does not hold. A page shorter than a page is the end of the file.
 func (remote *Remote) Read(id ramfs.NodeID, offset uint64, target []byte) (int, ramfs.Status) {
@@ -516,7 +561,7 @@ func (remote *Remote) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byt
 func statOf(reply fsproto.Reply) ramfs.Stat {
 	return ramfs.Stat{ID: reply.Node, Kind: reply.Kind, Size: reply.Value,
 		Created: reply.Created, Modified: reply.Modified, Attributes: reply.Attributes,
-		AttributesAvailable: reply.AttributesAvailable}
+		AttributesAvailable: reply.AttributesAvailable, Unix: reply.Unix}
 }
 
 func (remote *Remote) reportCacheFault(source, target []byte, length int) {

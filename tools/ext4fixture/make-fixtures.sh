@@ -1,6 +1,9 @@
 #!/bin/sh
 # Regenerates the ext4 test images in userspace/ext4/testdata with the
 # pinned e2fsprogs build (docs/development/ext4-reference-versions.md).
+# Every image is built and checked; IMAGES, a space-separated list such as
+# IMAGES=links, limits which of them and their manifests are copied, so the
+# other committed images keep their bytes.
 #
 # mke2fs -d stamps inode change times and the superblock with the real
 # clock, so a regenerated image differs from the committed one in those
@@ -32,6 +35,15 @@ grep -q '^mke2fs 1.47.2 ' "$work/mke2fs-version" || {
 	exit 1
 }
 mkdir -p "$dest"
-cp "$work"/*.img.gz "$work"/*.dumpe2fs "$work"/*manifest.tsv "$dest"/
+if [ -n "${IMAGES:-}" ]; then
+	for name in $IMAGES; do
+		cp "$work/$name".img.gz "$work/$name".dumpe2fs "$dest"/
+		for extra in "$work/$name".*.tsv; do
+			[ -e "$extra" ] && cp "$extra" "$dest"/
+		done
+	done
+else
+	cp "$work"/*.img.gz "$work"/*.dumpe2fs "$work"/*.tsv "$dest"/
+fi
 (cd "$dest" && shasum -a 256 *.img.gz >SHA256SUMS)
 echo "fixtures written to $dest"

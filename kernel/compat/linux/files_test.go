@@ -24,8 +24,8 @@ func TestDecodeOpen(t *testing.T) {
 		{0o1000 | 0o100 | 1, OpenIntent{Rights: vfs.Write, Access: 1, Create: true, Truncate: true}, 0},
 		{0o2000 | 0o100 | 1, OpenIntent{Rights: vfs.Write, Access: 1, Create: true, Append: true}, 0},
 		{0o200000 | 0o2000000, OpenIntent{Rights: vfs.Read, Directory: true, CloseOnExec: true}, 0},
-		{0o400 | 0o400000, OpenIntent{Rights: vfs.Read}, 0}, // O_NOCTTY, O_NOFOLLOW
-		{1 << 32, OpenIntent{Rights: vfs.Read}, 0},          // flags is an int
+		{0o400 | 0o400000, OpenIntent{Rights: vfs.Read, NoFollow: true}, 0}, // O_NOCTTY, O_NOFOLLOW
+		{1 << 32, OpenIntent{Rights: vfs.Read}, 0},                          // flags is an int
 		{3, OpenIntent{}, abi.EINVAL},
 		{0o200000 | 0o100, OpenIntent{}, abi.EINVAL},                                          // O_DIRECTORY|O_CREAT
 		{0o4000 | 0o200000, OpenIntent{Rights: vfs.Read, Directory: true, NonBlock: true}, 0}, // opendir
@@ -42,6 +42,19 @@ func TestDecodeOpen(t *testing.T) {
 	}
 	if flags := (OpenIntent{Access: 1, Append: true}).StatusFlags(); flags != 1|abi.OpenAppend {
 		t.Fatalf("status flags = %#o", flags)
+	}
+	for _, test := range []struct {
+		intent       OpenIntent
+		stat, opened vfs.Rights
+	}{
+		{OpenIntent{Rights: vfs.Read}, 0, vfs.Read},
+		{OpenIntent{Rights: vfs.Read, NoFollow: true}, vfs.NoFollow, vfs.Read | vfs.NoFollow},
+		{OpenIntent{Rights: vfs.Write, Create: true}, 0, vfs.Write},
+		{OpenIntent{Rights: vfs.Write, Create: true, Exclusive: true}, vfs.NoFollow, vfs.Write},
+	} {
+		if stat, opened := test.intent.StatRights(), test.intent.OpenRights(); stat != test.stat || opened != test.opened {
+			t.Errorf("%+v: stat %#x open %#x", test.intent, stat, opened)
+		}
 	}
 }
 
@@ -67,6 +80,9 @@ func TestPlanOpen(t *testing.T) {
 		{"create existing", create, false, vfs.StatusOK, ramfs.KindFile, OpenExistingFile, 0},
 		{"exclusive create of existing", exclusive, false, vfs.StatusOK, ramfs.KindFile, OpenFail, abi.EEXIST},
 		{"exclusive create of existing directory", exclusive, false, vfs.StatusOK, ramfs.KindDirectory, OpenFail, abi.EEXIST},
+		{"no-follow open of a link", read, false, vfs.StatusOK, ramfs.KindSymlink, OpenFail, abi.ELOOP},
+		{"exclusive create over a link", exclusive, false, vfs.StatusOK, ramfs.KindSymlink, OpenFail, abi.EEXIST},
+		{"device node", read, false, vfs.StatusOK, ramfs.KindSpecial, OpenFail, abi.ENXIO},
 		{"exclusive create of missing", exclusive, false, vfs.StatusNotFound, 0, OpenCreateFile, 0},
 		{"create with a trailing slash", create, true, vfs.StatusNotFound, 0, OpenFail, abi.EISDIR},
 		{"truncate existing", truncate, false, vfs.StatusOK, ramfs.KindFile, OpenTruncateFile, 0},

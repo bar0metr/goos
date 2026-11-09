@@ -139,6 +139,6 @@ func ValidDirBatch(data []byte, count, cursor, next int) bool {
 }
 
 func validDirStat(stat *Stat) bool {
-	return stat.Kind >= KindFile && stat.Kind <= KindDirectory && stat.Created.Valid() && stat.Modified.Valid() &&
+	return stat.Kind >= KindFile && stat.Kind <= LastKind && stat.Created.Valid() && stat.Modified.Valid() &&
 		stat.Attributes <= LastAttribute*2-1 && (stat.AttributesAvailable || stat.Attributes == 0)
 }

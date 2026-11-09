@@ -242,10 +242,12 @@ records.
 | `kernel/vfs.MaxScopes`, `kernel/vfs.MaxAuthorities` | 8, 64 | policy | session | static | `StatusResourceExhausted` | none |
 | `kernel/vfs.MaxRootPath` | 64 | protocol | n/a | n/a | refused | n/a |
 | `kernel/vfs.MaxPath` | `limits.PathMax` | protocol (ADR 0110) | n/a | n/a | `StatusInvalidArgument` | n/a |
+| `kernel/vfs.MaxLinkExpansions` | 40 | protocol (ADR 0223, Linux's bound) | path resolution | three `PathMax` buffers per namespace, allocated when a mount can hold links | `StatusLoop`, Linux `ELOOP` | n/a |
 | `kernel/vfs.MaxProtocolData`, `kernel/vfs.MaxReplyData`, `kernel/vfs.MaxInlineName`, `kernel/vfs.MaxDirBatch` | message payload less headers; 4096 | protocol | n/a | n/a | n/a | n/a |
 | `kernel/ramfs.MaxNodes` | 65536 | profile | instance | 64-node chunks on demand | `StatusResourceExhausted` | `df` |
 | `kernel/ramfs.MaxFileSize` | about 4 GiB | protocol (index depth) | file | pages on write | `StatusResourceExhausted` | n/a |
 | `kernel/ramfs.MaxName`, `kernel/ramfs.MaxVolumeName`, `kernel/ramfs.MaxInlineData`, `kernel/ramfs.MaxDirBatch`, `kernel/ramfs.MaxDirRecord` | `NameMax`, 64, payload, 4096, record | protocol | n/a | n/a | refused | n/a |
+| `kernel/ramfs.MaxLinkTarget` | `PathMax` − 1 | protocol (ADR 0223) | symbolic link | one page per RAMFS link | `StatusNameTooLong`, Linux `ENAMETOOLONG` | n/a |
 | `userspace/vfs.MaxReadWorkers` | 4 | profile | VFS service | one worker each | requests queue (`ReadQueueCapacity` 8) | none |
 | `userspace/block.Max*` | payload less header; 1 MiB bulk | protocol | n/a | n/a | refused | n/a |
 | `userspace/partition.Max*` | 128 partitions, 108-byte names | protocol (GPT) | n/a | n/a | table refused as unsupported | n/a |

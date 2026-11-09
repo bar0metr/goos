@@ -97,6 +97,10 @@ func VFSReason(status vfs.Status, mutation bool) string {
 		return "storage service unavailable"
 	case vfs.StatusUnsupported:
 		return "operation not supported"
+	case vfs.StatusLoop:
+		return "too many levels of symbolic links"
+	case vfs.StatusCrossDevice:
+		return "link crosses filesystems"
 	default:
 		return "filesystem error"
 	}

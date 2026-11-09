@@ -27,6 +27,14 @@ root). Backends see only opaque node IDs and single path components; neither
 the kernel nor RAMFS nor FAT32 parses POSIX paths. Mount selection uses the
 longest whole-component prefix.
 
+Symbolic links live in RAMFS and on ext4 volumes. The VFS follows them
+itself, before it authorizes a request: a relative target continues from
+the link's directory, an absolute one from the session's root, and `..`
+applies to the spelled path. The expanded path faces the same root, scope,
+reserved-path and `/system` checks as one the client sent, and a lookup
+follows at most 40 links (ADR 0223). Hard links stay inside one filesystem
+instance.
+
 | Path | Backend | Persistence |
 | --- | --- | --- |
 | `/` | RAMFS | volatile |
@@ -96,7 +104,10 @@ VFS `stat` and directory replies use one native fixed-width metadata model
 timestamps, stable attributes, and a namespace mount ID. Availability bits
 distinguish absent timestamps or attributes from real zero values. The
 attributes are directory, read-only, hidden, system and archive; no FAT raw
-byte or invented Unix ownership/mode field crosses the boundary.
+byte or invented Unix ownership/mode field crosses the boundary. A
+filesystem that stores Unix metadata, ext4, adds a block with the mode,
+owner, link count, generation, device number and access and change times,
+marked available (ADR 0223). It describes the file and grants nothing.
 
 FAT32 translates its directory-entry fields in the filesystem service. RAMFS
 uses the native realtime clock for creation and modification events. The

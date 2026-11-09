@@ -496,6 +496,8 @@ func mapPathObject(request *vfs.Request, object handle.ID) ([]byte, uint64, uint
 		minimum = limits.PathMax
 	} else if request.Operation == vfs.OperationReadDirBatch {
 		minimum = vfs.MaxDirBatch
+	} else if request.Operation == vfs.OperationReadLink {
+		minimum = ramfs.MaxLinkTarget
 	}
 	if size > maxPathObject || request.NameReturn && size < minimum || request.PathsAttached && !request.TakePaths(memory, &pathCopy, &targetCopy) {
 		sys.VMUnmap(base, size)

@@ -95,10 +95,20 @@ func (volume *Volume) inode(id ramfs.NodeID) (*ext4.Inode, ramfs.Status) {
 	return inode, ramfs.StatusOK
 }
 
-// served reports whether the native VFS can present inode: regular files
-// and directories. Symbolic links and device, FIFO and socket inodes stay
-// hidden until the VFS resolves links under its own authority.
-func served(inode *ext4.Inode) bool { return inode.IsRegular() || inode.IsDir() }
+// kindOf maps an inode's file type onto the native kinds. The VFS follows
+// symbolic links itself (ADR 0223); device, FIFO and socket inodes are
+// listed and described but never opened.
+func kindOf(inode *ext4.Inode) ramfs.Kind {
+	switch inode.Type() {
+	case ext4.ModeRegular:
+		return ramfs.KindFile
+	case ext4.ModeDir:
+		return ramfs.KindDirectory
+	case ext4.ModeSymlink:
+		return ramfs.KindSymlink
+	}
+	return ramfs.KindSpecial
+}
 
 func (volume *Volume) Root() (ramfs.NodeID, ramfs.Status) {
 	if volume.fs == nil {
@@ -150,9 +160,6 @@ func (volume *Volume) OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.Node
 	if status != ramfs.StatusOK {
 		return 0, status
 	}
-	if !served(inode) {
-		return 0, ramfs.StatusUnsupported
-	}
 	return nodeID(inode), ramfs.StatusOK
 }
 
@@ -182,18 +189,30 @@ func timestamp(stamp ext4.Timestamp, available bool) ramfs.Timestamp {
 }
 
 // stat reports the native view of an inode. ext4 has no FAT attributes, so
-// none are claimed; ownership and mode wait for the versioned metadata
-// extension.
+// none are claimed. The Unix metadata is what the inode stores; the VFS
+// grants nothing from it (ADR 0223).
 func stat(inode *ext4.Inode) ramfs.Stat {
 	result := ramfs.Stat{
 		ID:       nodeID(inode),
-		Kind:     ramfs.KindFile,
+		Kind:     kindOf(inode),
 		Size:     inode.Size,
 		Created:  timestamp(inode.Create, inode.HasCreate),
 		Modified: timestamp(inode.Modify, true),
+		Unix: ramfs.Unix{
+			Mode:       inode.Mode,
+			UID:        inode.UID,
+			GID:        inode.GID,
+			Links:      uint32(inode.Links),
+			Generation: inode.Generation,
+			Device:     inode.DeviceNumber(),
+			Accessed:   timestamp(inode.Access, true),
+			Changed:    timestamp(inode.Change, true),
+			Available:  true,
+		},
 	}
-	if inode.IsDir() {
-		result.Kind, result.Size = ramfs.KindDirectory, 0
+	switch result.Kind {
+	case ramfs.KindDirectory, ramfs.KindSpecial:
+		result.Size = 0
 	}
 	return result
 }
@@ -203,10 +222,30 @@ func (volume *Volume) Stat(id ramfs.NodeID) (ramfs.Stat, ramfs.Status) {
 	if status != ramfs.StatusOK {
 		return ramfs.Stat{}, status
 	}
-	if !served(inode) {
-		return ramfs.Stat{}, ramfs.StatusUnsupported
-	}
 	return stat(inode), ramfs.StatusOK
+}
+
+// ReadLink copies the target of the symbolic link id into target. A node
+// that is no link is StatusInvalidArgument, as Linux readlink answers EINVAL.
+func (volume *Volume) ReadLink(id ramfs.NodeID, target []byte) (int, ramfs.Status) {
+	inode, status := volume.inode(id)
+	if status != ramfs.StatusOK {
+		return 0, status
+	}
+	if !inode.IsSymlink() {
+		return 0, ramfs.StatusInvalidArgument
+	}
+	link, err := volume.fs.Readlink(inode)
+	if err != nil {
+		return 0, statusOf(err)
+	}
+	if !ramfs.ValidLinkTarget(link) {
+		return 0, ramfs.StatusCorrupt
+	}
+	if len(link) > len(target) {
+		return 0, ramfs.StatusResourceExhausted
+	}
+	return copy(target, link), ramfs.StatusOK
 }
 
 // listing walks parent from cursor, a byte position in the directory, and
@@ -234,9 +273,6 @@ func (volume *Volume) listing(parent ramfs.NodeID, cursor int, emit func(*ext4.I
 				failure = ramfs.StatusCorrupt
 			}
 			return false
-		}
-		if !served(inode) {
-			return true
 		}
 		volume.entry = *entry
 		// The entry after this one starts no earlier than one byte on; the
@@ -364,6 +400,14 @@ func (volume *Volume) ReplaceName(ramfs.NodeID, ramfs.NodeID, ramfs.Name) ramfs.
 }
 
 func (volume *Volume) UnlinkName(ramfs.NodeID, ramfs.Name) ramfs.Status { return volume.readOnly() }
+
+func (volume *Volume) SymlinkName(ramfs.NodeID, ramfs.Name, []byte) (ramfs.NodeID, ramfs.Status) {
+	return 0, volume.readOnly()
+}
+
+func (volume *Volume) LinkName(ramfs.NodeID, ramfs.NodeID, ramfs.Name) ramfs.Status {
+	return volume.readOnly()
+}
 
 func (volume *Volume) SetMetadata(ramfs.NodeID, ramfs.MetadataChange) ramfs.Status {
 	return volume.readOnly()

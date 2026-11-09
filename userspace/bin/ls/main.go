@@ -1,6 +1,7 @@
 //go:build goos_userspace
 
-// Command ls lists a directory.
+// Command ls lists a directory. A directory name ends in "/" and a symbolic
+// link's in "@".
 package main
 
 import (
@@ -31,7 +32,7 @@ func run(data startup.Data) {
 	path := utility.Resolve(data, argument)
 	stat, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationStat, Path: path})
 	utility.Check(stat, ok, path, false)
-	if stat.Kind == ramfs.KindFile {
+	if stat.Kind != ramfs.KindDirectory {
 		utility.PrintName(baseName(path))
 		utility.EndLine()
 		utility.Mark("LS_PROCESS_OK\n")
@@ -53,8 +54,11 @@ func run(data startup.Data) {
 			}
 			records = records[size:]
 			utility.PrintName(record.Name)
-			if record.Stat.Kind == ramfs.KindDirectory {
+			switch record.Stat.Kind {
+			case ramfs.KindDirectory:
 				utility.PrintText("/")
+			case ramfs.KindSymlink:
+				utility.PrintText("@")
 			}
 			utility.EndLine()
 		}

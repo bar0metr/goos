@@ -898,6 +898,123 @@ static int leave_scratch(void)
 	return chdir("/system/linux") == 0 && rmdir(scratch) == 0;
 }
 
+/* The libc this probe links has no stat wrappers; these make the calls. */
+static int probe_stat(const char *path, struct stat *status)
+{
+	return (int)syscall(SYS_stat, path, status);
+}
+
+static int probe_lstat(const char *path, struct stat *status)
+{
+	return (int)syscall(SYS_lstat, path, status);
+}
+
+/* Returns 1 when the directory listing of path shows name with type. The
+ * listing is read with getdents64 itself; the libc this probe links has no
+ * directory stream. */
+static int listed_as(const char *path, const char *name, unsigned char type)
+{
+	static char records[4096];
+	int fd = open(path, O_RDONLY | O_DIRECTORY), found = 0;
+	long size;
+
+	if (fd < 0)
+		return 0;
+	while (!found && (size = syscall(SYS_getdents64, fd, records, sizeof records)) > 0) {
+		for (long offset = 0; offset < size;) {
+			unsigned short length;
+
+			memcpy(&length, records + offset + 16, sizeof length);
+			if (!strcmp(records + offset + 19, name)) {
+				found = (unsigned char)records[offset + 18] == type ? 1 : -1;
+				break;
+			}
+			offset += length;
+		}
+	}
+	close(fd);
+	return found == 1;
+}
+
+/* links checks the symbolic-link calls in a scratch directory: symlink and
+ * symlinkat, readlink with a short buffer, lstat beside stat, O_NOFOLLOW, a
+ * loop, a dangling link, O_CREAT|O_EXCL over a link, d_type, and rename and
+ * unlink acting on the link. link makes a second name on Linux; GoOS's RAMFS
+ * keeps no hard links and refuses it with EPERM. */
+static int links_test(void)
+{
+	char target[64];
+	struct stat followed, itself, hard;
+	int fd, ok = enter_scratch();
+
+	ok = ok && (fd = open("file", O_CREAT | O_WRONLY, 0644)) >= 0 && write(fd, "data", 4) == 4 && close(fd) == 0;
+	ok = ok && symlink("file", "rel") == 0 && symlinkat("missing", AT_FDCWD, "dangling") == 0 && symlink("loop", "loop") == 0;
+	ok = ok && readlink("rel", target, sizeof target) == 4 && !memcmp(target, "file", 4) &&
+	     readlink("rel", target, 2) == 2 && !memcmp(target, "fi", 2) &&
+	     syscall(SYS_readlinkat, AT_FDCWD, "dangling", target, sizeof target) == 7 &&
+	     fails(readlink("file", target, sizeof target), EINVAL) && fails(readlink("rel/", target, sizeof target), ENOTDIR);
+	ok = ok && probe_stat("rel", &followed) == 0 && S_ISREG(followed.st_mode) && followed.st_size == 4 &&
+	     probe_lstat("rel", &itself) == 0 && S_ISLNK(itself.st_mode) && itself.st_size == 4 && itself.st_ino != followed.st_ino &&
+	     syscall(SYS_newfstatat, AT_FDCWD, "rel", &itself, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(itself.st_mode);
+	ok = ok && fails(open("rel", O_RDONLY | O_NOFOLLOW), ELOOP) && fails(open("loop", O_RDONLY), ELOOP) &&
+	     fails(probe_stat("loop", &itself), ELOOP) && fails(open("dangling", O_RDONLY), ENOENT) &&
+	     fails(symlink("other", "rel"), EEXIST) && fails(open("rel", O_CREAT | O_EXCL | O_WRONLY, 0644), EEXIST) &&
+	     fails(symlink("", "empty"), ENOENT);
+	ok = ok && (fd = open("rel", O_RDONLY)) >= 0 && read(fd, target, sizeof target) == 4 && close(fd) == 0;
+	ok = ok && listed_as(".", "rel", DT_LNK) && listed_as(".", "file", DT_REG);
+	if (ok && link("file", "hard") == 0) {
+		ok = !on_goos() && probe_stat("hard", &hard) == 0 && hard.st_ino == followed.st_ino && hard.st_nlink == 2 && unlink("hard") == 0;
+	} else if (ok) {
+		ok = on_goos() && errno == EPERM;
+		errno = 0;
+	}
+	ok = ok && fails(syscall(SYS_linkat, AT_FDCWD, "file", AT_FDCWD, "x", 0x8000), EINVAL);
+	ok = ok && rename("rel", "moved") == 0 && probe_lstat("moved", &itself) == 0 && S_ISLNK(itself.st_mode) &&
+	     unlink("moved") == 0 && probe_stat("file", &followed) == 0;
+	ok = ok && unlink("dangling") == 0 && unlink("loop") == 0 && unlink("file") == 0 && leave_scratch();
+	return report("links", ok);
+}
+
+/* ext4_links checks what Linux made in the links fixture as a Linux program
+ * sees it: modes, owners, link counts and device numbers from the inodes,
+ * hard links sharing an inode, the 40-link bound, O_NOFOLLOW, d_type, and the
+ * read-only and cross-filesystem refusals. base is where the volume is
+ * mounted read-only. */
+static int ext4_links_test(const char *base)
+{
+	char target[64];
+	struct stat file, other, link_stat;
+	int fd, ok = chdir(base) == 0;
+
+	ok = ok && probe_stat("file.txt", &file) == 0 && file.st_mode == (S_IFREG | 0640) && file.st_uid == 1234 &&
+	     file.st_gid == 5678 && file.st_nlink == 3 && file.st_size == 11 && file.st_atime == 1767225600 &&
+	     file.st_mtime == 1767225600;
+	ok = ok && probe_stat("hard-a", &other) == 0 && other.st_ino == file.st_ino && other.st_dev == file.st_dev &&
+	     probe_stat("rel", &other) == 0 && other.st_ino == file.st_ino;
+	ok = ok && probe_lstat("rel", &link_stat) == 0 && link_stat.st_mode == (S_IFLNK | 0777) && link_stat.st_uid == 42 &&
+	     link_stat.st_gid == 43 && link_stat.st_size == 8 && link_stat.st_ino != file.st_ino;
+	ok = ok && probe_stat("dir", &other) == 0 && other.st_mode == (S_IFDIR | 0750) && other.st_uid == 7 && other.st_gid == 8 &&
+	     other.st_nlink == 3 && probe_stat("setuid", &other) == 0 && other.st_mode == (S_IFREG | 04755);
+	ok = ok && probe_lstat("fifo", &other) == 0 && S_ISFIFO(other.st_mode) && probe_lstat("char", &other) == 0 && S_ISCHR(other.st_mode) &&
+	     major(other.st_rdev) == 1 && minor(other.st_rdev) == 3 && probe_lstat("block", &other) == 0 && S_ISBLK(other.st_mode) &&
+	     major(other.st_rdev) == 8 && minor(other.st_rdev) == 1 && probe_lstat("wide", &other) == 0 &&
+	     major(other.st_rdev) == 259 && minor(other.st_rdev) == 300;
+	ok = ok && readlink("abs", target, sizeof target) == 9 && !memcmp(target, "/file.txt", 9) &&
+	     readlink("bad-target", target, sizeof target) == 5 && !memcmp(target, "bad-\377", 5) &&
+	     readlink("dir/sub/up", target, sizeof target) == 14;
+	ok = ok && fails(open("deep-0", O_RDONLY), ELOOP) && (fd = open("deep-1", O_RDONLY)) >= 0 && close(fd) == 0 &&
+	     fails(open("loop-a", O_RDONLY), ELOOP) && fails(open("self", O_RDONLY), ELOOP) &&
+	     fails(open("rel", O_RDONLY | O_NOFOLLOW), ELOOP) && fails(open("dangling", O_RDONLY), ENOENT) &&
+	     fails(open("abs", O_RDONLY), ENOENT);
+	ok = ok && (fd = open("sub-dir/inner.txt", O_RDONLY)) >= 0 && read(fd, target, sizeof target) == 11 &&
+	     !memcmp(target, "inner file\n", 11) && close(fd) == 0;
+	ok = ok && listed_as(".", "rel", DT_LNK) && listed_as(".", "dir", DT_DIR) && listed_as(".", "file.txt", DT_REG) &&
+	     (listed_as(".", "fifo", DT_FIFO) || on_goos() && listed_as(".", "fifo", DT_UNKNOWN));
+	ok = ok && fails(symlink("file.txt", "new"), EROFS) && fails(link("file.txt", "new"), EROFS) &&
+	     fails(link("file.txt", "/tmp/ext4-links"), EXDEV) && fails(unlink("rel"), EROFS);
+	return report("ext4 links", ok);
+}
+
 /* Returns how many of its checks failed. */
 static int scratch_checks(const char *self)
 {
@@ -4528,6 +4645,10 @@ int main(int argc, char **argv)
 		}
 		if (!strcmp(argv[1], "hardening"))
 			return hardening_test();
+		if (!strcmp(argv[1], "links"))
+			return links_test();
+		if (!strcmp(argv[1], "ext4-links") && argc >= 3)
+			return ext4_links_test(argv[2]);
 		if (!strcmp(argv[1], "limits"))
 			return limits_test();
 		if (!strcmp(argv[1], "fork-fault"))
