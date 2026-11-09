@@ -113,10 +113,11 @@ const (
 	lastOperation = OperationLink
 )
 
-// NoFollow, in the Rights of an open, a stat, a link or a metadata change,
-// leaves a symbolic link that Path ends in unfollowed: an open then fails
-// with StatusLoop, a stat describes the link, a link names the link itself
-// and a metadata change applies to the link.
+// NoFollow, in the Rights of an open, a stat, a create, a link or a metadata
+// change, leaves a symbolic link that Path ends in unfollowed: an open then
+// fails with StatusLoop, a stat describes the link, a create finds the name
+// taken, a link names the link itself and a metadata change applies to the
+// link.
 const NoFollow Rights = 1 << 7
 
 // Valid reports whether the operation exists in this protocol version.
@@ -511,7 +512,7 @@ func allowedRights(operation Operation) Rights {
 	switch operation {
 	case OperationSetMetadata:
 		return MetadataModified | MetadataReadOnly | MetadataWritable | NoFollow
-	case OperationOpen, OperationStat, OperationLink:
+	case OperationOpen, OperationStat, OperationLink, OperationCreate:
 		return Read | Write | NoFollow
 	}
 	return Read | Write

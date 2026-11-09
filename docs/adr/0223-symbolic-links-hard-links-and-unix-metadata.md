@@ -83,8 +83,10 @@ last component unless the request carries `NoFollow`. Create follows it
 too, so `open(O_CREAT)` through a dangling link makes the target, as on
 Linux; the target faces the caller's root and scopes, and a rooted
 session cannot create outside its root that way. `O_EXCL` and `O_NOFOLLOW`
-stat the name without following it first: an existing link is `EEXIST`
-under `O_EXCL` and `ELOOP` under `O_NOFOLLOW`. Mkdir, unlink, rename,
+send `NoFollow` with both the stat and the create, so the backend's create
+sees the name itself. A link that already exists, or one another session
+makes between the two exchanges, ends `O_EXCL` with `EEXIST` and
+`O_NOFOLLOW` with `ELOOP`, and its target is never made. Mkdir, unlink, rename,
 replace, read-link and symlink act on the last component itself.
 
 **Cross-filesystem moves.** Rename and replace between two backends are

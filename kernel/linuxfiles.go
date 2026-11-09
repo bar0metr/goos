@@ -113,7 +113,7 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 				return linuxErrno(errno)
 			}
 		case linuxcompat.OpenStageCreate:
-			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationCreate, Path: path}, attachPaths)
+			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationCreate, Path: path, Rights: intent.StatRights()}, attachPaths)
 			if blocked {
 				return linuxBlocked
 			}
@@ -121,7 +121,9 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 				return linuxErrno(errno)
 			}
 			// Another process may have created the name since the stat. That
-			// is what O_EXCL exists to refuse.
+			// is what O_EXCL exists to refuse. A link made there in between
+			// meets a create that does not follow it: O_EXCL fails here with
+			// EEXIST, and O_NOFOLLOW's open below with ELOOP.
 			raced := reply.Status == vfs.StatusAlreadyExists
 			if reply.Status != vfs.StatusOK && !raced || raced && intent.Exclusive {
 				handler.vfsFinish()

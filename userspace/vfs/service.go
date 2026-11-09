@@ -615,17 +615,20 @@ func tooLong(path []byte) bool {
 // (ADR 0223). An operation on a name itself leaves its last component alone:
 // removing, renaming or reading a link acts on the link, and mkdir or
 // symlink over a link finds the name taken. Create follows a last link, as
-// Linux open(O_CREAT) does, so a dangling link makes its target; a caller
-// that must not create through a link checks the name first, as O_EXCL and
-// O_NOFOLLOW do. The target faces the caller's root and scopes like any
-// other path. A symlink's Target is its content, not a path to resolve.
+// Linux open(O_CREAT) does, so a dangling link makes its target, unless the
+// request carries NoFollow: then the backend sees the name itself and a link
+// that appeared there makes the create fail with StatusAlreadyExists. O_EXCL
+// and O_NOFOLLOW send NoFollow on the create itself, since a stat before it
+// cannot stop a link made in between. The target faces the caller's root and
+// scopes like any other path. A symlink's Target is its content, not a path
+// to resolve.
 func (service *Service) expand(owner vfs.Owner, request *vfs.Request) vfs.Status {
 	followPath, target := false, false
 	switch request.Operation {
-	case vfs.OperationOpen, vfs.OperationStat, vfs.OperationSetMetadata, vfs.OperationLink:
+	case vfs.OperationOpen, vfs.OperationStat, vfs.OperationSetMetadata, vfs.OperationLink, vfs.OperationCreate:
 		followPath = request.Rights&vfs.NoFollow == 0
 		target = request.Operation == vfs.OperationLink
-	case vfs.OperationReadDir, vfs.OperationReadDirBatch, vfs.OperationTruncate, vfs.OperationFilesystemInfo, vfs.OperationSync, vfs.OperationCreate:
+	case vfs.OperationReadDir, vfs.OperationReadDirBatch, vfs.OperationTruncate, vfs.OperationFilesystemInfo, vfs.OperationSync:
 		followPath = true
 	case vfs.OperationRename, vfs.OperationReplace:
 		target = true

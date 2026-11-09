@@ -51,6 +51,7 @@ func TestDecodeOpen(t *testing.T) {
 		{OpenIntent{Rights: vfs.Read, NoFollow: true}, vfs.NoFollow, vfs.Read | vfs.NoFollow},
 		{OpenIntent{Rights: vfs.Write, Create: true}, 0, vfs.Write},
 		{OpenIntent{Rights: vfs.Write, Create: true, Exclusive: true}, vfs.NoFollow, vfs.Write},
+		{OpenIntent{Rights: vfs.Write, Create: true, NoFollow: true}, vfs.NoFollow, vfs.Write | vfs.NoFollow},
 	} {
 		if stat, opened := test.intent.StatRights(), test.intent.OpenRights(); stat != test.stat || opened != test.opened {
 			t.Errorf("%+v: stat %#x open %#x", test.intent, stat, opened)

@@ -60,7 +60,6 @@ func TestLinkRequestsAndNoFollow(t *testing.T) {
 		t.Fatal("no-follow metadata change")
 	}
 	for _, request := range []Request{
-		{Operation: OperationCreate, Rights: NoFollow, Path: []byte("/a")},
 		{Operation: OperationUnlink, Rights: NoFollow, Path: []byte("/a")},
 	} {
 		message, _ := EncodeRequest(request, 3)

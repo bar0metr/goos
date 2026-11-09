@@ -480,3 +480,57 @@ func TestListingCarriesInodeNumbers(t *testing.T) {
 		t.Fatalf("listed inode numbers %v", inodes)
 	}
 }
+
+// TestCreateRaceWithALink replays the exchanges of a Linux open(O_CREAT): a
+// stat that finds nothing, then a create. Between them another session makes
+// a symbolic link at the name. The create of O_EXCL or O_NOFOLLOW carries
+// NoFollow and must stop at the link; plain O_CREAT follows it.
+func TestCreateRaceWithALink(t *testing.T) {
+	service, _ := linksService(t)
+	const other vfs.Owner = 80
+	for _, test := range []struct {
+		name   string
+		create vfs.Rights
+		open   vfs.Rights
+		status vfs.Status
+	}{
+		{"exclusive", vfs.NoFollow, vfs.Write | vfs.NoFollow, vfs.StatusAlreadyExists},
+		{"no-follow", vfs.NoFollow, vfs.Write | vfs.NoFollow, vfs.StatusLoop},
+		{"plain", 0, vfs.Write, vfs.StatusOK},
+	} {
+		path, victim := "/tmp/race-"+test.name, "/tmp/victim-"+test.name
+		if reply := statPath(service, testSession, path, vfs.NoFollow); reply.Status != vfs.StatusNotFound {
+			t.Fatalf("%s: first stat %v", test.name, reply.Status)
+		}
+		if reply := service.Dispatch(other, vfs.Request{Operation: vfs.OperationSymlink, Path: []byte(path), Target: []byte(victim)}); reply.Status != vfs.StatusOK {
+			t.Fatalf("%s: the other session's link: %v", test.name, reply.Status)
+		}
+		created := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationCreate, Rights: test.create, Path: []byte(path)})
+		if test.create&vfs.NoFollow != 0 {
+			if created.Status != vfs.StatusAlreadyExists {
+				t.Fatalf("%s: create through the new link: %v", test.name, created.Status)
+			}
+			// O_EXCL ends at the create; O_NOFOLLOW goes on to its open.
+			if test.status == vfs.StatusLoop {
+				opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: test.open, Path: []byte(path)})
+				if opened.Status != vfs.StatusLoop {
+					t.Fatalf("%s: open after the race: %v", test.name, opened.Status)
+				}
+			}
+			if reply := statPath(service, testSession, victim, 0); reply.Status != vfs.StatusNotFound {
+				t.Fatalf("%s: the link's target was made: %v", test.name, reply.Status)
+			}
+			continue
+		}
+		if created.Status != vfs.StatusOK {
+			t.Fatalf("%s: plain create: %v", test.name, created.Status)
+		}
+		if reply := statPath(service, testSession, victim, 0); reply.Status != vfs.StatusOK {
+			t.Fatalf("%s: plain create did not follow the link: %v", test.name, reply.Status)
+		}
+	}
+	message, ok := vfs.EncodeRequest(vfs.Request{Operation: vfs.OperationCreate, Rights: vfs.NoFollow, Path: []byte("/tmp/x")}, 9)
+	if decoded, valid := vfs.DecodeRequest(message); !ok || !valid || decoded.Rights != vfs.NoFollow {
+		t.Fatal("NoFollow on a create did not cross the wire")
+	}
+}

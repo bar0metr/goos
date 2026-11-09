@@ -21,9 +21,11 @@ type OpenIntent struct {
 	NoFollow bool
 }
 
-// StatRights are the rights of the stat an open starts with. O_NOFOLLOW,
-// and O_CREAT with O_EXCL, which must not create through a link, describe
-// the link itself.
+// StatRights are the rights of the stat an open starts with and of the
+// create that may follow it. O_NOFOLLOW, and O_CREAT with O_EXCL, which must
+// not create through a link, act on the name itself. The create carries the
+// flag too: a link another process makes between the two exchanges then
+// stops the create instead of steering it to the link's target.
 func (intent OpenIntent) StatRights() vfs.Rights {
 	if intent.NoFollow || intent.Create && intent.Exclusive {
 		return vfs.NoFollow
