@@ -225,8 +225,9 @@ func zero(value []byte) bool {
 // other process can redirect where storage requests go.
 const (
 	ControlProtocolID = uint64(0x47424c4b43)
-	// Version 3 adds the volume selector to SetFilesystem (ADR 0115).
-	ControlVersion     = uint16(3)
+	// Version 3 adds the volume selector to SetFilesystem (ADR 0115);
+	// version 4 adds the volume slot and the writable flag (ADR 0222).
+	ControlVersion     = uint16(4)
 	operationSetDriver = byte(1)
 	// operationSetFilesystem replaces the endpoint the filesystem service
 	// reaches this service over, after that service restarts (ADR 0096).
@@ -243,51 +244,87 @@ const (
 	selectorNameSize = 22
 	selectorName     = 23
 	selectorSize     = selectorName + partition.MaxName
+	volumeSlot       = selectorSize
+	volumeFlags      = selectorSize + 1
+	volumePayload    = selectorSize + 2
+	flagWritable     = 1
 )
 
-// SetFilesystemRequest hands the block service the endpoint a filesystem
-// service reaches it over, and says which volume of the device that endpoint
-// may reach (ADR 0096, ADR 0115).
+// MaxVolumeSlots is the number of filesystem endpoints the block service
+// keeps, one per volume instance: slot 0 is the persistent volume, the rest
+// hold additional volumes (ADR 0222).
+const MaxVolumeSlots = 5
+
+// PersistentSlot is the slot of the persistent volume.
+const PersistentSlot = 0
+
+// VolumeGrant is what a SetFilesystem request carries: the endpoint a
+// filesystem service reaches this service over, the slot it fills, the
+// volume it may reach, and whether it may write.
+type VolumeGrant struct {
+	Server   handle.ID
+	Slot     uint8
+	Selector partition.Selector
+	Writable bool
+}
+
+// SetFilesystemRequest hands the block service the writable endpoint of the
+// persistent volume's filesystem service (ADR 0096, ADR 0115).
 func SetFilesystemRequest(server handle.ID, selector partition.Selector, correlation uint64) (ipc.Message, bool) {
-	if server == 0 || correlation == 0 || !validSelector(&selector) {
+	return SetVolumeRequest(VolumeGrant{Server: server, Slot: PersistentSlot, Selector: selector, Writable: true}, correlation)
+}
+
+// SetVolumeRequest hands the block service the endpoint of one volume slot,
+// replacing and closing the endpoint the slot had.
+func SetVolumeRequest(grant VolumeGrant, correlation uint64) (ipc.Message, bool) {
+	if grant.Server == 0 || correlation == 0 || grant.Slot >= MaxVolumeSlots || !validSelector(&grant.Selector) {
 		return ipc.Message{}, false
 	}
+	selector := &grant.Selector
 	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest,
-		Correlation: correlation, PayloadSize: selectorSize,
-		Handles: [ipc.MaxAttachedHandles]handle.ID{server}, HandleCount: 1}
+		Correlation: correlation, PayloadSize: volumePayload,
+		Handles: [ipc.MaxAttachedHandles]handle.ID{grant.Server}, HandleCount: 1}
 	message.Payload[0] = operationSetFilesystem
 	message.Payload[selectorKind] = byte(selector.Kind)
 	binary.LittleEndian.PutUint32(message.Payload[selectorIndex:], selector.Index)
 	copy(message.Payload[selectorGUID:selectorNameSize], selector.GUID[:])
 	message.Payload[selectorNameSize] = selector.NameSize
 	copy(message.Payload[selectorName:], selector.Name[:selector.NameSize])
+	message.Payload[volumeSlot] = grant.Slot
+	if grant.Writable {
+		message.Payload[volumeFlags] = flagWritable
+	}
 	return message, true
 }
 
-func DecodeSetFilesystem(message ipc.Message) (handle.ID, partition.Selector, bool) {
-	var selector partition.Selector
+func DecodeSetFilesystem(message ipc.Message) (VolumeGrant, bool) {
+	var grant VolumeGrant
+	selector := &grant.Selector
 	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindRequest ||
-		message.Correlation == 0 || message.PayloadSize != selectorSize || message.Payload[0] != operationSetFilesystem ||
+		message.Correlation == 0 || message.PayloadSize != volumePayload || message.Payload[0] != operationSetFilesystem ||
 		message.HandleCount != 1 || message.Handles[0] == 0 {
-		return 0, selector, false
+		return grant, false
 	}
 	selector.Kind = partition.SelectorKind(message.Payload[selectorKind])
 	selector.Index = binary.LittleEndian.Uint32(message.Payload[selectorIndex:])
 	copy(selector.GUID[:], message.Payload[selectorGUID:selectorNameSize])
 	selector.NameSize = message.Payload[selectorNameSize]
 	if int(selector.NameSize) > partition.MaxName {
-		return 0, selector, false
+		return grant, false
 	}
 	copy(selector.Name[:], message.Payload[selectorName:selectorName+int(selector.NameSize)])
 	for _, value := range message.Payload[selectorName+int(selector.NameSize) : selectorSize] {
 		if value != 0 {
-			return 0, selector, false
+			return grant, false
 		}
 	}
-	if !validSelector(&selector) {
-		return 0, selector, false
+	grant.Slot = message.Payload[volumeSlot]
+	flags := message.Payload[volumeFlags]
+	if !validSelector(selector) || grant.Slot >= MaxVolumeSlots || flags&^flagWritable != 0 {
+		return grant, false
 	}
-	return message.Handles[0], selector, true
+	grant.Server, grant.Writable = message.Handles[0], flags&flagWritable != 0
+	return grant, true
 }
 
 // validSelector accepts a selector whose kind is defined and whose unused

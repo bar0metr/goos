@@ -356,6 +356,7 @@ func userspaceMain() {
 				storageExited(name)
 			}
 		}
+		volumeExited(event.Process)
 		exitStatus := manager.Exit(event.Process, event.Code, supervisionTicks)
 		if filesystemCheckComplete && manager.Resume(filesystemName, supervisionTicks) == supervisor.StatusOK {
 			filesystemCheckComplete = false

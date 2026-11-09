@@ -182,11 +182,11 @@ disk_from() { # name edit-command...
 # The production archive is built from the same inputs without the
 # validation probes; it must hold the recovery commands and nothing else of
 # the distribution.
-inputs="$dir/userspace/init $dir/userspace/fault-probe $dir/userspace/vfs $dir/userspace/shell $dir/userspace/block $dir/userspace/virtio-blk $dir/userspace/tty $dir/userspace/fat32 $dir/userspace/bin $dir/userspace/commands"
+inputs="$dir/userspace/init $dir/userspace/fault-probe $dir/userspace/vfs $dir/userspace/shell $dir/userspace/block $dir/userspace/virtio-blk $dir/userspace/tty $dir/userspace/fat32 $dir/userspace/ext4 $dir/userspace/bin $dir/userspace/commands"
 # shellcheck disable=SC2086
 go run ./tools/initramfs $inputs "$work/production.tar"
 tar -tf "$work/production.tar" >"$work/production.list"
-for member in system/init system/vfs system/shell system/tty system/fat32 system/commands system/bin/ls system/bin/cat system/bin/edit system/bin/fsck-fat system/bin/write; do
+for member in system/init system/vfs system/shell system/tty system/fat32 system/ext4 system/commands system/bin/ls system/bin/cat system/bin/edit system/bin/fsck-fat system/bin/write; do
 	grep -qx "$member" "$work/production.list" || fail archive.member "$member in the production archive" "$work/production.list"
 	checks=$((checks + 1))
 done

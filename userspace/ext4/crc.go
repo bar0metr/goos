@@ -6,11 +6,15 @@ package ext4
 // filesystem seed. The older uninit_bg group descriptor checksum is CRC16
 // with the reflected 0x8005 polynomial (0xA001), started from ~0.
 
-var crc32cTable = makeCRC32CTable()
+// crc32cTable is filled on first use rather than by a package initializer:
+// GoOS services do not run initializers that need the heap.
+var (
+	crc32cTable  [256]uint32
+	crc32cFilled bool
+)
 
-func makeCRC32CTable() *[256]uint32 {
-	table := new([256]uint32)
-	for index := range table {
+func fillCRC32CTable() {
+	for index := range crc32cTable {
 		value := uint32(index)
 		for bit := 0; bit < 8; bit++ {
 			if value&1 != 0 {
@@ -19,14 +23,17 @@ func makeCRC32CTable() *[256]uint32 {
 				value >>= 1
 			}
 		}
-		table[index] = value
+		crc32cTable[index] = value
 	}
-	return table
+	crc32cFilled = true
 }
 
 // crc32c continues the raw CRC32C register crc over data.
 func crc32c(crc uint32, data []byte) uint32 {
-	table := crc32cTable
+	if !crc32cFilled {
+		fillCRC32CTable()
+	}
+	table := &crc32cTable
 	for _, value := range data {
 		crc = table[byte(crc)^value] ^ crc>>8
 	}

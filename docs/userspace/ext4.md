@@ -1,10 +1,18 @@
 # ext4
 
 GoOS reads Linux ext4 volumes in userspace. The format code lives in
-`userspace/ext4` (ADR 0220), and `userspace/ext4vol` serves it through the
-node-ID backend contract the VFS uses for FAT32 (ADR 0221). Nothing writes
-ext4 yet, and PID 1 does not start an ext4 service: the persistent volume
-stays FAT32.
+`userspace/ext4` (ADR 0220), `userspace/ext4vol` serves it through the
+node-ID backend contract the VFS uses for FAT32 (ADR 0221), and
+`/bootstrap/ext4` runs it as one process per mounted volume (ADR 0222).
+Nothing writes ext4 yet. The persistent volume stays FAT32; an ext4
+partition mounts read-only below `/mnt`:
+
+```text
+goos> mount -t ext4 name:linux-data /mnt/linux
+```
+
+docs/userspace/storage.md describes mounting, detection, and what happens
+when an instance fails.
 
 ## What the reader accepts
 
@@ -57,4 +65,6 @@ error.
 `make test-ext4-unit` runs the reader and adapter tests against images that
 e2fsprogs 1.47.2 built (docs/development/ext4-reference-versions.md).
 `make test-ext4-stress` repeats the random-damage walk 3000 times.
+`make test-volumes` boots a disk with the installed system and two Linux
+ext4 partitions and checks mounting, the refusals, and a replaced instance.
 `tools/ext4fixture/make-fixtures.sh` rebuilds the images; it needs Docker.

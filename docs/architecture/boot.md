@@ -23,7 +23,7 @@ The rest of the system is installed on the disk: `make run` boots
 `build/goos-disk.img`, made from the build's system tree when it does not
 exist and never changed when it does (ADR 0175).
 
-The ESP is the ISO's El Torito boot image, an 8 MiB FAT volume
+The ESP is the ISO's El Torito boot image, a 16 MiB FAT volume
 (`tools/mkiso`, ADR 0086). QEMU runs q35 with OVMF, 512 MiB RAM (`MEMORY`), COM1 on
 stdio, and a legacy virtio-blk disk (`Makefile`, `QEMU_COMMON_FLAGS`). `make
 run` adds a headless display, while `make run-gui` exposes the emulated VGA
@@ -41,9 +41,9 @@ is described in [boot-chain.md](../security/boot-chain.md).
    reported.
 2. **Initramfs load.** Using the loaded-image and simple-file-system
    protocols, the kernel opens `\initramfs.tar` on its boot volume and reads it
-   into at most `boot.MaxInitramfs` (6 MiB) of `EfiLoaderData`
+   into at most `boot.MaxInitramfs` (12 MiB) of `EfiLoaderData`
    (`kernel/boot/uefi/initramfs.go`, ADR 0020). A larger archive stops the boot
-   with `PANIC: initramfs is larger than the 6 MiB the loader reads` instead of
+   with `PANIC: initramfs is larger than the 12 MiB the loader reads` instead of
    being used cut short, and `tools/initramfs` refuses to build one. The pages
    past the archive go back to the firmware.
 3. **Graphics discovery.** The kernel locates GOP, queries at most 256 modes,

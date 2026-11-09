@@ -60,7 +60,11 @@ func fail(kind Kind, reason string) *Error { return &Error{Kind: kind, Reason: r
 
 func corrupt(reason string) *Error { return fail(KindCorrupt, reason) }
 
-var errIO = fail(KindIO, "device read failed")
+// errIO is a value, not a pointer made by a package initializer: GoOS
+// services do not run initializers that need the heap.
+var errIO = &ioError
+
+var ioError = Error{Kind: KindIO, Reason: "device read failed"}
 
 // KindOf reports the kind of err, or zero when err is nil or foreign.
 func KindOf(err error) Kind {

@@ -33,6 +33,9 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	}
 	process, launched := launchPrepared(spec)
 	discardReady()
+	if slot, isVolume := volumeOfService(bytesString(spec.Name[:spec.NameSize])); isVolume && !launched {
+		volumeLaunchFailed(slot)
+	}
 	return process, launched
 }
 
@@ -52,6 +55,9 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 		}
 	}
 	if bytesString(spec.Name[:spec.NameSize]) == filesystemName && (storageLost || filesystemStarted && !renewFilesystemChannels(&spec)) {
+		return 0, false
+	}
+	if slot, isVolume := volumeOfService(bytesString(spec.Name[:spec.NameSize])); isVolume && !launchVolumeSpec(slot, &spec) {
 		return 0, false
 	}
 	if blockStarted && bytesString(spec.Name[:spec.NameSize]) == "block" && !renewBlockGrants(&spec) {
@@ -154,8 +160,9 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	// the file cache mapped. Every other handle is closed: PID 1 supervises
 	// through lifecycle events, not handles.
 	session, tty, interactive := sessionOfService(name)
+	volumeSlot, volumeService := volumeOfService(name)
 	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || interactive || name == "vfs" || name == "block") ||
-		name == filesystemName || diskService(name) || networkService(name) || name == linuxSockName || remoteListener
+		name == filesystemName || diskService(name) || networkService(name) || name == linuxSockName || remoteListener || volumeService
 	if keep && launched == supervisor.LaunchOK {
 		switch {
 		case interactive && tty:
@@ -240,6 +247,9 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 			mark("LOG_RESTARTED_OK\n")
 		}
 		logStarted = true
+	}
+	if volumeService {
+		volumeLaunched(volumeSlot, event.ProcessHandle, event.Process)
 	}
 	if name == filesystemName {
 		restarted := filesystemStarted

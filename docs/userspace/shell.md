@@ -49,9 +49,9 @@ its prompt. Editing, echo and the control keys belong to the terminal service
 words in it is bounded only by its length (ADR 0109). Runtime allocation
 remains confined to the fixed userspace arena.
 
-The 16 shell built-ins are `help`, `clear`, `cd`, `services`, `handles`,
-`caps`, `config`, `hosts`, `log`, `jobs`, `kill`, `reboot`, `poweroff`, `exit`,
-`diag`, and `time`. They are a static shell table. `help` prints that table and
+The 18 shell built-ins are `help`, `clear`, `cd`, `services`, `handles`,
+`caps`, `config`, `hosts`, `log`, `jobs`, `kill`, `mount`, `umount`, `reboot`,
+`poweroff`, `exit`, `diag`, and `time`. They are a static shell table. `help` prints that table and
 the currently installed command index; `help NAME` first recognizes a builtin
 and otherwise looks up the executable's build-time manifest. `NAME --help`
 prints the same synopsis for either kind. The dynamic executable index is
@@ -61,7 +61,10 @@ a second handwritten shell list. A command given the wrong number of arguments
 prints `usage: ...` instead of running (ADR 0079).
 
 `services`, `reboot`, and `poweroff` are requests to PID 1 over the control
-protocol on the exec channel. `handles` and `caps` list the shell's own handle
+protocol on the exec channel, and so are `mount [-t TYPE] SOURCE PATH` and
+`umount PATH`, which mount and unmount an additional volume below `/mnt`
+([storage](storage.md#additional-volumes)). `mount` with no arguments is not
+the builtin: it runs the `mount` program, which lists the mount table. `handles` and `caps` list the shell's own handle
 table, raw and under its startup names. `config` and `hosts` use the shell's
 configuration session: `hosts` lists the hosts table, and `hosts get NAME`,
 `hosts set IPV4 NAME` and `hosts remove NAME` read and change one record

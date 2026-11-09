@@ -15,9 +15,9 @@ would have to be inserted. The boot sequence itself is in
 
 ```text
 OVMF / UEFI firmware
- └─ ISO El Torito EFI system partition (8 MiB FAT)
+ └─ ISO El Torito EFI system partition (16 MiB FAT)
      ├─ EFI/BOOT/BOOTX64.EFI        GoOS kernel
-     └─ initramfs.tar               boot archive, at most 6 MiB
+     └─ initramfs.tar               boot archive, at most 12 MiB
           ├─ system/init            PID 1
           ├─ bootstrap storage services
           ├─ tty and recovery shell
@@ -43,7 +43,7 @@ installed FAT32 disk
    established.
 2. **Boot archive.** Before `ExitBootServices`, the kernel opens
    `\initramfs.tar` through UEFI file services and reads at most
-   `boot.MaxInitramfs` (6 MiB). A larger archive is refused rather than
+   `boot.MaxInitramfs` (12 MiB). A larger archive is refused rather than
    truncated. The retained pages become the immutable boot-archive origin used
    for PID 1 and bootstrap/recovery executables.
 3. **PID 1.** The kernel loads `system/init` from the boot archive. USTAR
@@ -160,7 +160,7 @@ installed operating system.
 The present design provides useful structure even without authenticity:
 
 - deterministic kernel, archive and installed-system build artifacts;
-- one bounded boot archive with a 6 MiB loader/build limit;
+- one bounded boot archive with a 12 MiB loader/build limit;
 - a stable boot-archive executable origin and sealed file-backed executable
   origins for installed/user programs;
 - executable-format, W^X, address and capability validation in the kernel;

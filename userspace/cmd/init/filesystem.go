@@ -153,6 +153,7 @@ func pollFilesystemNotices() bool {
 	if generation, lost := vfsRecoveryRequests.FilesystemLost(); lost {
 		replaceFilesystem(generation)
 	}
+	pollVolumeNotices()
 	return usable
 }
 

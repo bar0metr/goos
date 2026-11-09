@@ -36,6 +36,10 @@ type filesystemTransport struct {
 	applied bool
 	// generation is owner-only: the attachment PID 1 named for this client.
 	generation uint64
+	// cache is the file cache this connection's requests name slots of: the
+	// boot-provided one for the persistent volume, a per-launch object for
+	// an additional volume (ADR 0222). The owner sets it at a barrier.
+	cache []byte
 }
 
 func (transport *filesystemTransport) Exchange(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
@@ -50,7 +54,7 @@ func (transport *filesystemTransport) Exchange(request fsproto.Request) (fsproto
 		return fsproto.Reply{}, ramfs.StatusIOError
 	}
 	transport.correlation++
-	if !fsproto.EncodeRequest(request, transport.correlation, &transport.request, fileCache) {
+	if !fsproto.EncodeRequest(request, transport.correlation, &transport.request, transport.cache) {
 		return fsproto.Reply{}, ramfs.StatusIOError
 	}
 	size, ok := ipc.EncodeFrom(&transport.request, transport.wire[:])
@@ -81,7 +85,7 @@ func (transport *filesystemTransport) Exchange(request fsproto.Request) (fsproto
 		if transport.reply.Correlation < transport.correlation {
 			continue
 		}
-		reply, valid := fsproto.DecodeReply(&transport.reply, fileCache, &transport.name)
+		reply, valid := fsproto.DecodeReply(&transport.reply, transport.cache, &transport.name)
 		if !valid || transport.reply.Correlation != transport.correlation || reply.Operation != request.Operation {
 			transport.availability.fail(ramfs.StatusIOError, true)
 			return fsproto.Reply{}, ramfs.StatusIOError
@@ -102,11 +106,18 @@ func (transport *filesystemTransport) Exchange(request fsproto.Request) (fsproto
 // filesystemOfflinePending is safe to observe while a worker runs. Applying
 // it is not: the owner does that only at a drained serial barrier.
 func filesystemOfflinePending() bool {
+	return persistentOfflinePending() || volumesOfflinePending()
+}
+
+func persistentOfflinePending() bool {
 	return !filesystemState.applied && filesystemState.availability.failure() != ramfs.StatusOK
 }
 
+// applyFilesystemOffline handles every transport that failed, the persistent
+// one and those of additional volumes, at a drained barrier.
 func applyFilesystemOffline() {
-	if !filesystemOfflinePending() {
+	applyVolumesOffline()
+	if !persistentOfflinePending() {
 		return
 	}
 	filesystemState.applied = true

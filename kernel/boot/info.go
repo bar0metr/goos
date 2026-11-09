@@ -5,8 +5,8 @@ const PageSize = uint64(4096)
 // MaxInitramfs bounds the boot archive the firmware loader reads. The build
 // refuses a larger archive and the kernel refuses to boot from one, so an
 // archive can never be used cut short. The kernel and the archive share the
-// 8 MiB EFI system partition, which caps it at 6 MiB (ADR 0087).
-const MaxInitramfs = uint64(6 << 20)
+// 16 MiB EFI system partition, which caps it at 12 MiB (ADR 0087).
+const MaxInitramfs = uint64(12 << 20)
 
 // MemoryKind is architecture-neutral. Firmware-specific numeric values never
 // cross the boot package boundary.

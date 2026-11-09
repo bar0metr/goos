@@ -142,6 +142,7 @@ func userspaceMain() {
 		syslog.Error("file cache unavailable", syslog.Uint("status", uint64(status)))
 	} else {
 		fileCache = cache
+		filesystemState.cache = cache
 		mark("FILE_CACHE_OK\n")
 	}
 	// The persistent volume is not mounted here: it is served by the FAT32
@@ -169,6 +170,9 @@ func pollControl() bool {
 
 // processControl runs only on the namespace owner after earlier work drains.
 func processControl(message ipc.Message) bool {
+	if handled := processVolumeControl(message); handled {
+		return true
+	}
 	if attach, ok := vfs.DecodeSetFilesystem(message); ok {
 		reply, encoded := vfs.AddSessionReply(attachFilesystem(attach), message.Correlation)
 		if !encoded {

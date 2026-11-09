@@ -10,12 +10,12 @@ import (
 	"unicode/utf16"
 )
 
-// The EFI system partition is an 8 MiB FAT16 volume with 1 KiB clusters.
+// The EFI system partition is a 16 MiB FAT16 volume with 1 KiB clusters.
 // Every field the image contains is derived from its inputs and the build
 // timestamp, so identical inputs give an identical volume.
 const (
 	fatSectorSize     = 512
-	fatImageSize      = 8 * 1024 * 1024
+	fatImageSize      = 16 * 1024 * 1024
 	fatTotalSectors   = fatImageSize / fatSectorSize
 	fatClusterSectors = 2
 	fatClusterSize    = fatClusterSectors * fatSectorSize

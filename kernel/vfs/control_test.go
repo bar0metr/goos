@@ -198,3 +198,53 @@ func TestReplaceControlCodec(t *testing.T) {
 		}
 	}
 }
+
+func TestVolumeControls(t *testing.T) {
+	var attach VolumeAttach
+	attach.Slot, attach.Client, attach.Cache, attach.Generation = 2, 21, 22, 7
+	if !attach.SetPath([]byte("/mnt/data")) {
+		t.Fatal("path refused")
+	}
+	message, ok := AttachVolumeRequest(attach, 9)
+	decoded, valid := DecodeAttachVolume(message)
+	if !ok || !valid || decoded != attach {
+		t.Fatalf("attach: %+v %v", decoded, valid)
+	}
+	for name, corrupt := range map[string]func(*ipc.Message){
+		"slot 0":        func(m *ipc.Message) { m.Payload[1] = 0 },
+		"slot too high": func(m *ipc.Message) { m.Payload[1] = MaxVolumes + 1 },
+		"one handle":    func(m *ipc.Message) { m.HandleCount = 1 },
+		"path size":     func(m *ipc.Message) { m.Payload[10]++ },
+		"relative path": func(m *ipc.Message) { m.Payload[11] = 'm' },
+		"generation 0":  func(m *ipc.Message) { m.Payload[2], m.Payload[3] = 0, 0 },
+	} {
+		damaged := message
+		damaged.Payload[2] = 7
+		corrupt(&damaged)
+		if _, ok := DecodeAttachVolume(damaged); ok {
+			t.Errorf("decoded an attach with %s", name)
+		}
+	}
+	for _, path := range []string{"", "/", "mnt", string(make([]byte, MaxVolumePath+1))} {
+		var bad VolumeAttach
+		if bad.SetPath([]byte(path)) {
+			t.Errorf("accepted path %q", path)
+		}
+	}
+	detach, ok := DetachVolumeRequest(3, 11, 5)
+	slot, generation, valid := DecodeDetachVolume(detach)
+	if !ok || !valid || slot != 3 || generation != 11 {
+		t.Fatalf("detach: %d %d %v", slot, generation, valid)
+	}
+	notice, ok := VolumeLostNotice(4, 12)
+	slot, generation, valid = DecodeVolumeLostNotice(&notice)
+	if !ok || !valid || slot != 4 || generation != 12 {
+		t.Fatalf("lost: %d %d %v", slot, generation, valid)
+	}
+	if _, ok := DecodeFilesystemLostNotice(&notice); ok {
+		t.Fatal("a volume notice decoded as the persistent one")
+	}
+	if _, ok := VolumeLostNotice(0, 1); ok {
+		t.Fatal("slot 0 is the persistent volume")
+	}
+}

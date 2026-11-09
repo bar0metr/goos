@@ -77,3 +77,18 @@ partition, where the kernel takes under 1 MiB, so 6 MiB leaves room for both
 without changing the partition. The system image window has been 1 GiB since
 the layout moved to `[UserImageAddress, UserImageLimit)`, and its host test
 still ties it to this constant.
+
+## Addendum: a 12 MiB bound on a 16 MiB partition
+
+The volume instances of ADR 0222 put their probe, mount policy and mount
+commands into PID 1, the VFS and the shell, about 195 KiB together. The
+validation archive was 6.27 MiB of the 6 MiB bound's 6.29 MiB before that
+change, so it no longer fit.
+
+The EFI system partition grows to 16 MiB (`tools/mkiso`), still FAT16 with
+1 KiB clusters, and the bound to 12 MiB. The kernel takes 1.4 MiB, so the
+partition keeps room for both. El Torito counts the boot image in 512-byte
+sectors in a 16-bit field; 16 MiB is 32768 of them. The UEFI loader reserves
+its read buffer at the bound, so the boot allocates 12 MiB of `EfiLoaderData`
+for it instead of 6 MiB. The image window is 1 GiB and its host test still
+checks it against the bound.

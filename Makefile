@@ -37,6 +37,8 @@ VIRTIO_BLOCK_IMAGE = $(OUT_DIR)/userspace/virtio-blk
 VIRTIO_BLOCK_ELF = $(OUT_DIR)/userspace/virtio-blk.elf
 FAT32_IMAGE = $(OUT_DIR)/userspace/fat32
 FAT32_ELF = $(OUT_DIR)/userspace/fat32.elf
+EXT4_IMAGE = $(OUT_DIR)/userspace/ext4
+EXT4_ELF = $(OUT_DIR)/userspace/ext4.elf
 LOG_IMAGE = $(OUT_DIR)/userspace/log
 LOG_ELF = $(OUT_DIR)/userspace/log.elf
 CONFIG_IMAGE = $(OUT_DIR)/userspace/config
@@ -214,7 +216,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: stress-linux-stream FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-ext4-unit test-ext4-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-aslr test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware bench-pve-linux-network bench-pve-linux-network-diag bench-pve-linux-network-hz
+.PHONY: stress-linux-stream FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-ext4-unit test-ext4-stress test-volumes test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-aslr test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware bench-pve-linux-network bench-pve-linux-network-diag bench-pve-linux-network-hz
 
 all: iso
 
@@ -237,16 +239,16 @@ $(KERNEL): $(shell find $(CURDIR)/kernel $(CURDIR)/internal \( -type f -o -type 
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tools/tinygo.sh build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=$(OPT) -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-SERVICE_NAMES := init fault-probe shell vfs block virtio-blk fat32 log config tty netd virtio-net resolved linuxsockd remoted remoted-worker sftpd
+SERVICE_NAMES := init fault-probe shell vfs block virtio-blk fat32 ext4 log config tty netd virtio-net resolved linuxsockd remoted remoted-worker sftpd
 .PHONY: $(addprefix service-,$(SERVICE_NAMES)) $(addprefix command-,$(COMMANDS)) kernel-iso boot-service-vfs
 $(addprefix service-,$(SERVICE_NAMES)): service-%: $(OUT_DIR)/userspace/%
 $(addprefix command-,$(COMMANDS)): command-%: $(COMMAND_DIR)/%
 kernel-iso: iso
 boot-service-vfs: iso
 
-$(COMMAND_ELFS) $(INIT_ELF) $(SHELL_ELF) $(VFS_ELF) $(BLOCK_ELF) $(VIRTIO_BLOCK_ELF) $(FAT32_ELF) $(LOG_ELF) $(CONFIG_ELF) $(TTY_ELF) $(NETD_ELF) $(VIRTIO_NET_ELF) $(RESOLVED_ELF) $(LINUXSOCKD_ELF) $(REMOTED_ELF) $(REMOTED_WORKER_ELF) $(SFTPD_ELF): go.mod go.sum
+$(COMMAND_ELFS) $(INIT_ELF) $(SHELL_ELF) $(VFS_ELF) $(BLOCK_ELF) $(VIRTIO_BLOCK_ELF) $(FAT32_ELF) $(EXT4_ELF) $(LOG_ELF) $(CONFIG_ELF) $(TTY_ELF) $(NETD_ELF) $(VIRTIO_NET_ELF) $(RESOLVED_ELF) $(LINUXSOCKD_ELF) $(REMOTED_ELF) $(REMOTED_WORKER_ELF) $(SFTPD_ELF): go.mod go.sum
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(EXT4_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(dir $@)
@@ -381,6 +383,14 @@ $(FAT32_IMAGE): $(FAT32_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kern
 	@$(STACKFRAMES) $(FAT32_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(FAT32_ELF) $@
 
+$(EXT4_ELF): $(call go_deps,./userspace/cmd/ext4) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tools/tinygo.sh build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/ext4
+
+$(EXT4_IMAGE): $(EXT4_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(EXT4_ELF)
+	$(BUILD_ENV) go run ./tools/elf2native $(EXT4_ELF) $@
+
 $(LOG_ELF): $(call go_deps,./userspace/cmd/logd) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tools/tinygo.sh build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/logd
@@ -473,7 +483,7 @@ $(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loa
 	$(BUILD_ENV) go run ./tools/service-image $@
 
 INITRAMFS_FLAGS = $(if $(filter 1,$(VALIDATION)),-validation)
-INITRAMFS_INPUTS = $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX)
+INITRAMFS_INPUTS = $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(EXT4_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX)
 
 # The archive holds what boots before there is a volume and what recovery
 # runs without one; the rest of the system is installed on the volume
@@ -719,7 +729,7 @@ test-fat32:
 # matrix, and the corruption corpus. The stress variant flips bytes in 3000
 # damaged images instead of 60.
 test-ext4-unit:
-	$(BUILD_ENV) go test -count=1 ./userspace/ext4 ./userspace/ext4vol
+	$(BUILD_ENV) go test -count=1 ./userspace/ext4 ./userspace/ext4vol ./userspace/fsdetect ./userspace/volume ./tools/diskcompose
 
 test-ext4-stress:
 	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -timeout 60m -run 'RandomMetadataDamage' ./userspace/ext4
@@ -857,6 +867,13 @@ test-system-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
 	@$(MAKE) --no-print-directory recovery-iso system-tree VALIDATION=1
 	@MEMORY=$(MEMORY) tests/boot/system.sh $(ISO) $(OVMF_CODE)
+
+# Additional volumes (ADR 0222): a configured ext4 mount at boot, shell
+# mount and umount, the refusals of the mount policy, and one instance
+# replaced while the others keep serving.
+test-volumes:
+	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
+	@MEMORY=$(MEMORY) tests/boot/volumes.sh $(ISO) $(OVMF_CODE)
 
 # The network gate (ADR 0190, 0191): DHCP and ping on QEMU user networking
 # with a driver replacement, two guests on a private stream backend, and a
@@ -1018,6 +1035,7 @@ docs:
 	@test -f docs/adr/0096-separate-fat32-filesystem-service.md
 	@test -f docs/adr/0220-ext4-read-only-core-and-feature-contract.md
 	@test -f docs/adr/0221-ext4-read-only-volume-adapter.md
+	@test -f docs/adr/0222-filesystem-volume-instances.md
 	@test -f docs/userspace/ext4.md
 	@test -f docs/development/ext4-feature-matrix.md
 	@test -f docs/development/ext4-reference-versions.md

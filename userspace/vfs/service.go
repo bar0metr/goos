@@ -28,6 +28,8 @@ type Service struct {
 	systemNode ramfs.NodeID
 	// published records that /system and /apps are mounted.
 	published bool
+	// volumes are the additional volumes, slot 1 at index 0 (ADR 0222).
+	volumes [vfs.MaxVolumes]volumeBackend
 	// copyFault, when set, checks read-path copies (SetCopyFault).
 	copyFault CopyFaultHandler
 }
@@ -336,13 +338,14 @@ func (service *Service) SetRAMFSClock(clock func() (ramfs.Timestamp, bool)) {
 // RAMFSUsage reports what the volatile root holds against its limits.
 func (service *Service) RAMFSUsage() ramfs.Usage { return service.fs.Usage() }
 
-// Init builds the volatile root with its /tmp and /run. /bootstrap, /etc,
+// Init builds the volatile root with its /tmp, /run and /mnt, the directory
+// additional volumes are mounted below (ADR 0222). /bootstrap, /etc,
 // /system and /apps are not created here: they are mount points, and the namespace
 // lists a mount in its parent directory without needing a placeholder to
 // stand in for it.
 func (service *Service) Init() bool {
 	root := service.fs.Init()
-	for _, name := range [...]string{"tmp", "run"} {
+	for _, name := range [...]string{"tmp", "run", "mnt"} {
 		if _, status := service.fs.Mkdir(root, []byte(name)); status != ramfs.StatusOK {
 			return false
 		}

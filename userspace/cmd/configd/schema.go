@@ -89,6 +89,12 @@ func declareSchema(target *config.Store) config.Status {
 		{"system.dns.failure-cache-sec", config.Uint(5), false},
 		{"system.dns.query-timeout-ms", config.Uint(3000), false},
 		{"system.dns.attempts", config.Uint(2), false},
+		// Additional volumes PID 1 mounts at boot (ADR 0222): "TYPE SOURCE
+		// PATH", such as "auto name:data /mnt/data", or empty for none.
+		{"system.mount.1", mustText(""), false},
+		{"system.mount.2", mustText(""), false},
+		{"system.mount.3", mustText(""), false},
+		{"system.mount.4", mustText(""), false},
 		{"system.shell.prompt", mustText("goos> "), false},
 		{"user.name", mustText("goos"), false},
 	}

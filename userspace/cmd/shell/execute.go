@@ -105,7 +105,7 @@ func executeCommand(line []byte) {
 			return
 		}
 	}
-	if count != 1 || !shellcmd.IsBuiltin(invocation.Arguments[0]) {
+	if count != 1 || !shellcmd.IsBuiltinCall(invocation.Arguments[0], int(invocation.Count)-1) {
 		executeExternal(line, false)
 		return
 	}
@@ -133,6 +133,8 @@ func executeCommand(line []byte) {
 		runConfig(invocation)
 	case "hosts":
 		runHosts(invocation)
+	case "mount", "umount":
+		commandStatus = runVolumeCommand(invocation)
 	case "services":
 		printServices()
 	case "jobs":

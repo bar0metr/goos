@@ -74,6 +74,12 @@ func (v *VFSRequests) FilesystemLost() (uint64, bool) {
 	return v.client.takeLost()
 }
 
+// VolumeLost returns, once each, the slot and attachment generation of an
+// additional volume's replacement notice.
+func (v *VFSRequests) VolumeLost() (uint8, uint64, bool) {
+	return v.client.takeVolumeLost()
+}
+
 // Complete validates an asynchronous request's reply under the same failure
 // policy as Call. The owner retires the request's shared object on failure.
 func (v *VFSRequests) Complete(channel handle.ID, request vfs.Request, correlation uint64, reply *ipc.Message, status kcall.Status) (vfs.Reply, bool) {

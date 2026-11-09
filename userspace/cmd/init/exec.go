@@ -170,6 +170,10 @@ func finishJob(job *execJob) {
 
 // handleControl answers the shell's requests that launch nothing.
 func handleControl(message ipc.Message) {
+	if command, isVolume := execproto.DecodeVolumeCommand(&message); isVolume {
+		handleVolumeCommand(command, message.Correlation)
+		return
+	}
 	operation, argument, ok := execproto.DecodeControl(message)
 	if remoteSession(replying) != nil && (operation == execproto.ControlFault || operation == execproto.ControlDiagnostics) {
 		sendControlStatus(execproto.ControlInvalid, message.Correlation)
@@ -187,6 +191,12 @@ func handleControl(message ipc.Message) {
 		}
 		status := execproto.ControlNotFound
 		if injectServiceFault(process, marker) {
+			status = execproto.ControlOK
+		}
+		sendControlStatus(status, message.Correlation)
+	case operation == execproto.ControlFault && argument == execproto.FaultVolume:
+		status := execproto.ControlNotFound
+		if injectVolumeFault() {
 			status = execproto.ControlOK
 		}
 		sendControlStatus(status, message.Correlation)

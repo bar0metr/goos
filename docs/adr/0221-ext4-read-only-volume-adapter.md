@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted. Builds on ADR 0220. The ext4 service process and the mount
-policy that would start it remain open.
+Accepted. Builds on ADR 0220. ADR 0222 adds the ext4 service process and
+the mount policy that starts it.
 
 ## Context
 
