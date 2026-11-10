@@ -99,6 +99,17 @@ Linux bridge reserves its descriptor and sends one `OperationOpen` carrying
 `OpenCreate`, `OpenExclusive`, `OpenTruncate`, `OpenDirectory` and trailing-
 slash intent; it no longer composes `Stat`, `Create` or `Truncate` requests.
 The standalone native `OperationCreate` and `OperationTruncate` remain valid.
+`O_CREAT` requires mutation authority only when the name is missing; opening
+an existing file requires the requested descriptor rights. `O_TRUNC` requires
+mutation authority.
+
+If descriptor installation fails after the VFS has opened a file, the bridge
+waits for a protocol close and returns the original error on success. On timeout,
+Linux closes the family VFS channel and returns the allocation error; the VFS
+session teardown closes its handles and releases backend objects. A failed close
+returns a VFS error. Release of external backend references after VFS service
+death remains unverified. A created pathname may remain: resource cleanup does
+not roll back namespace mutations.
 
 The VFS may issue separate synchronous backend `OpenName`, `CreateName`,
 `AcquireObject` and `Truncate` calls, but they execute inside the one serial
@@ -189,10 +200,12 @@ holds a sparse file; `links.inodes.tsv` records what debugfs reads back.
 `abi-probe hold` keeps a descriptor open through a link: the other volumes
 keep serving, the old descriptor fails, and a new open works after PID 1
 checked the replacement's identity. `make test-linux-vfs` runs
-`abi-probe links` on RAMFS.
+`abi-probe links` and `abi-probe open-intent` on RAMFS. The latter checks
+existing-file creation intent, exclusive creation, truncation, read-only
+creation and creation through a dangling link.
 
-The same two probe modes pass on Linux: `userspace/linux/run-on-linux.sh
-abi-probe links` on Alpine's tmpfs, where `link` makes a second name, and
+The probe modes can also run on Linux: `userspace/linux/run-on-linux.sh
+abi-probe links` and `abi-probe open-intent` on Alpine's tmpfs, and
 `abi-probe ext4-links` in a privileged Alpine container with `links.img`
 loop-mounted read-only, where Linux reports `DT_FIFO` for the FIFO GoOS
 lists as `DT_UNKNOWN`.

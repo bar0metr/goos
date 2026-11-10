@@ -105,7 +105,10 @@ func DecodeOpen(flags uint64) (OpenIntent, abi.Errno) {
 	return intent, 0
 }
 
-const OpenStageOpen = uint8(1)
+const (
+	OpenStageOpen    = uint8(1)
+	OpenStageCleanup = uint8(2)
+)
 
 // SeekTarget computes the offset an lseek asks for. current is the file
 // position and size the file length, which SEEK_END alone needs. A negative

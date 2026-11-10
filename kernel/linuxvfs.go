@@ -73,6 +73,25 @@ func (handler *linuxCallHandler) vfsBegin(request linuxcompat.Request, path []by
 }
 
 func (handler *linuxCallHandler) vfsAbandon() {
+	pending, active := linuxcompat.SyscallContinuations.Pending(handler.task)
+	if active && pending.Stage == linuxcompat.OpenStageCleanup && (pending.Number == linuxabi.SysOpen || pending.Number == linuxabi.SysOpenat) {
+		state, found := linuxcompat.FindProcess(handler.root)
+		if found {
+			if context, ok := linuxcompat.VFSContext(state.FamilyID); ok {
+				context.Session.Fail()
+			}
+			if owner, ok := handler.self(); ok {
+				if authority, ok := owner.Handles().Lookup(state.VFSHandle, handle.TypeChannel, capability.Read|capability.Write|capability.Wait); ok {
+					if channelID, side, ok := ipc.DecodeEndpointObject(authority.Object()); ok {
+						if closeChannelSide(channelID, side) {
+							wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
+						}
+						wakeIPCWaiters(channelID, side, ipc.WaitPeerDied)
+					}
+				}
+			}
+		}
+	}
 	next := linuxcompat.CancelVFSTask(handler.task)
 	linuxcompat.SyscallContinuations.Cancel(handler.task)
 	ipcWaitSet.Cancel(handler.task)

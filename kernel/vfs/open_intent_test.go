@@ -191,6 +191,12 @@ func TestOpenIntentFailuresDoNotInstallOrRetargetAHandle(t *testing.T) {
 		if backend.creates != before {
 			t.Fatal("created before detecting open-table exhaustion")
 		}
+		if handle, _, status := namespace.OpenIntent(1, []byte("/seed"), Read, OpenTruncate); status != StatusResourceExhausted || handle != 0 {
+			t.Fatalf("handle=%x status=%d", handle, status)
+		}
+		if backend.truncates != 0 {
+			t.Fatalf("truncates=%d", backend.truncates)
+		}
 	})
 }
 

@@ -1076,11 +1076,23 @@ static int open_intent_test(void)
 {
 	int failed_line = 0, fd, ok = enter_scratch();
 	struct stat created, opened, path;
+	char data[7];
 
 	ok = ok && (fd = open("atomic", O_CREAT | O_EXCL | O_RDWR, 0644)) >= 0 &&
 	     syscall(SYS_fstat, fd, &created) == 0 && created.st_size == 0 &&
 	     write(fd, "payload", 7) == 7 && close(fd) == 0 &&
 	     fails(open("atomic", O_CREAT | O_EXCL | O_WRONLY, 0644), EEXIST);
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
+	ok = ok && (fd = open("atomic", O_RDONLY | O_CREAT, 0644)) >= 0 &&
+	     syscall(SYS_fstat, fd, &opened) == 0 && opened.st_ino == created.st_ino && opened.st_size == 7 &&
+	     read(fd, data, sizeof data) == sizeof data && !memcmp(data, "payload", sizeof data) && close(fd) == 0;
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
+	ok = ok && (fd = open("readonly-created", O_RDONLY | O_CREAT, 0644)) >= 0 &&
+	     syscall(SYS_fstat, fd, &opened) == 0 && opened.st_size == 0 &&
+	     fails(write(fd, "x", 1), EBADF) && close(fd) == 0 &&
+	     probe_stat("readonly-created", &path) == 0 && path.st_ino == opened.st_ino && path.st_size == 0;
 	if (!ok && !failed_line)
 		failed_line = __LINE__;
 	ok = ok && (fd = open("atomic", O_WRONLY | O_TRUNC)) >= 0 &&
@@ -1098,7 +1110,7 @@ static int open_intent_test(void)
 	if (!ok && !failed_line)
 		failed_line = __LINE__;
 	ok = ok && unlink("dangling") == 0 && unlink("made") == 0 &&
-	     unlink("atomic") == 0 && leave_scratch();
+	     unlink("readonly-created") == 0 && unlink("atomic") == 0 && leave_scratch();
 	if (!ok && !failed_line)
 		failed_line = __LINE__;
 	if (failed_line)

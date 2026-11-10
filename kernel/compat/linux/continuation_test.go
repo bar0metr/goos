@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	"goos/kernel/compat/linux/abi"
+	"goos/kernel/ramfs"
 	"goos/kernel/sched"
+	"goos/kernel/vfs"
 )
 
 func TestContinuationBlocksResumesAndAdvancesExactlyOnce(t *testing.T) {
@@ -30,6 +32,78 @@ func TestContinuationBlocksResumesAndAdvancesExactlyOnce(t *testing.T) {
 	}
 	if !table.Finish(task) {
 		t.Fatal("ready continuation did not finish")
+	}
+}
+
+type cleanupObjectBackend struct {
+	*ramfs.FileSystem
+	acquired int
+	released int
+}
+
+func (backend *cleanupObjectBackend) AcquireObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status) {
+	backend.acquired++
+	return id, ramfs.StatusOK
+}
+
+func (backend *cleanupObjectBackend) ReleaseObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status) {
+	backend.released++
+	return id, ramfs.StatusOK
+}
+
+func TestOpenCleanupContinuationAfterDescriptionExhaustion(t *testing.T) {
+	resetFDTest()
+	defer resetFDTest()
+	var fds FDTable
+	if !fds.Initialize(1, 1, 2, 3) || fds.Reserve() != 0 {
+		t.Fatal("FD table setup failed")
+	}
+	backend := &cleanupObjectBackend{FileSystem: &ramfs.FileSystem{}}
+	root := backend.Init()
+	var namespace vfs.Namespace
+	if status := namespace.Mount([]byte("/"), backend, root); status != vfs.StatusOK {
+		t.Fatal(status)
+	}
+	handle, kind, status := namespace.OpenIntent(1, []byte("/file"), vfs.Write, vfs.OpenCreate)
+	if status != vfs.StatusOK || kind != ramfs.KindFile || handle == 0 || backend.acquired != 1 {
+		t.Fatalf("open = %d, %d, %d, acquired=%d", handle, kind, status, backend.acquired)
+	}
+	for i := range openDescriptions {
+		if openDescriptions[i].familyID == 0 {
+			openDescriptions[i].familyID = 2
+		}
+	}
+	fd, errno := fds.Allocate(FileDescription{Kind: FDVFSFile, Object: uint64(handle)}, false)
+	if fd != -1 || errno != abi.ENFILE {
+		t.Fatalf("allocation = %d, %d", fd, errno)
+	}
+	if _, found := fds.Lookup(3); found {
+		t.Fatal("failed allocation installed an FD")
+	}
+	var table ContinuationTable
+	task, _ := sched.NewTaskID(8, 1)
+	request := Request{Number: abi.SysOpenat}
+	if !table.Begin(task, request, []byte("/file")) || !table.Issue(task, OpenStageOpen, 1) || !table.Block(task, OpenStageOpen) || !table.Resume(task, 1, WakeMessage) {
+		t.Fatal("open continuation setup failed")
+	}
+	if !table.AdvanceOpenCleanup(task, uint64(handle), errno) || table.AdvanceOpenCleanup(task, uint64(handle), errno) {
+		t.Fatal("cleanup transition failed")
+	}
+	if !table.Issue(task, OpenStageCleanup, 2) || !table.Block(task, OpenStageCleanup) || !table.Resume(task, 2, WakeTimeout) || !table.Block(task, OpenStageCleanup) || !table.Resume(task, 2, WakeMessage) {
+		t.Fatal("close continuation failed")
+	}
+	pending, found := table.Pending(task)
+	if !found || pending.Stage != OpenStageCleanup || pending.Partial != uint64(handle) || pending.Note != uint64(abi.ENFILE) {
+		t.Fatalf("cleanup state = %#v", pending)
+	}
+	if status := namespace.Close(1, vfs.Handle(pending.Partial)); status != vfs.StatusOK || backend.released != 1 {
+		t.Fatalf("close = %d, released=%d", status, backend.released)
+	}
+	if status := namespace.Close(1, handle); status == vfs.StatusOK || backend.released != 1 {
+		t.Fatalf("duplicate close = %d, released=%d", status, backend.released)
+	}
+	if _, status := namespace.Stat([]byte("/file")); status != vfs.StatusOK || !table.Finish(task) {
+		t.Fatalf("created file missing or continuation unfinished: %d", status)
 	}
 }
 

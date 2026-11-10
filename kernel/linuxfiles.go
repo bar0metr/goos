@@ -82,6 +82,9 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 	}
 	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
 	pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
+	if pending.Stage == linuxcompat.OpenStageCleanup {
+		return handler.cleanupOpen(pending)
+	}
 	if pending.Stage != linuxcompat.OpenStageOpen {
 		return linuxErrno(handler.vfsFailed())
 	}
@@ -98,8 +101,8 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 		handler.vfsFinish()
 		return result
 	}
-	handler.vfsFinish()
 	if reply.Status != vfs.StatusOK {
+		handler.vfsFinish()
 		permission := linuxcompat.VFSPermissionAccess
 		if intent.Rights&vfs.Write != 0 || openFlags&(vfs.OpenCreate|vfs.OpenTruncate) != 0 {
 			permission = linuxcompat.VFSPermissionReadOnly
@@ -109,20 +112,37 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 	description := linuxcompat.FileDescription{Kind: linuxcompat.FDVFSFile, Flags: intent.StatusFlags(), Object: uint64(reply.Handle)}
 	fd, errno := linuxcompat.AllocateFD(handler.root, description, intent.CloseOnExec)
 	if errno != 0 {
-		return linuxErrno(linuxabi.EIO)
+		if !linuxcompat.SyscallContinuations.AdvanceOpenCleanup(handler.task, uint64(reply.Handle), errno) {
+			return linuxErrno(handler.vfsFailed())
+		}
+		pending, _ = linuxcompat.SyscallContinuations.Pending(handler.task)
+		return handler.cleanupOpen(pending)
 	}
+	handler.vfsFinish()
 	return linuxcompat.Result{Value: uint64(fd)}
 }
 
-func (handler *linuxCallHandler) installDirectory(state *linuxcompat.ProcessState, path []byte, intent linuxcompat.OpenIntent) linuxcompat.Result {
-	reference, retained := linuxcompat.RetainDirectory(state.FamilyID, path)
-	if !retained {
-		return linuxErrno(linuxabi.ENFILE)
+func (handler *linuxCallHandler) cleanupOpen(pending linuxcompat.Pending) linuxcompat.Result {
+	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationClose, Handle: vfs.Handle(pending.Partial)}, attachPaths)
+	if blocked {
+		return linuxBlocked
 	}
-	description := linuxcompat.FileDescription{Kind: linuxcompat.FDVFSDirectory, Flags: intent.StatusFlags(), Object: reference}
-	fd, errno := linuxcompat.AllocateFD(handler.root, description, intent.CloseOnExec)
 	if errno != 0 {
-		linuxcompat.ReleaseDirectory(state.FamilyID, reference)
+		if errno == linuxabi.ETIMEDOUT {
+			return linuxErrno(linuxabi.Errno(pending.Note))
+		}
+		return linuxErrno(errno)
+	}
+	if reply.Status != vfs.StatusOK {
+		return linuxErrno(handler.vfsFailed())
+	}
+	handler.vfsFinish()
+	return linuxErrno(linuxabi.Errno(pending.Note))
+}
+
+func (handler *linuxCallHandler) installDirectory(state *linuxcompat.ProcessState, path []byte, intent linuxcompat.OpenIntent) linuxcompat.Result {
+	fd, errno := linuxcompat.InstallDirectory(handler.root, state.FamilyID, path, intent)
+	if errno != 0 {
 		return linuxErrno(errno)
 	}
 	return linuxcompat.Result{Value: uint64(fd)}

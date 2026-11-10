@@ -480,7 +480,7 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 	}
 	switch request.Operation {
 	case vfs.OperationOpen:
-		if (request.Rights&vfs.Write != 0 || request.OpenFlags&(vfs.OpenCreate|vfs.OpenTruncate) != 0) && service.onImage(request.Path) {
+		if (request.Rights&vfs.Write != 0 || request.OpenFlags&vfs.OpenTruncate != 0) && service.onImage(request.Path) {
 			reply.Status = vfs.StatusPermissionDenied
 			break
 		}
@@ -662,13 +662,7 @@ func (service *Service) authorize(owner vfs.Owner, request vfs.Request) vfs.Stat
 	switch request.Operation {
 	case vfs.OperationOpen:
 		rights = request.Rights &^ vfs.NoFollow
-		if status := service.namespace.AuthorizePath(owner, request.Path, rights, false); status != vfs.StatusOK {
-			return status
-		}
-		if request.OpenFlags&(vfs.OpenCreate|vfs.OpenTruncate) != 0 {
-			return service.namespace.AuthorizePath(owner, request.Path, vfs.Write, false)
-		}
-		return vfs.StatusOK
+		return service.namespace.AuthorizePath(owner, request.Path, rights, false)
 	case vfs.OperationReadDir, vfs.OperationStat, vfs.OperationSync:
 		if len(request.Path) == 0 {
 			return vfs.StatusOK

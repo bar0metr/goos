@@ -349,6 +349,17 @@ func (table *ContinuationTable) Advance(task sched.TaskID, stage uint8, next uin
 	return result
 }
 
+func (table *ContinuationTable) AdvanceOpenCleanup(task sched.TaskID, handle uint64, errno abi.Errno) bool {
+	table.take()
+	result := errno != 0 && table.advanceHeld(task, OpenStageOpen, OpenStageCleanup, handle)
+	if result {
+		entry, _ := table.entry(task)
+		entry.Note = uint64(errno)
+	}
+	table.lock.Unlock()
+	return result
+}
+
 // Rearm ends one wait of a call that waits more than once at the same
 // stage, a socket call, and records its progress. The call keeps its
 // arguments and note; the next wait is issued afresh.

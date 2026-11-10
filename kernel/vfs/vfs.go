@@ -564,6 +564,9 @@ func (namespace *Namespace) OpenIntent(owner Owner, path []byte, rights Rights, 
 	if owner == 0 || rights == 0 || rights&^(Read|Write) != 0 || !flags.Valid() || flags&(OpenCreate|OpenDirectory) == OpenCreate|OpenDirectory {
 		return 0, 0, StatusInvalidArgument
 	}
+	if !namespace.insideRoot(owner, path, false) {
+		return 0, 0, StatusPermissionDenied
+	}
 	mountIndex, node, protected, status := namespace.resolve(path)
 	if status == StatusNotFound {
 		if flags&OpenCreate == 0 {
@@ -584,8 +587,8 @@ func (namespace *Namespace) OpenIntent(owner Owner, path []byte, rights Rights, 
 			return 0, 0, parentStatus
 		}
 		backend := namespace.mounts[mountIndex].backend
-		parentScopes, permission := namespace.nodeScopes(backend, parent)
-		if parentProtected || permission != StatusOK || !namespace.permits(owner, parentScopes, Write) {
+		scopes, permission := namespace.nameScopes(mountIndex, parent, name)
+		if parentProtected || permission != StatusOK || !namespace.permits(owner, scopes, rights|Write) {
 			return 0, 0, StatusPermissionDenied
 		}
 		var backendStatus ramfs.Status
@@ -598,7 +601,7 @@ func (namespace *Namespace) OpenIntent(owner Owner, path []byte, rights Rights, 
 			return 0, 0, mapStatus(backendStatus)
 		}
 		protected = parentProtected || namespace.guards(&namespace.mounts[mountIndex], node)
-		return namespace.finishOpen(free, owner, mountIndex, node, protected, rights, flags, true)
+		return namespace.finishOpen(free, owner, mountIndex, node, protected, rights, flags, true, scopes)
 	}
 	if status != StatusOK {
 		return 0, 0, status
@@ -632,11 +635,18 @@ func (namespace *Namespace) OpenIntent(owner Owner, path []byte, rights Rights, 
 	if flags&(OpenDirectory|OpenTrailingSlash) != 0 {
 		return 0, stat.Kind, StatusNotDirectory
 	}
+	if flags&OpenTruncate != 0 && namespace.reservedTarget(path) {
+		return 0, stat.Kind, StatusPermissionDenied
+	}
 	free, reserveStatus := namespace.reserveOpen(owner)
 	if reserveStatus != StatusOK {
 		return 0, stat.Kind, reserveStatus
 	}
-	return namespace.finishOpen(free, owner, mountIndex, node, protected, rights, flags, false)
+	scopes, permission := namespace.nodeScopes(backend, node)
+	if permission != StatusOK {
+		return 0, stat.Kind, StatusPermissionDenied
+	}
+	return namespace.finishOpen(free, owner, mountIndex, node, protected, rights, flags, false, scopes)
 }
 
 func (namespace *Namespace) reserveOpen(owner Owner) (int, Status) {
@@ -651,14 +661,13 @@ func (namespace *Namespace) reserveOpen(owner Owner) (int, Status) {
 	return -1, StatusResourceExhausted
 }
 
-func (namespace *Namespace) finishOpen(free int, owner Owner, mountIndex uint8, identity ramfs.NodeID, protected bool, rights Rights, flags OpenFlags, created bool) (Handle, ramfs.Kind, Status) {
+func (namespace *Namespace) finishOpen(free int, owner Owner, mountIndex uint8, identity ramfs.NodeID, protected bool, rights Rights, flags OpenFlags, created bool, scopes uint8) (Handle, ramfs.Kind, Status) {
 	backend := namespace.mounts[mountIndex].backend
-	scopes, permission := namespace.nodeScopes(backend, identity)
-	if permission != StatusOK || !namespace.permits(owner, scopes, rights) ||
-		flags&(OpenCreate|OpenTruncate) != 0 && !namespace.permits(owner, scopes, Write) {
+	if !namespace.permits(owner, scopes, rights) ||
+		!created && flags&OpenTruncate != 0 && !namespace.permits(owner, scopes, Write) {
 		return 0, ramfs.KindFile, StatusPermissionDenied
 	}
-	if protected && (rights&Write != 0 || flags&(OpenCreate|OpenTruncate) != 0) {
+	if protected && (rights&Write != 0 || flags&OpenTruncate != 0) {
 		return 0, ramfs.KindFile, StatusPermissionDenied
 	}
 	object := identity

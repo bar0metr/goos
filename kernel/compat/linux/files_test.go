@@ -194,6 +194,54 @@ func TestDirectoryDescriptionsAreBoundedAndOwned(t *testing.T) {
 	directorySlots = [MaxOpenDirectories]directorySlot{}
 }
 
+func TestInstallDirectoryReleasesReferenceWhenAllocationFails(t *testing.T) {
+	resetCompatibilityProcesses()
+	defer resetCompatibilityProcesses()
+	directorySlots = [MaxOpenDirectories]directorySlot{}
+	const root = 0x5000
+	if !InstallProcess(root, 60, linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4}), StandardStreams{Input: 1, Output: 2, Error: 3}, 0x600000, 0x4600000) {
+		t.Fatal("install failed")
+	}
+	state, _ := FindProcess(root)
+	if errno := state.FDs.Reserve(); errno != 0 {
+		t.Fatalf("reserve: %d", errno)
+	}
+	for state.FDs.HasFree() {
+		if _, errno := AllocateFD(root, FileDescription{Kind: FDVFSFile, Object: 1}, false); errno != 0 {
+			t.Fatalf("fill descriptors: %d", errno)
+		}
+	}
+	for i := 0; i < MaxOpenDirectories+1; i++ {
+		fd, errno := InstallDirectory(root, state.FamilyID, []byte("/tmp"), OpenIntent{})
+		if fd != -1 || errno != abi.EMFILE {
+			t.Fatalf("attempt %d: fd=%d errno=%d", i, fd, errno)
+		}
+	}
+	for i := range directorySlots {
+		if directorySlots[i].owner != 0 {
+			t.Fatalf("directory slot %d leaked", i)
+		}
+	}
+	if directorySlots[0].generation != MaxOpenDirectories+1 {
+		t.Fatalf("directory was not retained for each attempt: generation=%d", directorySlots[0].generation)
+	}
+	if _, _, errno := CloseFD(root, 3); errno != 0 {
+		t.Fatalf("close: %d", errno)
+	}
+	fd, errno := InstallDirectory(root, state.FamilyID, []byte("/tmp"), OpenIntent{})
+	if fd != 3 || errno != 0 {
+		t.Fatalf("install after close: fd=%d errno=%d", fd, errno)
+	}
+	description, found := DescriptionOf(root, uint64(fd))
+	if !found || description.Kind != FDVFSDirectory {
+		t.Fatalf("directory description: %#v", description)
+	}
+	path, found := DirectoryPath(state.FamilyID, description.Object)
+	if !found || string(path) != "/tmp" {
+		t.Fatalf("directory path: %q found=%v", path, found)
+	}
+}
+
 func TestProcessRemovalReleasesDirectoriesAndOffsetsAreShared(t *testing.T) {
 	resetCompatibilityProcesses()
 	directorySlots = [MaxOpenDirectories]directorySlot{}

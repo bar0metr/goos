@@ -342,7 +342,7 @@ func TestSystemImageIsVisibleAndImmutable(t *testing.T) {
 	if stat := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte("/bootstrap/bin/ls")}); stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindFile || stat.Size != 7 {
 		t.Fatalf("stat /bootstrap/bin/ls = %+v", stat)
 	}
-	opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/bootstrap/motd")})
+	opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, OpenFlags: vfs.OpenCreate, Path: []byte("/bootstrap/motd")})
 	if opened.Status != vfs.StatusOK {
 		t.Fatalf("open motd = %d", opened.Status)
 	}
@@ -350,10 +350,16 @@ func TestSystemImageIsVisibleAndImmutable(t *testing.T) {
 		t.Fatalf("read motd = %q", reply.Data)
 	}
 	service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, OpenFlags: vfs.OpenCreate | vfs.OpenExclusive, Path: []byte("/bootstrap/motd")}); reply.Status != vfs.StatusAlreadyExists {
+		t.Fatalf("exclusive open motd = %d", reply.Status)
+	}
 
 	// Nothing can change the system image through the namespace.
 	for _, request := range []vfs.Request{
 		{Operation: vfs.OperationCreate, Path: []byte("/bootstrap/bin/backdoor")},
+		{Operation: vfs.OperationOpen, Rights: vfs.Read, OpenFlags: vfs.OpenCreate, Path: []byte("/bootstrap/bin/backdoor")},
+		{Operation: vfs.OperationOpen, Rights: vfs.Read, OpenFlags: vfs.OpenTruncate, Path: []byte("/bootstrap/motd")},
+		{Operation: vfs.OperationOpen, Rights: vfs.Write, OpenFlags: vfs.OpenCreate, Path: []byte("/bootstrap/motd")},
 		{Operation: vfs.OperationMkdir, Path: []byte("/bootstrap/extra")},
 		{Operation: vfs.OperationUnlink, Path: []byte("/bootstrap/motd")},
 		{Operation: vfs.OperationTruncate, Path: []byte("/bootstrap/motd"), Offset: 0},

@@ -500,38 +500,41 @@ func (namespace *Namespace) AuthorizePath(owner Owner, path []byte, rights Right
 		if result != StatusOK {
 			return result
 		}
-		backend := namespace.mounts[parentMount].backend
-		if namespace.mounts[parentMount].filesystemType == 0 {
-			for slot := range namespace.scopes {
-				entry := &namespace.scopes[slot]
-				if entry.backend == backend && !entry.subtree {
-					return StatusPermissionDenied
-				}
-			}
-		}
-		mask, result = namespace.nodeScopes(backend, parent)
+		mask, result = namespace.nameScopes(parentMount, parent, name)
 		if result != StatusOK {
 			return result
-		}
-		for slot := range namespace.scopes {
-			if !namespace.scopes[slot].subtree {
-				mask &^= 1 << slot
-			}
-		}
-		for slot := range namespace.scopes {
-			entry := &namespace.scopes[slot]
-			if entry.backend != backend || entry.subtree || entry.parent != parent {
-				continue
-			}
-			if namespace.scopeNameEqual(parentMount, entry.name, name) {
-				mask |= 1 << slot
-			}
 		}
 	}
 	if !namespace.permits(owner, mask, rights) {
 		return StatusPermissionDenied
 	}
 	return StatusOK
+}
+
+func (namespace *Namespace) nameScopes(mount uint8, parent ramfs.NodeID, name ramfs.Name) (uint8, Status) {
+	backend := namespace.mounts[mount].backend
+	if namespace.mounts[mount].filesystemType == 0 {
+		for slot := range namespace.scopes {
+			entry := &namespace.scopes[slot]
+			if entry.backend == backend && !entry.subtree {
+				return 0, StatusPermissionDenied
+			}
+		}
+	}
+	mask, status := namespace.nodeScopes(backend, parent)
+	if status != StatusOK {
+		return 0, status
+	}
+	for slot := range namespace.scopes {
+		entry := &namespace.scopes[slot]
+		if !entry.subtree {
+			mask &^= 1 << slot
+			if entry.backend == backend && entry.parent == parent && namespace.scopeNameEqual(mount, entry.name, name) {
+				mask |= 1 << slot
+			}
+		}
+	}
+	return mask, StatusOK
 }
 
 func (namespace *Namespace) scopeNameEqual(mount uint8, leftName, rightName ramfs.Name) bool {
