@@ -21,24 +21,34 @@ type OpenIntent struct {
 	NoFollow bool
 }
 
-// StatRights are the rights of the stat an open starts with and of the
-// create that may follow it. O_NOFOLLOW, and O_CREAT with O_EXCL, which must
-// not create through a link, act on the name itself. The create carries the
-// flag too: a link another process makes between the two exchanges then
-// stops the create instead of steering it to the link's target.
-func (intent OpenIntent) StatRights() vfs.Rights {
-	if intent.NoFollow || intent.Create && intent.Exclusive {
-		return vfs.NoFollow
-	}
-	return 0
-}
-
 // OpenRights are the rights of the VFS open.
 func (intent OpenIntent) OpenRights() vfs.Rights {
 	if intent.NoFollow {
 		return intent.Rights | vfs.NoFollow
 	}
 	return intent.Rights
+}
+
+// VFSOpenFlags carries the complete namespace intent in one OperationOpen.
+// O_EXCL without O_CREAT retains the existing policy and has no effect.
+func (intent OpenIntent) VFSOpenFlags(trailing bool) vfs.OpenFlags {
+	var flags vfs.OpenFlags
+	if intent.Create {
+		flags |= vfs.OpenCreate
+		if intent.Exclusive {
+			flags |= vfs.OpenExclusive
+		}
+	}
+	if intent.Truncate {
+		flags |= vfs.OpenTruncate
+	}
+	if intent.Directory {
+		flags |= vfs.OpenDirectory
+	}
+	if trailing {
+		flags |= vfs.OpenTrailingSlash
+	}
+	return flags
 }
 
 // StatusFlags is what the open-file description keeps of the intent: the
@@ -95,76 +105,7 @@ func DecodeOpen(flags uint64) (OpenIntent, abi.Errno) {
 	return intent, 0
 }
 
-// OpenStep is what an open does after the stat of its resolved path.
-type OpenStep uint8
-
-const (
-	OpenFail OpenStep = iota
-	// OpenCreateFile creates the missing file, then opens it.
-	OpenCreateFile
-	// OpenTruncateFile empties the existing file, then opens it.
-	OpenTruncateFile
-	// OpenExistingFile opens the file as it is.
-	OpenExistingFile
-	// OpenExistingDirectory installs a directory descriptor. A directory has
-	// no VFS open file; the descriptor keeps its path.
-	OpenExistingDirectory
-)
-
-// An open runs up to three VFS exchanges. The stage numbers rise in the
-// order the exchanges can occur, which the continuation requires.
-const (
-	OpenStageStat     = uint8(1)
-	OpenStageCreate   = uint8(2)
-	OpenStageTruncate = uint8(3)
-	OpenStageOpen     = uint8(4)
-)
-
-// PlanOpen applies Linux open semantics to the stat result. trailing reports
-// that the path itself demanded a directory.
-func PlanOpen(intent OpenIntent, trailing bool, status vfs.Status, kind ramfs.Kind) (OpenStep, abi.Errno) {
-	switch status {
-	case vfs.StatusNotFound:
-		if !intent.Create {
-			return OpenFail, abi.ENOENT
-		}
-		if trailing {
-			return OpenFail, abi.EISDIR
-		}
-		return OpenCreateFile, 0
-	case vfs.StatusOK:
-	default:
-		return OpenFail, VFSErrno(status, VFSPermissionAccess, abi.ENFILE)
-	}
-	if intent.Create && intent.Exclusive {
-		return OpenFail, abi.EEXIST
-	}
-	if kind == ramfs.KindDirectory {
-		if intent.Access != abi.OpenReadOnly || intent.Create || intent.Truncate {
-			return OpenFail, abi.EISDIR
-		}
-		return OpenExistingDirectory, 0
-	}
-	switch kind {
-	case ramfs.KindFile:
-	case ramfs.KindSymlink:
-		// Only a stat that did not follow the last link sees one.
-		return OpenFail, abi.ELOOP
-	case ramfs.KindSpecial:
-		// A device, FIFO or socket node a filesystem stores has nothing
-		// behind it in GoOS.
-		return OpenFail, abi.ENXIO
-	default:
-		return OpenFail, abi.EIO
-	}
-	if trailing || intent.Directory {
-		return OpenFail, abi.ENOTDIR
-	}
-	if intent.Truncate {
-		return OpenTruncateFile, 0
-	}
-	return OpenExistingFile, 0
-}
+const OpenStageOpen = uint8(1)
 
 // SeekTarget computes the offset an lseek asks for. current is the file
 // position and size the file length, which SEEK_END alone needs. A negative

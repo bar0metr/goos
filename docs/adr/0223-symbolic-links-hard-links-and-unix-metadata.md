@@ -52,6 +52,9 @@ the `NoFollow` right for open, stat, link and metadata changes, and the
 statuses `StatusLoop` and `StatusCrossDevice`. A directory-batch record
 carries the 32-bit inode number in bytes once reserved. A long `ReadLink` answer
 comes back in the object the request attaches, as a long listed name does.
+`GVF1` version 16 adds bounded open-intent flags to `OperationOpen` in the
+request-flags word. Transport flags and open flags are validated separately;
+open flags on any other operation and unknown flags are refused.
 Peers of different versions refuse each other's messages.
 
 **Resolution.** The VFS resolves links before it authorizes or performs a
@@ -83,11 +86,32 @@ last component unless the request carries `NoFollow`. Create follows it
 too, so `open(O_CREAT)` through a dangling link makes the target, as on
 Linux; the target faces the caller's root and scopes, and a rooted
 session cannot create outside its root that way. `O_EXCL` and `O_NOFOLLOW`
-send `NoFollow` with both the stat and the create, so the backend's create
-sees the name itself. A link that already exists, or one another session
-makes between the two exchanges, ends `O_EXCL` with `EEXIST` and
-`O_NOFOLLOW` with `ELOOP`, and its target is never made. Mkdir, unlink, rename,
-replace, read-link and symlink act on the last component itself.
+leave the final link unexpanded, so the atomic open sees the name itself.
+An existing link ends `O_EXCL` with `EEXIST` and `O_NOFOLLOW` with `ELOOP`,
+and its target is never made. Mkdir, unlink, rename, replace, read-link and
+symlink act on the last component itself.
+
+**Atomic Linux open.** Linux file open is one serialized VFS namespace
+transaction. Path expansion, authority checks, lookup, optional creation,
+optional truncation, stable-object acquisition and VFS handle installation
+occur without another namespace mutation being admitted between them. The
+Linux bridge reserves its descriptor and sends one `OperationOpen` carrying
+`OpenCreate`, `OpenExclusive`, `OpenTruncate`, `OpenDirectory` and trailing-
+slash intent; it no longer composes `Stat`, `Create` or `Truncate` requests.
+The standalone native `OperationCreate` and `OperationTruncate` remain valid.
+
+The VFS may issue separate synchronous backend `OpenName`, `CreateName`,
+`AcquireObject` and `Truncate` calls, but they execute inside the one serial
+dispatch. A created node is acquired directly from the identity returned by
+`CreateName`; an existing file is acquired before truncation, and that same
+object is installed in the handle. A failed acquisition is not followed by a
+second pathname lookup, and a failed truncation releases the acquired object
+without installing a handle. M3 may replace these backend calls with
+transactional ext4 mutation primitives without changing the Linux/VFS
+contract. ext4 remains read-only in M2.
+
+Directory descriptors remain pathname-backed rather than stable VFS directory
+objects. This decision does not provide Linux directory-FD rename semantics.
 
 **Cross-filesystem moves.** Rename and replace between two backends are
 `StatusCrossDevice` (`EXDEV`). Two mounts of one backend, `/home` and
@@ -146,6 +170,8 @@ equal to Linux.
 - `DT_UNKNOWN` for special files, above.
 - A crashed ext4 instance still revokes every open handle (ADR 0222);
   links add no recovery path.
+- A created file may remain if stable-object acquisition fails after the
+  backend created it. Transactional mutation and rollback belong to M3/M4.
 
 ## Verification
 

@@ -44,69 +44,40 @@ func TestDecodeOpen(t *testing.T) {
 		t.Fatalf("status flags = %#o", flags)
 	}
 	for _, test := range []struct {
-		intent       OpenIntent
-		stat, opened vfs.Rights
+		intent OpenIntent
+		opened vfs.Rights
 	}{
-		{OpenIntent{Rights: vfs.Read}, 0, vfs.Read},
-		{OpenIntent{Rights: vfs.Read, NoFollow: true}, vfs.NoFollow, vfs.Read | vfs.NoFollow},
-		{OpenIntent{Rights: vfs.Write, Create: true}, 0, vfs.Write},
-		{OpenIntent{Rights: vfs.Write, Create: true, Exclusive: true}, vfs.NoFollow, vfs.Write},
-		{OpenIntent{Rights: vfs.Write, Create: true, NoFollow: true}, vfs.NoFollow, vfs.Write | vfs.NoFollow},
+		{OpenIntent{Rights: vfs.Read}, vfs.Read},
+		{OpenIntent{Rights: vfs.Read, NoFollow: true}, vfs.Read | vfs.NoFollow},
+		{OpenIntent{Rights: vfs.Write, Create: true}, vfs.Write},
+		{OpenIntent{Rights: vfs.Write, Create: true, Exclusive: true}, vfs.Write},
+		{OpenIntent{Rights: vfs.Write, Create: true, NoFollow: true}, vfs.Write | vfs.NoFollow},
 	} {
-		if stat, opened := test.intent.StatRights(), test.intent.OpenRights(); stat != test.stat || opened != test.opened {
-			t.Errorf("%+v: stat %#x open %#x", test.intent, stat, opened)
+		if opened := test.intent.OpenRights(); opened != test.opened {
+			t.Errorf("%+v: open %#x", test.intent, opened)
 		}
 	}
 }
 
-func TestPlanOpen(t *testing.T) {
-	read := OpenIntent{Rights: vfs.Read}
-	write := OpenIntent{Rights: vfs.Write, Access: 1}
-	create := OpenIntent{Rights: vfs.Write, Access: 1, Create: true}
-	exclusive := OpenIntent{Rights: vfs.Write, Access: 1, Create: true, Exclusive: true}
-	truncate := OpenIntent{Rights: vfs.Write, Access: 1, Truncate: true}
-	directory := OpenIntent{Rights: vfs.Read, Directory: true}
-	cases := []struct {
-		label    string
+func TestOpenIntentVFSFlags(t *testing.T) {
+	for _, test := range []struct {
 		intent   OpenIntent
 		trailing bool
-		status   vfs.Status
-		kind     ramfs.Kind
-		step     OpenStep
-		errno    abi.Errno
+		want     vfs.OpenFlags
 	}{
-		{"existing file", read, false, vfs.StatusOK, ramfs.KindFile, OpenExistingFile, 0},
-		{"missing file", read, false, vfs.StatusNotFound, 0, OpenFail, abi.ENOENT},
-		{"create missing", create, false, vfs.StatusNotFound, 0, OpenCreateFile, 0},
-		{"create existing", create, false, vfs.StatusOK, ramfs.KindFile, OpenExistingFile, 0},
-		{"exclusive create of existing", exclusive, false, vfs.StatusOK, ramfs.KindFile, OpenFail, abi.EEXIST},
-		{"exclusive create of existing directory", exclusive, false, vfs.StatusOK, ramfs.KindDirectory, OpenFail, abi.EEXIST},
-		{"no-follow open of a link", read, false, vfs.StatusOK, ramfs.KindSymlink, OpenFail, abi.ELOOP},
-		{"exclusive create over a link", exclusive, false, vfs.StatusOK, ramfs.KindSymlink, OpenFail, abi.EEXIST},
-		{"device node", read, false, vfs.StatusOK, ramfs.KindSpecial, OpenFail, abi.ENXIO},
-		{"exclusive create of missing", exclusive, false, vfs.StatusNotFound, 0, OpenCreateFile, 0},
-		{"create with a trailing slash", create, true, vfs.StatusNotFound, 0, OpenFail, abi.EISDIR},
-		{"truncate existing", truncate, false, vfs.StatusOK, ramfs.KindFile, OpenTruncateFile, 0},
-		{"read a directory", read, false, vfs.StatusOK, ramfs.KindDirectory, OpenExistingDirectory, 0},
-		{"O_DIRECTORY on a directory", directory, true, vfs.StatusOK, ramfs.KindDirectory, OpenExistingDirectory, 0},
-		{"write a directory", write, false, vfs.StatusOK, ramfs.KindDirectory, OpenFail, abi.EISDIR},
-		{"create over a directory", create, false, vfs.StatusOK, ramfs.KindDirectory, OpenFail, abi.EISDIR},
-		{"truncate a directory", OpenIntent{Rights: vfs.Read, Truncate: true}, false, vfs.StatusOK, ramfs.KindDirectory, OpenFail, abi.EISDIR},
-		{"O_DIRECTORY on a file", directory, false, vfs.StatusOK, ramfs.KindFile, OpenFail, abi.ENOTDIR},
-		{"file with a trailing slash", read, true, vfs.StatusOK, ramfs.KindFile, OpenFail, abi.ENOTDIR},
-		{"file under a file", read, false, vfs.StatusNotDirectory, 0, OpenFail, abi.ENOTDIR},
-		{"name too long for the filesystem", read, false, vfs.StatusNameTooLong, 0, OpenFail, abi.ENAMETOOLONG},
-		{"backend failure", read, false, vfs.StatusBackendError, 0, OpenFail, abi.EIO},
-		{"unknown kind", read, false, vfs.StatusOK, 0, OpenFail, abi.EIO},
-	}
-	for _, test := range cases {
-		step, errno := PlanOpen(test.intent, test.trailing, test.status, test.kind)
-		if step != test.step || errno != test.errno {
-			t.Errorf("%s: step=%d errno=%d, want step=%d errno=%d", test.label, step, errno, test.step, test.errno)
+		{OpenIntent{}, false, 0},
+		{OpenIntent{Create: true}, false, vfs.OpenCreate},
+		{OpenIntent{Create: true, Exclusive: true}, false, vfs.OpenCreate | vfs.OpenExclusive},
+		{OpenIntent{Exclusive: true}, false, 0},
+		{OpenIntent{Truncate: true}, false, vfs.OpenTruncate},
+		{OpenIntent{Directory: true}, true, vfs.OpenDirectory | vfs.OpenTrailingSlash},
+	} {
+		if got := test.intent.VFSOpenFlags(test.trailing); got != test.want {
+			t.Errorf("%+v trailing=%v: %#x, want %#x", test.intent, test.trailing, got, test.want)
 		}
 	}
-	if !(OpenStageStat < OpenStageCreate && OpenStageCreate < OpenStageTruncate && OpenStageTruncate < OpenStageOpen) {
-		t.Fatal("open stages do not rise in exchange order")
+	if OpenStageOpen != 1 {
+		t.Fatalf("open stage = %d", OpenStageOpen)
 	}
 }
 

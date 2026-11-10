@@ -312,6 +312,10 @@ run '/system/linux/abi-probe links'
 expect '^links ok$' 'symbolic links in RAMFS: symlink, readlink, lstat, O_NOFOLLOW, loops'
 clean 'symbolic links in RAMFS: symlink, readlink, lstat, O_NOFOLLOW, loops'
 
+run '/system/linux/abi-probe open-intent'
+expect '^open intent ok$' 'atomic O_CREAT, O_EXCL, O_NOFOLLOW, O_TRUNC and fstat identity'
+clean 'atomic O_CREAT, O_EXCL, O_NOFOLLOW, O_TRUNC and fstat identity'
+
 run '/system/linux/abi-probe fpstate'
 expect '^fpstate ok$' 'x87 and SSE state survives a signal handler'
 clean 'x87 and SSE state survives a signal handler'

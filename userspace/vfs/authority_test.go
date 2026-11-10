@@ -214,6 +214,8 @@ func TestOverlappingHostSubtreeDoesNotWidenAuthorizedKeysGrant(t *testing.T) {
 	file := remoteOK(t, service, vfs.Request{Operation: vfs.OperationOpen, Path: []byte("/state/security/ssh/authorized_keys"), Rights: vfs.Read}).Handle
 	deny(t, service, remoteOwner,
 		vfs.Request{Operation: vfs.OperationOpen, Path: []byte("/state/security/ssh/authorized_keys"), Rights: vfs.Write},
+		vfs.Request{Operation: vfs.OperationOpen, Path: []byte("/state/security/ssh/authorized_keys"), Rights: vfs.Read, OpenFlags: vfs.OpenTruncate},
+		vfs.Request{Operation: vfs.OperationOpen, Path: []byte("/state/security/ssh/authorized_keys"), Rights: vfs.Read, OpenFlags: vfs.OpenCreate},
 		vfs.Request{Operation: vfs.OperationTruncate, Path: []byte("/state/security/ssh/authorized_keys")},
 		vfs.Request{Operation: vfs.OperationUnlink, Path: []byte("/state/security/ssh/authorized_keys")},
 		vfs.MetadataRequest(nil, file, ramfs.MetadataChange{SetReadOnly: true, ReadOnly: true}),
@@ -432,6 +434,7 @@ func TestRootedSessionThroughDispatch(t *testing.T) {
 	}
 	deny(t, service, rooted,
 		vfs.Request{Operation: vfs.OperationStat, Path: []byte("/home/elsewhere")},
+		vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, OpenFlags: vfs.OpenCreate, Path: []byte("/home/rooted/../elsewhere/x")},
 		vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/home/rooted/../elsewhere/x")},
 		vfs.Request{Operation: vfs.OperationRename, Path: []byte("/home/rooted/file"), Target: []byte("/home/elsewhere/file")},
 		vfs.Request{Operation: vfs.OperationRename, Path: []byte("/home/rooted"), Target: []byte("/home/moved")},

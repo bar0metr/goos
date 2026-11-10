@@ -480,11 +480,11 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 	}
 	switch request.Operation {
 	case vfs.OperationOpen:
-		if request.Rights&vfs.Write != 0 && service.onImage(request.Path) {
+		if (request.Rights&vfs.Write != 0 || request.OpenFlags&(vfs.OpenCreate|vfs.OpenTruncate) != 0) && service.onImage(request.Path) {
 			reply.Status = vfs.StatusPermissionDenied
 			break
 		}
-		reply.Handle, reply.Status = service.namespace.Open(owner, request.Path, request.Rights&^vfs.NoFollow)
+		reply.Handle, reply.Kind, reply.Status = service.namespace.OpenIntent(owner, request.Path, request.Rights&^vfs.NoFollow, request.OpenFlags)
 	case vfs.OperationClose:
 		reply.Status = service.namespace.Close(owner, request.Handle)
 	case vfs.OperationRead:
@@ -627,6 +627,9 @@ func (service *Service) expand(owner vfs.Owner, request *vfs.Request) vfs.Status
 	switch request.Operation {
 	case vfs.OperationOpen, vfs.OperationStat, vfs.OperationSetMetadata, vfs.OperationLink, vfs.OperationCreate:
 		followPath = request.Rights&vfs.NoFollow == 0
+		if request.Operation == vfs.OperationOpen && request.OpenFlags&(vfs.OpenCreate|vfs.OpenExclusive) == vfs.OpenCreate|vfs.OpenExclusive {
+			followPath = false
+		}
 		target = request.Operation == vfs.OperationLink
 	case vfs.OperationReadDir, vfs.OperationReadDirBatch, vfs.OperationTruncate, vfs.OperationFilesystemInfo, vfs.OperationSync:
 		followPath = true
@@ -659,6 +662,13 @@ func (service *Service) authorize(owner vfs.Owner, request vfs.Request) vfs.Stat
 	switch request.Operation {
 	case vfs.OperationOpen:
 		rights = request.Rights &^ vfs.NoFollow
+		if status := service.namespace.AuthorizePath(owner, request.Path, rights, false); status != vfs.StatusOK {
+			return status
+		}
+		if request.OpenFlags&(vfs.OpenCreate|vfs.OpenTruncate) != 0 {
+			return service.namespace.AuthorizePath(owner, request.Path, vfs.Write, false)
+		}
+		return vfs.StatusOK
 	case vfs.OperationReadDir, vfs.OperationStat, vfs.OperationSync:
 		if len(request.Path) == 0 {
 			return vfs.StatusOK

@@ -49,8 +49,10 @@ func refusesSystemChanges(t *testing.T, service *Service, roots ...string) {
 	for _, root := range roots {
 		attempts := []vfs.Request{
 			{Operation: vfs.OperationCreate, Path: []byte(root + "/bin/backdoor")},
+			{Operation: vfs.OperationOpen, Rights: vfs.Write, OpenFlags: vfs.OpenCreate, Path: []byte(root + "/bin/backdoor")},
 			{Operation: vfs.OperationMkdir, Path: []byte(root + "/extra")},
 			{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: []byte(root + "/commands")},
+			{Operation: vfs.OperationOpen, Rights: vfs.Write, OpenFlags: vfs.OpenTruncate, Path: []byte(root + "/commands")},
 			{Operation: vfs.OperationOpen, Rights: vfs.Read | vfs.Write, Path: []byte(root + "/bin/ls")},
 			{Operation: vfs.OperationTruncate, Path: []byte(root + "/commands")},
 			{Operation: vfs.OperationUnlink, Path: []byte(root + "/bin/ls")},

@@ -1069,6 +1069,43 @@ static int links_test(void)
 	return report("links", ok);
 }
 
+/* open_intent checks the externally visible result of the one-request VFS
+ * open path and identifies successful results through fstat, not a later
+ * pathname lookup. */
+static int open_intent_test(void)
+{
+	int failed_line = 0, fd, ok = enter_scratch();
+	struct stat created, opened, path;
+
+	ok = ok && (fd = open("atomic", O_CREAT | O_EXCL | O_RDWR, 0644)) >= 0 &&
+	     syscall(SYS_fstat, fd, &created) == 0 && created.st_size == 0 &&
+	     write(fd, "payload", 7) == 7 && close(fd) == 0 &&
+	     fails(open("atomic", O_CREAT | O_EXCL | O_WRONLY, 0644), EEXIST);
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
+	ok = ok && (fd = open("atomic", O_WRONLY | O_TRUNC)) >= 0 &&
+	     syscall(SYS_fstat, fd, &opened) == 0 && opened.st_ino == created.st_ino && opened.st_size == 0 &&
+	     close(fd) == 0 && probe_stat("atomic", &path) == 0 &&
+	     path.st_ino == opened.st_ino && path.st_size == 0;
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
+	ok = ok && symlink("made", "dangling") == 0 &&
+	     fails(open("dangling", O_CREAT | O_NOFOLLOW | O_WRONLY, 0644), ELOOP) &&
+	     fails(probe_stat("made", &path), ENOENT) &&
+	     (fd = open("dangling", O_CREAT | O_RDWR, 0644)) >= 0 &&
+	     syscall(SYS_fstat, fd, &opened) == 0 && close(fd) == 0 &&
+	     probe_stat("made", &path) == 0 && opened.st_ino == path.st_ino;
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
+	ok = ok && unlink("dangling") == 0 && unlink("made") == 0 &&
+	     unlink("atomic") == 0 && leave_scratch();
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
+	if (failed_line)
+		printf("%s failed at line %d\n", "open intent", failed_line);
+	return report("open intent", ok);
+}
+
 /* hold opens path, reads it, and keeps the descriptor while the test
  * replaces the filesystem instance behind it. After seconds it reads the
  * descriptor again, which must fail, and opens path afresh, which must work.
@@ -4814,6 +4851,8 @@ int main(int argc, char **argv)
 			return hardening_test();
 		if (!strcmp(argv[1], "links"))
 			return links_test();
+		if (!strcmp(argv[1], "open-intent"))
+			return open_intent_test();
 		if (!strcmp(argv[1], "hold") && argc >= 4)
 			return hold_test(argv[2], atoi(argv[3]));
 		if (!strcmp(argv[1], "ext4-links") && argc >= 4)

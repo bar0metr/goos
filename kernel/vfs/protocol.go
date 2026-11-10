@@ -24,8 +24,9 @@ const (
 	// (ADR 0142); version 14 adds batched directory listing (ADR 0208);
 	// version 15 adds symbolic and hard links, the no-follow flag, the loop
 	// and cross-device statuses, and Unix metadata in a stat reply
-	// (ADR 0223).
-	ProtocolVersion = uint16(15)
+	// (ADR 0223); version 16 makes open/create/truncate intent one serialized
+	// VFS operation.
+	ProtocolVersion = uint16(16)
 	protocolHeader  = 40
 	// MaxProtocolData is the most write data one inline request carries.
 	MaxProtocolData = ipc.MaxPayload - protocolHeader
@@ -41,7 +42,13 @@ const (
 	flagPathsAttached = 1
 	// flagNameReturn lets a directory listing return a name too long for the
 	// message in the attached object, at its start.
-	flagNameReturn = 2
+	flagNameReturn        = 2
+	flagOpenCreate        = uint32(1 << 8)
+	flagOpenExclusive     = uint32(1 << 9)
+	flagOpenTruncate      = uint32(1 << 10)
+	flagOpenDirectory     = uint32(1 << 11)
+	flagOpenTrailingSlash = uint32(1 << 12)
+	flagOpenMask          = flagOpenCreate | flagOpenExclusive | flagOpenTruncate | flagOpenDirectory | flagOpenTrailingSlash
 	// flagNameAttached marks a reply whose name is in the attached object.
 	flagNameAttached = 1
 	// replyBatchEnd marks a directory batch that reached the listing's end.
@@ -193,6 +200,7 @@ func (operation Operation) Bulk() bool {
 type Request struct {
 	Operation     Operation
 	Rights        Rights
+	OpenFlags     OpenFlags
 	Handle        Handle
 	Offset        uint64
 	Size          uint32
@@ -428,7 +436,8 @@ func DecodeReplyFrom(message *ipc.Message) (Reply, bool) {
 func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 	if request.Operation < OperationOpen || request.Operation > lastOperation || correlation == 0 ||
 		len(request.Path) > limits.PathMax || len(request.Target) > limits.PathMax || len(request.Data) > MaxProtocolData ||
-		request.NameReturn && !request.Operation.listsNames() || request.Operation == OperationReadDirBatch && !request.NameReturn || request.PathsAttached && request.Operation.Bulk() {
+		request.NameReturn && !request.Operation.listsNames() || request.Operation == OperationReadDirBatch && !request.NameReturn || request.PathsAttached && request.Operation.Bulk() ||
+		request.OpenFlags != 0 && request.Operation != OperationOpen || !request.OpenFlags.Valid() || request.OpenFlags&(OpenCreate|OpenDirectory) == OpenCreate|OpenDirectory {
 		return ipc.Message{}, false
 	}
 	inline := len(request.Path) + len(request.Target)
@@ -439,6 +448,7 @@ func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 	if request.NameReturn {
 		flags |= flagNameReturn
 	}
+	flags |= uint32(request.OpenFlags) << 8
 	if protocolHeader+inline+len(request.Data) > ipc.MaxPayload {
 		return ipc.Message{}, false
 	}
@@ -477,18 +487,21 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 	if attached {
 		inline = 0
 	}
-	if flags&^(flagPathsAttached|flagNameReturn) != 0 || pathSize > limits.PathMax || targetSize > limits.PathMax || dataSize > MaxProtocolData ||
+	if flags&^(flagPathsAttached|flagNameReturn|flagOpenMask) != 0 || pathSize > limits.PathMax || targetSize > limits.PathMax || dataSize > MaxProtocolData ||
 		protocolHeader+inline+dataSize != int(message.PayloadSize) || attached && protocolHeader+pathSize+targetSize+dataSize <= ipc.MaxPayload {
 		return Request{}, false
 	}
 	operation := Operation(message.Payload[0])
 	rights := Rights(message.Payload[1])
-	if operation < OperationOpen || operation > lastOperation || rights&^allowedRights(operation) != 0 || flags&flagNameReturn != 0 && !operation.listsNames() || operation == OperationReadDirBatch && flags&flagNameReturn == 0 || attached && operation.Bulk() {
+	openFlags := OpenFlags(flags >> 8)
+	if operation < OperationOpen || operation > lastOperation || rights&^allowedRights(operation) != 0 || flags&flagNameReturn != 0 && !operation.listsNames() || operation == OperationReadDirBatch && flags&flagNameReturn == 0 || attached && operation.Bulk() ||
+		openFlags != 0 && operation != OperationOpen || !openFlags.Valid() || openFlags&(OpenCreate|OpenDirectory) == OpenCreate|OpenDirectory {
 		return Request{}, false
 	}
 	request := Request{
 		Operation:     operation,
 		Rights:        rights,
+		OpenFlags:     openFlags,
 		Handle:        Handle(binary.LittleEndian.Uint64(message.Payload[8:])),
 		Offset:        binary.LittleEndian.Uint64(message.Payload[16:]),
 		Size:          binary.LittleEndian.Uint32(message.Payload[24:]),

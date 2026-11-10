@@ -279,13 +279,15 @@ func TestRootedSessionsStayInsideThroughLinks(t *testing.T) {
 	}
 	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationSymlink, Path: []byte("/tmp/jail/out"), Target: []byte("../escaped")})
 	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationSymlink, Path: []byte("/tmp/jail/in"), Target: []byte("/made")})
-	deny(t, service, jailedTmp, vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/tmp/jail/out")})
+	deny(t, service, jailedTmp, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, OpenFlags: vfs.OpenCreate, Path: []byte("/tmp/jail/out")})
 	if reply := statPath(service, testSession, "/tmp/escaped", 0); reply.Status != vfs.StatusNotFound {
 		t.Fatalf("a rooted create escaped: %v", reply.Status)
 	}
-	if reply := service.Dispatch(jailedTmp, vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/tmp/jail/in")}); reply.Status != vfs.StatusOK {
-		t.Fatalf("rooted create through an absolute link: %v", reply.Status)
+	created := service.Dispatch(jailedTmp, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, OpenFlags: vfs.OpenCreate, Path: []byte("/tmp/jail/in")})
+	if created.Status != vfs.StatusOK {
+		t.Fatalf("rooted create through an absolute link: %v", created.Status)
 	}
+	service.Dispatch(jailedTmp, vfs.Request{Operation: vfs.OperationClose, Handle: created.Handle})
 	if reply := statPath(service, testSession, "/tmp/jail/made", 0); reply.Status != vfs.StatusOK {
 		t.Fatalf("absolute target outside the root: %v", reply.Status)
 	}
@@ -300,6 +302,7 @@ func TestScopesApplyToLinkTargets(t *testing.T) {
 	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationSymlink, Path: []byte("/tmp/key"), Target: []byte("/state/security/ssh/host")})
 	deny(t, service, remoteOwner,
 		vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/tmp/key")},
+		vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, OpenFlags: vfs.OpenCreate, Path: []byte("/tmp/key")},
 		vfs.Request{Operation: vfs.OperationStat, Path: []byte("/tmp/key")})
 }
 
@@ -481,22 +484,20 @@ func TestListingCarriesInodeNumbers(t *testing.T) {
 	}
 }
 
-// TestCreateRaceWithALink replays the exchanges of a Linux open(O_CREAT): a
-// stat that finds nothing, then a create. Between them another session makes
-// a symbolic link at the name. The create of O_EXCL or O_NOFOLLOW carries
-// NoFollow and must stop at the link; plain O_CREAT follows it.
+// TestCreateRaceWithALink preserves the old adversarial setup, but the Linux
+// side now sends one open intent after the other session inserts the link.
 func TestCreateRaceWithALink(t *testing.T) {
 	service, _ := linksService(t)
 	const other vfs.Owner = 80
 	for _, test := range []struct {
-		name   string
-		create vfs.Rights
-		open   vfs.Rights
-		status vfs.Status
+		name      string
+		rights    vfs.Rights
+		openFlags vfs.OpenFlags
+		status    vfs.Status
 	}{
-		{"exclusive", vfs.NoFollow, vfs.Write | vfs.NoFollow, vfs.StatusAlreadyExists},
-		{"no-follow", vfs.NoFollow, vfs.Write | vfs.NoFollow, vfs.StatusLoop},
-		{"plain", 0, vfs.Write, vfs.StatusOK},
+		{"exclusive", vfs.Write, vfs.OpenCreate | vfs.OpenExclusive, vfs.StatusAlreadyExists},
+		{"no-follow", vfs.Write | vfs.NoFollow, vfs.OpenCreate, vfs.StatusLoop},
+		{"plain", vfs.Write, vfs.OpenCreate, vfs.StatusOK},
 	} {
 		path, victim := "/tmp/race-"+test.name, "/tmp/victim-"+test.name
 		if reply := statPath(service, testSession, path, vfs.NoFollow); reply.Status != vfs.StatusNotFound {
@@ -505,29 +506,22 @@ func TestCreateRaceWithALink(t *testing.T) {
 		if reply := service.Dispatch(other, vfs.Request{Operation: vfs.OperationSymlink, Path: []byte(path), Target: []byte(victim)}); reply.Status != vfs.StatusOK {
 			t.Fatalf("%s: the other session's link: %v", test.name, reply.Status)
 		}
-		created := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationCreate, Rights: test.create, Path: []byte(path)})
-		if test.create&vfs.NoFollow != 0 {
-			if created.Status != vfs.StatusAlreadyExists {
-				t.Fatalf("%s: create through the new link: %v", test.name, created.Status)
-			}
-			// O_EXCL ends at the create; O_NOFOLLOW goes on to its open.
-			if test.status == vfs.StatusLoop {
-				opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: test.open, Path: []byte(path)})
-				if opened.Status != vfs.StatusLoop {
-					t.Fatalf("%s: open after the race: %v", test.name, opened.Status)
-				}
-			}
+		opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: test.rights, OpenFlags: test.openFlags, Path: []byte(path)})
+		if opened.Status != test.status {
+			t.Fatalf("%s: atomic open: %v", test.name, opened.Status)
+		}
+		if test.status != vfs.StatusOK {
 			if reply := statPath(service, testSession, victim, 0); reply.Status != vfs.StatusNotFound {
 				t.Fatalf("%s: the link's target was made: %v", test.name, reply.Status)
 			}
 			continue
 		}
-		if created.Status != vfs.StatusOK {
-			t.Fatalf("%s: plain create: %v", test.name, created.Status)
+		target := statPath(service, testSession, victim, 0)
+		byHandle := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Handle: opened.Handle})
+		if target.Status != vfs.StatusOK || byHandle.Status != vfs.StatusOK || target.Node != byHandle.Node {
+			t.Fatalf("%s: target=%+v handle=%+v", test.name, target, byHandle)
 		}
-		if reply := statPath(service, testSession, victim, 0); reply.Status != vfs.StatusOK {
-			t.Fatalf("%s: plain create did not follow the link: %v", test.name, reply.Status)
-		}
+		service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
 	}
 	message, ok := vfs.EncodeRequest(vfs.Request{Operation: vfs.OperationCreate, Rights: vfs.NoFollow, Path: []byte("/tmp/x")}, 9)
 	if decoded, valid := vfs.DecodeRequest(message); !ok || !valid || decoded.Rights != vfs.NoFollow {

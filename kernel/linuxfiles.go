@@ -40,9 +40,9 @@ func (handler *linuxCallHandler) Openat(request linuxcompat.Request) linuxcompat
 	return handler.openPath(request, int32(request.Arguments[0]), request.Arguments[1], request.Arguments[2])
 }
 
-// openPath stats the resolved path, creates or empties the file when the
-// flags ask for it, and opens it. A directory gets a descriptor that keeps
-// its path; the VFS has no open file for one.
+// openPath sends one VFS request carrying the complete open intent. A
+// directory gets a descriptor that keeps its path; the VFS has no open file
+// for one.
 func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int32, address uint64, flags uint64) linuxcompat.Result {
 	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
@@ -81,101 +81,37 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 		}
 	}
 	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
-	for {
-		pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
-		switch pending.Stage {
-		case linuxcompat.OpenStageStat:
-			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationStat, Path: path, Rights: intent.StatRights()}, attachPaths)
-			if blocked {
-				return linuxBlocked
-			}
-			if errno != 0 {
-				return linuxErrno(errno)
-			}
-			step, errno := linuxcompat.PlanOpen(intent, pending.Note&noteTrailing != 0, reply.Status, reply.Kind)
-			next := linuxcompat.OpenStageOpen
-			switch step {
-			case linuxcompat.OpenFail:
-				handler.vfsFinish()
-				return linuxErrno(errno)
-			case linuxcompat.OpenExistingDirectory:
-				// The descriptor copies the path before the continuation
-				// that holds it is released.
-				result := handler.installDirectory(state, path, intent)
-				handler.vfsFinish()
-				return result
-			case linuxcompat.OpenCreateFile:
-				next = linuxcompat.OpenStageCreate
-			case linuxcompat.OpenTruncateFile:
-				next = linuxcompat.OpenStageTruncate
-			}
-			if errno := handler.vfsNext(pending.Stage, next, 0); errno != 0 {
-				return linuxErrno(errno)
-			}
-		case linuxcompat.OpenStageCreate:
-			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationCreate, Path: path, Rights: intent.StatRights()}, attachPaths)
-			if blocked {
-				return linuxBlocked
-			}
-			if errno != 0 {
-				return linuxErrno(errno)
-			}
-			// Another process may have created the name since the stat. That
-			// is what O_EXCL exists to refuse. A link made there in between
-			// meets a create that does not follow it: O_EXCL fails here with
-			// EEXIST, and O_NOFOLLOW's open below with ELOOP.
-			raced := reply.Status == vfs.StatusAlreadyExists
-			if reply.Status != vfs.StatusOK && !raced || raced && intent.Exclusive {
-				handler.vfsFinish()
-				return linuxErrno(linuxcompat.MutationErrno(reply.Status))
-			}
-			if errno := handler.vfsNext(pending.Stage, linuxcompat.OpenStageOpen, 0); errno != 0 {
-				return linuxErrno(errno)
-			}
-		case linuxcompat.OpenStageTruncate:
-			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationTruncate, Path: path}, attachPaths)
-			if blocked {
-				return linuxBlocked
-			}
-			if errno != 0 {
-				return linuxErrno(errno)
-			}
-			if reply.Status != vfs.StatusOK {
-				handler.vfsFinish()
-				return linuxErrno(linuxcompat.MutationErrno(reply.Status))
-			}
-			if errno := handler.vfsNext(pending.Stage, linuxcompat.OpenStageOpen, 0); errno != 0 {
-				return linuxErrno(errno)
-			}
-		case linuxcompat.OpenStageOpen:
-			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationOpen, Rights: intent.OpenRights(), Path: path}, attachPaths)
-			if blocked {
-				return linuxBlocked
-			}
-			if errno != 0 {
-				return linuxErrno(errno)
-			}
-			handler.vfsFinish()
-			if reply.Status != vfs.StatusOK {
-				// GoOS has no per-file permissions, so a refused write open
-				// is a read-only mount. An exhausted open is the VFS
-				// open-file table.
-				permission := linuxcompat.VFSPermissionAccess
-				if intent.Rights&vfs.Write != 0 {
-					permission = linuxcompat.VFSPermissionReadOnly
-				}
-				return linuxErrno(linuxcompat.VFSErrno(reply.Status, permission, linuxabi.ENFILE))
-			}
-			description := linuxcompat.FileDescription{Kind: linuxcompat.FDVFSFile, Flags: intent.StatusFlags(), Object: uint64(reply.Handle)}
-			fd, errno := linuxcompat.AllocateFD(handler.root, description, intent.CloseOnExec)
-			if errno != 0 {
-				return linuxErrno(linuxabi.EIO)
-			}
-			return linuxcompat.Result{Value: uint64(fd)}
-		default:
-			return linuxErrno(handler.vfsFailed())
-		}
+	pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
+	if pending.Stage != linuxcompat.OpenStageOpen {
+		return linuxErrno(handler.vfsFailed())
 	}
+	openFlags := intent.VFSOpenFlags(pending.Note&noteTrailing != 0)
+	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationOpen, Rights: intent.OpenRights(), OpenFlags: openFlags, Path: path}, attachPaths)
+	if blocked {
+		return linuxBlocked
+	}
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	if reply.Status == vfs.StatusOK && reply.Kind == ramfs.KindDirectory {
+		result := handler.installDirectory(state, path, intent)
+		handler.vfsFinish()
+		return result
+	}
+	handler.vfsFinish()
+	if reply.Status != vfs.StatusOK {
+		permission := linuxcompat.VFSPermissionAccess
+		if intent.Rights&vfs.Write != 0 || openFlags&(vfs.OpenCreate|vfs.OpenTruncate) != 0 {
+			permission = linuxcompat.VFSPermissionReadOnly
+		}
+		return linuxErrno(linuxcompat.VFSErrno(reply.Status, permission, linuxabi.ENFILE))
+	}
+	description := linuxcompat.FileDescription{Kind: linuxcompat.FDVFSFile, Flags: intent.StatusFlags(), Object: uint64(reply.Handle)}
+	fd, errno := linuxcompat.AllocateFD(handler.root, description, intent.CloseOnExec)
+	if errno != 0 {
+		return linuxErrno(linuxabi.EIO)
+	}
+	return linuxcompat.Result{Value: uint64(fd)}
 }
 
 func (handler *linuxCallHandler) installDirectory(state *linuxcompat.ProcessState, path []byte, intent linuxcompat.OpenIntent) linuxcompat.Result {
