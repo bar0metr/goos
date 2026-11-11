@@ -116,6 +116,20 @@ func (archive *Archive) Stat(id ramfs.NodeID) (ramfs.Stat, ramfs.Status) {
 	return imageStat(id, ramfs.KindFile, uint64(len(data))), ramfs.StatusOK
 }
 
+// SyncFile, SyncDirectory and SyncFilesystem succeed for any member: the
+// archive is immutable, so nothing in it waits to be written.
+func (archive *Archive) SyncFile(id ramfs.NodeID) ramfs.Status {
+	_, status := archive.Stat(id)
+	return status
+}
+
+func (archive *Archive) SyncDirectory(id ramfs.NodeID) ramfs.Status {
+	_, status := archive.Stat(id)
+	return status
+}
+
+func (archive *Archive) SyncFilesystem() ramfs.Status { return ramfs.StatusOK }
+
 func imageStat(id ramfs.NodeID, kind ramfs.Kind, size uint64) ramfs.Stat {
 	attributes := ramfs.AttrReadOnly
 	if kind == ramfs.KindDirectory {

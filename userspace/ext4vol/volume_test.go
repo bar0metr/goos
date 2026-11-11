@@ -90,8 +90,33 @@ func TestOpenReadStat(t *testing.T) {
 		!stat.Modified.Available || stat.Modified.Seconds != 1767225600 || stat.AttributesAvailable {
 		t.Fatalf("stat %+v %v", stat, status)
 	}
-	if _, status := volume.OpenName(root, name(t, "sym-fast")); status != ramfs.StatusUnsupported {
-		t.Fatalf("symlink open: %v", status)
+	if stat.Unix.Links != 2 || stat.Unix.Mode&ramfs.ModeTypeMask != ramfs.ModeRegular || stat.Unix.Generation != uint32(uint64(id)>>32) ||
+		!stat.Unix.Accessed.Available || stat.Unix.Accessed.Seconds != 1767225600 || !stat.Unix.Changed.Available {
+		t.Fatalf("hard-linked file metadata %+v", stat.Unix)
+	}
+	fast, status := volume.OpenName(root, name(t, "sym-fast"))
+	if status != ramfs.StatusOK {
+		t.Fatalf("symlink lookup: %v", status)
+	}
+	if stat, _ := volume.Stat(fast); stat.Kind != ramfs.KindSymlink || stat.Size != 9 || stat.Unix.Mode&ramfs.ModeTypeMask != ramfs.ModeSymlink || !stat.Valid() {
+		t.Fatalf("symlink stat %+v", stat)
+	}
+	target := make([]byte, ramfs.MaxLinkTarget)
+	if count, status := volume.ReadLink(fast, target); status != ramfs.StatusOK || string(target[:count]) != "hello.txt" {
+		t.Fatalf("fast symlink %q %v", target[:count], status)
+	}
+	slow, _ := volume.OpenName(root, name(t, "sym-slow"))
+	if count, status := volume.ReadLink(slow, target); status != ramfs.StatusOK || count != 208 || string(target[:8]) != "dir/sub/" {
+		t.Fatalf("slow symlink %q %v", target[:count], status)
+	}
+	if _, status := volume.ReadLink(slow, target[:10]); status != ramfs.StatusResourceExhausted {
+		t.Fatalf("short buffer: %v", status)
+	}
+	if _, status := volume.ReadLink(id, target); status != ramfs.StatusInvalidArgument {
+		t.Fatalf("readlink of a file: %v", status)
+	}
+	if _, status := volume.Read(fast, 0, buffer); status != ramfs.StatusUnsupported {
+		t.Fatalf("read through a symlink node: %v", status)
 	}
 	if _, status := volume.OpenName(root, name(t, "missing")); status != ramfs.StatusNotFound {
 		t.Fatalf("missing: %v", status)
@@ -131,12 +156,16 @@ func TestMutationsRefused(t *testing.T) {
 	if _, status := volume.CreateName(root, name(t, "new")); status != ramfs.StatusPermissionDenied {
 		t.Fatal(status)
 	}
+	if _, status := volume.SymlinkName(root, name(t, "new"), []byte("hello.txt")); status != ramfs.StatusPermissionDenied {
+		t.Fatal(status)
+	}
 	if _, status := volume.Write(id, 0, []byte("x")); status != ramfs.StatusPermissionDenied {
 		t.Fatal(status)
 	}
 	if volume.UnlinkName(root, name(t, "hello.txt")) != ramfs.StatusPermissionDenied ||
 		volume.Truncate(id, 0) != ramfs.StatusPermissionDenied ||
-		volume.RenameName(id, root, name(t, "x")) != ramfs.StatusPermissionDenied {
+		volume.RenameName(id, root, name(t, "x")) != ramfs.StatusPermissionDenied ||
+		volume.LinkName(id, root, name(t, "x")) != ramfs.StatusPermissionDenied {
 		t.Fatal("mutation accepted")
 	}
 	info, status := volume.FilesystemInfo()
@@ -181,9 +210,9 @@ func listAll(t *testing.T, volume *Volume, dir ramfs.NodeID, budget int) []strin
 func TestReadDirBatch(t *testing.T) {
 	volume := mounted(t)
 	root, _ := volume.Root()
-	want := []string{"big", "digests", "dir", "empty", "fragmented", "hello.txt", "link-to-hello", "lost+found", "names", "sparse"}
+	want := []string{"big", "digests", "dir", "empty", "fragmented", "hello.txt", "link-to-hello", "lost+found", "names", "sparse", "sym-fast", "sym-slow"}
 	if got := listAll(t, volume, root, ramfs.MaxDirBatch); len(got) != len(want) {
-		t.Fatalf("root lists %q, want %q (symlinks hidden)", got, want)
+		t.Fatalf("root lists %q, want %q", got, want)
 	} else {
 		for index := range want {
 			if got[index] != want[index] {

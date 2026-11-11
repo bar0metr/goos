@@ -50,21 +50,29 @@ error.
 
 - Regular files and directories, with sizes, modification times and
   creation times.
+- The mode, owner, link count, inode number, allocated blocks, device
+  number and access and change times each inode stores (ADR 0223). A Linux program sees them in `stat`; GoOS
+  grants nothing from them.
 - Names exactly as Linux stored them: up to 255 bytes, case-sensitive, not
   necessarily UTF-8.
-- Hard links as one object under several names.
+- Hard links as one object under several names, with their link count.
 - Sparse files and preallocated (unwritten) ranges read as zeros.
-- Symbolic links, device nodes, FIFOs and sockets are hidden, and opening
-  one by name fails as unsupported. Following a link needs VFS-side
-  resolution under the caller's authority, which does not exist yet.
+- Symbolic links, followed by the VFS under the caller's root and scopes,
+  at most 40 in one lookup (ADR 0223). `stat` in the shell and `lstat` in a
+  Linux program describe the link itself; `readlink` returns its target.
+- Device nodes, FIFOs and sockets in listings and `stat`. A listing gives
+  their type as unknown (`DT_UNKNOWN`); `stat` gives the exact one.
+  Opening one fails: GoOS has nothing behind them.
 - Every mutation fails with permission denied, the read-only backend
-  status.
+  status, including new symbolic and hard links.
 
 ## Tests
 
 `make test-ext4-unit` runs the reader and adapter tests against images that
 e2fsprogs 1.47.2 built (docs/development/ext4-reference-versions.md).
 `make test-ext4-stress` repeats the random-damage walk 3000 times.
-`make test-volumes` boots a disk with the installed system and two Linux
-ext4 partitions and checks mounting, the refusals, and a replaced instance.
+`make test-volumes` boots a disk with the installed system and three Linux
+ext4 partitions and checks mounting, the refusals, symbolic links, the
+metadata a Linux program sees (`abi-probe ext4-links`), and a replaced
+instance.
 `tools/ext4fixture/make-fixtures.sh` rebuilds the images; it needs Docker.

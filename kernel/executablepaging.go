@@ -215,7 +215,11 @@ func requestExecutablePage(owner *process.Process, entry region.Region, page uin
 	}
 	*current = executableFault{task: task, root: owner.AddressSpace().Root, page: page, object: entry.Object,
 		offset: entry.Offset + within, count: min(vm.PageSize, entry.Data-within), began: launchMark()}
-	if !sendExecutableRequest(current) {
+	if status := sendExecutableRequest(current); status != ipc.StatusOK {
+		if status == ipc.StatusResourceExhausted && deferExecutableRequest(current, amd64.TimerTicks()) {
+			amd64.BlockCurrentTask()
+			return pageParked
+		}
 		*current = executableFault{}
 		return pageFailed
 	}
@@ -314,15 +318,17 @@ func cancelExecutableFault(task sched.TaskID) {
 }
 
 // sendExecutableRequest asks the VFS for the page fault describes, under a
-// fresh correlation. The executable and paging locks are held.
-func sendExecutableRequest(fault *executableFault) bool {
+// fresh correlation. The executable and paging locks are held. It only writes
+// the transport identity after the request entered the channel, so a full
+// queue remains a local deferred fault with no reply to orphan.
+func sendExecutableRequest(fault *executableFault) ipc.Status {
 	object, found := executables.Find(fault.object)
 	if !found {
-		return false
+		return ipc.StatusNotFound
 	}
 	channelID, side, file, source := object.Source()
 	if !source {
-		return false
+		return ipc.StatusPeerDied
 	}
 	executableCorrelation++
 	if executableCorrelation == 0 {
@@ -334,16 +340,35 @@ func sendExecutableRequest(fault *executableFault) bool {
 		Offset:    fault.offset,
 		Size:      uint32(fault.count),
 	}, executableCorrelation)
-	if !encoded || channelSend(channelID, side, &message, nil, nil, nil) != ipc.StatusOK {
-		return false
+	if !encoded {
+		return ipc.StatusInvalidArgument
+	}
+	if status := channelSend(channelID, side, &message, nil, nil, nil); status != ipc.StatusOK {
+		return status
 	}
 	fault.channelID, fault.side, fault.correlation, fault.retryAt = channelID, side, executableCorrelation, 0
 	wakeIPCWaiters(channelID, side^1, ipc.WaitMessage)
+	return ipc.StatusOK
+}
+
+// deferExecutableRequest retries a request the outbound queue could not admit.
+// It uses the same bounded deadline policy as a temporarily unavailable VFS;
+// no message was sent, so it deliberately leaves correlation zero.
+func deferExecutableRequest(fault *executableFault, now uint64) bool {
+	if fault.giveUp == 0 {
+		fault.giveUp = now + executableRetrySeconds*clock.TicksPerSecond
+	}
+	if now >= fault.giveUp {
+		return false
+	}
+	fault.retryAt = now + max(clock.TicksPerSecond/executableRetryPerSecond, 1)
+	deadlines.Arm(deadline.SourcePaging, fault.task, fault.retryAt)
 	return true
 }
 
 // retryExecutablePage sends task's page request again once its filesystem
-// was away and its retry tick has come. A request that cannot be sent fails.
+// was away or whose channel was full and its retry tick has come. A full
+// channel re-arms the bounded retry; any other failed send wakes the task.
 // The deadline index names the task when the tick comes.
 func retryExecutablePage(task sched.TaskID, now uint64) {
 	slot, _, valid := task.Parts()
@@ -353,10 +378,17 @@ func retryExecutablePage(task sched.TaskID, now uint64) {
 	executableLock.Lock()
 	pagingLock.Lock()
 	fault := &executableFaults[slot]
-	if fault.task == task && !fault.failed && fault.physical == 0 && fault.retryAt != 0 && now >= fault.retryAt &&
-		!sendExecutableRequest(fault) {
-		fault.failed = true
-		amd64.WakeTaskID(uint64(fault.task))
+	if fault.task == task && !fault.failed && fault.physical == 0 && fault.retryAt != 0 && now >= fault.retryAt {
+		status := sendExecutableRequest(fault)
+		if status == ipc.StatusResourceExhausted && deferExecutableRequest(fault, now) {
+			pagingLock.Unlock()
+			executableLock.Unlock()
+			return
+		}
+		if status != ipc.StatusOK {
+			fault.failed = true
+			amd64.WakeTaskID(uint64(fault.task))
+		}
 	}
 	pagingLock.Unlock()
 	executableLock.Unlock()

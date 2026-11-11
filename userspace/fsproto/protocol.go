@@ -30,8 +30,10 @@ const (
 	// carries fixed-width native timestamps and attributes; version 10 adds
 	// filesystem capacity and read-only state; version 11 adds whole-file
 	// replacement (ADR 0129); version 12 adds batched directory listing
-	// (ADR 0208).
-	Version = uint16(12)
+	// (ADR 0208); version 13 adds symbolic-link and special kinds, Unix
+	// metadata in every reply that describes a node, and the read-link,
+	// symlink and link operations (ADR 0223).
+	Version = uint16(13)
 	// RequestDeadline bounds one exchange. A filesystem service that stalls
 	// surfaces as an I/O error on its mounts rather than a hung namespace. It
 	// is above the block protocol's own deadline, so a slow device is reported
@@ -39,7 +41,10 @@ const (
 	RequestDeadline = 6 * clock.TicksPerSecond
 
 	requestHeader = 40
-	replyHeader   = 88
+	// replyHeader holds the fixed fields and, from byte unixOffset, the Unix
+	// metadata record.
+	replyHeader = unixOffset + ramfs.UnixRecordSize
+	unixOffset  = 88
 
 	// PageSize is the size of one file-cache slot.
 	PageSize = 4096
@@ -95,6 +100,15 @@ const (
 	// is the bytes written, Count the records, Cursor where to continue, and
 	// End whether the directory ended.
 	OperationReadDirBatch
+	// OperationReadLink copies the target of the symbolic link Node into the
+	// request's slot, at most Size bytes; the reply's Value is its length.
+	OperationReadLink
+	// OperationSymlink makes a symbolic link called Name in Parent whose
+	// target is the Size bytes at the start of the request's slot.
+	OperationSymlink
+	// OperationLink gives the existing node Node the further name Name in
+	// Parent.
+	OperationLink
 )
 
 // The flags of OperationSetMetadata, in the request's Parent field.
@@ -180,12 +194,20 @@ type Reply struct {
 	// Count and End describe a directory batch.
 	Count uint16
 	End   bool
+	// Unix is the POSIX metadata of the node the reply describes, when the
+	// filesystem keeps it.
+	Unix ramfs.Unix
 }
 
 // validTransfer reports whether a read or write names a slot and stays within
 // the cache from it.
 func validTransfer(request Request) bool {
-	if request.Operation != OperationRead && request.Operation != OperationWrite {
+	switch request.Operation {
+	case OperationRead, OperationWrite:
+	case OperationReadLink, OperationSymlink:
+		// A link target is one slot's worth at most, at its start.
+		return request.Slot < CachePages && request.Offset == 0 && request.Size != 0 && request.Size <= ramfs.MaxLinkTarget
+	default:
 		return request.Slot == 0
 	}
 	return request.Slot < CachePages && request.Size != 0 &&
@@ -195,7 +217,12 @@ func validTransfer(request Request) bool {
 // SlotBytes returns the bytes of cache a read or write moves: Size bytes at
 // Offset's position in the request's slot. The request must be valid.
 func SlotBytes(cache []byte, request Request) ([]byte, bool) {
-	if len(cache) != CacheSize || !validTransfer(request) || (request.Operation != OperationRead && request.Operation != OperationWrite) {
+	if len(cache) != CacheSize || !validTransfer(request) {
+		return nil, false
+	}
+	switch request.Operation {
+	case OperationRead, OperationWrite, OperationReadLink, OperationSymlink:
+	default:
 		return nil, false
 	}
 	start := uint64(request.Slot)*PageSize + request.Offset%PageSize
@@ -203,7 +230,7 @@ func SlotBytes(cache []byte, request Request) ([]byte, bool) {
 }
 
 func validOperation(operation Operation) bool {
-	return operation >= OperationMount && operation <= OperationReadDirBatch
+	return operation >= OperationMount && operation <= OperationLink
 }
 
 // validName accepts an empty name, for operations that take none, or one a
@@ -294,7 +321,7 @@ func DecodeRequest(message *ipc.Message, cache []byte, name *[ramfs.MaxName]byte
 // of cache.
 func EncodeReply(reply Reply, correlation uint64, message *ipc.Message, cache []byte) bool {
 	if message == nil || correlation == 0 || !validOperation(reply.Operation) || reply.Status > ramfs.LastStatus ||
-		reply.Kind > ramfs.KindDirectory || len(reply.Name) > ramfs.MaxName || !reply.Created.Valid() || !reply.Modified.Valid() ||
+		reply.Kind > ramfs.LastKind || !reply.Unix.Valid(reply.Kind) || len(reply.Name) > ramfs.MaxName || !reply.Created.Valid() || !reply.Modified.Valid() ||
 		reply.Attributes > (ramfs.LastAttribute*2-1) || !reply.AttributesAvailable && reply.Attributes != 0 || !reply.Filesystem.Valid() ||
 		reply.Operation == OperationFilesystemInfo && len(reply.Name) > ramfs.MaxVolumeName || reply.Status == ramfs.StatusOK && reply.Operation == OperationFilesystemInfo && reply.Filesystem.Type == 0 ||
 		reply.Operation != OperationReadDirBatch && (reply.Count != 0 || reply.End) {
@@ -341,6 +368,7 @@ func EncodeReply(reply Reply, correlation uint64, message *ipc.Message, cache []
 	if reply.Filesystem.CapacityAvailable {
 		payload[81] |= 2
 	}
+	ramfs.EncodeUnix(payload[unixOffset:], &reply.Unix)
 	if inline {
 		message.PayloadSize += uint16(copy(payload[replyHeader:], reply.Name))
 	} else {
@@ -361,7 +389,11 @@ func DecodeReply(message *ipc.Message, cache []byte, name *[ramfs.MaxName]byte) 
 	cached := payload[5] == flagNameInCache
 	batch := Operation(payload[0]) == OperationReadDirBatch
 	if payload[5]&^flagNameInCache != 0 || !batch && !zero(payload[6:8]) || payload[29]&^byte(7) != 0 || !batch && payload[30] != 0 || payload[30] > 1 || payload[31] != 0 ||
-		payload[81]&^byte(3) != 0 || !zero(payload[82:88]) || nameSize > ramfs.MaxName {
+		payload[81]&^byte(3) != 0 || !zero(payload[82:unixOffset]) || nameSize > ramfs.MaxName {
+		return Reply{}, false
+	}
+	unix, unixValid := ramfs.DecodeUnix(payload[unixOffset:], ramfs.Kind(payload[2]))
+	if !unixValid {
 		return Reply{}, false
 	}
 	reply := Reply{
@@ -378,6 +410,7 @@ func DecodeReply(message *ipc.Message, cache []byte, name *[ramfs.MaxName]byte) 
 		Filesystem:          ramfs.FilesystemInfo{Type: ramfs.FilesystemType(payload[80]), TotalBytes: binary.LittleEndian.Uint64(payload[56:]), FreeBytes: binary.LittleEndian.Uint64(payload[64:]), AvailableBytes: binary.LittleEndian.Uint64(payload[72:]), ReadOnly: payload[81]&1 != 0, CapacityAvailable: payload[81]&2 != 0},
 		Count:               binary.LittleEndian.Uint16(payload[6:]),
 		End:                 payload[30] != 0,
+		Unix:                unix,
 	}
 	switch {
 	case cached:
@@ -397,7 +430,7 @@ func DecodeReply(message *ipc.Message, cache []byte, name *[ramfs.MaxName]byte) 
 	if reply.Operation == OperationFilesystemInfo && !reply.Filesystem.SetVolumeName(reply.Name) {
 		return Reply{}, false
 	}
-	if !validOperation(reply.Operation) || reply.Status > ramfs.LastStatus || reply.Kind > ramfs.KindDirectory ||
+	if !validOperation(reply.Operation) || reply.Status > ramfs.LastStatus || reply.Kind > ramfs.LastKind ||
 		!reply.Created.Valid() || !reply.Modified.Valid() || reply.Attributes > (ramfs.LastAttribute*2-1) || !reply.AttributesAvailable && reply.Attributes != 0 || !reply.Filesystem.Valid() ||
 		reply.Status == ramfs.StatusOK && reply.Operation == OperationFilesystemInfo && reply.Filesystem.Type == 0 {
 		return Reply{}, false

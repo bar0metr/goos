@@ -37,6 +37,21 @@ type objectVolume interface {
 	ReleaseObject(ramfs.NodeID) (ramfs.NodeID, ramfs.Status)
 }
 
+// linkVolume holds symbolic links. A volume without it answers the read-link
+// and symlink operations with StatusUnsupported. The target SymlinkName gets
+// lies in the file cache, which the VFS can still write: a volume that stores
+// it copies it first and checks the copy with ramfs.ValidLinkTarget.
+type linkVolume interface {
+	ReadLink(id ramfs.NodeID, target []byte) (int, ramfs.Status)
+	SymlinkName(parent ramfs.NodeID, name ramfs.Name, target []byte) (ramfs.NodeID, ramfs.Status)
+}
+
+// hardLinkVolume gives a node a further name. A volume without it answers
+// the link operation with StatusUnsupported.
+type hardLinkVolume interface {
+	LinkName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
+}
+
 type filesystemVolume interface {
 	FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status)
 }
@@ -51,12 +66,30 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 	switch request.Operation {
 	case OperationMount:
 		reply.Node, reply.Status = volume.Root()
-	case OperationOpen, OperationCreate, OperationMkdir, OperationRename, OperationReplace, OperationUnlink:
+	case OperationOpen, OperationCreate, OperationMkdir, OperationRename, OperationReplace, OperationUnlink, OperationSymlink, OperationLink:
 		if !named {
 			reply.Status = ramfs.StatusInvalidArgument
 			break
 		}
 		switch request.Operation {
+		case OperationSymlink:
+			links, supported := volume.(linkVolume)
+			target, mapped := SlotBytes(cache, request)
+			switch {
+			case !supported:
+				reply.Status = ramfs.StatusUnsupported
+			case !mapped:
+				reply.Status = ramfs.StatusIOError
+			default:
+				reply.Node, reply.Status = links.SymlinkName(request.Parent, requested, target)
+			}
+		case OperationLink:
+			links, supported := volume.(hardLinkVolume)
+			if !supported {
+				reply.Status = ramfs.StatusUnsupported
+				break
+			}
+			reply.Status = links.LinkName(request.Node, request.Parent, requested)
 		case OperationReplace:
 			reply.Status = volume.ReplaceName(request.Node, request.Parent, requested)
 		case OperationOpen:
@@ -95,6 +128,21 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 			count, reply.Status = 0, ramfs.StatusIOError
 		}
 		reply.Value = uint64(count)
+	case OperationReadLink:
+		links, supported := volume.(linkVolume)
+		target, mapped := SlotBytes(cache, request)
+		switch {
+		case !supported:
+			reply.Status = ramfs.StatusUnsupported
+		case !mapped:
+			reply.Status = ramfs.StatusIOError
+		default:
+			count, status := links.ReadLink(request.Node, target)
+			if status == ramfs.StatusOK && (count <= 0 || count > len(target)) {
+				count, status = 0, ramfs.StatusIOError
+			}
+			reply.Value, reply.Status = uint64(count), status
+		}
 	case OperationTruncate:
 		reply.Status = volume.Truncate(request.Node, request.Offset)
 	case OperationSetMetadata:
@@ -188,4 +236,5 @@ func (reply *Reply) setStat(stat ramfs.Stat) {
 	reply.Node, reply.Kind, reply.Value = stat.ID, stat.Kind, stat.Size
 	reply.Created, reply.Modified = stat.Created, stat.Modified
 	reply.Attributes, reply.AttributesAvailable = stat.Attributes, stat.AttributesAvailable
+	reply.Unix = stat.Unix
 }

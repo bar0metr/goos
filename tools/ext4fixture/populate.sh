@@ -76,10 +76,54 @@ while [ $i -lt 300 ]; do
 done
 find . -exec touch -h -t $STAMP {} +
 
+# The link tree: symbolic links of every shape the VFS has to resolve or
+# refuse, hard links, special files, and owners and modes to report.
+mkdir -p /src/links/dir/sub && cd /src/links
+printf 'owned file\n' >file.txt
+printf 'inner file\n' >dir/sub/inner.txt
+printf 'setuid\n' >setuid
+ln file.txt hard-a
+ln file.txt hard-b
+ln -s file.txt rel
+ln -s dir/sub sub-dir
+ln -s ../../file.txt dir/sub/up
+ln -s /file.txt abs
+ln -s missing dangling
+ln -s loop-b loop-a
+ln -s loop-a loop-b
+ln -s self self
+ln -s ../../../../../../etc escape
+ln -s "$(printf 'bad-\377')" bad-target
+ln -s file.txt "$(printf 'link-\376')"
+# deep-0 is 41 links from file.txt, one more than a lookup follows.
+ln -s file.txt deep-40
+i=39
+while [ $i -ge 0 ]; do
+	ln -s deep-$((i + 1)) deep-$i
+	i=$((i - 1))
+done
+mkfifo fifo
+mknod char c 1 3
+mknod block b 8 1
+mknod wide c 259 300
+# One 4 KiB block at 1 MiB: st_blocks well below st_size.
+printf 'S' | dd of=sparse bs=1 seek=1048576 conv=notrunc 2>/dev/null
+find . -exec touch -h -t $STAMP {} +
+chown 1234:5678 file.txt
+chown -h 42:43 rel
+chown 7:8 dir
+chmod 0640 file.txt
+chmod 0750 dir
+chmod 4755 setuid
+
 manifest() {
 	(cd "$1" && find . -mindepth 1 | LC_ALL=C sort | while IFS= read -r p; do
 		if [ -L "$p" ]; then
 			printf 'symlink\t%s\t%s\n' "$p" "$(readlink "$p")"
+		elif [ -p "$p" ]; then
+			printf 'fifo\t%s\n' "$p"
+		elif [ -c "$p" ] || [ -b "$p" ]; then
+			printf 'device\t%s\t%s\n' "$p" "$(stat -c '%t:%T' "$p")"
 		elif [ -d "$p" ]; then
 			printf 'dir\t%s\n' "$p"
 		else
@@ -129,8 +173,33 @@ for hash in tea legacy; do
 done
 build blockmap-1k /src/blockmap "$EXT3" 1024 2048 16384 1
 finish blockmap-1k
+build links /src/links "$FULL" 4096 4096 8192 4
+# mke2fs -d leaves generations at zero; a nonzero one shows that st_ino is
+# the inode number and not the VFS node identity.
+debugfs -w -R 'set_inode_field /file.txt generation 0x6f6f7367' /tmp/links.img >/dev/null 2>&1
+debugfs -w -R 'set_inode_field /dir generation 0x2a' /tmp/links.img >/dev/null 2>&1
+finish links
+# links.inodes.tsv: what the image itself stores for a few paths, read back
+# by debugfs: inode number, generation, 512-byte block count and size.
+for p in file.txt hard-a dir rel sparse fifo; do
+	debugfs -R "stat /$p" /tmp/links.img 2>/dev/null | awk -v p="$p" '
+		/^Inode:/ { inode = $2 }
+		/Generation:/ { for (i = 1; i <= NF; i++) if ($i == "Generation:") generation = $(i + 1) }
+		/^User:/ { for (i = 1; i <= NF; i++) if ($i == "Size:") size = $(i + 1) }
+		/Blockcount:/ { for (i = 1; i <= NF; i++) if ($i == "Blockcount:") blocks = $(i + 1) }
+		END { printf "%s\t%s\t%s\t%s\t%s\n", p, inode, generation, blocks, size }'
+done >"$out/links.inodes.tsv"
+
+# metadata NAME SOURCE: the inode fields GoOS reports, by path.
+metadata() {
+	(cd "$1" && find . -mindepth 1 | LC_ALL=C sort | while IFS= read -r p; do
+		stat -c '%n	%f	%u	%g	%h' "$p"
+	done)
+}
 
 manifest /src/main >"$out/manifest.tsv"
+manifest /src/links >"$out/links.manifest.tsv"
+metadata /src/links >"$out/links.metadata.tsv"
 manifest /src/hash >"$out/hash.manifest.tsv"
 manifest /src/blockmap >"$out/blockmap.manifest.tsv"
 mke2fs -V 2>&1 | head -1 >"$out/mke2fs-version"

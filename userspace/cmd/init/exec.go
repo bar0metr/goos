@@ -194,9 +194,9 @@ func handleControl(message ipc.Message) {
 			status = execproto.ControlOK
 		}
 		sendControlStatus(status, message.Correlation)
-	case operation == execproto.ControlFault && argument == execproto.FaultVolume:
+	case operation == execproto.ControlFault && (argument == execproto.FaultVolume || argument == execproto.FaultVolumeLast):
 		status := execproto.ControlNotFound
-		if injectVolumeFault() {
+		if injectVolumeFault(argument == execproto.FaultVolumeLast) {
 			status = execproto.ControlOK
 		}
 		sendControlStatus(status, message.Correlation)

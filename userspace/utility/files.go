@@ -106,7 +106,7 @@ func CreateFile(path []byte) vfs.Status {
 }
 
 // Rename moves source to target within one filesystem. Across filesystems
-// the VFS answers StatusUnsupported.
+// the VFS answers StatusCrossDevice.
 func Rename(source, target []byte) vfs.Status {
 	_, status := Request(vfs.Request{Operation: vfs.OperationRename, Path: source, Target: target})
 	return status

@@ -283,7 +283,14 @@ func processControl(message ipc.Message) bool {
 // drain, so closing here does not abandon received handles in the IPC queue.
 func closeSession(index int) {
 	rooted := service.Rooted(sessionOwner(index))
+	var releases uint64
+	if validation.Enabled {
+		_, _, releases = service.ValidationOpenState(sessionOwner(index))
+	}
 	closed := service.CloseSession(sessionOwner(index))
+	if validation.Enabled {
+		checkOpenTimeoutClosed(index, closed, releases)
+	}
 	if rooted {
 		syslog.Info("rooted session closed", syslog.Uint("open-files", uint64(closed)), syslog.Uint("sessions", uint64(liveSessions-1)))
 	}
@@ -291,6 +298,7 @@ func closeSession(index int) {
 	if validation.Enabled {
 		releaseWithheld(sessionOwner(index), sessions[index], false)
 		execCrashHandles[index] = 0
+		lateAllocate[index] = lateAllocateState{}
 	}
 	sys.HandleClose(handle.ID(sessions[index]))
 	sessions[index] = 0
@@ -345,6 +353,11 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 		sys.Exit(exitFailed)
 	}
 	var answer vfs.Reply
+	var openBefore int
+	var acquiredBefore, releasedBefore uint64
+	if validation.Enabled && (isTimeoutOpen(request) || isLateAllocateOpen(request)) {
+		openBefore, acquiredBefore, releasedBefore = service.ValidationOpenState(owner)
+	}
 	if request.Operation.Bulk() {
 		answer = serveBulk(owner, request, attached[0])
 	} else if request.Operation == vfs.OperationReadExecutable {
@@ -367,12 +380,22 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 		sys.VMUnmap(base, size)
 	}
 	closeAttached(attached)
+	if validation.Enabled && openCrash(request, answer) {
+		// The request reached the namespace and any backend acquisition, but
+		// no reply reached the client. This is the exact unknown-outcome
+		// boundary an issued Linux open has to survive.
+		mark("VFS_OPEN_CRASH_RECEIVED\n")
+		mark("VFS_FAULT_INJECTED\n")
+		sys.Exit(exitFailed)
+	}
 	reply, ok := vfs.EncodeReply(answer, message.Correlation)
 	if !ok {
 		fatal("VFS_REPLY_FAILED\n")
 	}
 	if validation.Enabled {
+		noteLateAllocate(owner, request, answer, openBefore, acquiredBefore, releasedBefore)
 		noteExecCrashOpen(owner, request, answer)
+		noteOpenTimeout(owner, request, answer, openBefore, acquiredBefore, releasedBefore)
 		readPoolProbeOpen(owner, request, answer)
 		if withhold(owner, request, reply) {
 			if request.Operation == vfs.OperationPrepareExecutable {
@@ -389,6 +412,119 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 // test observe a client's deadline and then the late reply it must discard.
 // The normal build has no such name.
 const stallPath = "/tmp/.validation-vfs-stall"
+
+// openCrashPath makes the validation service die after a persistent open has
+// completed, but before its reply is encoded or sent. The normal build has no
+// such path.
+const openCrashPath = "/home/demo/.validation-vfs-open-crash"
+
+func openCrash(request vfs.Request, answer vfs.Reply) bool {
+	return request.Operation == vfs.OperationOpen && string(request.Path) == openCrashPath &&
+		request.OpenFlags&vfs.OpenCreate != 0 && answer.Status == vfs.StatusOK && answer.Handle != 0
+}
+
+// lateAllocate records the exact handle and backend counts of the validation
+// open. Only an actual successful close of that handle can emit the marker.
+const lateAllocatePath = "/home/demo/.validation-late-allocate"
+
+type lateAllocateState struct {
+	handle             vfs.Handle
+	open               int
+	acquired, released uint64
+}
+
+var lateAllocate [maxSessions]lateAllocateState
+
+func isLateAllocateOpen(request vfs.Request) bool {
+	return request.Operation == vfs.OperationOpen && string(request.Path) == lateAllocatePath
+}
+
+func noteLateAllocate(owner vfs.Owner, request vfs.Request, answer vfs.Reply, before int, acquired, released uint64) {
+	index := int(owner) - 1
+	if index < 0 || index >= maxSessions {
+		return
+	}
+	if isLateAllocateOpen(request) && answer.Status == vfs.StatusOK && answer.Handle != 0 {
+		open, a, r := service.ValidationOpenState(owner)
+		if open == before+1 && a == acquired+1 && r == released {
+			lateAllocate[index] = lateAllocateState{answer.Handle, before, acquired, released}
+		}
+		return
+	}
+	state := lateAllocate[index]
+	if request.Operation == vfs.OperationClose && state.handle != 0 && request.Handle == state.handle {
+		lateAllocate[index] = lateAllocateState{}
+		open, a, r := service.ValidationOpenState(owner)
+		if answer.Status == vfs.StatusOK && open == state.open && a == state.acquired+1 && r == state.released+1 {
+			mark("VFS_LATE_ALLOCATE_CLOSE_RELEASED\n")
+		}
+	}
+}
+
+const timeoutExistingPath = "/home/demo/.validation-open-existing"
+const timeoutCreatePath = "/home/demo/.validation-open-create"
+
+// timeoutKillPath is an existing file whose open reply the validation build
+// withholds until another member of the caller's family kills the caller.
+const timeoutKillPath = "/home/demo/.validation-open-kill"
+
+var timeoutOpen [maxSessions]uint8
+
+func isTimeoutOpen(request vfs.Request) bool {
+	return request.Operation == vfs.OperationOpen &&
+		((string(request.Path) == timeoutExistingPath || string(request.Path) == timeoutKillPath) && request.Rights == vfs.Read ||
+			string(request.Path) == timeoutCreatePath && request.OpenFlags&vfs.OpenCreate != 0)
+}
+
+func noteOpenTimeout(owner vfs.Owner, request vfs.Request, answer vfs.Reply, before int, acquired, released uint64) {
+	index := int(owner) - 1
+	open, afterAcquire, afterRelease := service.ValidationOpenState(owner)
+	if index < 0 || index >= maxSessions || !isTimeoutOpen(request) || answer.Status != vfs.StatusOK || answer.Handle == 0 ||
+		before != 0 || open != 1 || afterAcquire != acquired+1 || afterRelease != released {
+		return
+	}
+	switch string(request.Path) {
+	case timeoutExistingPath:
+		timeoutOpen[index] = 1
+	case timeoutCreatePath:
+		timeoutOpen[index] = 2
+	default:
+		timeoutOpen[index] = 3
+	}
+}
+
+func checkOpenTimeoutClosed(index int, closed int, releases uint64) {
+	kind := timeoutOpen[index]
+	timeoutOpen[index] = 0
+	open, _, afterRelease := service.ValidationOpenState(sessionOwner(index))
+	if kind == 0 || closed != 1 || open != 0 || afterRelease != releases+1 {
+		return
+	}
+	path := timeoutExistingPath
+	switch kind {
+	case 2:
+		path = timeoutCreatePath
+	case 3:
+		path = timeoutKillPath
+	}
+	// Observe the surviving directory entry before the validation cleanup.
+	stat := service.Dispatch(sessionOwner(index), vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)})
+	if stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindFile {
+		return
+	}
+	answer := service.Dispatch(sessionOwner(index), vfs.Request{Operation: vfs.OperationUnlink, Path: []byte(path)})
+	if answer.Status != vfs.StatusOK {
+		return
+	}
+	switch kind {
+	case 1:
+		mark("VFS_OPEN_TIMEOUT_EXISTING_RELEASED\n")
+	case 2:
+		mark("VFS_OPEN_TIMEOUT_CREATED_RELEASED\n")
+	default:
+		mark("VFS_OPEN_KILL_RELEASED\n")
+	}
+}
 
 // slowSourcePath is a name whose presence makes the validation build hold
 // back every answer to a request to prepare an executable, as a stalled
@@ -434,10 +570,13 @@ var (
 func withhold(owner vfs.Owner, request vfs.Request, reply ipc.Message) bool {
 	index := int(owner) - 1
 	if index < 0 || index >= maxSessions || withholding[index] ||
-		string(request.Path) != stallPath && !(request.Operation == vfs.OperationPrepareExecutable && slowSources()) {
+		string(request.Path) != stallPath && !isTimeoutOpen(request) && !(request.Operation == vfs.OperationPrepareExecutable && slowSources()) {
 		return false
 	}
 	withheld[index], withholding[index] = reply, true
+	if string(request.Path) == timeoutKillPath {
+		mark("VFS_OPEN_KILL_WITHHELD\n")
+	}
 	return true
 }
 
@@ -451,6 +590,13 @@ func releaseWithheld(owner vfs.Owner, session uint64, deliver bool) {
 	withholding[index] = false
 	if deliver {
 		send(session, withheld[index])
+	} else if validation.Enabled && withheld[index].Payload[0] == byte(vfs.OperationOpen) {
+		// A reply generated before the timeout must not revive a failed session.
+		// Try sending it only after the peer-death barrier and require rejection.
+		size, ok := ipc.Encode(withheld[index], wire[:])
+		if ok && sys.IPCSend(handle.ID(session), wire[:size]) == kcall.StatusPeerDied {
+			mark("VFS_OPEN_LATE_REPLY_REJECTED\n")
+		}
 	}
 }
 
@@ -496,6 +642,8 @@ func mapPathObject(request *vfs.Request, object handle.ID) ([]byte, uint64, uint
 		minimum = limits.PathMax
 	} else if request.Operation == vfs.OperationReadDirBatch {
 		minimum = vfs.MaxDirBatch
+	} else if request.Operation == vfs.OperationReadLink {
+		minimum = ramfs.MaxLinkTarget
 	}
 	if size > maxPathObject || request.NameReturn && size < minimum || request.PathsAttached && !request.TakePaths(memory, &pathCopy, &targetCopy) {
 		sys.VMUnmap(base, size)

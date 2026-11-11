@@ -21,8 +21,12 @@ const (
 	// version 11 adds whole-file replacement (ADR 0129); version 12 lets a
 	// stat with no path name an open file by its handle (ADR 0141); version
 	// 13 returns a node's identity with a stat or a directory entry
-	// (ADR 0142); version 14 adds batched directory listing (ADR 0208).
-	ProtocolVersion = uint16(14)
+	// (ADR 0142); version 14 adds batched directory listing (ADR 0208);
+	// version 15 adds symbolic and hard links, the no-follow flag, the loop
+	// and cross-device statuses, and Unix metadata in a stat reply
+	// (ADR 0223); version 16 makes open/create/truncate intent one serialized
+	// VFS operation.
+	ProtocolVersion = uint16(16)
 	protocolHeader  = 40
 	// MaxProtocolData is the most write data one inline request carries.
 	MaxProtocolData = ipc.MaxPayload - protocolHeader
@@ -38,7 +42,13 @@ const (
 	flagPathsAttached = 1
 	// flagNameReturn lets a directory listing return a name too long for the
 	// message in the attached object, at its start.
-	flagNameReturn = 2
+	flagNameReturn        = 2
+	flagOpenCreate        = uint32(1 << 8)
+	flagOpenExclusive     = uint32(1 << 9)
+	flagOpenTruncate      = uint32(1 << 10)
+	flagOpenDirectory     = uint32(1 << 11)
+	flagOpenTrailingSlash = uint32(1 << 12)
+	flagOpenMask          = flagOpenCreate | flagOpenExclusive | flagOpenTruncate | flagOpenDirectory | flagOpenTrailingSlash
 	// flagNameAttached marks a reply whose name is in the attached object.
 	flagNameAttached = 1
 	// replyBatchEnd marks a directory batch that reached the listing's end.
@@ -86,9 +96,10 @@ const (
 	// empty. Rights carries the Metadata flags; Offset and Size are the new
 	// time's seconds and nanoseconds.
 	OperationSetMetadata
-	// OperationSync makes every completed write durable, as the PID 1 sync
-	// control does, on behalf of the open file Handle. The flush covers the
-	// whole volume, which is more than one file needs and never less.
+	// OperationSync makes the open file Handle durable, or, with no handle,
+	// the file or directory Path. Only the filesystem that holds the object
+	// is asked; one without a durability operation answers
+	// StatusUnsupported (ADR 0223).
 	OperationSync
 	// OperationReadDirBatch lists Path from Offset into the object the request
 	// attaches with NameReturn, at its start. The reply's Size is the bytes of
@@ -97,8 +108,24 @@ const (
 	// records. Records use the format of ramfs.DirRecord. A nonzero Size asks
 	// for at most that many bytes of records, or one longest record if more.
 	OperationReadDirBatch
-	lastOperation = OperationReadDirBatch
+	// OperationReadLink returns the target of the symbolic link Path as the
+	// reply's name, in the object the request attaches with NameReturn when
+	// it is too long for the message.
+	OperationReadLink
+	// OperationSymlink makes Path a symbolic link whose target is Target.
+	OperationSymlink
+	// OperationLink gives the existing object Path the further name Target
+	// in the same filesystem.
+	OperationLink
+	lastOperation = OperationLink
 )
+
+// NoFollow, in the Rights of an open, a stat, a create, a link or a metadata
+// change, leaves a symbolic link that Path ends in unfollowed: an open then
+// fails with StatusLoop, a stat describes the link, a create finds the name
+// taken, a link names the link itself and a metadata change applies to the
+// link.
+const NoFollow Rights = 1 << 7
 
 // Valid reports whether the operation exists in this protocol version.
 func (operation Operation) Valid() bool {
@@ -108,7 +135,7 @@ func (operation Operation) Valid() bool {
 // listsNames reports whether a request of this operation may attach an object
 // for the VFS to write listed names to.
 func (operation Operation) listsNames() bool {
-	return operation == OperationReadDir || operation == OperationReadMount || operation == OperationReadDirBatch
+	return operation == OperationReadDir || operation == OperationReadMount || operation == OperationReadDirBatch || operation == OperationReadLink
 }
 
 // The flags of OperationSetMetadata, in the request's Rights field.
@@ -137,7 +164,7 @@ func MetadataRequest(path []byte, handle Handle, change ramfs.MetadataChange) Re
 // MetadataChangeOf decodes what an OperationSetMetadata request changes.
 func MetadataChangeOf(request Request) (ramfs.MetadataChange, bool) {
 	var change ramfs.MetadataChange
-	if request.Rights&^(MetadataModified|MetadataReadOnly|MetadataWritable) != 0 ||
+	if request.Rights&^(MetadataModified|MetadataReadOnly|MetadataWritable|NoFollow) != 0 ||
 		request.Rights&MetadataReadOnly != 0 && request.Rights&MetadataWritable != 0 {
 		return change, false
 	}
@@ -173,6 +200,7 @@ func (operation Operation) Bulk() bool {
 type Request struct {
 	Operation     Operation
 	Rights        Rights
+	OpenFlags     OpenFlags
 	Handle        Handle
 	Offset        uint64
 	Size          uint32
@@ -213,6 +241,9 @@ type Reply struct {
 	// BatchCount and BatchEnd describe a directory batch.
 	BatchCount uint16
 	BatchEnd   bool
+	// Unix is the POSIX metadata a stat found, carried in the data area of
+	// the reply when the filesystem keeps it.
+	Unix ramfs.Unix
 }
 
 // FitsInline reports whether a request's path, target, and data fit in one
@@ -242,16 +273,20 @@ func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 	if reply.AttachedName != 0 {
 		nameSize = int(reply.AttachedName)
 	}
-	maxName := ramfs.MaxName
-	if reply.Operation == OperationReadMount {
-		maxName = limits.PathMax
-	} else if reply.Operation == OperationFilesystemInfo {
-		maxName = ramfs.MaxVolumeName
-	}
+	maxName := replyNameLimit(reply.Operation)
 	identity := uint64(reply.Handle)
 	if reply.Operation.describesNode() {
 		identity = reply.Node
 	} else if reply.Node != 0 {
+		return ipc.Message{}, false
+	}
+	dataSize := len(reply.Data)
+	if reply.Unix.Available {
+		if reply.Operation != OperationStat || len(reply.Data) != 0 || !reply.Unix.Valid(reply.Kind) {
+			return ipc.Message{}, false
+		}
+		dataSize = ramfs.UnixRecordSize
+	} else if reply.Unix != (ramfs.Unix{}) {
 		return ipc.Message{}, false
 	}
 	if reply.Operation < OperationOpen || reply.Operation > lastOperation || correlation == 0 ||
@@ -259,16 +294,17 @@ func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 		replyHeader+len(reply.Name)+len(reply.Data) > ipc.MaxPayload || reply.AttachedName != 0 && (len(reply.Name) != 0 || int(reply.AttachedName) <= MaxInlineName) ||
 		!reply.Created.Valid() || !reply.Modified.Valid() || reply.Attributes > (ramfs.LastAttribute*2-1) || !reply.AttributesAvailable && reply.Attributes != 0 || !reply.Filesystem.Valid() ||
 		reply.Status == StatusOK && (reply.Operation == OperationFilesystemInfo || reply.Operation == OperationReadMount) && reply.Filesystem.Type == 0 ||
-		reply.Operation != OperationReadDirBatch && (reply.BatchCount != 0 || reply.BatchEnd) || reply.Operation == OperationReadDirBatch && reply.Size > MaxDirBatch {
+		reply.Operation != OperationReadDirBatch && (reply.BatchCount != 0 || reply.BatchEnd) || reply.Operation == OperationReadDirBatch && reply.Size > MaxDirBatch ||
+		reply.Kind > ramfs.LastKind {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ProtocolID, Version: ProtocolVersion, Kind: ipc.KindReply, Correlation: correlation,
-		PayloadSize: uint16(replyHeader + len(reply.Name) + len(reply.Data))}
+		PayloadSize: uint16(replyHeader + len(reply.Name) + dataSize)}
 	message.Payload[0] = byte(reply.Operation)
 	message.Payload[1] = byte(reply.Status)
 	message.Payload[2] = byte(reply.Kind)
 	binary.LittleEndian.PutUint16(message.Payload[3:], uint16(nameSize))
-	binary.LittleEndian.PutUint16(message.Payload[5:], uint16(len(reply.Data)))
+	binary.LittleEndian.PutUint16(message.Payload[5:], uint16(dataSize))
 	if reply.AttachedName != 0 {
 		message.Payload[7] = flagNameAttached
 	}
@@ -305,8 +341,25 @@ func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 		message.Payload[97] |= 2
 	}
 	copy(message.Payload[replyHeader:], reply.Name)
-	copy(message.Payload[replyHeader+len(reply.Name):], reply.Data)
+	if reply.Unix.Available {
+		ramfs.EncodeUnix(message.Payload[replyHeader+len(reply.Name):], &reply.Unix)
+	} else {
+		copy(message.Payload[replyHeader+len(reply.Name):], reply.Data)
+	}
 	return message, true
+}
+
+// replyNameLimit is the longest name a reply to operation may return.
+func replyNameLimit(operation Operation) int {
+	switch operation {
+	case OperationReadMount:
+		return limits.PathMax
+	case OperationFilesystemInfo:
+		return ramfs.MaxVolumeName
+	case OperationReadLink:
+		return ramfs.MaxLinkTarget
+	}
+	return ramfs.MaxName
 }
 
 func DecodeReply(message ipc.Message) (Reply, bool) {
@@ -334,14 +387,9 @@ func DecodeReplyFrom(message *ipc.Message) (Reply, bool) {
 	if attached {
 		inlineName = 0
 	}
-	maxName := ramfs.MaxName
-	if operation == OperationReadMount {
-		maxName = limits.PathMax
-	} else if operation == OperationFilesystemInfo {
-		maxName = ramfs.MaxVolumeName
-	}
+	maxName := replyNameLimit(operation)
 	if operation < OperationOpen || operation > lastOperation || status > lastStatus ||
-		kind > ramfs.KindDirectory || inlineName > MaxInlineName || dataSize > MaxReplyData ||
+		kind > ramfs.LastKind || inlineName > MaxInlineName || dataSize > MaxReplyData ||
 		nameSize > maxName || message.Payload[7]&^flagNameAttached != 0 || message.Payload[57]&^byte(replyMetadata|replyBatchEnd) != 0 || operation != OperationReadDirBatch && (message.Payload[57]&replyBatchEnd != 0 || binary.LittleEndian.Uint16(message.Payload[28:]) != 0) || binary.LittleEndian.Uint16(message.Payload[58:]) != 0 || binary.LittleEndian.Uint32(message.Payload[60:]) != 0 ||
 		message.Payload[97]&^byte(3) != 0 || binary.LittleEndian.Uint16(message.Payload[98:]) != 0 || binary.LittleEndian.Uint32(message.Payload[100:]) != 0 || attached && nameSize <= MaxInlineName || replyHeader+inlineName+dataSize != int(message.PayloadSize) {
 		return Reply{}, false
@@ -364,6 +412,13 @@ func DecodeReplyFrom(message *ipc.Message) (Reply, bool) {
 	if operation.describesNode() {
 		reply.Node, reply.Handle = uint64(reply.Handle), 0
 	}
+	if operation == OperationStat && dataSize != 0 {
+		unix, ok := ramfs.DecodeUnix(reply.Data, kind)
+		if dataSize != ramfs.UnixRecordSize || !ok || !unix.Available {
+			return Reply{}, false
+		}
+		reply.Unix, reply.Data = unix, nil
+	}
 	if reply.Operation == OperationFilesystemInfo && !reply.Filesystem.SetVolumeName(reply.Name) {
 		return Reply{}, false
 	}
@@ -381,7 +436,8 @@ func DecodeReplyFrom(message *ipc.Message) (Reply, bool) {
 func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 	if request.Operation < OperationOpen || request.Operation > lastOperation || correlation == 0 ||
 		len(request.Path) > limits.PathMax || len(request.Target) > limits.PathMax || len(request.Data) > MaxProtocolData ||
-		request.NameReturn && !request.Operation.listsNames() || request.Operation == OperationReadDirBatch && !request.NameReturn || request.PathsAttached && request.Operation.Bulk() {
+		request.NameReturn && !request.Operation.listsNames() || request.Operation == OperationReadDirBatch && !request.NameReturn || request.PathsAttached && request.Operation.Bulk() ||
+		request.OpenFlags != 0 && request.Operation != OperationOpen || !request.OpenFlags.Valid() || request.OpenFlags&(OpenCreate|OpenDirectory) == OpenCreate|OpenDirectory {
 		return ipc.Message{}, false
 	}
 	inline := len(request.Path) + len(request.Target)
@@ -392,6 +448,7 @@ func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 	if request.NameReturn {
 		flags |= flagNameReturn
 	}
+	flags |= uint32(request.OpenFlags) << 8
 	if protocolHeader+inline+len(request.Data) > ipc.MaxPayload {
 		return ipc.Message{}, false
 	}
@@ -430,18 +487,21 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 	if attached {
 		inline = 0
 	}
-	if flags&^(flagPathsAttached|flagNameReturn) != 0 || pathSize > limits.PathMax || targetSize > limits.PathMax || dataSize > MaxProtocolData ||
+	if flags&^(flagPathsAttached|flagNameReturn|flagOpenMask) != 0 || pathSize > limits.PathMax || targetSize > limits.PathMax || dataSize > MaxProtocolData ||
 		protocolHeader+inline+dataSize != int(message.PayloadSize) || attached && protocolHeader+pathSize+targetSize+dataSize <= ipc.MaxPayload {
 		return Request{}, false
 	}
 	operation := Operation(message.Payload[0])
 	rights := Rights(message.Payload[1])
-	if operation < OperationOpen || operation > lastOperation || rights&^allowedRights(operation) != 0 || flags&flagNameReturn != 0 && !operation.listsNames() || operation == OperationReadDirBatch && flags&flagNameReturn == 0 || attached && operation.Bulk() {
+	openFlags := OpenFlags(flags >> 8)
+	if operation < OperationOpen || operation > lastOperation || rights&^allowedRights(operation) != 0 || flags&flagNameReturn != 0 && !operation.listsNames() || operation == OperationReadDirBatch && flags&flagNameReturn == 0 || attached && operation.Bulk() ||
+		openFlags != 0 && operation != OperationOpen || !openFlags.Valid() || openFlags&(OpenCreate|OpenDirectory) == OpenCreate|OpenDirectory {
 		return Request{}, false
 	}
 	request := Request{
 		Operation:     operation,
 		Rights:        rights,
+		OpenFlags:     openFlags,
 		Handle:        Handle(binary.LittleEndian.Uint64(message.Payload[8:])),
 		Offset:        binary.LittleEndian.Uint64(message.Payload[16:]),
 		Size:          binary.LittleEndian.Uint32(message.Payload[24:]),
@@ -462,8 +522,11 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 // allowedRights is what the Rights byte may hold: access rights, or the
 // metadata flags of OperationSetMetadata.
 func allowedRights(operation Operation) Rights {
-	if operation == OperationSetMetadata {
-		return MetadataModified | MetadataReadOnly | MetadataWritable
+	switch operation {
+	case OperationSetMetadata:
+		return MetadataModified | MetadataReadOnly | MetadataWritable | NoFollow
+	case OperationOpen, OperationStat, OperationLink, OperationCreate:
+		return Read | Write | NoFollow
 	}
 	return Read | Write
 }

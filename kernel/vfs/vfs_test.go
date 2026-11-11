@@ -222,6 +222,9 @@ func TestPreparedExecutableIsImmutableAndReadAtKeepsCursor(t *testing.T) {
 	if got := namespace.Truncate([]byte("/program"), 1); got != StatusPermissionDenied {
 		t.Fatalf("truncate prepared executable=%d", got)
 	}
+	if handle, _, got := namespace.OpenIntent(3, []byte("/program"), Write, OpenTruncate); got != StatusPermissionDenied || handle != 0 {
+		t.Fatalf("atomic truncate prepared executable: handle=%x status=%d", handle, got)
+	}
 	if got := namespace.Rename([]byte("/program"), []byte("/renamed")); got != StatusOK {
 		t.Fatalf("rename prepared executable=%d", got)
 	}
@@ -406,6 +409,10 @@ func TestReplyProtocolRoundTripAndReservedFields(t *testing.T) {
 	}
 	if _, ok := EncodeReply(Reply{Operation: OperationOpen, Node: 9}, 15); ok {
 		t.Fatal("open reply with a node encoded")
+	}
+	directory, _ := EncodeReply(Reply{Operation: OperationOpen, Status: StatusOK, Kind: ramfs.KindDirectory}, 15)
+	if reply, valid := DecodeReply(directory); !valid || reply.Kind != ramfs.KindDirectory || reply.Handle != 0 {
+		t.Fatalf("directory open reply: %#v", reply)
 	}
 	if _, ok := EncodeReply(Reply{Operation: OperationStat, Handle: 9}, 15); ok {
 		t.Fatal("stat reply with a handle encoded")
@@ -680,7 +687,7 @@ func TestRenameAcrossMountsIsUnsupported(t *testing.T) {
 	if namespace.Create([]byte("/file"), false) != StatusOK {
 		t.Fatal("create failed")
 	}
-	if status := namespace.Rename([]byte("/file"), []byte("/persist/file")); status != StatusUnsupported {
+	if status := namespace.Rename([]byte("/file"), []byte("/persist/file")); status != StatusCrossDevice {
 		t.Fatalf("cross-mount rename = %d", status)
 	}
 	if _, _, status := namespace.Resolve([]byte("/file")); status != StatusOK {

@@ -46,6 +46,7 @@ func TestFilesystemServiceDeathAndRestart(t *testing.T) {
 	for _, request := range []vfs.Request{
 		{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64},
 		{Operation: vfs.OperationStat, Path: []byte("/home/note.txt")},
+		{Operation: vfs.OperationOpen, Rights: vfs.Write, OpenFlags: vfs.OpenTruncate, Path: []byte("/home/note.txt")},
 		{Operation: vfs.OperationReadDir, Path: []byte("/persist")},
 		{Operation: vfs.OperationCreate, Path: []byte("/state/new")},
 	} {
@@ -161,6 +162,12 @@ func TestBlockIOErrorIsReportedNotFatal(t *testing.T) {
 	device.broken = true
 	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/persist/after.txt")}); reply.Status == vfs.StatusOK {
 		t.Fatal("a create succeeded on a failed device")
+	}
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, OpenFlags: vfs.OpenCreate, Path: []byte("/persist/atomic-after.txt")}); reply.Status == vfs.StatusOK || reply.Handle != 0 {
+		t.Fatalf("atomic create on failed device = %+v", reply)
+	}
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, OpenFlags: vfs.OpenTruncate, Path: []byte("/persist/io.txt")}); reply.Status == vfs.StatusOK || reply.Handle != 0 {
+		t.Fatalf("atomic truncate on failed device = %+v", reply)
 	}
 	if service.Sync() {
 		t.Fatal("sync succeeded on a failed device")

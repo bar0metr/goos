@@ -72,11 +72,71 @@ func (handler *linuxCallHandler) vfsBegin(request linuxcompat.Request, path []by
 	return 0
 }
 
+// vfsSnapshot gives one syscall stable, per-CPU copies. Calls run with local
+// interrupts disabled and do not enter another syscall before returning;
+// vfsExchange and its nested helpers do not use this scratch.
+func (handler *linuxCallHandler) vfsSnapshot() (linuxcompat.Pending, []byte, []byte, bool) {
+	snapshot := &thisCPU().linuxContinuationPaths
+	pending, ok := linuxcompat.SyscallContinuations.Snapshot(handler.task, snapshot)
+	if !ok {
+		return linuxcompat.Pending{}, nil, nil, false
+	}
+	return pending, snapshot.Path(), snapshot.Target(), true
+}
+
 func (handler *linuxCallHandler) vfsAbandon() {
-	next := linuxcompat.CancelVFSTask(handler.task)
-	linuxcompat.SyscallContinuations.Cancel(handler.task)
-	ipcWaitSet.Cancel(handler.task)
-	wakeVFSContextWaiter(next)
+	wakeVFSContextWaiter(cancelLinuxVFS(handler.task))
+}
+
+// cancelLinuxVFS retires the syscall-side continuation and returns the next
+// family waiter. A remote canceller leaves a sent open to the task's exit
+// delivery (retireExitedLinuxVFS), which closes the session.
+func cancelLinuxVFS(task sched.TaskID) sched.TaskID {
+	pending, active := linuxcompat.SyscallContinuations.Abandon(task)
+	if active && pending.AbandonFailsVFS() {
+		if owner, found := processRegistry.Owner(task); found {
+			current, _ := processRegistry.Owner(amd64.CurrentTask())
+			failLinuxVFSSession(owner, pending, current == owner)
+		}
+	}
+	next := linuxcompat.CancelVFSTask(task)
+	ipcWaitSet.Cancel(task)
+	return next
+}
+
+// retireExitedLinuxVFS clears an exited task's continuation and its place in
+// the family VFS context. The exit path holds owner's handle table, so a sent
+// open whose result is unknown fails and closes the family session here,
+// before CancelVFSTask hands the context to a waiter.
+func retireExitedLinuxVFS(task sched.TaskID, owner *process.Process) sched.TaskID {
+	pending, active := linuxcompat.SyscallContinuations.Abandon(task)
+	if active && pending.AbandonFailsVFS() {
+		failLinuxVFSSession(owner, pending, true)
+	}
+	return linuxcompat.CancelVFSTask(task)
+}
+
+func failLinuxVFSSession(owner *process.Process, pending linuxcompat.Pending, closeEndpoint bool) {
+	if owner == nil || !pending.AbandonFailsVFS() {
+		return
+	}
+	state, found := linuxcompat.FindProcess(owner.AddressSpace().Root)
+	if found {
+		if context, ok := linuxcompat.VFSContext(state.FamilyID); ok {
+			context.Session.Fail()
+		}
+		if !closeEndpoint {
+			return
+		}
+		if authority, ok := owner.Handles().Lookup(state.VFSHandle, handle.TypeChannel, capability.Read|capability.Write|capability.Wait); ok {
+			if channelID, side, ok := ipc.DecodeEndpointObject(authority.Object()); ok {
+				if closeChannelSide(channelID, side) {
+					wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
+				}
+				wakeIPCWaiters(channelID, side, ipc.WaitPeerDied)
+			}
+		}
+	}
 }
 
 // vfsNext commits a finished stage and names the one that follows.
@@ -245,7 +305,8 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 		handler.vfsUnsent(transfers[:attached])
 		return linuxabi.EIO
 	}
-	if status := channelSend(channelID, side, &local.linuxVFSMessage, owner.Handles(), peerHandles, transfers[:attached]); status != ipc.StatusOK {
+	status, sent := sendLinuxVFS(channelID, side, &local.linuxVFSMessage, owner.Handles(), peerHandles, transfers[:attached], handler.task, stage, correlation)
+	if !sent {
 		if status == ipc.StatusPeerDied {
 			context.Session.Fail()
 		}
@@ -261,6 +322,20 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 	linuxcompat.NoteVFSRequest()
 	wakeIPCWaiters(channelID, side^1, ipc.WaitMessage)
 	return 0
+}
+
+// sendLinuxVFS couples queue visibility to the continuation's Sent state.
+// The channel lock is taken first, matching the global lock order. Kill or
+// exec cancellation can therefore happen only before both effects or after
+// both effects, never between channelSend and Sent.
+func sendLinuxVFS(channelID uint64, side uint8, message *ipc.Message, source *handle.Table, target *handle.Table, transfers []ipc.Transfer, task sched.TaskID, stage uint8, correlation uint64) (ipc.Status, bool) {
+	channel, live := channelRegistry.Acquire(channelID)
+	if !live {
+		return ipc.StatusPeerDied, false
+	}
+	status, sent := linuxcompat.SyscallContinuations.SendVFS(task, stage, correlation, channel, side, message, source, target, transfers)
+	channel.Unlock()
+	return status, sent
 }
 
 // vfsUnsent undoes a request that never reached the queue: the continuation
@@ -419,6 +494,20 @@ func (handler *linuxCallHandler) vfsReply(operation vfs.Operation) (reply vfs.Re
 	context, contextFound := linuxcompat.VFSContext(state.FamilyID)
 	if !reachable || !contextFound {
 		return vfs.Reply{}, handler.vfsFailed(), false
+	}
+	// Once the deadline won, a queued reply is late even if it arrived before
+	// this task resumed. Never install its handle; discard any attached native
+	// capabilities before closing the failed session.
+	if pending.Wake == linuxcompat.WakeTimeout && pending.AbandonFailsVFS() {
+		for drained := 0; drained < ipc.QueueCapacity; drained++ {
+			if channelReceive(channelID, side, &local.linuxVFSMessage) != ipc.StatusOK {
+				break
+			}
+			handler.dropAttachedHandles()
+		}
+		handler.vfsAbandon()
+		linuxcompat.NoteVFSFailure()
+		return vfs.Reply{}, linuxabi.ETIMEDOUT, false
 	}
 	// At most a full queue of replies to abandoned requests precedes this one.
 	for drained := 0; drained <= ipc.QueueCapacity; drained++ {

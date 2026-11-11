@@ -47,10 +47,14 @@ func writeFile(t *testing.T, service *Service, path, payload string) {
 func refusesSystemChanges(t *testing.T, service *Service, roots ...string) {
 	t.Helper()
 	for _, root := range roots {
+		opened := dispatchOK(t, service, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, OpenFlags: vfs.OpenCreate, Path: []byte(root + "/bin/ls")})
+		dispatchOK(t, service, vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
 		attempts := []vfs.Request{
 			{Operation: vfs.OperationCreate, Path: []byte(root + "/bin/backdoor")},
+			{Operation: vfs.OperationOpen, Rights: vfs.Write, OpenFlags: vfs.OpenCreate, Path: []byte(root + "/bin/backdoor")},
 			{Operation: vfs.OperationMkdir, Path: []byte(root + "/extra")},
 			{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: []byte(root + "/commands")},
+			{Operation: vfs.OperationOpen, Rights: vfs.Write, OpenFlags: vfs.OpenTruncate, Path: []byte(root + "/commands")},
 			{Operation: vfs.OperationOpen, Rights: vfs.Read | vfs.Write, Path: []byte(root + "/bin/ls")},
 			{Operation: vfs.OperationTruncate, Path: []byte(root + "/commands")},
 			{Operation: vfs.OperationUnlink, Path: []byte(root + "/bin/ls")},

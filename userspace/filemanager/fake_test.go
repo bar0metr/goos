@@ -119,7 +119,7 @@ func (filesystem *memoryFS) Rename(source, target []byte) vfs.Status {
 	filesystem.calls = append(filesystem.calls, "rename "+string(source)+" "+string(target))
 	from, to := string(source), string(target)
 	if strings.HasPrefix(from, "/other") != strings.HasPrefix(to, "/other") {
-		return vfs.StatusUnsupported
+		return vfs.StatusCrossDevice
 	}
 	if status := filesystem.writable(to); status != vfs.StatusOK {
 		return status

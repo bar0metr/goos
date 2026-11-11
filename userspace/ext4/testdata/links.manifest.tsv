@@ -1,0 +1,64 @@
+symlink	./abs	/file.txt
+symlink	./bad-target	bad-ÿ
+device	./block	8:1
+device	./char	1:3
+symlink	./dangling	missing
+symlink	./deep-0	deep-1
+symlink	./deep-1	deep-2
+symlink	./deep-10	deep-11
+symlink	./deep-11	deep-12
+symlink	./deep-12	deep-13
+symlink	./deep-13	deep-14
+symlink	./deep-14	deep-15
+symlink	./deep-15	deep-16
+symlink	./deep-16	deep-17
+symlink	./deep-17	deep-18
+symlink	./deep-18	deep-19
+symlink	./deep-19	deep-20
+symlink	./deep-2	deep-3
+symlink	./deep-20	deep-21
+symlink	./deep-21	deep-22
+symlink	./deep-22	deep-23
+symlink	./deep-23	deep-24
+symlink	./deep-24	deep-25
+symlink	./deep-25	deep-26
+symlink	./deep-26	deep-27
+symlink	./deep-27	deep-28
+symlink	./deep-28	deep-29
+symlink	./deep-29	deep-30
+symlink	./deep-3	deep-4
+symlink	./deep-30	deep-31
+symlink	./deep-31	deep-32
+symlink	./deep-32	deep-33
+symlink	./deep-33	deep-34
+symlink	./deep-34	deep-35
+symlink	./deep-35	deep-36
+symlink	./deep-36	deep-37
+symlink	./deep-37	deep-38
+symlink	./deep-38	deep-39
+symlink	./deep-39	deep-40
+symlink	./deep-4	deep-5
+symlink	./deep-40	file.txt
+symlink	./deep-5	deep-6
+symlink	./deep-6	deep-7
+symlink	./deep-7	deep-8
+symlink	./deep-8	deep-9
+symlink	./deep-9	deep-10
+dir	./dir
+dir	./dir/sub
+file	./dir/sub/inner.txt	11	12178d1258007fad49d7a4ceab4356797bfcf3284ace5973893d6c8ab7d55a9b
+symlink	./dir/sub/up	../../file.txt
+symlink	./escape	../../../../../../etc
+fifo	./fifo
+file	./file.txt	11	624892d5136bcf87617e8a85890ffda2dc31647c50bdc2beab31b88ebcaf2492
+file	./hard-a	11	624892d5136bcf87617e8a85890ffda2dc31647c50bdc2beab31b88ebcaf2492
+file	./hard-b	11	624892d5136bcf87617e8a85890ffda2dc31647c50bdc2beab31b88ebcaf2492
+symlink	./link-þ	file.txt
+symlink	./loop-a	loop-b
+symlink	./loop-b	loop-a
+symlink	./rel	file.txt
+symlink	./self	self
+file	./setuid	7	fcd249947a42433f3ca96fd828ace5d07193ea0d7023210bfffd1453f1860a75
+file	./sparse	1048577	08a1f946267e37602ab3d0a7e3707185d744a0253498c24f82083eeeaaca873f
+symlink	./sub-dir	dir/sub
+device	./wide	103:12c

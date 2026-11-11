@@ -41,8 +41,10 @@ type Remote struct {
 	copyFault   CopyFaultHandler
 	copyContext CopyFault
 	// readDirs and batch count directory exchanges for the DIAG listing report.
-	readDirs uint64
-	batch    BackendBatchCounters
+	readDirs           uint64
+	batch              BackendBatchCounters
+	validationAcquired uint64
+	validationReleased uint64
 }
 
 // AttachCache gives the backend the file-cache mapping it shares with its
@@ -133,9 +135,20 @@ func (remote *Remote) Root() (ramfs.NodeID, ramfs.Status) {
 
 // Flush asks the service to make completed writes durable.
 func (remote *Remote) Flush() bool {
-	_, status := remote.call(fsproto.Request{Operation: fsproto.OperationFlush})
-	return status == ramfs.StatusOK
+	return remote.SyncFilesystem() == ramfs.StatusOK
 }
+
+// SyncFilesystem asks this backend's own service, and no other, to make its
+// completed writes durable. The protocol has one flush for the whole
+// instance, which covers any one file or directory of it.
+func (remote *Remote) SyncFilesystem() ramfs.Status {
+	_, status := remote.call(fsproto.Request{Operation: fsproto.OperationFlush})
+	return status
+}
+
+func (remote *Remote) SyncFile(ramfs.NodeID) ramfs.Status { return remote.SyncFilesystem() }
+
+func (remote *Remote) SyncDirectory(ramfs.NodeID) ramfs.Status { return remote.SyncFilesystem() }
 
 func (remote *Remote) FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status) {
 	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationFilesystemInfo})
@@ -159,6 +172,9 @@ func (remote *Remote) AcquireObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status
 		return 0, ramfs.StatusIOError
 	}
 	if status == ramfs.StatusOK {
+		if validation.Enabled {
+			remote.validationAcquired++
+		}
 		if stat, known := remote.cached(id); known {
 			stat.ID = reply.Node
 			remote.remember(stat)
@@ -180,6 +196,9 @@ func (remote *Remote) ReleaseObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status
 			status = ramfs.StatusIOError
 		}
 		return 0, status
+	}
+	if validation.Enabled {
+		remote.validationReleased++
 	}
 	if reply.Node == id {
 		return id, status
@@ -220,6 +239,51 @@ func (remote *Remote) ReplaceName(id ramfs.NodeID, parent ramfs.NodeID, name ram
 func (remote *Remote) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
 	remote.forgetAll()
 	_, status := remote.named(fsproto.OperationUnlink, 0, parent, name)
+	return status
+}
+
+// ReadLink asks the service for the target of the symbolic link id. The
+// service writes it to the scratch slot, and it is copied out of the shared
+// cache before anyone checks it.
+func (remote *Remote) ReadLink(id ramfs.NodeID, target []byte) (int, ramfs.Status) {
+	if !remote.pages.Ready() {
+		return 0, ramfs.StatusUnsupported
+	}
+	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationReadLink, Node: id, Slot: scratchSlot, Size: ramfs.MaxLinkTarget})
+	if status != ramfs.StatusOK {
+		return 0, status
+	}
+	if reply.Value == 0 || reply.Value > ramfs.MaxLinkTarget || reply.Value > uint64(len(target)) {
+		remote.forgetAll()
+		return 0, ramfs.StatusIOError
+	}
+	return copy(target[:reply.Value], remote.pages.Slot(scratchSlot)), ramfs.StatusOK
+}
+
+// SymlinkName passes the target through the scratch slot, as a write passes
+// bytes it does not cache.
+func (remote *Remote) SymlinkName(parent ramfs.NodeID, name ramfs.Name, target []byte) (ramfs.NodeID, ramfs.Status) {
+	if !ramfs.ValidLinkTarget(target) {
+		return 0, ramfs.StatusInvalidArgument
+	}
+	if !remote.pages.Ready() {
+		return 0, ramfs.StatusUnsupported
+	}
+	size := name.CopyTo(remote.name[:])
+	if size == 0 {
+		return 0, ramfs.StatusInvalidArgument
+	}
+	remote.forget(parent)
+	copy(remote.pages.Slot(scratchSlot), target)
+	return remote.looked(remote.call(fsproto.Request{Operation: fsproto.OperationSymlink, Parent: parent, Name: remote.name[:size], Slot: scratchSlot, Size: uint32(len(target))}))
+}
+
+// LinkName gives id a further name. Its link count changes, so its cached
+// attributes go.
+func (remote *Remote) LinkName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
+	remote.forget(id)
+	remote.forget(parent)
+	_, status := remote.named(fsproto.OperationLink, id, parent, name)
 	return status
 }
 
@@ -516,7 +580,7 @@ func (remote *Remote) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byt
 func statOf(reply fsproto.Reply) ramfs.Stat {
 	return ramfs.Stat{ID: reply.Node, Kind: reply.Kind, Size: reply.Value,
 		Created: reply.Created, Modified: reply.Modified, Attributes: reply.Attributes,
-		AttributesAvailable: reply.AttributesAvailable}
+		AttributesAvailable: reply.AttributesAvailable, Unix: reply.Unix}
 }
 
 func (remote *Remote) reportCacheFault(source, target []byte, length int) {

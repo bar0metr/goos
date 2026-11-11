@@ -1,7 +1,10 @@
 //go:build goos_userspace
 
 // Command stat shows the type and size of a path. A directory's size is the
-// total of the files under it, at any depth.
+// total of the regular files under it, at any depth. A symbolic link is
+// described as itself, with its target, and is not followed; the walk does
+// not follow links either. A filesystem that keeps Unix metadata adds a line
+// with the mode, owner and link count it stores.
 package main
 
 import (
@@ -52,8 +55,21 @@ func run(data startup.Data) {
 		unit, index = selected, 2
 	}
 	path := utility.Path(data, index)
-	reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationStat, Path: path})
+	reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationStat, Path: path, Rights: vfs.NoFollow})
 	utility.Check(reply, received, path, false)
+	switch reply.Kind {
+	case ramfs.KindSymlink:
+		printLink(path)
+		printMetadata(reply)
+		utility.Mark("STAT_PROCESS_OK\n")
+		return
+	case ramfs.KindSpecial:
+		utility.Print(append(line[:0], "special"...))
+		utility.EndLine()
+		printMetadata(reply)
+		utility.Mark("STAT_PROCESS_OK\n")
+		return
+	}
 	if reply.Kind != ramfs.KindDirectory {
 		utility.Print(utility.AppendSize(append(line[:0], "file "...), reply.Size, unit))
 		utility.EndLine()
@@ -116,6 +132,49 @@ func printMetadata(reply vfs.Reply) {
 	text = utility.AppendUint(text, uint64(reply.MountID))
 	utility.Print(text)
 	utility.EndLine()
+	if unix := &reply.Unix; unix.Available {
+		text = append(line[:0], "mode="...)
+		text = appendOctal(text, uint64(unix.Mode&^ramfs.ModeTypeMask))
+		text = append(text, " uid="...)
+		text = utility.AppendUint(text, uint64(unix.UID))
+		text = append(text, " gid="...)
+		text = utility.AppendUint(text, uint64(unix.GID))
+		text = append(text, " links="...)
+		text = utility.AppendUint(text, uint64(unix.Links))
+		utility.Print(text)
+		utility.EndLine()
+	}
+}
+
+// printLink prints a link's target, or its length when the target is too
+// long for one reply.
+func printLink(path []byte) {
+	reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationReadLink, Path: path})
+	if received && reply.Status == vfs.StatusNameTooLong {
+		text := append(line[:0], "symlink, target of "...)
+		utility.Print(utility.AppendCount(text, reply.Size, "byte", "bytes"))
+		utility.EndLine()
+		return
+	}
+	utility.Check(reply, received, path, false)
+	utility.Print(append(line[:0], "symlink -> "...))
+	utility.Print(reply.Name)
+	utility.EndLine()
+}
+
+func appendOctal(target []byte, value uint64) []byte {
+	var digits [8]byte
+	index := len(digits)
+	for {
+		index--
+		digits[index] = byte(value&7) + '0'
+		value >>= 3
+		if value == 0 {
+			break
+		}
+	}
+	target = append(target, '0')
+	return append(target, digits[index:]...)
 }
 
 func appendPadded(target []byte, value uint64, width int) []byte {
@@ -163,8 +222,10 @@ func walk(path []byte, length int) {
 			records = records[size:]
 			levelCursor[depth] = uint32(record.Next)
 			if record.Stat.Kind != ramfs.KindDirectory {
-				total += record.Stat.Size
-				files++
+				if record.Stat.Kind == ramfs.KindFile {
+					total += record.Stat.Size
+					files++
+				}
 				continue
 			}
 			directories++

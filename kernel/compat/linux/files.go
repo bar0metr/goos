@@ -17,6 +17,38 @@ type OpenIntent struct {
 	Directory   bool
 	CloseOnExec bool
 	NonBlock    bool
+	// NoFollow is O_NOFOLLOW: an open of a symbolic link fails with ELOOP.
+	NoFollow bool
+}
+
+// OpenRights are the rights of the VFS open.
+func (intent OpenIntent) OpenRights() vfs.Rights {
+	if intent.NoFollow {
+		return intent.Rights | vfs.NoFollow
+	}
+	return intent.Rights
+}
+
+// VFSOpenFlags carries the complete namespace intent in one OperationOpen.
+// O_EXCL without O_CREAT retains the existing policy and has no effect.
+func (intent OpenIntent) VFSOpenFlags(trailing bool) vfs.OpenFlags {
+	var flags vfs.OpenFlags
+	if intent.Create {
+		flags |= vfs.OpenCreate
+		if intent.Exclusive {
+			flags |= vfs.OpenExclusive
+		}
+	}
+	if intent.Truncate {
+		flags |= vfs.OpenTruncate
+	}
+	if intent.Directory {
+		flags |= vfs.OpenDirectory
+	}
+	if trailing {
+		flags |= vfs.OpenTrailingSlash
+	}
+	return flags
 }
 
 // StatusFlags is what the open-file description keeps of the intent: the
@@ -33,8 +65,9 @@ func (intent OpenIntent) StatusFlags() uint32 {
 }
 
 // DecodeOpen accepts the documented open flags. O_LARGEFILE is always in
-// effect on x86_64. O_NOCTTY and O_NOFOLLOW change nothing here: no GoOS
-// file is a terminal device or a symbolic link. O_NONBLOCK changes nothing
+// effect on x86_64. O_NOCTTY changes nothing here: no GoOS file is a
+// terminal device. O_NOFOLLOW refuses a path that ends in a symbolic link.
+// O_NONBLOCK changes nothing
 // either: a path names a file, a directory, or a device that never blocks,
 // and Linux ignores the flag for the first two. Every other flag is refused,
 // because ignoring it would claim a behavior the open does not have.
@@ -54,6 +87,7 @@ func DecodeOpen(flags uint64) (OpenIntent, abi.Errno) {
 		Directory:   value&abi.OpenDirectory != 0,
 		CloseOnExec: value&abi.OpenCloseExec != 0,
 		NonBlock:    value&abi.OpenNonBlock != 0,
+		NoFollow:    value&abi.OpenNoFollow != 0,
 	}
 	switch intent.Access {
 	case abi.OpenReadOnly:
@@ -71,67 +105,10 @@ func DecodeOpen(flags uint64) (OpenIntent, abi.Errno) {
 	return intent, 0
 }
 
-// OpenStep is what an open does after the stat of its resolved path.
-type OpenStep uint8
-
 const (
-	OpenFail OpenStep = iota
-	// OpenCreateFile creates the missing file, then opens it.
-	OpenCreateFile
-	// OpenTruncateFile empties the existing file, then opens it.
-	OpenTruncateFile
-	// OpenExistingFile opens the file as it is.
-	OpenExistingFile
-	// OpenExistingDirectory installs a directory descriptor. A directory has
-	// no VFS open file; the descriptor keeps its path.
-	OpenExistingDirectory
+	OpenStageOpen    = uint8(1)
+	OpenStageCleanup = uint8(2)
 )
-
-// An open runs up to three VFS exchanges. The stage numbers rise in the
-// order the exchanges can occur, which the continuation requires.
-const (
-	OpenStageStat     = uint8(1)
-	OpenStageCreate   = uint8(2)
-	OpenStageTruncate = uint8(3)
-	OpenStageOpen     = uint8(4)
-)
-
-// PlanOpen applies Linux open semantics to the stat result. trailing reports
-// that the path itself demanded a directory.
-func PlanOpen(intent OpenIntent, trailing bool, status vfs.Status, kind ramfs.Kind) (OpenStep, abi.Errno) {
-	switch status {
-	case vfs.StatusNotFound:
-		if !intent.Create {
-			return OpenFail, abi.ENOENT
-		}
-		if trailing {
-			return OpenFail, abi.EISDIR
-		}
-		return OpenCreateFile, 0
-	case vfs.StatusOK:
-	default:
-		return OpenFail, VFSErrno(status, VFSPermissionAccess, abi.ENFILE)
-	}
-	if intent.Create && intent.Exclusive {
-		return OpenFail, abi.EEXIST
-	}
-	if kind == ramfs.KindDirectory {
-		if intent.Access != abi.OpenReadOnly || intent.Create || intent.Truncate {
-			return OpenFail, abi.EISDIR
-		}
-		return OpenExistingDirectory, 0
-	}
-	if kind != ramfs.KindFile {
-		return OpenFail, abi.EIO
-	}
-	if trailing || intent.Directory {
-		return OpenFail, abi.ENOTDIR
-	}
-	if intent.Truncate {
-		return OpenTruncateFile, 0
-	}
-	return OpenExistingFile, 0
-}
 
 // SeekTarget computes the offset an lseek asks for. current is the file
 // position and size the file length, which SEEK_END alone needs. A negative
@@ -172,9 +149,9 @@ func RemovalErrno(removeDirectory bool, trailing bool, kind ramfs.Kind) abi.Errn
 	switch {
 	case kind == ramfs.KindDirectory && !removeDirectory:
 		return abi.EISDIR
-	case kind == ramfs.KindFile && (removeDirectory || trailing):
+	case kind != ramfs.KindDirectory && (removeDirectory || trailing):
 		return abi.ENOTDIR
-	case kind != ramfs.KindFile && kind != ramfs.KindDirectory:
+	case kind < ramfs.KindFile || kind > ramfs.LastKind:
 		return abi.EIO
 	}
 	return 0
@@ -185,6 +162,31 @@ func RemovalErrno(removeDirectory bool, trailing bool, kind ramfs.Kind) abi.Errn
 // mount; a full filesystem is the only exhaustion a mutation meets.
 func MutationErrno(status vfs.Status) abi.Errno {
 	return VFSErrno(status, VFSPermissionReadOnly, abi.ENOSPC)
+}
+
+// SyncErrno translates the status of fsync and fdatasync. A filesystem
+// without a durability operation is EINVAL, as on Linux; any other failure
+// is EIO, the error a failed flush reports.
+func SyncErrno(status vfs.Status) abi.Errno {
+	switch status {
+	case vfs.StatusOK:
+		return 0
+	case vfs.StatusUnsupported:
+		return abi.EINVAL
+	case vfs.StatusNotFound:
+		return abi.EBADF
+	}
+	return abi.EIO
+}
+
+// LinkErrno translates the status of a symlink or a hard link. A filesystem
+// without the kind of link asked for, and a hard link to a directory, are
+// EPERM on Linux; a refused change is a read-only mount.
+func LinkErrno(status vfs.Status) abi.Errno {
+	if status == vfs.StatusUnsupported {
+		return abi.EPERM
+	}
+	return MutationErrno(status)
 }
 
 // StatusFlagsOf is what F_GETFL reports for a description. A regular file or

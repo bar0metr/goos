@@ -80,6 +80,9 @@ const (
 	// FaultVolume kills the instance serving the first additional volume,
 	// which PID 1 replaces while the other volumes keep running (ADR 0222).
 	FaultVolume
+	// FaultVolumeLast kills the instance serving the last mounted additional
+	// volume, the one mounted in the highest slot.
+	FaultVolumeLast
 )
 
 // ControlStatus answers control requests. Remote shutdown returns Accepted
@@ -145,7 +148,7 @@ func validControl(operation ControlOperation, argument uint8) bool {
 	case ControlKill:
 		return argument < Slots
 	case ControlFault:
-		return argument >= FaultTerminal && argument <= FaultVolume
+		return argument >= FaultTerminal && argument <= FaultVolumeLast
 	default:
 		return false
 	}

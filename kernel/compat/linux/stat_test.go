@@ -99,6 +99,14 @@ func TestStatusOfReply(t *testing.T) {
 			FileStatus{Inode: 9, Mode: 0o100644, Seconds: 40, Nanoseconds: 3, Born: true, BirthSeconds: 40, BirthNanosecond: 3}, 0},
 		{"zero identity", vfs.Reply{Kind: ramfs.KindFile}, FileStatus{Inode: 1, Mode: 0o100644}, 0},
 		{"unknown kind", vfs.Reply{Node: 9}, FileStatus{}, abi.EIO},
+		{"symbolic link", vfs.Reply{Kind: ramfs.KindSymlink, Node: 9, Size: 8}, FileStatus{Inode: 9, Mode: 0o120777, Size: 8}, 0},
+		{"special without metadata", vfs.Reply{Kind: ramfs.KindSpecial, Node: 9}, FileStatus{}, abi.EIO},
+		{"ext4 device", vfs.Reply{Kind: ramfs.KindSpecial, Node: 9, Attributes: ramfs.AttrReadOnly, AttributesAvailable: true,
+			Modified: ramfs.Timestamp{Seconds: 50, Available: true},
+			Unix: ramfs.Unix{Mode: 0o20640, UID: 4, GID: 5, Links: 2, Device: 0x103, Available: true,
+				Accessed: ramfs.Timestamp{Seconds: 60, Nanoseconds: 1, Available: true}, Changed: ramfs.Timestamp{Seconds: 70, Nanoseconds: 2, Available: true}}},
+			FileStatus{Inode: 9, Mode: 0o20640, RawDevice: 0x103, Seconds: 50, Stored: true, Links: 2, UID: 4, GID: 5,
+				AccessSeconds: 60, AccessNanoseconds: 1, ChangeSeconds: 70, ChangeNanoseconds: 2}, 0},
 	}
 	for _, test := range cases {
 		got, errno := StatusOfReply(&test.reply)
@@ -114,20 +122,21 @@ func TestStatusOfReply(t *testing.T) {
 
 func TestStatFlags(t *testing.T) {
 	for flags, want := range map[uint64]struct {
-		empty bool
-		errno abi.Errno
+		empty    bool
+		noFollow bool
+		errno    abi.Errno
 	}{
-		0:       {false, 0},
-		0x100:   {false, 0},
-		0x800:   {false, 0},
-		0x1000:  {true, 0},
-		0x1900:  {true, 0},
-		0x200:   {false, abi.EINVAL}, // AT_REMOVEDIR
-		0x400:   {false, abi.EINVAL}, // AT_SYMLINK_FOLLOW
-		1 << 40: {false, abi.EINVAL},
+		0:       {false, false, 0},
+		0x100:   {false, true, 0},
+		0x800:   {false, false, 0},
+		0x1000:  {true, false, 0},
+		0x1900:  {true, true, 0},
+		0x200:   {false, false, abi.EINVAL}, // AT_REMOVEDIR
+		0x400:   {false, false, abi.EINVAL}, // AT_SYMLINK_FOLLOW
+		1 << 40: {false, false, abi.EINVAL},
 	} {
-		if empty, errno := StatFlags(flags); empty != want.empty || errno != want.errno {
-			t.Errorf("flags %#x: empty=%v errno=%d", flags, empty, errno)
+		if empty, noFollow, errno := StatFlags(flags); empty != want.empty || noFollow != want.noFollow || errno != want.errno {
+			t.Errorf("flags %#x: empty=%v nofollow=%v errno=%d", flags, empty, noFollow, errno)
 		}
 	}
 }
@@ -269,9 +278,36 @@ func TestStatxFlags(t *testing.T) {
 		{0x10000000, 0x7ff, false, abi.EINVAL},
 		{0, 0x7fffffff, false, 0},
 	} {
-		empty, errno := StatxFlags(test.flags, test.mask)
-		if empty != test.empty || errno != test.errno {
+		empty, noFollow, errno := StatxFlags(test.flags, test.mask)
+		if empty != test.empty || errno != test.errno || noFollow != (errno == 0 && test.flags&abi.AtSymlinkNoFollow != 0) {
 			t.Errorf("flags %#x mask %#x: empty=%v errno=%d", test.flags, test.mask, empty, errno)
 		}
+	}
+}
+
+func TestStoredInodeAndBlocks(t *testing.T) {
+	reply := vfs.Reply{Kind: ramfs.KindFile, Node: 0x6f6f7367<<32 | 64, Size: 1048577, MountID: 3,
+		Unix: ramfs.Unix{Mode: 0o100644, Links: 1, Inode: 64, Blocks: 8, Available: true}}
+	status, errno := StatusOfReply(&reply)
+	if errno != 0 || status.Inode != 64 || status.Device != 3 {
+		t.Fatalf("status %+v", status)
+	}
+	var encoded [StatSize]byte
+	EncodeStat(&encoded, status)
+	if binary.LittleEndian.Uint64(encoded[statBlocks:]) != 8 || binary.LittleEndian.Uint64(encoded[statInode:]) != 64 {
+		t.Fatal("st_blocks or st_ino")
+	}
+	var extended [StatxSize]byte
+	EncodeStatx(&extended, status)
+	if binary.LittleEndian.Uint64(extended[statxBlocks:]) != 8 || binary.LittleEndian.Uint64(extended[statxInode:]) != 64 {
+		t.Fatal("stx_blocks or stx_ino")
+	}
+	for status, want := range map[vfs.Status]abi.Errno{vfs.StatusOK: 0, vfs.StatusUnsupported: abi.EINVAL, vfs.StatusBackendError: abi.EIO, vfs.StatusPeerDied: abi.EIO} {
+		if got := SyncErrno(status); got != want {
+			t.Fatalf("sync status %v: errno %d", status, got)
+		}
+	}
+	if VFSErrno(vfs.StatusCrossDevice, VFSPermissionAccess, abi.ENOMEM) != abi.EXDEV || MutationErrno(vfs.StatusCrossDevice) != abi.EXDEV {
+		t.Fatal("EXDEV")
 	}
 }

@@ -35,6 +35,7 @@ const (
 	ENAMETOOLONG Errno = 36
 	ENOSYS       Errno = 38
 	ENOTEMPTY    Errno = 39
+	ELOOP        Errno = 40
 	ENOTSOCK     Errno = 88
 	EDESTADDRREQ Errno = 89
 	EMSGSIZE     Errno = 90

@@ -106,7 +106,11 @@ clean() {
 	refuse 'exit status:\|killed\|not found\|permission denied\|exec:' "$1"
 }
 
-qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -cpu qemu64,+rdrand -m "$memory" \
+snapshot=
+if [ "${OPEN_TIMEOUT_ONLY:-0}" = 1 ] || [ "${LATE_ALLOCATE_ONLY:-0}" = 1 ]; then
+	snapshot=-snapshot
+fi
+qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -cpu qemu64,+rdrand -m "$memory" $snapshot \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -129,6 +133,69 @@ for marker in LINUX_PID1_LAUNCH_OK LINUX_RAW_SYSCALL_OK LINUX_MEMORY_TLS_OK LINU
 	LINUX_VFS_SESSION_OK LINUX_PATH_OK LINUX_FILE_IO_OK LINUX_STAT_OK LINUX_DIRENT_OK LINUX_SYSTEM_OK; do
 	expect "^$marker\$" "PID 1 Linux probes"
 done
+
+if [ "${LATE_ALLOCATE_ONLY:-0}" = 1 ]; then
+	run 'mkdir /home/demo'
+	run '/system/linux/abi-probe late-allocate'
+	expect '^late allocate: EMFILE and fd reuse 3 times$' 'late AllocateFD errno and descriptor reuse'
+	[ "$(grep -c '^VFS_LATE_ALLOCATE_CLOSE_RELEASED$' "$work/output" || true)" -eq 3 ] || fail 'late AllocateFD: expected three actual closes and backend releases'
+	checks=$((checks + 1))
+	clean 'late AllocateFD'
+	printf 'PASS late AllocateFD IPC cleanup (%s checks)\n' "$checks"
+	exit 0
+fi
+
+if [ "${OPEN_TIMEOUT_ONLY:-0}" = 1 ]; then
+	run 'mkdir /home/demo'
+	for kind in existing created; do
+		start=$(wc -l <"$log")
+		next=$(($(prompts) + 1))
+		printf '/system/linux/abi-probe open-timeout-%s\n' "$kind" >&3
+		case $kind in
+		existing) marker=VFS_OPEN_TIMEOUT_EXISTING_RELEASED ;;
+		created) marker=VFS_OPEN_TIMEOUT_CREATED_RELEASED ;;
+		esac
+		elapsed=0
+		until tr -d '\r' <"$log" | grep -q "^$marker\$"; do
+			! grep -q "$fatal" "$log" || fail "$kind fatal marker"
+			[ "$elapsed" -lt 1200 ] || fail "$kind release timeout"
+			sleep 0.1
+			elapsed=$((elapsed + 1))
+		done
+		printf '\n' >&3
+		await_prompt "$next"
+		tail -n "+$((start + 1))" "$log" | tr -d '\r' >"$work/output"
+		expect "open timeout $kind: ETIMEDOUT then EIO, waiting\$" "$kind timeout"
+		expect '^VFS_OPEN_LATE_REPLY_REJECTED$' "$kind late reply"
+		expect "open timeout $kind: done\$" "$kind completion"
+		clean "$kind timeout"
+	done
+	# A family member kills the task whose open the VFS has executed but not
+	# answered. The parent stays alive: the release marker must appear before
+	# the second newline lets it exit.
+	start=$(wc -l <"$log")
+	next=$(($(prompts) + 1))
+	printf '/system/linux/abi-probe open-kill\n' >&3
+	for marker in VFS_OPEN_KILL_WITHHELD VFS_OPEN_KILL_RELEASED; do
+		elapsed=0
+		until tr -d '\r' <"$log" | grep -q "^$marker\$"; do
+			! grep -q "$fatal" "$log" || fail "open kill fatal marker"
+			[ "$elapsed" -lt 1200 ] || fail "open kill: no $marker"
+			sleep 0.1
+			elapsed=$((elapsed + 1))
+		done
+		checks=$((checks + 1))
+		printf '\n' >&3
+	done
+	await_prompt "$next"
+	tail -n "+$((start + 1))" "$log" | tr -d '\r' >"$work/output"
+	expect 'open kill: SIGKILL, then EIO, waiting$' 'remote kill fails the family session'
+	expect '^VFS_OPEN_LATE_REPLY_REJECTED$' 'remote kill late reply'
+	expect 'open kill: done$' 'remote kill completion'
+	clean 'remote kill'
+	printf 'PASS open timeout IPC lifecycle (%s checks)\n' "$checks"
+	exit 0
+fi
 
 # The release proofs: a program with no libc, a static musl program, files
 # through the VFS on the volatile root and on FAT32, and a directory listing.
@@ -307,6 +374,14 @@ clean 'a Linux program replaces itself with another'
 run '/system/linux/abi-probe hardening'
 expect '^hardening ok$' 'failed exec, fork memory, descriptors, pipes, and signal frames'
 clean 'failed exec, fork memory, descriptors, pipes, and signal frames'
+
+run '/system/linux/abi-probe links'
+expect '^links ok$' 'symbolic links in RAMFS: symlink, readlink, lstat, O_NOFOLLOW, loops'
+clean 'symbolic links in RAMFS: symlink, readlink, lstat, O_NOFOLLOW, loops'
+
+run '/system/linux/abi-probe open-intent'
+expect '^open intent ok$' 'atomic O_CREAT, O_EXCL, O_NOFOLLOW, O_TRUNC and fstat identity'
+clean 'atomic O_CREAT, O_EXCL, O_NOFOLLOW, O_TRUNC and fstat identity'
 
 run '/system/linux/abi-probe fpstate'
 expect '^fpstate ok$' 'x87 and SSE state survives a signal handler'

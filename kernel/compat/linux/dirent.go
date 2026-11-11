@@ -59,7 +59,13 @@ func EncodeBatchDirent(target, batch []byte) (written, consumed int, next uint64
 	if DirentSize(len(record.Name)) > len(target) {
 		return 0, 0, 0, true
 	}
-	written, valid = EncodeDirent(target, uint64(record.Stat.ID), uint64(record.Next), record.Stat.Kind, record.Name)
+	// d_ino is the filesystem's inode number when it has one, the number
+	// stat reports as st_ino; otherwise the node identity, as stat uses.
+	inode := uint64(record.Stat.ID)
+	if record.Inode != 0 {
+		inode = record.Inode
+	}
+	written, valid = EncodeDirent(target, inode, uint64(record.Next), record.Stat.Kind, record.Name)
 	return written, consumed, uint64(record.Next), valid
 }
 
@@ -78,6 +84,11 @@ func EncodeDirent(target []byte, inode uint64, next uint64, kind ramfs.Kind, nam
 	case ramfs.KindFile:
 	case ramfs.KindDirectory:
 		entryType = abi.DirentDirectory
+	case ramfs.KindSymlink:
+		entryType = abi.DirentSymlink
+	case ramfs.KindSpecial:
+		// A listing does not say which special kind; lstat does.
+		entryType = abi.DirentUnknown
 	default:
 		return 0, false
 	}

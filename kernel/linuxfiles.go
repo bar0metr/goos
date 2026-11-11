@@ -8,6 +8,7 @@ package main
 // from the continuation and keeps nothing in locals across an exchange.
 
 import (
+	"goos/internal/validation"
 	linuxcompat "goos/kernel/compat/linux"
 	linuxabi "goos/kernel/compat/linux/abi"
 	"goos/kernel/mm/vm"
@@ -21,6 +22,7 @@ const (
 	noteTrailing        = 1 << 0 // the path demanded a directory
 	noteRemoveDirectory = 1 << 1 // rmdir, or unlinkat with AT_REMOVEDIR
 	noteTargetTrailing  = 1 << 2 // the rename target demanded a directory
+	noteNoFollow        = 1 << 3 // a path stat describes the link it ends in
 )
 
 var linuxBlocked = linuxcompat.Result{Action: linuxabi.ActionBlock}
@@ -39,9 +41,9 @@ func (handler *linuxCallHandler) Openat(request linuxcompat.Request) linuxcompat
 	return handler.openPath(request, int32(request.Arguments[0]), request.Arguments[1], request.Arguments[2])
 }
 
-// openPath stats the resolved path, creates or empties the file when the
-// flags ask for it, and opens it. A directory gets a descriptor that keeps
-// its path; the VFS has no open file for one.
+// openPath sends one VFS request carrying the complete open intent. A
+// directory gets a descriptor that keeps its path; the VFS has no open file
+// for one.
 func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int32, address uint64, flags uint64) linuxcompat.Result {
 	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
@@ -79,111 +81,82 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 			return linuxErrno(errno)
 		}
 	}
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
-	for {
-		pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
-		switch pending.Stage {
-		case linuxcompat.OpenStageStat:
-			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationStat, Path: path}, attachPaths)
-			if blocked {
-				return linuxBlocked
-			}
-			if errno != 0 {
-				return linuxErrno(errno)
-			}
-			step, errno := linuxcompat.PlanOpen(intent, pending.Note&noteTrailing != 0, reply.Status, reply.Kind)
-			next := linuxcompat.OpenStageOpen
-			switch step {
-			case linuxcompat.OpenFail:
-				handler.vfsFinish()
-				return linuxErrno(errno)
-			case linuxcompat.OpenExistingDirectory:
-				// The descriptor copies the path before the continuation
-				// that holds it is released.
-				result := handler.installDirectory(state, path, intent)
-				handler.vfsFinish()
-				return result
-			case linuxcompat.OpenCreateFile:
-				next = linuxcompat.OpenStageCreate
-			case linuxcompat.OpenTruncateFile:
-				next = linuxcompat.OpenStageTruncate
-			}
-			if errno := handler.vfsNext(pending.Stage, next, 0); errno != 0 {
-				return linuxErrno(errno)
-			}
-		case linuxcompat.OpenStageCreate:
-			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationCreate, Path: path}, attachPaths)
-			if blocked {
-				return linuxBlocked
-			}
-			if errno != 0 {
-				return linuxErrno(errno)
-			}
-			// Another process may have created the name since the stat. That
-			// is what O_EXCL exists to refuse.
-			raced := reply.Status == vfs.StatusAlreadyExists
-			if reply.Status != vfs.StatusOK && !raced || raced && intent.Exclusive {
-				handler.vfsFinish()
-				return linuxErrno(linuxcompat.MutationErrno(reply.Status))
-			}
-			if errno := handler.vfsNext(pending.Stage, linuxcompat.OpenStageOpen, 0); errno != 0 {
-				return linuxErrno(errno)
-			}
-		case linuxcompat.OpenStageTruncate:
-			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationTruncate, Path: path}, attachPaths)
-			if blocked {
-				return linuxBlocked
-			}
-			if errno != 0 {
-				return linuxErrno(errno)
-			}
-			if reply.Status != vfs.StatusOK {
-				handler.vfsFinish()
-				return linuxErrno(linuxcompat.MutationErrno(reply.Status))
-			}
-			if errno := handler.vfsNext(pending.Stage, linuxcompat.OpenStageOpen, 0); errno != 0 {
-				return linuxErrno(errno)
-			}
-		case linuxcompat.OpenStageOpen:
-			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationOpen, Rights: intent.Rights, Path: path}, attachPaths)
-			if blocked {
-				return linuxBlocked
-			}
-			if errno != 0 {
-				return linuxErrno(errno)
-			}
-			handler.vfsFinish()
-			if reply.Status != vfs.StatusOK {
-				// GoOS has no per-file permissions, so a refused write open
-				// is a read-only mount. An exhausted open is the VFS
-				// open-file table.
-				permission := linuxcompat.VFSPermissionAccess
-				if intent.Rights&vfs.Write != 0 {
-					permission = linuxcompat.VFSPermissionReadOnly
-				}
-				return linuxErrno(linuxcompat.VFSErrno(reply.Status, permission, linuxabi.ENFILE))
-			}
-			description := linuxcompat.FileDescription{Kind: linuxcompat.FDVFSFile, Flags: intent.StatusFlags(), Object: uint64(reply.Handle)}
-			fd, errno := linuxcompat.AllocateFD(handler.root, description, intent.CloseOnExec)
-			if errno != 0 {
-				return linuxErrno(linuxabi.EIO)
-			}
-			return linuxcompat.Result{Value: uint64(fd)}
-		default:
+	pending, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
+	if pending.Stage == linuxcompat.OpenStageCleanup {
+		return handler.cleanupOpen(pending)
+	}
+	if pending.Stage != linuxcompat.OpenStageOpen {
+		return linuxErrno(handler.vfsFailed())
+	}
+	openFlags := intent.VFSOpenFlags(pending.Note&noteTrailing != 0)
+	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationOpen, Rights: intent.OpenRights(), OpenFlags: openFlags, Path: path}, attachPaths)
+	if blocked {
+		return linuxBlocked
+	}
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	if reply.Status == vfs.StatusOK && reply.Kind == ramfs.KindDirectory {
+		result := handler.installDirectory(state, path, intent)
+		handler.vfsFinish()
+		return result
+	}
+	if reply.Status != vfs.StatusOK {
+		handler.vfsFinish()
+		permission := linuxcompat.VFSPermissionAccess
+		if intent.Rights&vfs.Write != 0 || openFlags&(vfs.OpenCreate|vfs.OpenTruncate) != 0 {
+			permission = linuxcompat.VFSPermissionReadOnly
+		}
+		return linuxErrno(linuxcompat.VFSErrno(reply.Status, permission, linuxabi.ENFILE))
+	}
+	// The validation-only path forces a real late EMFILE without affecting the
+	// preflight Reserve. Restore the limit before entering the cleanup exchange.
+	fault := validation.Enabled && string(path) == "/home/demo/.validation-late-allocate"
+	soft, hard := 0, 0
+	if fault {
+		soft, hard = state.FDs.Limits()
+		state.FDs.SetLimits(0, uint64(hard))
+	}
+	description := linuxcompat.FileDescription{Kind: linuxcompat.FDVFSFile, Flags: intent.StatusFlags(), Object: uint64(reply.Handle)}
+	fd, errno := linuxcompat.AllocateFD(handler.root, description, intent.CloseOnExec)
+	if fault {
+		state.FDs.SetLimits(uint64(soft), uint64(hard))
+	}
+	if errno != 0 {
+		if !linuxcompat.SyscallContinuations.AdvanceOpenCleanup(handler.task, uint64(reply.Handle), errno) {
 			return linuxErrno(handler.vfsFailed())
 		}
+		pending, _ = linuxcompat.SyscallContinuations.Pending(handler.task)
+		return handler.cleanupOpen(pending)
 	}
+	handler.vfsFinish()
+	return linuxcompat.Result{Value: uint64(fd)}
+}
+
+func (handler *linuxCallHandler) cleanupOpen(pending linuxcompat.Pending) linuxcompat.Result {
+	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationClose, Handle: vfs.Handle(pending.Partial)}, attachPaths)
+	if blocked {
+		return linuxBlocked
+	}
+	if errno != 0 {
+		if errno == linuxabi.ETIMEDOUT {
+			return linuxErrno(linuxabi.Errno(pending.Note))
+		}
+		return linuxErrno(errno)
+	}
+	if reply.Status != vfs.StatusOK {
+		return linuxErrno(handler.vfsFailed())
+	}
+	handler.vfsFinish()
+	return linuxErrno(linuxabi.Errno(pending.Note))
 }
 
 func (handler *linuxCallHandler) installDirectory(state *linuxcompat.ProcessState, path []byte, intent linuxcompat.OpenIntent) linuxcompat.Result {
-	reference, retained := linuxcompat.RetainDirectory(state.FamilyID, path)
-	if !retained {
-		return linuxErrno(linuxabi.ENFILE)
-	}
-	description := linuxcompat.FileDescription{Kind: linuxcompat.FDVFSDirectory, Flags: intent.StatusFlags(), Object: reference}
-	fd, errno := linuxcompat.AllocateFD(handler.root, description, intent.CloseOnExec)
+	fd, errno := linuxcompat.InstallDirectory(handler.root, state.FamilyID, path, intent)
 	if errno != 0 {
-		linuxcompat.ReleaseDirectory(state.FamilyID, reference)
 		return linuxErrno(errno)
 	}
 	return linuxcompat.Result{Value: uint64(fd)}
@@ -611,8 +584,10 @@ func (handler *linuxCallHandler) Filesystem(request linuxcompat.Request) linuxco
 		return handler.access(request, linuxabi.AtFDCWD, arguments[0], arguments[1])
 	case linuxabi.SysFaccessat:
 		return handler.access(request, int32(arguments[0]), arguments[1], arguments[2])
-	case linuxabi.SysStat, linuxabi.SysLstat:
+	case linuxabi.SysStat:
 		return handler.status(request, linuxabi.AtFDCWD, arguments[0], arguments[1], 0, false)
+	case linuxabi.SysLstat:
+		return handler.status(request, linuxabi.AtFDCWD, arguments[0], arguments[1], linuxabi.AtSymlinkNoFollow, false)
 	case linuxabi.SysFstat:
 		return handler.status(request, int32(arguments[0]), 0, arguments[1], 0, true)
 	case linuxabi.SysNewfstatat:
@@ -621,9 +596,17 @@ func (handler *linuxCallHandler) Filesystem(request linuxcompat.Request) linuxco
 		// The flags are a C int; the mask stays in the request for status.
 		return handler.status(request, int32(arguments[0]), arguments[1], arguments[4], uint64(uint32(arguments[2])), false)
 	case linuxabi.SysReadlink:
-		return handler.readlink(request, linuxabi.AtFDCWD, arguments[0], arguments[2])
+		return handler.readlink(request, linuxabi.AtFDCWD, arguments[0], arguments[1], arguments[2])
 	case linuxabi.SysReadlinkat:
-		return handler.readlink(request, int32(arguments[0]), arguments[1], arguments[3])
+		return handler.readlink(request, int32(arguments[0]), arguments[1], arguments[2], arguments[3])
+	case linuxabi.SysSymlink:
+		return handler.link(request, arguments[0], linuxabi.AtFDCWD, 0, linuxabi.AtFDCWD, arguments[1], 0, true)
+	case linuxabi.SysSymlinkat:
+		return handler.link(request, arguments[0], linuxabi.AtFDCWD, 0, int32(arguments[1]), arguments[2], 0, true)
+	case linuxabi.SysLink:
+		return handler.link(request, 0, linuxabi.AtFDCWD, arguments[0], linuxabi.AtFDCWD, arguments[1], 0, false)
+	case linuxabi.SysLinkat:
+		return handler.link(request, 0, int32(arguments[0]), arguments[1], int32(arguments[2]), arguments[3], arguments[4], false)
 	case linuxabi.SysGetdents64:
 		return handler.getdents(request)
 	case linuxabi.SysLseek:
@@ -693,12 +676,12 @@ func (handler *linuxCallHandler) status(request linuxcompat.Request, dirfd int32
 	}
 	extended := request.Number == linuxabi.SysStatx
 	if !active {
-		var emptyPath bool
+		var emptyPath, noFollow bool
 		var errno linuxabi.Errno
 		if extended {
-			emptyPath, errno = linuxcompat.StatxFlags(flags, request.Arguments[3])
+			emptyPath, noFollow, errno = linuxcompat.StatxFlags(flags, request.Arguments[3])
 		} else {
-			emptyPath, errno = linuxcompat.StatFlags(flags)
+			emptyPath, noFollow, errno = linuxcompat.StatFlags(flags)
 		}
 		switch {
 		case errno != 0 || descriptor || !emptyPath:
@@ -733,9 +716,13 @@ func (handler *linuxCallHandler) status(request linuxcompat.Request, dirfd int32
 				}
 				return handler.deliverStatus(request, buffer, linuxcompat.DeviceStatus(device))
 			}
+			// A trailing slash asks for the directory a link names, so it
+			// is followed even by lstat.
 			note := uint64(0)
 			if trailing {
 				note = noteTrailing
+			} else if noFollow {
+				note = noteNoFollow
 			}
 			if errno == 0 {
 				errno = handler.vfsBegin(request, path, nil, note)
@@ -747,12 +734,16 @@ func (handler *linuxCallHandler) status(request linuxcompat.Request, dirfd int32
 	}
 	// A call with a path stats it and keeps flags in its note. A call
 	// without one stats the open file whose VFS handle the note holds.
-	pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	pending, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	operation := vfs.Request{Operation: vfs.OperationStat, Path: path}
 	trailing := pending.Note&noteTrailing != 0
 	if len(path) == 0 {
 		operation.Handle, trailing = vfs.Handle(pending.Note), false
+	} else if pending.Note&noteNoFollow != 0 {
+		operation.Rights = vfs.NoFollow
 	}
 	reply, errno, blocked := handler.vfsExchange(operation, attachPaths)
 	if blocked {
@@ -813,8 +804,10 @@ func (handler *linuxCallHandler) access(request linuxcompat.Request, dirfd int32
 			return linuxErrno(errno)
 		}
 	}
-	pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	pending, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationStat, Path: path}, attachPaths)
 	if blocked {
 		return linuxBlocked
@@ -836,19 +829,83 @@ func (handler *linuxCallHandler) access(request linuxcompat.Request, dirfd int32
 	return linuxErrno(linuxcompat.AccessErrno(requested, described.Mode))
 }
 
-// readlink serves readlink and readlinkat. GoOS has no symbolic links, so
-// a name that exists is not one (EINVAL) and the lookup's error is the
-// answer for any other; access does the lookup. /proc/self/exe, which glibc
-// asks for at startup, is ENOENT as on a Linux without /proc.
-func (handler *linuxCallHandler) readlink(request linuxcompat.Request, dirfd int32, pathAddress uint64, size uint64) linuxcompat.Result {
+// readlink serves readlink and readlinkat. The VFS reads the link the path
+// ends in without following it (ADR 0223) and returns its target in the
+// message or, when long, in the I/O buffer. As on Linux the target is cut to
+// the caller's buffer without a terminating NUL, and a name that is no link
+// is EINVAL. A path with a trailing slash names the directory a link leads
+// to, which is never a link: access does that lookup. /proc/self/exe, which
+// glibc asks for at startup, is ENOENT as on a Linux without /proc.
+func (handler *linuxCallHandler) readlink(request linuxcompat.Request, dirfd int32, pathAddress uint64, buffer uint64, size uint64) linuxcompat.Result {
 	if int32(size) <= 0 {
 		return linuxErrno(linuxabi.EINVAL)
 	}
-	result := handler.access(request, dirfd, pathAddress, 0)
-	if result == linuxBlocked || result.Errno != 0 {
-		return result
+	local := thisCPU()
+	pending, active, errno := handler.vfsStage(request)
+	state, found := linuxcompat.FindProcess(handler.root)
+	if errno == 0 && !found {
+		errno = linuxabi.EIO
 	}
-	return linuxErrno(linuxabi.EINVAL)
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	directory := active && pending.Note&noteTrailing != 0
+	if !active {
+		path, trailing, errno := handler.resolvePath(state, dirfd, pathAddress, &local.linuxResolved)
+		device := linuxcompat.DeviceNone
+		if errno == 0 {
+			device, errno = linuxcompat.LookupDevice(path)
+		}
+		switch {
+		case errno != 0:
+			return linuxErrno(errno)
+		case device != linuxcompat.DeviceNone:
+			return linuxErrno(linuxabi.EINVAL)
+		case trailing:
+			directory = true
+		default:
+			if errno := handler.vfsBegin(request, path, nil, 0); errno != 0 {
+				return linuxErrno(errno)
+			}
+		}
+	}
+	if directory {
+		result := handler.access(request, dirfd, pathAddress, 0)
+		if result == linuxBlocked || result.Errno != 0 {
+			return result
+		}
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	_, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
+	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationReadLink, Path: path, NameReturn: true}, attachName)
+	if blocked {
+		return linuxBlocked
+	}
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	handler.vfsFinish()
+	if reply.Status != vfs.StatusOK {
+		return linuxErrno(linuxcompat.VFSErrno(reply.Status, linuxcompat.VFSPermissionAccess, linuxabi.ENOMEM))
+	}
+	target := reply.Name
+	if reply.AttachedName != 0 {
+		attached, mapped := handler.returnedBatch(uint64(reply.AttachedName))
+		if !mapped {
+			return linuxErrno(linuxabi.EIO)
+		}
+		target = attached
+	}
+	if uint64(len(target)) > size {
+		target = target[:size]
+	}
+	if !vm.CopyOut(handler.root, buffer, target) {
+		return linuxErrno(linuxabi.EFAULT)
+	}
+	return linuxcompat.Result{Value: uint64(len(target))}
 }
 
 // beginDescriptorStatus starts the stat of what a descriptor holds. done
@@ -938,9 +995,12 @@ func (handler *linuxCallHandler) getdents(request linuxcompat.Request) linuxcomp
 			return linuxErrno(errno)
 		}
 	}
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	var completed uint64
 	for {
-		pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
+		pending, path, _, snapshotOK := handler.vfsSnapshot()
+		if !snapshotOK {
+			return direntResult(completed, linuxabi.EIO)
+		}
 		written := pending.Partial
 		reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationReadDirBatch, Path: path, Offset: description.Offset, Size: linuxcompat.DirentBatchLimit(capacity - written), NameReturn: true}, attachName)
 		if blocked {
@@ -991,6 +1051,7 @@ func (handler *linuxCallHandler) getdents(request linuxcompat.Request) linuxcomp
 		if errno := handler.vfsNext(pending.Stage, pending.Stage+1, written); errno != 0 {
 			return direntResult(written, errno)
 		}
+		completed = written
 	}
 }
 
@@ -1165,7 +1226,10 @@ func (handler *linuxCallHandler) chdir(request linuxcompat.Request) linuxcompat.
 			return linuxErrno(errno)
 		}
 	}
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	_, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationStat, Path: path}, attachPaths)
 	if blocked {
 		return linuxBlocked
@@ -1208,7 +1272,10 @@ func (handler *linuxCallHandler) mkdir(request linuxcompat.Request, dirfd int32,
 			return linuxErrno(errno)
 		}
 	}
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	_, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationMkdir, Path: path}, attachPaths)
 	if blocked {
 		return linuxBlocked
@@ -1263,11 +1330,19 @@ func (handler *linuxCallHandler) remove(request linuxcompat.Request, dirfd int32
 			return linuxErrno(errno)
 		}
 	}
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
 	for {
-		pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
+		pending, path, _, snapshotOK := handler.vfsSnapshot()
+		if !snapshotOK {
+			return linuxErrno(linuxabi.EIO)
+		}
 		if pending.Stage == removeStageStat {
-			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationStat, Path: path}, attachPaths)
+			// unlink removes the link, never what it names. A trailing slash
+			// asks for the directory behind it.
+			rights := vfs.NoFollow
+			if pending.Note&noteTrailing != 0 {
+				rights = 0
+			}
+			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationStat, Path: path, Rights: rights}, attachPaths)
 			if blocked {
 				return linuxBlocked
 			}
@@ -1345,13 +1420,22 @@ func (handler *linuxCallHandler) rename(request linuxcompat.Request, fromDirfd i
 			return linuxErrno(errno)
 		}
 	}
-	source, target := linuxcompat.SyscallContinuations.Paths(handler.task)
 	for {
-		pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
+		pending, source, target, snapshotOK := handler.vfsSnapshot()
+		if !snapshotOK {
+			return linuxErrno(linuxabi.EIO)
+		}
 		operation := vfs.OperationRename
 		switch pending.Stage {
 		case renameStageStat:
-			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationStat, Path: source}, attachPaths)
+			// A rename moves the name, so a link is moved as itself. The VFS
+			// replaces only a regular file; a link or special file moves
+			// onto a free name.
+			rights := vfs.NoFollow
+			if pending.Note&noteTrailing != 0 {
+				rights = 0
+			}
+			reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationStat, Path: source, Rights: rights}, attachPaths)
 			if blocked {
 				return linuxBlocked
 			}
@@ -1362,7 +1446,7 @@ func (handler *linuxCallHandler) rename(request linuxcompat.Request, fromDirfd i
 			switch {
 			case reply.Status != vfs.StatusOK:
 				errno = linuxcompat.VFSErrno(reply.Status, linuxcompat.VFSPermissionAccess, linuxabi.ENOMEM)
-			case reply.Kind == ramfs.KindFile && pending.Note&(noteTrailing|noteTargetTrailing) != 0:
+			case reply.Kind != ramfs.KindDirectory && pending.Note&(noteTrailing|noteTargetTrailing) != 0:
 				errno = linuxabi.ENOTDIR
 			case reply.Kind == ramfs.KindFile:
 				next = renameStageReplace
@@ -1390,12 +1474,92 @@ func (handler *linuxCallHandler) rename(request linuxcompat.Request, fromDirfd i
 			return linuxErrno(errno)
 		}
 		handler.vfsFinish()
-		if reply.Status == vfs.StatusUnsupported {
-			// The VFS moves a name within one filesystem only.
-			return linuxErrno(linuxabi.EXDEV)
-		}
+		// The VFS moves a name within one filesystem only: StatusCrossDevice
+		// is EXDEV.
 		return linuxErrno(linuxcompat.MutationErrno(reply.Status))
 	}
+}
+
+// link serves symlink, symlinkat, link and linkat. A symbolic link's target
+// is copied as the caller spelled it and resolved only when the link is
+// followed; the new name is resolved like any path. A hard link's source is
+// not followed unless linkat has AT_SYMLINK_FOLLOW. Linux answers EPERM for a
+// filesystem that keeps no links of the kind asked for and for a hard link
+// to a directory, EXDEV for a hard link between filesystems, and EROFS for a
+// read-only mount.
+func (handler *linuxCallHandler) link(request linuxcompat.Request, targetAddress uint64, fromDirfd int32, fromAddress uint64, toDirfd int32, toAddress uint64, flags uint64, symbolic bool) linuxcompat.Result {
+	local := thisCPU()
+	_, active, errno := handler.vfsStage(request)
+	state, found := linuxcompat.FindProcess(handler.root)
+	if errno == 0 && !found {
+		errno = linuxabi.EIO
+	}
+	if errno == 0 && flags&^(linuxabi.AtSymlinkFollow|linuxabi.AtEmptyPath) != 0 {
+		errno = linuxabi.EINVAL
+	}
+	if errno == 0 && flags&linuxabi.AtEmptyPath != 0 {
+		// Linking a descriptor by an empty path needs CAP_DAC_READ_SEARCH.
+		errno = linuxabi.ENOENT
+	}
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	if !active {
+		var source []byte
+		var errno linuxabi.Errno
+		if symbolic {
+			source, errno = handler.copyPath(targetAddress)
+			if errno == 0 && len(source) == 0 {
+				errno = linuxabi.ENOENT
+			}
+			if errno == 0 {
+				source = local.linuxTarget[:copy(local.linuxTarget[:], source)]
+			}
+		} else {
+			source, _, errno = handler.resolvePath(state, fromDirfd, fromAddress, &local.linuxTarget)
+		}
+		if errno != 0 {
+			return linuxErrno(errno)
+		}
+		name, trailing, errno := handler.resolvePath(state, toDirfd, toAddress, &local.linuxResolved)
+		if errno == 0 && trailing {
+			errno = linuxabi.ENOENT
+		}
+		if errno == 0 {
+			errno = linuxcompat.DevicePathErrno(name, linuxabi.EEXIST)
+		}
+		if errno == 0 && !symbolic {
+			errno = linuxcompat.DevicePathErrno(source, linuxabi.EPERM)
+		}
+		// The continuation keeps the new name as its path and the source
+		// or the target as its second one.
+		if errno == 0 {
+			errno = handler.vfsBegin(request, name, source, 0)
+		}
+		if errno != 0 {
+			return linuxErrno(errno)
+		}
+	}
+	_, name, source, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
+	operation := vfs.Request{Operation: vfs.OperationSymlink, Path: name, Target: source}
+	if !symbolic {
+		operation = vfs.Request{Operation: vfs.OperationLink, Path: source, Target: name}
+		if flags&linuxabi.AtSymlinkFollow == 0 {
+			operation.Rights = vfs.NoFollow
+		}
+	}
+	reply, errno, blocked := handler.vfsExchange(operation, attachPaths)
+	if blocked {
+		return linuxBlocked
+	}
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	handler.vfsFinish()
+	return linuxErrno(linuxcompat.LinkErrno(reply.Status))
 }
 
 func samePath(first []byte, second []byte) bool {

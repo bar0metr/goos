@@ -537,12 +537,14 @@ CA-0539	goos/userspace/cmd/vfs	initialSessionHandle	process	owned	none
 CA-0540	goos/userspace/cmd/vfs	liveSessions	process	owned	none
 CA-0541	goos/userspace/cmd/vfs	pathCopy	process	owned	none
 CA-0542	goos/userspace/cmd/vfs	profile	process	owned	none
+CA-9998	goos/userspace/cmd/vfs	lateAllocate	process	owned	none
 CA-0543	goos/userspace/cmd/vfs	profileLine	process	owned	none
 CA-0544	goos/userspace/cmd/vfs	ramfsPages	process	owned	none
 CA-0545	goos/userspace/cmd/vfs	requestsServed	process	owned	none
 CA-0546	goos/userspace/cmd/vfs	service	process	runtime	test-vfs-goroutine-acceptance
 CA-0547	goos/userspace/cmd/vfs	sessions	process	owned	none
 CA-0548	goos/userspace/cmd/vfs	targetCopy	process	owned	none
+CA-9999	goos/userspace/cmd/vfs	timeoutOpen	process	owned	none
 CA-0549	goos/userspace/cmd/vfs	waitCount	process	owned	none
 CA-0550	goos/userspace/cmd/vfs	waitInterests	process	owned	none
 CA-0551	goos/userspace/cmd/vfs	wire	process	owned	none

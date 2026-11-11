@@ -29,8 +29,9 @@ func TestContinuationRecordsComeFromStorageOncePerSlot(t *testing.T) {
 	if pending, ok := table.Pending(next); !ok || pending.Number != abi.SysPpoll {
 		t.Fatal("the reused record lost the call")
 	}
-	if path, _ := table.Paths(next); len(path) != 0 {
-		t.Fatalf("the reused record kept the old path %q", path)
+	var snapshot PathSnapshot
+	if _, ok := table.Snapshot(next, &snapshot); !ok || len(snapshot.Path()) != 0 {
+		t.Fatalf("the reused record kept the old path %q", snapshot.Path())
 	}
 	other, _ := sched.NewTaskID(64, 1)
 	if !table.Begin(other, request, nil) || storage.Live != 2 {

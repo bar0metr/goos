@@ -34,9 +34,13 @@ anything or when the e2fsprogs version differs from the pin.
 real clock, so two runs produce images that differ in those fields. The
 committed images are the reference; `userspace/ext4/testdata/SHA256SUMS`
 pins them and the tests refuse an image that does not match.
+`IMAGES=links tools/ext4fixture/make-fixtures.sh` builds and checks every
+image but copies only the ones named, so adding a fixture leaves the
+committed bytes of the others alone.
 
 | Image | Profile | Contents |
 |---|---|---|
+| `links` | writable profile, 4 KiB blocks | symbolic links (relative, absolute, dangling, looping, a 41-link chain, a `..` escape, non-UTF-8 names and targets), three names of one inode, a FIFO and three device nodes, owners and modes; `links.metadata.tsv` lists each inode's mode, owner and link count |
 | `canonical` | writable profile, 4 KiB blocks, `metadata_csum`, `64bit` | files, a 2000-entry indexed directory, hard and symbolic links, a sparse file past 5 GiB, a 400-extent file, extended attributes, an unwritten extent, a non-UTF-8 name |
 | `legacy` | `uninit_bg` instead of `metadata_csum`, 32-byte descriptors | the canonical tree |
 | `hash-tea`, `hash-legacy` | writable profile, directory hash changed with `tune2fs -E hash_alg` | 1200 names, half with bytes above 0x7f |

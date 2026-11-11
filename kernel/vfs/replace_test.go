@@ -106,7 +106,7 @@ func TestReplaceRefusals(t *testing.T) {
 		t.Fatal("mount failed")
 	}
 	writeFile(t, namespace, "/persist/doc", "other")
-	if status := namespace.Replace([]byte("/temp"), []byte("/persist/doc")); status != StatusUnsupported {
+	if status := namespace.Replace([]byte("/temp"), []byte("/persist/doc")); status != StatusCrossDevice {
 		t.Fatalf("cross-mount replace = %d", status)
 	}
 	if status := namespace.Replace([]byte("/temp"), []byte("/persist")); status != StatusBusy {

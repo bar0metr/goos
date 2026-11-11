@@ -58,7 +58,9 @@ const (
 	SysRename        Syscall = 82
 	SysMkdir         Syscall = 83
 	SysRmdir         Syscall = 84
+	SysLink          Syscall = 86
 	SysUnlink        Syscall = 87
+	SysSymlink       Syscall = 88
 	SysReadlink      Syscall = 89
 	SysUmask         Syscall = 95
 	SysGettimeofday  Syscall = 96
@@ -98,6 +100,8 @@ const (
 	SysNewfstatat       Syscall = 262
 	SysUnlinkat         Syscall = 263
 	SysRenameat         Syscall = 264
+	SysLinkat           Syscall = 265
+	SysSymlinkat        Syscall = 266
 	SysReadlinkat       Syscall = 267
 	SysFchmodat         Syscall = 268
 	SysFaccessat        Syscall = 269
@@ -157,8 +161,10 @@ const (
 
 	// Flags of newfstatat.
 	AtSymlinkNoFollow = uint64(0x100)
-	AtNoAutomount     = uint64(0x800)
-	AtEmptyPath       = uint64(0x1000)
+	// AtSymlinkFollow makes linkat follow a link its source names.
+	AtSymlinkFollow = uint64(0x400)
+	AtNoAutomount   = uint64(0x800)
+	AtEmptyPath     = uint64(0x1000)
 	// UtimeNow and UtimeOmit are the tv_nsec values utimensat reads as "the
 	// current time" and "leave this time alone".
 	UtimeNow  = uint64(1<<30 - 1)
@@ -181,8 +187,10 @@ const (
 	OpenNoATime  = uint32(0o1000000)
 
 	// d_type values of a directory entry.
+	DirentUnknown   = uint8(0)
 	DirentDirectory = uint8(4)
 	DirentRegular   = uint8(8)
+	DirentSymlink   = uint8(10)
 
 	// Clock identifiers of clock_gettime.
 	ClockRealtime        = uint64(0)
@@ -296,6 +304,7 @@ const (
 	ModeCharacter = uint32(0o020000)
 	ModeDirectory = uint32(0o040000)
 	ModeRegular   = uint32(0o100000)
+	ModeSymlink   = uint32(0o120000)
 
 	SeekSet = uint64(0)
 	SeekCur = uint64(1)
@@ -325,7 +334,7 @@ func (number Syscall) Known() bool {
 		SysReadlink, SysUmask, SysGettimeofday, SysSysinfo, SysGetuid, SysGetgid, SysGeteuid, SysGetegid, SysGetppid, SysSetpgid, SysGetpgrp, SysSetsid, SysGetpgid, SysGetsid,
 		SysArchPrctl, SysGettid, SysTime, SysFutex, SysGetdents64, SysSetTidAddress,
 		SysClockGettime,
-		SysExitGroup, SysOpenat, SysNewfstatat, SysUnlinkat, SysReadlinkat,
+		SysExitGroup, SysOpenat, SysNewfstatat, SysUnlinkat, SysReadlinkat, SysLink, SysSymlink, SysLinkat, SysSymlinkat,
 		SysSelect, SysPselect6, SysPpoll, SysSetRobustList, SysPipe2, SysPrlimit64, SysGetrandom,
 		SysStatx, SysChmod, SysFchmod, SysFchmodat, SysUtimensat, SysSchedGetaffinity, SysSchedSetaffinity, SysGetcpu:
 		return true

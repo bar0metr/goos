@@ -58,6 +58,10 @@ func VFSErrno(status vfs.Status, permission VFSPermissionContext, exhaustion abi
 		return abi.ETIMEDOUT
 	case vfs.StatusUnsupported:
 		return abi.EOPNOTSUPP
+	case vfs.StatusLoop:
+		return abi.ELOOP
+	case vfs.StatusCrossDevice:
+		return abi.EXDEV
 	default:
 		return abi.EIO
 	}

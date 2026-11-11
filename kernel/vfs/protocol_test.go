@@ -73,6 +73,57 @@ func TestLongPathsTravelAttached(t *testing.T) {
 	}
 }
 
+func TestAtomicOpenIntentProtocol(t *testing.T) {
+	validFlags := []OpenFlags{
+		0,
+		OpenCreate,
+		OpenCreate | OpenExclusive,
+		OpenTruncate,
+		OpenDirectory,
+		OpenTrailingSlash,
+		OpenCreate | OpenTruncate | OpenTrailingSlash,
+	}
+	for _, flags := range validFlags {
+		request := Request{Operation: OperationOpen, Rights: Read | NoFollow, OpenFlags: flags, Path: []byte("/tmp/x")}
+		message, ok := EncodeRequest(request, 7)
+		decoded, valid := DecodeRequest(message)
+		if !ok || !valid || decoded.OpenFlags != flags || decoded.Rights != request.Rights {
+			t.Fatalf("flags %#x: encoded=%v decoded=%v request=%+v", flags, ok, valid, decoded)
+		}
+	}
+	for _, request := range []Request{
+		{Operation: OperationOpen, Rights: Read, OpenFlags: OpenExclusive, Path: []byte("/tmp/x")},
+		{Operation: OperationOpen, Rights: Read, OpenFlags: OpenCreate | OpenDirectory, Path: []byte("/tmp/x")},
+		{Operation: OperationStat, Rights: Read, OpenFlags: OpenCreate, Path: []byte("/tmp/x")},
+		{Operation: OperationOpen, Rights: Read, OpenFlags: OpenFlags(1 << 7), Path: []byte("/tmp/x")},
+	} {
+		if _, ok := EncodeRequest(request, 7); ok {
+			t.Fatalf("encoded invalid open intent %+v", request)
+		}
+	}
+	message, _ := EncodeRequest(Request{Operation: OperationOpen, Rights: Read, Path: []byte("/tmp/x")}, 7)
+	old := message
+	old.Version = ProtocolVersion - 1
+	if _, ok := DecodeRequest(old); ok {
+		t.Fatal("old GVF1 peer decoded")
+	}
+	message.Payload[29] |= 1 << 7
+	if _, ok := DecodeRequest(message); ok {
+		t.Fatal("decoded an unknown open flag")
+	}
+	message, _ = EncodeRequest(Request{Operation: OperationStat, Rights: Read, Path: []byte("/tmp/x")}, 7)
+	message.Payload[29] |= 1
+	if _, ok := DecodeRequest(message); ok {
+		t.Fatal("decoded open flags on stat")
+	}
+	long := append([]byte("/"), bytes.Repeat([]byte{'x'}, limits.PathMax-1)...)
+	message, ok := EncodeRequest(Request{Operation: OperationOpen, Rights: Read | NoFollow, OpenFlags: OpenCreate, Path: long, PathsAttached: true}, 8)
+	decoded, decodedOK := DecodeRequest(message)
+	if !ok || !decodedOK || decoded.OpenFlags != OpenCreate || !decoded.PathsAttached {
+		t.Fatal("attached atomic open intent did not round trip")
+	}
+}
+
 func TestLongListedNamesComeAttached(t *testing.T) {
 	message, ok := EncodeRequest(Request{Operation: OperationReadDir, Path: []byte("/tmp"), NameReturn: true}, 2)
 	if !ok {

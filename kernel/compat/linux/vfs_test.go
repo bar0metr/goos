@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"goos/kernel/ipc"
+	"goos/kernel/ramfs"
 	"goos/kernel/sched"
 	"goos/kernel/vfs"
 )
@@ -35,7 +36,7 @@ func TestVFSSessionCorrelationsRiseAndStopAfterFailure(t *testing.T) {
 }
 
 func TestClassifyVFSReply(t *testing.T) {
-	open := vfs.Reply{Operation: vfs.OperationOpen, Status: vfs.StatusOK, Handle: 0x10001}
+	open := vfs.Reply{Operation: vfs.OperationOpen, Status: vfs.StatusOK, Kind: ramfs.KindFile, Handle: 0x10001}
 	message := vfsReplyMessage(t, open, 7)
 	reply, verdict := ClassifyVFSReply(&message, 7, vfs.OperationOpen)
 	if verdict != VFSReplyAccepted || reply.Handle != 0x10001 {
@@ -74,6 +75,27 @@ func TestClassifyVFSReply(t *testing.T) {
 	}
 	if _, verdict := ClassifyVFSReply(nil, 7, vfs.OperationOpen); verdict != VFSReplyMalformed {
 		t.Fatalf("nil message: verdict=%d", verdict)
+	}
+}
+
+func TestMalformedSuccessfulOpenReplies(t *testing.T) {
+	for _, test := range []struct {
+		kind   ramfs.Kind
+		handle vfs.Handle
+		valid  bool
+	}{
+		{ramfs.KindFile, 1, true},
+		{ramfs.KindDirectory, 0, true},
+		{ramfs.KindFile, 0, false},
+		{ramfs.KindDirectory, 1, false},
+		{ramfs.KindSymlink, 0, false},
+		{0, 0, false},
+	} {
+		message := vfsReplyMessage(t, vfs.Reply{Operation: vfs.OperationOpen, Status: vfs.StatusOK, Kind: test.kind, Handle: test.handle}, 9)
+		_, verdict := ClassifyVFSReply(&message, 9, vfs.OperationOpen)
+		if (verdict == VFSReplyAccepted) != test.valid {
+			t.Fatalf("kind=%v handle=%d: verdict=%v", test.kind, test.handle, verdict)
+		}
 	}
 }
 
@@ -226,6 +248,7 @@ func TestVFSContextPeerDeathDrainsWaiters(t *testing.T) {
 	if correlation, ok := context.Session.Next(); !ok || correlation != 1 {
 		t.Fatal("the owner could not issue its request")
 	}
+
 	// The VFS dies under the owner's exchange.
 	context.Session.Fail()
 	if _, ok := context.Session.Next(); ok {
@@ -275,7 +298,7 @@ func TestVFSReplyFromAnAbandonedRequestCannotAnswerANewerOne(t *testing.T) {
 	if _, verdict := ClassifyVFSReply(&other, current, vfs.OperationOpen); verdict != VFSReplyMalformed {
 		t.Fatalf("a reply to another operation was %d", verdict)
 	}
-	right := vfsReplyMessage(t, vfs.Reply{Operation: vfs.OperationOpen, Status: vfs.StatusOK}, current)
+	right := vfsReplyMessage(t, vfs.Reply{Operation: vfs.OperationOpen, Status: vfs.StatusOK, Kind: ramfs.KindFile, Handle: 1}, current)
 	if _, verdict := ClassifyVFSReply(&right, current, vfs.OperationOpen); verdict != VFSReplyAccepted {
 		t.Fatalf("the reply in flight was %d", verdict)
 	}

@@ -61,7 +61,13 @@ const (
 	StatusTimeout
 	StatusPeerDied
 	StatusUnsupported
-	lastStatus = StatusUnsupported
+	// StatusLoop is a path that met more than MaxLinkExpansions symbolic
+	// links, or an open that refused to follow one (ADR 0223).
+	StatusLoop
+	// StatusCrossDevice refuses a hard link between two filesystem
+	// instances.
+	StatusCrossDevice
+	lastStatus = StatusCrossDevice
 )
 
 type Rights uint8
@@ -70,6 +76,24 @@ const (
 	Read Rights = 1 << iota
 	Write
 )
+
+// OpenFlags carry the namespace mutations and kind constraints of one open.
+// NoFollow remains a right because path expansion also uses it.
+type OpenFlags uint8
+
+const (
+	OpenCreate OpenFlags = 1 << iota
+	OpenExclusive
+	OpenTruncate
+	OpenDirectory
+	OpenTrailingSlash
+	openFlagsMask = OpenCreate | OpenExclusive | OpenTruncate | OpenDirectory | OpenTrailingSlash
+)
+
+// Valid reports whether flags are a supported explicit open intent.
+func (flags OpenFlags) Valid() bool {
+	return flags&^openFlagsMask == 0 && (flags&OpenExclusive == 0 || flags&OpenCreate != 0)
+}
 
 type Handle uint64
 
@@ -121,6 +145,32 @@ type MetadataBackend interface {
 	SetMetadata(id ramfs.NodeID, change ramfs.MetadataChange) ramfs.Status
 }
 
+// LinkBackend holds symbolic links. ReadLink copies a link's target and
+// returns its length; SymlinkName makes a link. The VFS follows links itself
+// and never asks a backend to (ADR 0223).
+type LinkBackend interface {
+	ReadLink(id ramfs.NodeID, target []byte) (int, ramfs.Status)
+	SymlinkName(parent ramfs.NodeID, name ramfs.Name, target []byte) (ramfs.NodeID, ramfs.Status)
+}
+
+// HardLinkBackend gives the existing node id a further name in parent. A
+// backend without it answers Link with StatusUnsupported.
+type HardLinkBackend interface {
+	LinkName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
+}
+
+// SyncBackend makes a backend's completed changes durable. SyncFile covers
+// a file's data and the metadata needed to find it, SyncDirectory a
+// directory's entries, and SyncFilesystem everything the instance holds. A
+// sync reaches only the backend that owns the object, never another
+// filesystem. A backend without this interface answers a sync with
+// StatusUnsupported rather than claim durability it does not have.
+type SyncBackend interface {
+	SyncFile(id ramfs.NodeID) ramfs.Status
+	SyncDirectory(id ramfs.NodeID) ramfs.Status
+	SyncFilesystem() ramfs.Status
+}
+
 // ObjectBackend gives an opened file identity independent of pathname lookup.
 // Backends whose node IDs are already stable need not implement it.
 type ObjectBackend interface {
@@ -136,7 +186,10 @@ type mount struct {
 	generation     uint32
 	filesystemType ramfs.FilesystemType
 	readOnly       bool
-	used           bool
+	// links reports a backend that can hold symbolic links, so a walk
+	// through it checks the kind of every node it reaches.
+	links bool
+	used  bool
 }
 
 // MountInfo is one bounded mount-table entry.
@@ -173,7 +226,10 @@ type cacheEntry struct {
 	path      [maxCachedPath]byte
 	size      uint16
 	protected bool
-	used      bool
+	// link marks a path whose last component is a symbolic link. A walk
+	// that meets a link earlier stops there and caches nothing.
+	link bool
+	used bool
 }
 
 type Namespace struct {
@@ -217,6 +273,11 @@ type Namespace struct {
 	// one per scope slot. Every change to a name, mount, or scope clears them
 	// through invalidate.
 	scopeMembers [MaxScopes]scopeMembers
+	// hit is the symbolic link the last resolve met, and links the buffers
+	// expansion builds paths in. links is allocated when a mount that can
+	// hold links first appears.
+	hit   linkHit
+	links *linkState
 }
 
 const maxReserved = 4
@@ -339,10 +400,15 @@ func (namespace *Namespace) Mount(path []byte, backend Backend, root ramfs.NodeI
 				entry.generation = 1
 			}
 			entry.backend, entry.root, entry.size, entry.used = backend, root, uint16(size), true
+			entry.filesystemType, entry.readOnly = 0, false
 			if filesystem, supported := backend.(filesystemBackend); supported {
 				if info, status := filesystem.FilesystemInfo(); status == ramfs.StatusOK && info.Valid() && info.Type != 0 {
 					entry.filesystemType, entry.readOnly = info.Type, info.ReadOnly
 				}
+			}
+			entry.links = holdsLinks(backend, entry.filesystemType)
+			if entry.links && namespace.links == nil {
+				namespace.links = new(linkState)
 			}
 			copy(entry.path[:], canonical[:size])
 			namespace.invalidate()
@@ -434,11 +500,15 @@ func (namespace *Namespace) Resolve(path []byte) (uint8, ramfs.NodeID, Status) {
 // protected directory, so the node is it or lies below it.
 func (namespace *Namespace) resolve(path []byte) (uint8, ramfs.NodeID, bool, Status) {
 	canonical := &namespace.resolved
+	namespace.hit = linkHit{}
 	size, ok := canonicalPath(canonical, path)
 	if !ok {
 		return 0, 0, false, StatusInvalidArgument
 	}
-	if mountIndex, node, protected, found := namespace.cached(canonical[:size]); found {
+	if mountIndex, node, protected, link, found := namespace.cached(canonical[:size]); found {
+		if link {
+			namespace.hit = linkHit{mount: mountIndex, node: node, start: lastComponent(canonical[:size]), end: size, final: true, valid: true}
+		}
 		return mountIndex, node, protected, StatusOK
 	}
 	mountIndex, relative, status := namespace.selectMount(canonical[:size])
@@ -460,62 +530,179 @@ func (namespace *Namespace) resolve(path []byte) (uint8, ramfs.NodeID, bool, Sta
 			return 0, 0, false, mapStatus(backendStatus)
 		}
 		protected = protected || namespace.guards(mounted, node)
+		start := relative
 		relative = size - len(rest)
+		if mounted.links {
+			stat, statStatus := mounted.backend.Stat(node)
+			if statStatus != ramfs.StatusOK {
+				return 0, 0, false, mapStatus(statStatus)
+			}
+			if stat.Kind == ramfs.KindSymlink {
+				final := relative >= size
+				namespace.hit = linkHit{mount: mountIndex, node: node, start: start, end: start + len(component), final: final, valid: true}
+				if !final {
+					// The link is not a directory. A caller that did not
+					// expand the path gets the backend's answer for that.
+					return 0, 0, false, StatusNotDirectory
+				}
+			}
+		}
 	}
-	namespace.remember(canonical[:size], mountIndex, node, protected)
+	namespace.remember(canonical[:size], mountIndex, node, protected, namespace.hit.valid)
 	return mountIndex, node, protected, StatusOK
 }
 
 func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handle, Status) {
-	if owner == 0 || rights == 0 || rights&^(Read|Write) != 0 {
-		return 0, StatusInvalidArgument
+	handle, _, status := namespace.OpenIntent(owner, path, rights, 0)
+	return handle, status
+}
+
+// OpenIntent resolves and optionally creates or truncates one regular file,
+// acquires its stable object, and installs the handle without another path
+// lookup. A directory is reported by kind and receives no VFS handle.
+func (namespace *Namespace) OpenIntent(owner Owner, path []byte, rights Rights, flags OpenFlags) (Handle, ramfs.Kind, Status) {
+	if owner == 0 || rights == 0 || rights&^(Read|Write) != 0 || !flags.Valid() || flags&(OpenCreate|OpenDirectory) == OpenCreate|OpenDirectory {
+		return 0, 0, StatusInvalidArgument
 	}
-	if namespace.OpenBy(owner) >= MaxOpenPerOwner {
-		return 0, StatusResourceExhausted
-	}
-	free := -1
-	for index := range namespace.files {
-		if !namespace.files[index].used {
-			free = index
-			break
-		}
-	}
-	if free < 0 {
-		return 0, StatusResourceExhausted
+	if !namespace.insideRoot(owner, path, false) {
+		return 0, 0, StatusPermissionDenied
 	}
 	mountIndex, node, protected, status := namespace.resolve(path)
-	if status != StatusOK {
-		return 0, status
-	}
-	if protected && rights&Write != 0 {
-		return 0, StatusPermissionDenied
-	}
-	stat, backendStatus := namespace.mounts[mountIndex].backend.Stat(node)
-	if backendStatus != ramfs.StatusOK || stat.Kind != ramfs.KindFile {
-		return 0, StatusBackendError
-	}
-	identity := node
-	backend := namespace.mounts[mountIndex].backend
-	scopes, permission := namespace.nodeScopes(backend, node)
-	if permission != StatusOK || !namespace.permits(owner, scopes, rights) {
-		return 0, StatusPermissionDenied
-	}
-	if objects, ok := backend.(ObjectBackend); ok {
-		node, backendStatus = objects.AcquireObject(node)
+	if status == StatusNotFound {
+		if flags&OpenCreate == 0 {
+			return 0, 0, StatusNotFound
+		}
+		if flags&OpenTrailingSlash != 0 {
+			return 0, 0, StatusIsDirectory
+		}
+		if namespace.reservedTarget(path) {
+			return 0, 0, StatusPermissionDenied
+		}
+		free, reserveStatus := namespace.reserveOpen(owner)
+		if reserveStatus != StatusOK {
+			return 0, 0, reserveStatus
+		}
+		mountIndex, parent, name, parentProtected, parentStatus := namespace.resolveParent(path)
+		if parentStatus != StatusOK {
+			return 0, 0, parentStatus
+		}
+		backend := namespace.mounts[mountIndex].backend
+		scopes, permission := namespace.nameScopes(mountIndex, parent, name)
+		if parentProtected || permission != StatusOK || !namespace.permits(owner, scopes, rights|Write) {
+			return 0, 0, StatusPermissionDenied
+		}
+		var backendStatus ramfs.Status
+		node, backendStatus = backend.CreateName(parent, name)
+		namespace.invalidate()
 		if backendStatus != ramfs.StatusOK || node == 0 {
 			if backendStatus == ramfs.StatusOK {
 				backendStatus = ramfs.StatusIOError
 			}
-			return 0, mapStatus(backendStatus)
+			return 0, 0, mapStatus(backendStatus)
+		}
+		protected = parentProtected || namespace.guards(&namespace.mounts[mountIndex], node)
+		return namespace.finishOpen(free, owner, mountIndex, node, protected, rights, flags, true, scopes)
+	}
+	if status != StatusOK {
+		return 0, 0, status
+	}
+	if flags&(OpenCreate|OpenExclusive) == OpenCreate|OpenExclusive {
+		return 0, 0, StatusAlreadyExists
+	}
+	backend := namespace.mounts[mountIndex].backend
+	stat, backendStatus := backend.Stat(node)
+	if backendStatus != ramfs.StatusOK {
+		return 0, 0, mapStatus(backendStatus)
+	}
+	switch stat.Kind {
+	case ramfs.KindDirectory:
+		if rights&Write != 0 || flags&(OpenCreate|OpenTruncate) != 0 {
+			return 0, stat.Kind, StatusIsDirectory
+		}
+		scopes, permission := namespace.nodeScopes(backend, node)
+		if permission != StatusOK || !namespace.permits(owner, scopes, rights) {
+			return 0, stat.Kind, StatusPermissionDenied
+		}
+		return 0, stat.Kind, StatusOK
+	case ramfs.KindSymlink:
+		return 0, stat.Kind, StatusLoop
+	case ramfs.KindSpecial:
+		return 0, stat.Kind, StatusUnsupported
+	case ramfs.KindFile:
+	default:
+		return 0, stat.Kind, StatusBackendError
+	}
+	if flags&(OpenDirectory|OpenTrailingSlash) != 0 {
+		return 0, stat.Kind, StatusNotDirectory
+	}
+	if flags&OpenTruncate != 0 && namespace.reservedTarget(path) {
+		return 0, stat.Kind, StatusPermissionDenied
+	}
+	free, reserveStatus := namespace.reserveOpen(owner)
+	if reserveStatus != StatusOK {
+		return 0, stat.Kind, reserveStatus
+	}
+	scopes, permission := namespace.nodeScopes(backend, node)
+	if permission != StatusOK {
+		return 0, stat.Kind, StatusPermissionDenied
+	}
+	return namespace.finishOpen(free, owner, mountIndex, node, protected, rights, flags, false, scopes)
+}
+
+func (namespace *Namespace) reserveOpen(owner Owner) (int, Status) {
+	if namespace.OpenBy(owner) >= MaxOpenPerOwner {
+		return -1, StatusResourceExhausted
+	}
+	for index := range namespace.files {
+		if !namespace.files[index].used {
+			return index, StatusOK
+		}
+	}
+	return -1, StatusResourceExhausted
+}
+
+func (namespace *Namespace) finishOpen(free int, owner Owner, mountIndex uint8, identity ramfs.NodeID, protected bool, rights Rights, flags OpenFlags, created bool, scopes uint8) (Handle, ramfs.Kind, Status) {
+	backend := namespace.mounts[mountIndex].backend
+	if !namespace.permits(owner, scopes, rights) ||
+		!created && flags&OpenTruncate != 0 && !namespace.permits(owner, scopes, Write) {
+		return 0, ramfs.KindFile, StatusPermissionDenied
+	}
+	if protected && (rights&Write != 0 || flags&OpenTruncate != 0) {
+		return 0, ramfs.KindFile, StatusPermissionDenied
+	}
+	object := identity
+	objects, stable := backend.(ObjectBackend)
+	if stable {
+		var backendStatus ramfs.Status
+		object, backendStatus = objects.AcquireObject(identity)
+		if backendStatus != ramfs.StatusOK || object == 0 {
+			if backendStatus == ramfs.StatusOK {
+				backendStatus = ramfs.StatusIOError
+			}
+			return 0, ramfs.KindFile, mapStatus(backendStatus)
+		}
+	}
+	if !created && flags&OpenTruncate != 0 {
+		if namespace.heldDirect(mountIndex, object, true) {
+			if stable {
+				objects.ReleaseObject(object)
+			}
+			return 0, ramfs.KindFile, StatusPermissionDenied
+		}
+		if backendStatus := backend.Truncate(identity, 0); backendStatus != ramfs.StatusOK {
+			if stable {
+				objects.ReleaseObject(object)
+			}
+			return 0, ramfs.KindFile, mapStatus(backendStatus)
 		}
 	}
 	entry := &namespace.files[free]
 	if entry.generation == 0 {
 		entry.generation = 1
 	}
-	entry.node, entry.mount, entry.rights, entry.owner, entry.used = node, mountIndex, rights, owner, true
+	entry.node, entry.mount, entry.rights, entry.owner, entry.used = object, mountIndex, rights, owner, true
 	entry.identity, entry.protected, entry.scopes = identity, protected, scopes
-	return encodeHandle(free, entry.generation), StatusOK
+	return encodeHandle(free, entry.generation), ramfs.KindFile, StatusOK
 }
 
 func (namespace *Namespace) Close(owner Owner, handle Handle) Status {
@@ -666,7 +853,7 @@ func (namespace *Namespace) held(mount uint8, node ramfs.NodeID, executableOnly 
 func (namespace *Namespace) heldDirect(mount uint8, node ramfs.NodeID, executableOnly bool) bool {
 	for index := range namespace.files {
 		entry := &namespace.files[index]
-		if entry.used && (entry.executable || !executableOnly) && entry.mount == mount && entry.node == node {
+		if entry.used && (entry.executable || !executableOnly) && namespace.sameFilesystem(entry.mount, mount) && entry.node == node {
 			return true
 		}
 	}
@@ -1045,10 +1232,11 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 	if status != StatusOK {
 		return status
 	}
-	if sourceMount != targetMount {
+	if !namespace.sameFilesystem(sourceMount, targetMount) {
 		// A rename moves a name within one filesystem; moving between two is
-		// a copy, which is the caller's to make.
-		return StatusUnsupported
+		// a copy, which is the caller's to make. Two mounts of one backend,
+		// such as /home and /persist/home, are one filesystem.
+		return StatusCrossDevice
 	}
 	status = mapStatus(namespace.mounts[sourceMount].backend.RenameName(node, parent, name))
 	namespace.invalidate()
@@ -1069,7 +1257,7 @@ func (namespace *Namespace) follow(mountIndex uint8, previous ramfs.NodeID, targ
 	held := false
 	for index := range namespace.files {
 		entry := &namespace.files[index]
-		if entry.used && entry.mount == mountIndex && entry.identity == previous {
+		if entry.used && namespace.sameFilesystem(entry.mount, mountIndex) && entry.identity == previous {
 			held = true
 			break
 		}
@@ -1078,15 +1266,22 @@ func (namespace *Namespace) follow(mountIndex uint8, previous ramfs.NodeID, targ
 		return
 	}
 	targetMount, moved, status := namespace.Resolve(target)
-	if status != StatusOK || targetMount != mountIndex || moved == previous {
+	if status != StatusOK || !namespace.sameFilesystem(targetMount, mountIndex) || moved == previous {
 		return
 	}
 	for index := range namespace.files {
 		entry := &namespace.files[index]
-		if entry.used && entry.mount == mountIndex && entry.identity == previous {
+		if entry.used && namespace.sameFilesystem(entry.mount, mountIndex) && entry.identity == previous {
 			entry.identity = moved
 		}
 	}
+}
+
+// sameFilesystem reports whether two mounts are served by one backend
+// instance, whose node IDs mean the same thing under either mount.
+func (namespace *Namespace) sameFilesystem(first, second uint8) bool {
+	return int(first) < len(namespace.mounts) && int(second) < len(namespace.mounts) &&
+		namespace.mounts[first].backend == namespace.mounts[second].backend
 }
 
 // Replace moves the regular file path onto target within one filesystem
@@ -1117,8 +1312,8 @@ func (namespace *Namespace) Replace(path []byte, target []byte) Status {
 	if status != StatusOK {
 		return status
 	}
-	if targetMount != sourceMount {
-		return StatusUnsupported
+	if !namespace.sameFilesystem(sourceMount, targetMount) {
+		return StatusCrossDevice
 	}
 	if targetNode == node {
 		return StatusInvalidArgument
@@ -1230,17 +1425,17 @@ func (namespace *Namespace) file(owner Owner, handle Handle, required Rights) (*
 	return entry, StatusOK
 }
 
-func (namespace *Namespace) cached(path []byte) (uint8, ramfs.NodeID, bool, bool) {
+func (namespace *Namespace) cached(path []byte) (uint8, ramfs.NodeID, bool, bool, bool) {
 	for index := range namespace.cache {
 		entry := &namespace.cache[index]
 		if entry.used && equal(entry.path[:entry.size], path) {
-			return entry.mount, entry.node, entry.protected, true
+			return entry.mount, entry.node, entry.protected, entry.link, true
 		}
 	}
-	return 0, 0, false, false
+	return 0, 0, false, false, false
 }
 
-func (namespace *Namespace) remember(path []byte, mountIndex uint8, node ramfs.NodeID, protected bool) {
+func (namespace *Namespace) remember(path []byte, mountIndex uint8, node ramfs.NodeID, protected bool, link bool) {
 	if len(path) > maxCachedPath {
 		return
 	}
@@ -1248,6 +1443,7 @@ func (namespace *Namespace) remember(path []byte, mountIndex uint8, node ramfs.N
 		entry := &namespace.cache[index]
 		if !entry.used {
 			entry.used, entry.mount, entry.node, entry.size, entry.protected = true, mountIndex, node, uint16(len(path)), protected
+			entry.link = link
 			copy(entry.path[:], path)
 			return
 		}

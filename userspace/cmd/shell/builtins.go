@@ -51,8 +51,10 @@ func injectFault(target []byte) {
 		service = execproto.FaultLinuxSockets
 	} else if argumentIs(target, "volume") {
 		service = execproto.FaultVolume
+	} else if argumentIs(target, "volume-last") {
+		service = execproto.FaultVolumeLast
 	} else if !argumentIs(target, "tty") {
-		writeError("fault: tty, shell, fat32, vfs, config, log, block, driver, storage, net-driver, netd, linuxsockd, volume, remote-signer, remote-worker or kernel-stack\n")
+		writeError("fault: tty, shell, fat32, vfs, config, log, block, driver, storage, net-driver, netd, linuxsockd, volume, volume-last, remote-signer, remote-worker or kernel-stack\n")
 		return
 	}
 	reply, ok := controlExchange(execproto.ControlFault, service)

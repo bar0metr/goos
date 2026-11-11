@@ -3,7 +3,9 @@
 ## Status
 
 Accepted. Builds on ADR 0220. ADR 0222 adds the ext4 service process and
-the mount policy that starts it.
+the mount policy that starts it. ADR 0223 replaces the hidden kinds and the
+metadata rule below: links and special files are visible, the VFS follows
+links, and a stat carries the inode's Unix metadata.
 
 ## Context
 

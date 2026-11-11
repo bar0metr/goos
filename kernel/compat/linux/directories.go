@@ -1,6 +1,9 @@
 package linux
 
-import "goos/internal/limits"
+import (
+	"goos/internal/limits"
+	"goos/kernel/compat/linux/abi"
+)
 
 // MaxOpenDirectories bounds the directory descriptions all Linux processes
 // hold together. A directory has no open file in the VFS, so its description
@@ -93,6 +96,19 @@ func DirectoryPath(familyID uint64, reference uint64) ([]byte, bool) {
 	result0, result1 := directoryPathHeld(familyID, reference)
 	tablesLock.Unlock()
 	return result0, result1
+}
+
+func InstallDirectory(root, familyID uint64, path []byte, intent OpenIntent) (int, abi.Errno) {
+	reference, retained := RetainDirectory(familyID, path)
+	if !retained {
+		return -1, abi.ENFILE
+	}
+	description := FileDescription{Kind: FDVFSDirectory, Flags: intent.StatusFlags(), Object: reference}
+	fd, errno := AllocateFD(root, description, intent.CloseOnExec)
+	if errno != 0 {
+		ReleaseDirectory(familyID, reference)
+	}
+	return fd, errno
 }
 
 func ReleaseDirectory(familyID uint64, reference uint64) bool {

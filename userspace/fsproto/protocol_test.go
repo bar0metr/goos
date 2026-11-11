@@ -87,7 +87,7 @@ func TestDecodeRefusesMalformedMessages(t *testing.T) {
 		func(m *ipc.Message) { m.Correlation = 0 },
 		func(m *ipc.Message) { m.HandleCount = 1 },
 		func(m *ipc.Message) { m.Payload[0] = 0 },
-		func(m *ipc.Message) { m.Payload[0] = byte(OperationReadDirBatch + 1) },
+		func(m *ipc.Message) { m.Payload[0] = byte(OperationLink + 1) },
 		func(m *ipc.Message) { m.Payload[1] = 200 },
 		func(m *ipc.Message) { m.Payload[3] = 1 },
 		func(m *ipc.Message) { m.Payload[2] = 1 }, // a name in the page, with no page
@@ -111,7 +111,10 @@ func TestDecodeRefusesMalformedMessages(t *testing.T) {
 	}
 	for index, apply := range []func(*ipc.Message){
 		func(m *ipc.Message) { m.Payload[1] = byte(ramfs.LastStatus + 1) },
-		func(m *ipc.Message) { m.Payload[2] = byte(ramfs.KindDirectory + 1) },
+		func(m *ipc.Message) { m.Payload[2] = byte(ramfs.LastKind + 1) },
+		func(m *ipc.Message) { m.Payload[unixOffset+2] = 1 }, // Unix metadata whose mode is no file
+		func(m *ipc.Message) { m.Payload[unixOffset+2] = 8 },
+		func(m *ipc.Message) { m.Payload[unixOffset+4] = 1 }, // an owner with no metadata
 		func(m *ipc.Message) { m.Payload[5] = 1 },
 		func(m *ipc.Message) { m.Payload[30] = 1 },
 		func(m *ipc.Message) { m.Payload[52], m.Payload[53], m.Payload[54], m.Payload[55] = 0, 202, 154, 59 },

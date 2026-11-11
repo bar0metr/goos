@@ -24,8 +24,8 @@ func TestDecodeOpen(t *testing.T) {
 		{0o1000 | 0o100 | 1, OpenIntent{Rights: vfs.Write, Access: 1, Create: true, Truncate: true}, 0},
 		{0o2000 | 0o100 | 1, OpenIntent{Rights: vfs.Write, Access: 1, Create: true, Append: true}, 0},
 		{0o200000 | 0o2000000, OpenIntent{Rights: vfs.Read, Directory: true, CloseOnExec: true}, 0},
-		{0o400 | 0o400000, OpenIntent{Rights: vfs.Read}, 0}, // O_NOCTTY, O_NOFOLLOW
-		{1 << 32, OpenIntent{Rights: vfs.Read}, 0},          // flags is an int
+		{0o400 | 0o400000, OpenIntent{Rights: vfs.Read, NoFollow: true}, 0}, // O_NOCTTY, O_NOFOLLOW
+		{1 << 32, OpenIntent{Rights: vfs.Read}, 0},                          // flags is an int
 		{3, OpenIntent{}, abi.EINVAL},
 		{0o200000 | 0o100, OpenIntent{}, abi.EINVAL},                                          // O_DIRECTORY|O_CREAT
 		{0o4000 | 0o200000, OpenIntent{Rights: vfs.Read, Directory: true, NonBlock: true}, 0}, // opendir
@@ -43,53 +43,41 @@ func TestDecodeOpen(t *testing.T) {
 	if flags := (OpenIntent{Access: 1, Append: true}).StatusFlags(); flags != 1|abi.OpenAppend {
 		t.Fatalf("status flags = %#o", flags)
 	}
-}
-
-func TestPlanOpen(t *testing.T) {
-	read := OpenIntent{Rights: vfs.Read}
-	write := OpenIntent{Rights: vfs.Write, Access: 1}
-	create := OpenIntent{Rights: vfs.Write, Access: 1, Create: true}
-	exclusive := OpenIntent{Rights: vfs.Write, Access: 1, Create: true, Exclusive: true}
-	truncate := OpenIntent{Rights: vfs.Write, Access: 1, Truncate: true}
-	directory := OpenIntent{Rights: vfs.Read, Directory: true}
-	cases := []struct {
-		label    string
-		intent   OpenIntent
-		trailing bool
-		status   vfs.Status
-		kind     ramfs.Kind
-		step     OpenStep
-		errno    abi.Errno
+	for _, test := range []struct {
+		intent OpenIntent
+		opened vfs.Rights
 	}{
-		{"existing file", read, false, vfs.StatusOK, ramfs.KindFile, OpenExistingFile, 0},
-		{"missing file", read, false, vfs.StatusNotFound, 0, OpenFail, abi.ENOENT},
-		{"create missing", create, false, vfs.StatusNotFound, 0, OpenCreateFile, 0},
-		{"create existing", create, false, vfs.StatusOK, ramfs.KindFile, OpenExistingFile, 0},
-		{"exclusive create of existing", exclusive, false, vfs.StatusOK, ramfs.KindFile, OpenFail, abi.EEXIST},
-		{"exclusive create of existing directory", exclusive, false, vfs.StatusOK, ramfs.KindDirectory, OpenFail, abi.EEXIST},
-		{"exclusive create of missing", exclusive, false, vfs.StatusNotFound, 0, OpenCreateFile, 0},
-		{"create with a trailing slash", create, true, vfs.StatusNotFound, 0, OpenFail, abi.EISDIR},
-		{"truncate existing", truncate, false, vfs.StatusOK, ramfs.KindFile, OpenTruncateFile, 0},
-		{"read a directory", read, false, vfs.StatusOK, ramfs.KindDirectory, OpenExistingDirectory, 0},
-		{"O_DIRECTORY on a directory", directory, true, vfs.StatusOK, ramfs.KindDirectory, OpenExistingDirectory, 0},
-		{"write a directory", write, false, vfs.StatusOK, ramfs.KindDirectory, OpenFail, abi.EISDIR},
-		{"create over a directory", create, false, vfs.StatusOK, ramfs.KindDirectory, OpenFail, abi.EISDIR},
-		{"truncate a directory", OpenIntent{Rights: vfs.Read, Truncate: true}, false, vfs.StatusOK, ramfs.KindDirectory, OpenFail, abi.EISDIR},
-		{"O_DIRECTORY on a file", directory, false, vfs.StatusOK, ramfs.KindFile, OpenFail, abi.ENOTDIR},
-		{"file with a trailing slash", read, true, vfs.StatusOK, ramfs.KindFile, OpenFail, abi.ENOTDIR},
-		{"file under a file", read, false, vfs.StatusNotDirectory, 0, OpenFail, abi.ENOTDIR},
-		{"name too long for the filesystem", read, false, vfs.StatusNameTooLong, 0, OpenFail, abi.ENAMETOOLONG},
-		{"backend failure", read, false, vfs.StatusBackendError, 0, OpenFail, abi.EIO},
-		{"unknown kind", read, false, vfs.StatusOK, 0, OpenFail, abi.EIO},
-	}
-	for _, test := range cases {
-		step, errno := PlanOpen(test.intent, test.trailing, test.status, test.kind)
-		if step != test.step || errno != test.errno {
-			t.Errorf("%s: step=%d errno=%d, want step=%d errno=%d", test.label, step, errno, test.step, test.errno)
+		{OpenIntent{Rights: vfs.Read}, vfs.Read},
+		{OpenIntent{Rights: vfs.Read, NoFollow: true}, vfs.Read | vfs.NoFollow},
+		{OpenIntent{Rights: vfs.Write, Create: true}, vfs.Write},
+		{OpenIntent{Rights: vfs.Write, Create: true, Exclusive: true}, vfs.Write},
+		{OpenIntent{Rights: vfs.Write, Create: true, NoFollow: true}, vfs.Write | vfs.NoFollow},
+	} {
+		if opened := test.intent.OpenRights(); opened != test.opened {
+			t.Errorf("%+v: open %#x", test.intent, opened)
 		}
 	}
-	if !(OpenStageStat < OpenStageCreate && OpenStageCreate < OpenStageTruncate && OpenStageTruncate < OpenStageOpen) {
-		t.Fatal("open stages do not rise in exchange order")
+}
+
+func TestOpenIntentVFSFlags(t *testing.T) {
+	for _, test := range []struct {
+		intent   OpenIntent
+		trailing bool
+		want     vfs.OpenFlags
+	}{
+		{OpenIntent{}, false, 0},
+		{OpenIntent{Create: true}, false, vfs.OpenCreate},
+		{OpenIntent{Create: true, Exclusive: true}, false, vfs.OpenCreate | vfs.OpenExclusive},
+		{OpenIntent{Exclusive: true}, false, 0},
+		{OpenIntent{Truncate: true}, false, vfs.OpenTruncate},
+		{OpenIntent{Directory: true}, true, vfs.OpenDirectory | vfs.OpenTrailingSlash},
+	} {
+		if got := test.intent.VFSOpenFlags(test.trailing); got != test.want {
+			t.Errorf("%+v trailing=%v: %#x, want %#x", test.intent, test.trailing, got, test.want)
+		}
+	}
+	if OpenStageOpen != 1 {
+		t.Fatalf("open stage = %d", OpenStageOpen)
 	}
 }
 
@@ -206,6 +194,54 @@ func TestDirectoryDescriptionsAreBoundedAndOwned(t *testing.T) {
 	directorySlots = [MaxOpenDirectories]directorySlot{}
 }
 
+func TestInstallDirectoryReleasesReferenceWhenAllocationFails(t *testing.T) {
+	resetCompatibilityProcesses()
+	defer resetCompatibilityProcesses()
+	directorySlots = [MaxOpenDirectories]directorySlot{}
+	const root = 0x5000
+	if !InstallProcess(root, 60, linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4}), StandardStreams{Input: 1, Output: 2, Error: 3}, 0x600000, 0x4600000) {
+		t.Fatal("install failed")
+	}
+	state, _ := FindProcess(root)
+	if errno := state.FDs.Reserve(); errno != 0 {
+		t.Fatalf("reserve: %d", errno)
+	}
+	for state.FDs.HasFree() {
+		if _, errno := AllocateFD(root, FileDescription{Kind: FDVFSFile, Object: 1}, false); errno != 0 {
+			t.Fatalf("fill descriptors: %d", errno)
+		}
+	}
+	for i := 0; i < MaxOpenDirectories+1; i++ {
+		fd, errno := InstallDirectory(root, state.FamilyID, []byte("/tmp"), OpenIntent{})
+		if fd != -1 || errno != abi.EMFILE {
+			t.Fatalf("attempt %d: fd=%d errno=%d", i, fd, errno)
+		}
+	}
+	for i := range directorySlots {
+		if directorySlots[i].owner != 0 {
+			t.Fatalf("directory slot %d leaked", i)
+		}
+	}
+	if directorySlots[0].generation != MaxOpenDirectories+1 {
+		t.Fatalf("directory was not retained for each attempt: generation=%d", directorySlots[0].generation)
+	}
+	if _, _, errno := CloseFD(root, 3); errno != 0 {
+		t.Fatalf("close: %d", errno)
+	}
+	fd, errno := InstallDirectory(root, state.FamilyID, []byte("/tmp"), OpenIntent{})
+	if fd != 3 || errno != 0 {
+		t.Fatalf("install after close: fd=%d errno=%d", fd, errno)
+	}
+	description, found := DescriptionOf(root, uint64(fd))
+	if !found || description.Kind != FDVFSDirectory {
+		t.Fatalf("directory description: %#v", description)
+	}
+	path, found := DirectoryPath(state.FamilyID, description.Object)
+	if !found || string(path) != "/tmp" {
+		t.Fatalf("directory path: %q found=%v", path, found)
+	}
+}
+
 func TestProcessRemovalReleasesDirectoriesAndOffsetsAreShared(t *testing.T) {
 	resetCompatibilityProcesses()
 	directorySlots = [MaxOpenDirectories]directorySlot{}
@@ -251,8 +287,12 @@ func TestContinuationKeepsTwoPathsAndANote(t *testing.T) {
 	if !table.Begin(task, request, []byte("/a")) || table.Annotate(task, []byte("/b\x00"), 7) || !table.Annotate(task, []byte("/b"), 7) {
 		t.Fatal("annotation failed")
 	}
-	path, target := table.Paths(task)
-	pending, _ := table.Pending(task)
+	var snapshot PathSnapshot
+	pending, ok := table.Snapshot(task, &snapshot)
+	if !ok {
+		t.Fatal("snapshot failed")
+	}
+	path, target := snapshot.Path(), snapshot.Target()
 	if string(path) != "/a" || string(target) != "/b" || pending.Note != 7 {
 		t.Fatalf("paths %q %q note %d", path, target, pending.Note)
 	}
@@ -262,13 +302,16 @@ func TestContinuationKeepsTwoPathsAndANote(t *testing.T) {
 	if !table.Block(task, 1) || !table.Resume(task, 11, WakeMessage) || !table.Advance(task, 1, 3, 99) {
 		t.Fatal("stage did not advance")
 	}
-	path, target = table.Paths(task)
-	pending, _ = table.Pending(task)
+	pending, ok = table.Snapshot(task, &snapshot)
+	if !ok {
+		t.Fatal("advanced snapshot failed")
+	}
+	path, target = snapshot.Path(), snapshot.Target()
 	if string(path) != "/a" || string(target) != "/b" || pending.Note != 7 || pending.Partial != 99 || pending.Stage != 3 || pending.Issued {
 		t.Fatalf("after advance: %q %q %+v", path, target, pending)
 	}
 	table.Finish(task)
-	if path, target := table.Paths(task); path != nil || target != nil {
+	if _, ok := table.Snapshot(task, &snapshot); ok {
 		t.Fatal("finished call kept its paths")
 	}
 }

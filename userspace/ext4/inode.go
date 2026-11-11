@@ -1,5 +1,7 @@
 package ext4
 
+import "encoding/binary"
+
 const (
 	RootInode = 2
 
@@ -68,6 +70,21 @@ func (inode *Inode) IsDir() bool { return inode.Type() == ModeDir }
 func (inode *Inode) IsRegular() bool { return inode.Type() == ModeRegular }
 
 func (inode *Inode) IsSymlink() bool { return inode.Type() == ModeSymlink }
+
+// DeviceNumber returns the device a character or block device inode names,
+// in Linux's 32-bit encoding (major in bits 8-19, minor in bits 0-7 and
+// 20-31), and zero for every other kind. Linux writes the old 16-bit form to
+// the first word of i_block when it fits and the new form to the second word
+// otherwise; the old form is the new form's low half.
+func (inode *Inode) DeviceNumber() uint32 {
+	if inode.Type() != ModeChar && inode.Type() != ModeBlock {
+		return 0
+	}
+	if old := binary.LittleEndian.Uint32(inode.blockArea[0:]); old != 0 {
+		return old & 0xFFFF
+	}
+	return binary.LittleEndian.Uint32(inode.blockArea[4:])
+}
 
 // Permissions are the permission and set-id bits of the mode.
 func (inode *Inode) Permissions() uint16 { return inode.Mode &^ modeTypeMask }
@@ -162,7 +179,10 @@ func (fs *FS) decodeInode(number uint32, raw []byte) (*Inode, error) {
 		inode.Create = decodeTime(le32(raw, 0x90), raw, 0x94, true)
 		inode.HasCreate = true
 	}
-	if inode.Flags&inodeFlagHugeFile != 0 && fs.sb.Features.ROCompat&roCompatHugeFile != 0 {
+	// Without huge_file Linux reads only the low 32 bits of i_blocks.
+	if fs.sb.Features.ROCompat&roCompatHugeFile == 0 {
+		inode.Blocks512 &= 0xFFFFFFFF
+	} else if inode.Flags&inodeFlagHugeFile != 0 {
 		inode.Blocks512 *= uint64(fs.blockSize / 512)
 	}
 	return inode, nil

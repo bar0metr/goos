@@ -197,6 +197,26 @@ func TestScopedProtectionSurvivesFilesystemRestartAndWithdraw(t *testing.T) {
 	}
 }
 
+func TestCreateOpenMissingExactScope(t *testing.T) {
+	service := startedService(t, installedDevice(t))
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationMkdir, Path: []byte("/home/user/custom")})
+	scopeOK(t, service, 0, "/home/user/custom/HostKey", false, vfs.Read|vfs.Write)
+	authority := vfs.Authority{Confined: true}
+	authority.Grants[0] = vfs.Read
+	if service.SetAuthority(remoteOwner, authority) != vfs.StatusOK {
+		t.Fatal("authority")
+	}
+	request := vfs.Request{Operation: vfs.OperationOpen, Path: []byte("/persist/home/USER/CUSTOM/HOSTKEY"), Rights: vfs.Read, OpenFlags: vfs.OpenCreate}
+	deny(t, service, remoteOwner, request)
+	authority.Grants[0] = vfs.Read | vfs.Write
+	if service.SetAuthority(remoteOwner, authority) != vfs.StatusOK {
+		t.Fatal("authority")
+	}
+	file := remoteOK(t, service, request).Handle
+	deny(t, service, remoteOwner, vfs.Request{Operation: vfs.OperationWrite, Handle: file, Data: []byte("x")})
+	remoteOK(t, service, vfs.Request{Operation: vfs.OperationClose, Handle: file})
+}
+
 func TestOverlappingHostSubtreeDoesNotWidenAuthorizedKeysGrant(t *testing.T) {
 	service, _ := protectedRemote(t)
 	// Configuration may put authorized_keys inside the writable host-key tree.
@@ -211,9 +231,10 @@ func TestOverlappingHostSubtreeDoesNotWidenAuthorizedKeysGrant(t *testing.T) {
 	if service.SetAuthority(remoteOwner, authority) != vfs.StatusOK {
 		t.Fatal("authority")
 	}
-	file := remoteOK(t, service, vfs.Request{Operation: vfs.OperationOpen, Path: []byte("/state/security/ssh/authorized_keys"), Rights: vfs.Read}).Handle
+	file := remoteOK(t, service, vfs.Request{Operation: vfs.OperationOpen, Path: []byte("/state/security/ssh/authorized_keys"), Rights: vfs.Read, OpenFlags: vfs.OpenCreate}).Handle
 	deny(t, service, remoteOwner,
 		vfs.Request{Operation: vfs.OperationOpen, Path: []byte("/state/security/ssh/authorized_keys"), Rights: vfs.Write},
+		vfs.Request{Operation: vfs.OperationOpen, Path: []byte("/state/security/ssh/authorized_keys"), Rights: vfs.Read, OpenFlags: vfs.OpenTruncate},
 		vfs.Request{Operation: vfs.OperationTruncate, Path: []byte("/state/security/ssh/authorized_keys")},
 		vfs.Request{Operation: vfs.OperationUnlink, Path: []byte("/state/security/ssh/authorized_keys")},
 		vfs.MetadataRequest(nil, file, ramfs.MetadataChange{SetReadOnly: true, ReadOnly: true}),
@@ -432,6 +453,7 @@ func TestRootedSessionThroughDispatch(t *testing.T) {
 	}
 	deny(t, service, rooted,
 		vfs.Request{Operation: vfs.OperationStat, Path: []byte("/home/elsewhere")},
+		vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, OpenFlags: vfs.OpenCreate, Path: []byte("/home/rooted/../elsewhere/x")},
 		vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/home/rooted/../elsewhere/x")},
 		vfs.Request{Operation: vfs.OperationRename, Path: []byte("/home/rooted/file"), Target: []byte("/home/elsewhere/file")},
 		vfs.Request{Operation: vfs.OperationRename, Path: []byte("/home/rooted"), Target: []byte("/home/moved")},

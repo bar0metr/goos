@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -139,7 +140,7 @@ func readManifest(t testing.TB, name string) []manifestEntry {
 		fields := strings.Split(scanner.Text(), "\t")
 		entry := manifestEntry{kind: fields[0], path: strings.TrimPrefix(fields[1], ".")}
 		switch entry.kind {
-		case "symlink":
+		case "symlink", "device":
 			entry.target = fields[2]
 		case "file":
 			entry.size, _ = strconv.ParseInt(fields[2], 10, 64)
@@ -167,6 +168,7 @@ var fixtureManifests = []struct{ image, manifest string }{
 	{"hash-tea", "hash.manifest.tsv"},
 	{"hash-legacy", "hash.manifest.tsv"},
 	{"blockmap-1k", "blockmap.manifest.tsv"},
+	{"links", "links.manifest.tsv"},
 }
 
 // TestFixturesMatchManifest compares every name, type, size, content hash
@@ -181,6 +183,18 @@ func TestFixturesMatchManifest(t *testing.T) {
 				case "dir":
 					if !inode.IsDir() {
 						t.Fatalf("%s: not a directory", entry.path)
+					}
+				case "fifo":
+					if inode.Type() != ModeFIFO {
+						t.Fatalf("%s: mode %#o", entry.path, inode.Mode)
+					}
+				case "device":
+					// stat -c %t:%T prints major and minor in hex.
+					var major, minor uint32
+					fmt.Sscanf(entry.target, "%x:%x", &major, &minor)
+					want := minor&0xff | major<<8 | (minor&^0xff)<<12
+					if inode.Type() != ModeChar && inode.Type() != ModeBlock || inode.DeviceNumber() != want {
+						t.Fatalf("%s: device %#x, want %#x", entry.path, inode.DeviceNumber(), want)
 					}
 				case "symlink":
 					target, err := fs.Readlink(inode)
@@ -201,6 +215,60 @@ func TestFixturesMatchManifest(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestLinksMetadata compares the mode, owner and link count stat printed for
+// every path of the links tree with the inode the reader decodes.
+func TestLinksMetadata(t *testing.T) {
+	fs := mount(t, fixture(t, "links"))
+	data, err := os.ReadFile(filepath.Join("testdata", "links.metadata.tsv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) < 60 {
+		t.Fatalf("%d metadata lines", len(lines))
+	}
+	for _, line := range lines {
+		fields := strings.Split(line, "\t")
+		mode, _ := strconv.ParseUint(fields[1], 16, 16)
+		uid, _ := strconv.ParseUint(fields[2], 10, 32)
+		gid, _ := strconv.ParseUint(fields[3], 10, 32)
+		links, _ := strconv.ParseUint(fields[4], 10, 16)
+		inode := resolve(t, fs, strings.TrimPrefix(fields[0], "."))
+		if uint64(inode.Mode) != mode || uint64(inode.UID) != uid || uint64(inode.GID) != gid || uint64(inode.Links) != links {
+			t.Fatalf("%s: mode %#x uid %d gid %d links %d, Linux printed %s", fields[0], inode.Mode, inode.UID, inode.GID, inode.Links, line)
+		}
+	}
+}
+
+// TestLinksInodes compares the inode number, generation, block count and
+// size debugfs read from the links image with what the reader decodes.
+func TestLinksInodes(t *testing.T) {
+	fs := mount(t, fixture(t, "links"))
+	data, err := os.ReadFile(filepath.Join("testdata", "links.inodes.tsv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	generations := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Split(line, "\t")
+		number, _ := strconv.ParseUint(fields[1], 10, 32)
+		generation, _ := strconv.ParseUint(fields[2], 10, 32)
+		blocks, _ := strconv.ParseUint(fields[3], 10, 64)
+		size, _ := strconv.ParseUint(fields[4], 10, 64)
+		inode := resolve(t, fs, "/"+fields[0])
+		if uint64(inode.Number) != number || uint64(inode.Generation) != generation || inode.Blocks512 != blocks || inode.Size != size {
+			t.Fatalf("%s: inode %d generation %d blocks %d size %d, debugfs printed %s",
+				fields[0], inode.Number, inode.Generation, inode.Blocks512, inode.Size, line)
+		}
+		if generation != 0 {
+			generations++
+		}
+	}
+	if generations < 2 {
+		t.Fatal("the fixture lost its nonzero generations")
 	}
 }
 

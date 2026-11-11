@@ -8,6 +8,7 @@ package main
 // write bit and clears it otherwise; the other bits are accepted and not
 // kept, as on a FAT volume Linux mounts with the quiet option. utimensat
 // sets the modification time; the access time is accepted and not kept.
+// With AT_SYMLINK_NOFOLLOW utimensat changes a symbolic link itself.
 
 import (
 	"encoding/binary"
@@ -100,9 +101,14 @@ func (handler *linuxCallHandler) changeMetadata(request linuxcompat.Request, dir
 				// A device node keeps no mode or time of its own.
 				return linuxcompat.Result{}
 			}
+			// utimensat with AT_SYMLINK_NOFOLLOW changes a link the path ends
+			// in, not its target (ADR 0223). A trailing slash asks for the
+			// directory behind the link.
 			note := uint64(0)
 			if trailing {
 				note = noteTrailing
+			} else if request.Number == linuxabi.SysUtimensat && request.Arguments[3]&linuxabi.AtSymlinkNoFollow != 0 {
+				note = noteNoFollow
 			}
 			if errno == 0 {
 				errno = handler.vfsBegin(request, path, nil, note)
@@ -112,8 +118,10 @@ func (handler *linuxCallHandler) changeMetadata(request linuxcompat.Request, dir
 			}
 		}
 	}
-	pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	pending, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	handle := vfs.Handle(0)
 	if len(path) == 0 {
 		handle = vfs.Handle(pending.Note)
@@ -121,6 +129,9 @@ func (handler *linuxCallHandler) changeMetadata(request linuxcompat.Request, dir
 	operation := vfs.MetadataRequest(path, handle, change)
 	if !change.SetModified && !change.SetReadOnly {
 		operation = vfs.Request{Operation: vfs.OperationStat, Path: path, Handle: handle}
+	}
+	if len(path) != 0 && pending.Note&noteNoFollow != 0 {
+		operation.Rights |= vfs.NoFollow
 	}
 	reply, errno, blocked := handler.vfsExchange(operation, attachPaths)
 	if blocked {
