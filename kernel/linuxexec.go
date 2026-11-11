@@ -133,12 +133,40 @@ func (handler *linuxCallHandler) Execve(request linuxcompat.Request) linuxcompat
 		}
 		return linuxErrno(linuxabi.EIO)
 	}
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
 	for {
-		pending, _ = linuxcompat.SyscallContinuations.Pending(handler.task)
+		var path []byte
+		var snapshotOK bool
+		pending, path, _, snapshotOK = handler.vfsSnapshot()
+		if !snapshotOK {
+			cancelLinuxExec(handler.task)
+			return linuxErrno(linuxabi.EIO)
+		}
+		var operation vfs.Request
+		attachments := attachPaths
+		header := min(state.fileSize, uint64(vm.PageSize))
 		switch pending.Stage {
 		case linuxcompat.ExecStageStat:
-			reply, exchangeErrno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationStat, Path: path}, attachPaths)
+			operation = vfs.Request{Operation: vfs.OperationStat, Path: path}
+		case linuxcompat.ExecStageOpen:
+			operation = vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path}
+		case linuxcompat.ExecStagePrepare:
+			operation = vfs.Request{Operation: vfs.OperationPrepareExecutable, Handle: state.file, Size: uint32(header)}
+			attachments = attachExecutable
+		case linuxcompat.ExecStageSeek:
+			operation = vfs.Request{Operation: vfs.OperationSeek, Handle: state.file, Offset: header}
+		case linuxcompat.ExecStageFill:
+			operation = vfs.Request{Operation: vfs.OperationFillExecutable, Handle: state.file, Size: uint32(state.fileSize - header)}
+			attachments = attachExecutable
+		case linuxcompat.ExecStageClose:
+			operation = vfs.Request{Operation: vfs.OperationClose, Handle: state.file}
+		}
+		var reply vfs.Reply
+		if pending.Stage == linuxcompat.ExecStageStat || pending.Stage == linuxcompat.ExecStageOpen ||
+			pending.Stage == linuxcompat.ExecStagePrepare || pending.Stage == linuxcompat.ExecStageSeek ||
+			pending.Stage == linuxcompat.ExecStageFill || pending.Stage == linuxcompat.ExecStageClose {
+			var exchangeErrno linuxabi.Errno
+			var blocked bool
+			reply, exchangeErrno, blocked = handler.vfsExchange(operation, attachments)
 			if blocked {
 				return linuxBlocked
 			}
@@ -146,6 +174,9 @@ func (handler *linuxCallHandler) Execve(request linuxcompat.Request) linuxcompat
 				cancelLinuxExec(handler.task)
 				return linuxErrno(exchangeErrno)
 			}
+		}
+		switch pending.Stage {
+		case linuxcompat.ExecStageStat:
 			if reply.Status != vfs.StatusOK || reply.Kind != ramfs.KindFile || reply.Size == 0 || reply.Size > executable.MaxSize || reply.Size > uint64(^uint32(0)) {
 				handler.vfsFinish()
 				errno = linuxcompat.VFSErrno(reply.Status, linuxcompat.VFSPermissionAccess, linuxabi.ENOMEM)
@@ -164,14 +195,6 @@ func (handler *linuxCallHandler) Execve(request linuxcompat.Request) linuxcompat
 				return linuxErrno(errno)
 			}
 		case linuxcompat.ExecStageOpen:
-			reply, exchangeErrno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path}, attachPaths)
-			if blocked {
-				return linuxBlocked
-			}
-			if exchangeErrno != 0 {
-				cancelLinuxExec(handler.task)
-				return linuxErrno(exchangeErrno)
-			}
 			if reply.Status != vfs.StatusOK {
 				handler.vfsFinish()
 				cancelLinuxExec(handler.task)
@@ -191,15 +214,6 @@ func (handler *linuxCallHandler) Execve(request linuxcompat.Request) linuxcompat
 				return linuxErrno(errno)
 			}
 		case linuxcompat.ExecStagePrepare:
-			header := min(state.fileSize, uint64(vm.PageSize))
-			reply, exchangeErrno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationPrepareExecutable, Handle: state.file, Size: uint32(header)}, attachExecutable)
-			if blocked {
-				return linuxBlocked
-			}
-			if exchangeErrno != 0 {
-				cancelLinuxExec(handler.task)
-				return linuxErrno(exchangeErrno)
-			}
 			next := linuxcompat.ExecStageSeek
 			if reply.Status != vfs.StatusOK || reply.Size != header {
 				state.failure, next = execVFSErrno(reply.Status), linuxcompat.ExecStageClose
@@ -212,15 +226,6 @@ func (handler *linuxCallHandler) Execve(request linuxcompat.Request) linuxcompat
 				return linuxErrno(errno)
 			}
 		case linuxcompat.ExecStageSeek:
-			header := min(state.fileSize, uint64(vm.PageSize))
-			reply, exchangeErrno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationSeek, Handle: state.file, Offset: header}, attachPaths)
-			if blocked {
-				return linuxBlocked
-			}
-			if exchangeErrno != 0 {
-				cancelLinuxExec(handler.task)
-				return linuxErrno(exchangeErrno)
-			}
 			next := linuxcompat.ExecStageFill
 			if reply.Status != vfs.StatusOK {
 				state.failure, next = linuxabi.ENOEXEC, linuxcompat.ExecStageClose
@@ -232,15 +237,6 @@ func (handler *linuxCallHandler) Execve(request linuxcompat.Request) linuxcompat
 				return linuxErrno(errno)
 			}
 		case linuxcompat.ExecStageFill:
-			header := min(state.fileSize, uint64(vm.PageSize))
-			reply, exchangeErrno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationFillExecutable, Handle: state.file, Size: uint32(state.fileSize - header)}, attachExecutable)
-			if blocked {
-				return linuxBlocked
-			}
-			if exchangeErrno != 0 {
-				cancelLinuxExec(handler.task)
-				return linuxErrno(exchangeErrno)
-			}
 			if reply.Status != vfs.StatusOK || reply.Size != state.fileSize-header {
 				state.failure = execVFSErrno(reply.Status)
 				if reply.Status == vfs.StatusOK {
@@ -252,14 +248,6 @@ func (handler *linuxCallHandler) Execve(request linuxcompat.Request) linuxcompat
 				return linuxErrno(errno)
 			}
 		case linuxcompat.ExecStageClose:
-			reply, exchangeErrno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationClose, Handle: state.file}, attachPaths)
-			if blocked {
-				return linuxBlocked
-			}
-			if exchangeErrno != 0 {
-				cancelLinuxExec(handler.task)
-				return linuxErrno(exchangeErrno)
-			}
 			if state.failure != 0 || reply.Status != vfs.StatusOK {
 				handler.vfsFinish()
 				if state.failure == 0 {

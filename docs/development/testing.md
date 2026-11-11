@@ -446,6 +446,19 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   every host; `GOOS_FAT32_FIXTURES=1 go test -run TestMakeForeignFixtures
   ./userspace/fat32` regenerates them on macOS. Tests that need a host tool
   skip without it. `make test-unit` includes all of this.
+- Atomic open timeout: `OPEN_TIMEOUT_ONLY=1 make -j3 test-linux-boot` opens
+  an existing and a new persistent file through the Linux bridge and GVF1.
+  Validation checks peer-death teardown, one backend acquire and release, and
+  zero remaining owner handles. A third case, `abi-probe open-kill`, has a
+  parent kill a child whose open the VFS executed but did not answer; the VFS
+  must release the object while the parent runs, and the parent's next open
+  returns `EIO`. `make test-boot` runs the same three cases. An `execve`
+  killed between its open and close stages keeps its known VFS handle until
+  the session ends; no test covers that path.
+- Late Linux FD allocation failure: `TestOpenCleanupContinuationAfterDescriptionExhaustion`
+  checks a known handle and backend release after `ENFILE` at component level.
+  `LATE_ALLOCATE_ONLY=1 make -j3 test-linux-boot` passed through the bridge and
+  GVF1 `OperationClose`, checking `EMFILE`, FD reuse and backend release.
 - `make test-partitions` runs the partition-layer and block-slice tests (ADR
   0115): MBR and GPT parsing at 512 and 4096-byte blocks, every selector, GPT
   backup fallback and each header, array and entry corruption, seeded random
@@ -456,6 +469,17 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   `userspace/partition/testdata` cover foreign tables everywhere
   (`GOOS_PARTITION_FIXTURES=1` regenerates them). The boot test boots from an
   MBR and a GPT disk and reads the guest's file back out of the partition.
+  The test creates fixture paths in sorted order. Run `go test -run
+  TestUnicodeFixtureCreationPermutations ./userspace/fat32` to check all six
+  creation orders with the internal allocation checker, FSInfo accounting,
+  FAT mirror comparison and, when available, `fsck_msdos`. On macOS, set
+  `GOOS_PARTITION_KEEP_IMAGES` to a directory to retain images for investigation.
+  Host checks report the image SHA-256. A detach error fails the test, even if
+  forced detach succeeds. One earlier run on a heavily loaded host reported an
+  orphan cluster and an FSInfo mismatch from `fsck_msdos`. Its image was not
+  kept, so the cause is unknown. That run also used the old `hdiutil` parser,
+  which could leave the volume attached and mounted during the check. A hundred
+  repeated runs with the fixed parser, and all six creation orders, were clean.
 - `make test-storage-stress` (`make test-fat32-stress`) runs the same tests at
   scale: 128 KiB to 512 KiB clusters, a 1 GiB and a 4 GiB − 1 file on a sparse
   host file, thousands of seeded corruptions, a directory of 8000 long names,

@@ -52,8 +52,12 @@ func (handler *linuxCallHandler) sync(request linuxcompat.Request) linuxcompat.R
 		}
 		pending, _ = linuxcompat.SyscallContinuations.Pending(handler.task)
 	}
+	pending, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	operation := vfs.Request{Operation: vfs.OperationSync, Handle: vfs.Handle(pending.Note)}
-	if path, _ := linuxcompat.SyscallContinuations.Paths(handler.task); len(path) != 0 {
+	if len(path) != 0 {
 		operation = vfs.Request{Operation: vfs.OperationSync, Path: path}
 	}
 	reply, errno, blocked := handler.vfsExchange(operation, attachPaths)

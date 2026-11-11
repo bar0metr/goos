@@ -395,6 +395,12 @@ func (service *Service) CloseSession(owner vfs.Owner) int {
 	return closed
 }
 
+// ValidationOpenState observes namespace ownership and successful persistent
+// backend reference operations. Counters advance only in validation builds.
+func (service *Service) ValidationOpenState(owner vfs.Owner) (int, uint64, uint64) {
+	return service.namespace.OpenBy(owner), service.persistent.validationAcquired, service.persistent.validationReleased
+}
+
 // Rooted reports whether the session is limited to a root.
 func (service *Service) Rooted(owner vfs.Owner) bool { return service.namespace.Rooted(owner) }
 

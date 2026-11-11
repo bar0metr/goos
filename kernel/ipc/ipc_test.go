@@ -53,7 +53,7 @@ func TestRequestReply(t *testing.T) {
 	}
 }
 
-func TestQueueIsBounded(t *testing.T) {
+func TestQueueIsBoundedAndRecoversRoom(t *testing.T) {
 	channel := NewChannel()
 	for index := 0; index < QueueCapacity; index++ {
 		if status := channel.Send(0, message(KindNotification, 0), nil, nil, nil); status != StatusOK {
@@ -62,6 +62,12 @@ func TestQueueIsBounded(t *testing.T) {
 	}
 	if status := channel.Send(0, message(KindNotification, 0), nil, nil, nil); status != StatusResourceExhausted {
 		t.Fatalf("full queue status = %d", status)
+	}
+	if _, status := channel.Receive(1); status != StatusOK {
+		t.Fatalf("drain full queue status = %d", status)
+	}
+	if status := channel.Send(0, message(KindNotification, 0), nil, nil, nil); status != StatusOK {
+		t.Fatalf("send after room status = %d", status)
 	}
 }
 

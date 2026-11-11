@@ -190,6 +190,95 @@ func TestContinuationBlocksBeforeVFSIssue(t *testing.T) {
 	}
 }
 
+func TestContinuationTracksSuccessfulSend(t *testing.T) {
+	var table ContinuationTable
+	task, _ := sched.NewTaskID(3, 1)
+	if !table.Begin(task, Request{Number: abi.SysOpenat}, nil) || !table.Issue(task, OpenStageOpen, 41) {
+		t.Fatal("could not issue open")
+	}
+	called := 0
+	pending, _ := table.Pending(task)
+	if !pending.Issued || pending.Sent || table.Send(task, OpenStageOpen, 42, func() bool { called++; return true }) || called != 0 {
+		t.Fatal("unsent request marked sent")
+	}
+	if !table.Send(task, OpenStageOpen, 41, func() bool { called++; return true }) ||
+		table.Send(task, OpenStageOpen, 41, func() bool { called++; return true }) || called != 1 {
+		t.Fatal("send not recorded exactly once")
+	}
+	pending, _ = table.Pending(task)
+	if !pending.Sent || !table.Block(task, OpenStageOpen) || !table.Resume(task, 41, WakeMessage) || !table.Advance(task, OpenStageOpen, OpenStageCleanup, 0) {
+		t.Fatal("sent open did not advance")
+	}
+	pending, _ = table.Pending(task)
+	if pending.Sent || pending.Issued {
+		t.Fatal("send state carried into next stage")
+	}
+}
+
+func TestContinuationAbandonReturnsSentOpenState(t *testing.T) {
+	var table ContinuationTable
+	task, _ := sched.NewTaskID(3, 1)
+	if !table.Begin(task, Request{Number: abi.SysOpen}, nil) || !table.Issue(task, OpenStageOpen, 51) ||
+		!table.Send(task, OpenStageOpen, 51, func() bool { return true }) {
+		t.Fatal("could not send open")
+	}
+	pending, active := table.Abandon(task)
+	if !active || !pending.AbandonFailsVFS() || !pending.Sent {
+		t.Fatalf("abandoned open = %+v active=%v", pending, active)
+	}
+	if _, active = table.Pending(task); active {
+		t.Fatal("abandoned continuation remained active")
+	}
+}
+
+func TestCancelKnownKeepsOnlySentOpens(t *testing.T) {
+	var table ContinuationTable
+	issued, _ := sched.NewTaskID(4, 1)
+	if !table.Begin(issued, Request{Number: abi.SysOpenat}, nil) || !table.Issue(issued, OpenStageOpen, 61) {
+		t.Fatal("could not issue open")
+	}
+	if table.CancelKnown(issued) {
+		t.Fatal("unsent open kept for exit teardown")
+	}
+	if _, active := table.Pending(issued); active {
+		t.Fatal("unsent open stayed active")
+	}
+	if table.Send(issued, OpenStageOpen, 61, func() bool { return true }) {
+		t.Fatal("cancelled open was sent")
+	}
+	sent, _ := sched.NewTaskID(5, 1)
+	if !table.Begin(sent, Request{Number: abi.SysOpen}, nil) || !table.Issue(sent, OpenStageOpen, 62) ||
+		!table.Send(sent, OpenStageOpen, 62, func() bool { return true }) {
+		t.Fatal("could not send open")
+	}
+	if !table.CancelKnown(sent) {
+		t.Fatal("sent open was not kept")
+	}
+	pending, active := table.Abandon(sent)
+	if !active || !pending.Sent || !pending.AbandonFailsVFS() {
+		t.Fatalf("exit teardown saw %+v active=%v", pending, active)
+	}
+	stat, _ := sched.NewTaskID(6, 1)
+	if !table.Begin(stat, Request{Number: abi.SysStat}, nil) || table.CancelKnown(stat) {
+		t.Fatal("stat kept for exit teardown")
+	}
+}
+
+func TestExecOpenAbandonFailsOnlyAfterSend(t *testing.T) {
+	pending := Pending{Number: abi.SysExecve, Stage: ExecStageOpen, Issued: true}
+	if pending.AbandonFailsVFS() {
+		t.Fatal("unsent exec open failed the session")
+	}
+	pending.Sent = true
+	if !pending.AbandonFailsVFS() {
+		t.Fatal("sent exec open did not fail the session")
+	}
+	pending.Stage = ExecStageStat
+	if pending.AbandonFailsVFS() {
+		t.Fatal("exec stat failed the session")
+	}
+}
+
 func TestContinuationPendingAndTimeoutWake(t *testing.T) {
 	var table ContinuationTable
 	task, _ := sched.NewTaskID(3, 1)

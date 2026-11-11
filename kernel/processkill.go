@@ -51,8 +51,13 @@ func (handler nativeCallHandler) ProcessKill(processHandle uint64) kcall.Status 
 // follows, cancels it (deliverTaskExit).
 func cancelTaskWaits(taskID sched.TaskID) {
 	forgetFutexWaiter(taskID)
-	wakeVFSContextWaiter(linuxcompat.CancelVFSTask(taskID))
-	linuxcompat.SyscallContinuations.Cancel(taskID)
+	// A sent open keeps its continuation and the family VFS context: the
+	// task's exit delivery fails and closes the session before any waiter
+	// receives the context. A canceller can run inside a wake loop, where
+	// closing a channel would reuse that loop's per-CPU results.
+	if !linuxcompat.SyscallContinuations.CancelKnown(taskID) {
+		wakeVFSContextWaiter(linuxcompat.CancelVFSTask(taskID))
+	}
 	linuxcompat.AbandonTask(taskID)
 	linuxcompat.RemoveSocketWaiter(taskID)
 	ipcWaitSet.Cancel(taskID)

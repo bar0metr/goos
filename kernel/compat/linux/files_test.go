@@ -287,8 +287,12 @@ func TestContinuationKeepsTwoPathsAndANote(t *testing.T) {
 	if !table.Begin(task, request, []byte("/a")) || table.Annotate(task, []byte("/b\x00"), 7) || !table.Annotate(task, []byte("/b"), 7) {
 		t.Fatal("annotation failed")
 	}
-	path, target := table.Paths(task)
-	pending, _ := table.Pending(task)
+	var snapshot PathSnapshot
+	pending, ok := table.Snapshot(task, &snapshot)
+	if !ok {
+		t.Fatal("snapshot failed")
+	}
+	path, target := snapshot.Path(), snapshot.Target()
 	if string(path) != "/a" || string(target) != "/b" || pending.Note != 7 {
 		t.Fatalf("paths %q %q note %d", path, target, pending.Note)
 	}
@@ -298,13 +302,16 @@ func TestContinuationKeepsTwoPathsAndANote(t *testing.T) {
 	if !table.Block(task, 1) || !table.Resume(task, 11, WakeMessage) || !table.Advance(task, 1, 3, 99) {
 		t.Fatal("stage did not advance")
 	}
-	path, target = table.Paths(task)
-	pending, _ = table.Pending(task)
+	pending, ok = table.Snapshot(task, &snapshot)
+	if !ok {
+		t.Fatal("advanced snapshot failed")
+	}
+	path, target = snapshot.Path(), snapshot.Target()
 	if string(path) != "/a" || string(target) != "/b" || pending.Note != 7 || pending.Partial != 99 || pending.Stage != 3 || pending.Issued {
 		t.Fatalf("after advance: %q %q %+v", path, target, pending)
 	}
 	table.Finish(task)
-	if path, target := table.Paths(task); path != nil || target != nil {
+	if _, ok := table.Snapshot(task, &snapshot); ok {
 		t.Fatal("finished call kept its paths")
 	}
 }

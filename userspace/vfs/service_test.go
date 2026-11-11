@@ -3,7 +3,12 @@ package vfsservice
 import (
 	"archive/tar"
 	"bytes"
+	"goos/internal/validation"
+	linuxcompat "goos/kernel/compat/linux"
+	"goos/kernel/compat/linux/abi"
+	"goos/kernel/ipc"
 	"goos/kernel/ramfs"
+	"goos/kernel/sched"
 	"goos/kernel/vfs"
 	"goos/userspace/fat32"
 	"testing"
@@ -68,6 +73,104 @@ func startedService(t testing.TB, device fat32.Device) *Service {
 		t.Fatal("persistent mount failed")
 	}
 	return service
+}
+
+func TestAbandonedOpenClosesSessionOverIPC(t *testing.T) {
+	for _, create := range []bool{false, true} {
+		name := "existing"
+		if create {
+			name = "created"
+		}
+		t.Run(name, func(t *testing.T) {
+			service := startedService(t, testFAT32Device())
+			path := []byte("/persist/abandoned")
+			if !create {
+				if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationCreate, Path: path}); reply.Status != vfs.StatusOK {
+					t.Fatalf("create fixture: %v", reply.Status)
+				}
+			}
+			var table linuxcompat.ContinuationTable
+			var session linuxcompat.VFSSession
+			task, _ := sched.NewTaskID(3, 1)
+			if !table.Begin(task, linuxcompat.Request{Number: abi.SysOpenat}, path) || !table.Issue(task, linuxcompat.OpenStageOpen, 7) {
+				t.Fatal("issue")
+			}
+			pending, _ := table.Pending(task)
+			if pending.AbandonFailsVFS() {
+				t.Fatal("unsent open failed session")
+			}
+			request := vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path}
+			if create {
+				request.OpenFlags = vfs.OpenCreate
+			}
+			message, ok := vfs.EncodeRequest(request, 7)
+			full := ipc.NewChannel()
+			notice := ipc.Message{ProtocolID: vfs.ProtocolID, Version: vfs.ProtocolVersion, Kind: ipc.KindNotification}
+			for i := 0; i < ipc.QueueCapacity; i++ {
+				if full.Send(0, notice, nil, nil, nil) != ipc.StatusOK {
+					t.Fatal("fill queue")
+				}
+			}
+			if full.Send(0, message, nil, nil, nil) != ipc.StatusResourceExhausted {
+				t.Fatal("send to full queue succeeded")
+			}
+			pending, _ = table.Pending(task)
+			if pending.AbandonFailsVFS() || session.Failed() {
+				t.Fatal("failed send revoked session")
+			}
+			channel := ipc.NewChannel()
+			channel.Lock()
+			sent := table.Send(task, linuxcompat.OpenStageOpen, 7, func() bool {
+				return channel.SendFrom(0, &message, nil, nil, nil) == ipc.StatusOK
+			})
+			channel.Unlock()
+			if !ok || !sent {
+				t.Fatal("send")
+			}
+			message, status := channel.Receive(1)
+			decoded, ok := vfs.DecodeRequest(message)
+			if status != ipc.StatusOK || !ok {
+				t.Fatal("receive")
+			}
+			beforeOpen, acquired, released := service.ValidationOpenState(testSession)
+			reply := service.Dispatch(testSession, decoded)
+			open, afterAcquire, afterRelease := service.ValidationOpenState(testSession)
+			if beforeOpen != 0 || open != 1 || validation.Enabled && (afterAcquire != acquired+1 || afterRelease != released) {
+				t.Fatalf("open state: before=%d after=%d refs=%d/%d -> %d/%d", beforeOpen, open, acquired, released, afterAcquire, afterRelease)
+			}
+			if reply.Status != vfs.StatusOK {
+				t.Fatalf("open: %#v", reply)
+			}
+			if !table.Block(task, linuxcompat.OpenStageOpen) || !table.Resume(task, 7, linuxcompat.WakeTimeout) {
+				t.Fatal("timeout")
+			}
+			pending, _ = table.Pending(task)
+			if !pending.AbandonFailsVFS() {
+				t.Fatal("abandon did not require session failure")
+			}
+			session.Fail()
+			if _, ok := session.Next(); ok || !channel.Close(0) {
+				t.Fatal("abandon")
+			}
+			if _, status = channel.Receive(1); status != ipc.StatusPeerDied {
+				t.Fatalf("peer status = %v", status)
+			}
+			if closed := service.CloseSession(testSession); closed != 1 {
+				t.Fatalf("closed handles = %d", closed)
+			}
+			open, finalAcquire, finalRelease := service.ValidationOpenState(testSession)
+			if open != 0 || validation.Enabled && (finalAcquire != acquired+1 || finalRelease != released+1) {
+				t.Fatalf("closed state: open=%d refs=%d/%d -> %d/%d", open, acquired, released, finalAcquire, finalRelease)
+			}
+			stat := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: path})
+			if stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindFile {
+				t.Fatalf("file after session close: %+v", stat)
+			}
+			if result := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationUnlink, Path: path}); result.Status != vfs.StatusOK {
+				t.Fatalf("cleanup: %+v", result)
+			}
+		})
+	}
 }
 
 type testBlockDevice struct{ data []byte }

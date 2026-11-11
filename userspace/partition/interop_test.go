@@ -2,6 +2,7 @@ package partition_test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"goos/internal/imagefixture"
 	"goos/kernel/ramfs"
@@ -9,6 +10,7 @@ import (
 	"goos/userspace/fat32"
 	"goos/userspace/partition"
 	"hash/crc32"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,7 +104,13 @@ func mustName(t *testing.T, value string) ramfs.Name {
 // directories.
 func writeFiles(t *testing.T, fs *fat32.FileSystem, root ramfs.NodeID, files map[string]string) {
 	t.Helper()
-	for path, content := range files {
+	names := make([]string, 0, len(files))
+	for path := range files {
+		names = append(names, path)
+	}
+	sort.Strings(names)
+	for _, path := range names {
+		content := files[path]
 		parts := strings.Split(path, "/")
 		node := root
 		for _, part := range parts[:len(parts)-1] {
@@ -159,16 +167,40 @@ func hdiutil(t *testing.T, args ...string) string {
 	return string(output)
 }
 
+func imageDirectory(t *testing.T) string {
+	t.Helper()
+	base := os.Getenv("GOOS_PARTITION_KEEP_IMAGES")
+	if base == "" {
+		return t.TempDir()
+	}
+	directory, err := os.MkdirTemp(base, "goos-partition-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("retained image directory: %s", directory)
+	return directory
+}
+
 // hostImage has the host make a raw disk image of the given layout
 // (GPTSPUD or MBRSPUD) holding a FAT32 volume.
 func hostImage(t *testing.T, layout string) string {
 	t.Helper()
-	directory := t.TempDir()
+	directory := imageDirectory(t)
 	dmg := filepath.Join(directory, "disk.dmg")
 	hdiutil(t, "create", "-size", "300m", "-layout", layout, "-fs", "MS-DOS FAT32", "-volname", "HOSTDISK", "-type", "UDIF", dmg)
 	raw := filepath.Join(directory, "disk")
 	hdiutil(t, "convert", dmg, "-format", "UDTO", "-o", raw)
 	return raw + ".cdr"
+}
+
+func attachedDisk(lines []string) string {
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && strings.HasPrefix(fields[0], "/dev/disk") && !strings.Contains(strings.TrimPrefix(fields[0], "/dev/disk"), "s") {
+			return fields[0]
+		}
+	}
+	return ""
 }
 
 // attached attaches an image, mounting its volumes or not, and returns the
@@ -181,18 +213,38 @@ func attached(t *testing.T, path string, mount bool) ([]string, func()) {
 		args = append(args, "-nomount")
 	}
 	lines := strings.Split(strings.TrimSpace(hdiutil(t, append(args, path)...)), "\n")
-	disk := strings.Fields(lines[0])[0]
+	disk := attachedDisk(lines)
+	if disk == "" {
+		t.Fatalf("no disk device in hdiutil output: %q", lines)
+	}
 	done := false
 	detach := func() {
 		if !done {
-			done = true
-			if exec.Command("hdiutil", "detach", disk).Run() != nil {
-				exec.Command("hdiutil", "detach", "-force", disk).Run()
+			output, err := exec.Command("hdiutil", "detach", disk).CombinedOutput()
+			if err != nil {
+				t.Errorf("hdiutil detach %s: %v\n%s", disk, err, output)
+				forced, forceErr := exec.Command("hdiutil", "detach", "-force", disk).CombinedOutput()
+				if forceErr != nil {
+					t.Errorf("hdiutil detach -force %s: %v\n%s", disk, forceErr, forced)
+					return
+				}
 			}
+			done = true
 		}
 	}
 	t.Cleanup(detach)
 	return lines, detach
+}
+
+func TestAttachedDiskIgnoresHdiutilWarningsAndPartitions(t *testing.T) {
+	lines := []string{
+		"hdiutil: WARNING: 'hdiutil attach -nomount ...' is deprecated.",
+		"/dev/disk12\tGUID_partition_scheme",
+		"/dev/disk12s1\tMicrosoft Basic Data",
+	}
+	if got := attachedDisk(lines); got != "/dev/disk12" {
+		t.Fatalf("disk = %q", got)
+	}
 }
 
 // partitionLine finds the attach line of the first partition: its device,
@@ -217,12 +269,35 @@ func partitionLine(t *testing.T, lines []string) (string, string, string) {
 	return "", "", ""
 }
 
-func hostCheckFAT(t *testing.T, device string) {
+type checkIssues []fat32.CheckIssue
+
+func (issues *checkIssues) Issue(issue fat32.CheckIssue) { *issues = append(*issues, issue) }
+
+func checkFAT(t *testing.T, volume sliceDevice, path string) {
 	t.Helper()
+	var issues checkIssues
+	report := fat32.Check(volume, &issues)
+	if report.Status != ramfs.StatusOK || report.Issues != 0 {
+		t.Fatalf("internal FAT32 check image=%s report=%+v issues=%+v", path, report, issues)
+	}
+}
+
+func hostCheckFAT(t *testing.T, device, path string) {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.New()
+	_, err = io.Copy(hash, file)
+	closeErr := file.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("hash image %s: read=%v close=%v", path, err, closeErr)
+	}
+	t.Logf("fsck image=%s sha256=%x", path, hash.Sum(nil))
 	tool, err := exec.LookPath("fsck_msdos")
 	if err != nil {
-		t.Log("no fsck_msdos")
-		return
+		t.Fatalf("fsck_msdos unavailable: %v", err)
 	}
 	raw := strings.Replace(device, "/dev/disk", "/dev/rdisk", 1)
 	if output, err := exec.Command(tool, "-n", raw).CombinedOutput(); err != nil {
@@ -257,8 +332,21 @@ func TestHostMadeTables(t *testing.T) {
 				t.Fatalf("the host's FAT32 partition was refused: %v", fs.Refused())
 			}
 			writeFiles(t, &fs, root, unicodeFiles)
-			fs.Flush()
-			lines, detach := attached(t, path, true)
+			if !fs.Flush() {
+				t.Fatal("flush FAT32")
+			}
+			checkFAT(t, volume, path)
+			if err := device.file.Close(); err != nil {
+				t.Fatalf("close image: %v", err)
+			}
+			lines, detach := attached(t, path, false)
+			partitionDevice, _, _ := partitionLine(t, lines)
+			hostCheckFAT(t, partitionDevice, path)
+			detach()
+			if t.Failed() {
+				return
+			}
+			lines, detach = attached(t, path, true)
 			partitionDevice, _, mount := partitionLine(t, lines)
 			for name, content := range unicodeFiles {
 				data, err := os.ReadFile(filepath.Join(mount, name))
@@ -267,12 +355,15 @@ func TestHostMadeTables(t *testing.T) {
 				}
 			}
 			detach()
+			if t.Failed() {
+				return
+			}
 			lines, _ = attached(t, path, false)
 			if device, _, _ := partitionLine(t, lines); device != partitionDevice {
 				t.Logf("partition device changed from %s to %s", partitionDevice, device)
 			}
 			partitionDevice, _, _ = partitionLine(t, lines)
-			hostCheckFAT(t, partitionDevice)
+			hostCheckFAT(t, partitionDevice, path)
 		})
 	}
 }
@@ -281,11 +372,12 @@ func TestHostMadeTables(t *testing.T) {
 // with fat32.Format, and fills it.
 func ourImage(t *testing.T, scheme partition.Scheme) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "disk.img")
+	path := filepath.Join(imageDirectory(t), "disk.img")
 	file, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { file.Close() })
 	const size = 300 << 20
 	file.Truncate(size)
 	device := fileDevice{file: file, size: size}
@@ -313,8 +405,13 @@ func ourImage(t *testing.T, scheme partition.Scheme) string {
 		t.Fatal("mount")
 	}
 	writeFiles(t, &fs, root, unicodeFiles)
-	fs.Flush()
-	file.Close()
+	if !fs.Flush() {
+		t.Fatal("flush FAT32")
+	}
+	checkFAT(t, volume, path)
+	if err := file.Close(); err != nil {
+		t.Fatalf("close image: %v", err)
+	}
 	return path
 }
 
@@ -343,14 +440,16 @@ func TestHostReadsOurTables(t *testing.T) {
 					}
 				}
 			}
-			lines, _ := attached(t, path, false)
+			lines, detach := attached(t, path, false)
 			device, content, _ := partitionLine(t, lines)
 			if content != test.content {
 				t.Fatalf("the host sees the partition as %q", content)
 			}
-			hostCheckFAT(t, device)
-			// Detach before mounting: attach again with the volume mounted.
-			exec.Command("hdiutil", "detach", strings.TrimSuffix(device, "s1")).Run()
+			hostCheckFAT(t, device, path)
+			detach()
+			if t.Failed() {
+				return
+			}
 			lines, _ = attached(t, path, true)
 			_, _, mount := partitionLine(t, lines)
 			for name, want := range unicodeFiles {

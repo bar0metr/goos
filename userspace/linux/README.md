@@ -61,8 +61,9 @@ the inodes store them, the 40-link bound, `O_NOFOLLOW`, `d_type`, and the
 `file.txt`; `hold PATH SECONDS` keeps a descriptor open while the test
 replaces the filesystem instance behind it and checks that the old
 descriptor fails and a new open works;
-`fork-fault` and `exec-vfs-loss` serve the validation kernel and VFS, which
-fail a fork mid-copy and die during an `execve`; `fpstate` checks that XMM
+`fork-fault`, `open-vfs-loss`, and `exec-vfs-loss` serve the validation kernel
+and VFS, which fail a fork mid-copy, die after an accepted `OperationOpen`
+before its reply, and die during an `execve`; `fpstate` checks that XMM
 registers, MXCSR, and the x87 control word survive `getpid`, a `nanosleep`
 that sleeps, `fork` into the child, a handler that clobbers them, a nested
 signal, an edited and a null `fpstate`, and that a bad
@@ -149,7 +150,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `4a068a52296fca685abc2a6236f66006b6040f80335b7a3e67deadb849e9f0e6` |
-| `prebuilt/abi-probe` | `74f1b54d0ae0a435f01548a0c160c4748da732e936fd6a7944ba349112d53e53` |
+| `prebuilt/abi-probe` | `089f7e7ac597a6d596027cce204588ccc7f93e3fffaefa0cc829c0b3dd78ce7f` |
 | `prebuilt/tty-probe` | `5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957` |
 | `prebuilt/netprobe` | `dca2339b9c61ea9f190613aa58b6289e6166a58463e1a4441bfd8ba661d742cb` |
 | `prebuilt/pie-probe` | `4e1822fc5fd6c174726c8751cabb0c298e67adfa46e7a82c9b425732b00c7144` |

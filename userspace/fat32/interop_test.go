@@ -2,10 +2,12 @@ package fat32
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"goos/internal/imagefixture"
 	"goos/kernel/ramfs"
 	"hash/crc32"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,15 +23,18 @@ import (
 // elsewhere. testdata/ holds images made this way, so the foreign-volume
 // cases also run on hosts without the tools (TestForeignFixtures).
 
-// hostFormat formats the image at path with the host's formatter. It
-// reports false, with the reason, when the host has none or refuses the
-// geometry.
+// hostFormat formats the image at path with the host's formatter. It reports
+// false only when the host has no formatter. Once a formatter is available,
+// an attach or formatting failure is an interoperability failure, not a skip.
 func hostFormat(t *testing.T, path string, sector, perCluster, fats int) (bool, string) {
 	t.Helper()
 	if tool, err := exec.LookPath("mkfs.fat"); err == nil {
 		output, err := exec.Command(tool, "-F", "32", "-S", fmt.Sprint(sector), "-s", fmt.Sprint(perCluster),
 			"-f", fmt.Sprint(fats), "-n", "HOSTFAT", path).CombinedOutput()
-		return err == nil, string(output)
+		if err != nil {
+			t.Fatalf("mkfs.fat: %v\n%s", err, output)
+		}
+		return true, string(output)
 	}
 	if runtime.GOOS != "darwin" {
 		return false, "no mkfs.fat"
@@ -42,13 +47,26 @@ func hostFormat(t *testing.T, path string, sector, perCluster, fats int) (bool, 
 	// mounting it.
 	device, detach, ok := attach(t, path, false)
 	if !ok {
-		return false, "hdiutil attach failed"
+		t.Fatal("hdiutil attach failed")
 	}
 	defer detach()
 	raw := strings.Replace(device, "/dev/disk", "/dev/rdisk", 1)
 	output, err := exec.Command(tool, "-F", "32", "-S", fmt.Sprint(sector), "-c", fmt.Sprint(perCluster),
 		"-n", fmt.Sprint(fats), "-v", "HOSTFAT", raw).CombinedOutput()
-	return err == nil, string(output)
+	if err != nil {
+		t.Fatalf("newfs_msdos: %v\n%s", err, output)
+	}
+	return true, string(output)
+}
+
+func attachDevice(lines []string) string {
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && strings.HasPrefix(fields[0], "/dev/disk") {
+			return fields[0]
+		}
+	}
+	return ""
 }
 
 // attach attaches an image with hdiutil, mounted or not, and returns its
@@ -65,12 +83,28 @@ func attach(t *testing.T, path string, mount bool) (string, func(), bool) {
 		return "", nil, false
 	}
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	device := strings.Fields(lines[0])[0]
-	detach := func() {
-		if err := exec.Command("hdiutil", "detach", device).Run(); err != nil {
-			exec.Command("hdiutil", "detach", "-force", device).Run()
-		}
+	device := attachDevice(lines)
+	if device == "" {
+		t.Logf("hdiutil attach returned no device:\n%s", output)
+		return "", nil, false
 	}
+	done := false
+	detach := func() {
+		if done {
+			return
+		}
+		output, err := exec.Command("hdiutil", "detach", device).CombinedOutput()
+		if err != nil {
+			t.Errorf("hdiutil detach %s: %v\n%s", device, err, output)
+			forced, forceErr := exec.Command("hdiutil", "detach", "-force", device).CombinedOutput()
+			if forceErr != nil {
+				t.Errorf("hdiutil detach -force %s: %v\n%s", device, forceErr, forced)
+				return
+			}
+		}
+		done = true
+	}
+	t.Cleanup(detach)
 	if !mount {
 		return device, detach, true
 	}
@@ -81,6 +115,17 @@ func attach(t *testing.T, path string, mount bool) (string, func(), bool) {
 	}
 	detach()
 	return "", nil, false
+}
+
+func TestAttachDeviceIgnoresHdiutilWarnings(t *testing.T) {
+	lines := []string{
+		"hdiutil: WARNING: 'hdiutil attach -nomount ...' is deprecated.",
+		"/dev/disk12\tFDisk_partition_scheme",
+		"/dev/disk12s1\tDOS_FAT_32\t/Volumes/HOSTFAT",
+	}
+	if got := attachDevice(lines); got != "/dev/disk12" {
+		t.Fatalf("device = %q", got)
+	}
 }
 
 // hostMount mounts the image with the host's own FAT driver and returns the
@@ -110,9 +155,21 @@ func hostCheck(t *testing.T, path string) bool {
 	if command == nil {
 		return false
 	}
+	image, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open image for hashing %s: %v", path, err)
+	}
+	hash := sha256.New()
+	_, hashErr := io.Copy(hash, image)
+	closeErr := image.Close()
+	if hashErr != nil || closeErr != nil {
+		t.Fatalf("hash image %s: read=%v close=%v", path, hashErr, closeErr)
+	}
+	digest := fmt.Sprintf("%x", hash.Sum(nil))
+	t.Logf("host check image=%s sha256=%s", path, digest)
 	output, err := exec.Command(command[0], append(command[1:], path)...).CombinedOutput()
 	if err != nil {
-		t.Fatalf("%s: %v\n%s", filepath.Base(command[0]), err, output)
+		t.Fatalf("%s image=%s sha256=%s: %v\n%s", filepath.Base(command[0]), path, digest, err, output)
 	}
 	return true
 }

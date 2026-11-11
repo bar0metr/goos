@@ -122,23 +122,26 @@ type cpuScratch struct {
 	linuxVFSMessage ipc.Message
 	// linuxPath receives a path as the program wrote it; linuxResolved is its
 	// canonical absolute form, the only one a request carries.
-	linuxPath       [linuxabi.PathMax]byte
-	linuxResolved   [limits.PathMax]byte
-	linuxTarget     [limits.PathMax]byte
-	linuxWaitStatus [4]byte
-	linuxRusage     [linuxabi.RusageSize]byte
-	logWire         [kcall.MaxLogRecord]byte
-	logBoundsWire   [kcall.LogBoundsSize]byte
-	logText         [kcall.LogText]byte
-	logMessage      [logfmt.MaxMessage]byte
-	logFields       [logfmt.MaxFields]byte
-	logGrant        [logfmt.MaxFields]byte
-	logCopy         klog.Copy
-	logReadCopies   [kcall.LogReadMax]klog.Copy
-	logReadWire     [kcall.LogReadSize]byte
-	kernelCallData  [kcall.MaxConsoleWrite]byte
-	ipcWireData     [ipc.WireMaxSize]byte
-	dispatchHandler nativeCallHandler
+	linuxPath     [linuxabi.PathMax]byte
+	linuxResolved [limits.PathMax]byte
+	linuxTarget   [limits.PathMax]byte
+	// A syscall's continuation snapshot remains private to this CPU until the
+	// handler returns; VFS exchange and nested helpers never reuse it.
+	linuxContinuationPaths linuxcompat.PathSnapshot
+	linuxWaitStatus        [4]byte
+	linuxRusage            [linuxabi.RusageSize]byte
+	logWire                [kcall.MaxLogRecord]byte
+	logBoundsWire          [kcall.LogBoundsSize]byte
+	logText                [kcall.LogText]byte
+	logMessage             [logfmt.MaxMessage]byte
+	logFields              [logfmt.MaxFields]byte
+	logGrant               [logfmt.MaxFields]byte
+	logCopy                klog.Copy
+	logReadCopies          [kcall.LogReadMax]klog.Copy
+	logReadWire            [kcall.LogReadSize]byte
+	kernelCallData         [kcall.MaxConsoleWrite]byte
+	ipcWireData            [ipc.WireMaxSize]byte
+	dispatchHandler        nativeCallHandler
 	// The wires a native call copies its arguments and results through.
 	handleInfoWire        [kcall.HandleInfoSize]byte
 	processInfoWire       [kcall.ProcessInfoSize]byte

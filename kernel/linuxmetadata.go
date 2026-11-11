@@ -118,8 +118,10 @@ func (handler *linuxCallHandler) changeMetadata(request linuxcompat.Request, dir
 			}
 		}
 	}
-	pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	pending, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	handle := vfs.Handle(0)
 	if len(path) == 0 {
 		handle = vfs.Handle(pending.Note)

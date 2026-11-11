@@ -760,13 +760,32 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	# before main and faults without it (ADR 0185).
 	send_after_done '/system/linux/abi-probe random' '^random: '
 	sleep 1
-	# The validation VFS answers one name late. A Linux program that opens
-	# it waits out the bridge's eight-second deadline, gets ETIMEDOUT, and on
-	# its next request must discard the late reply and carry on.
+	# The validation VFS answers one name late. A timed-out Linux open
+	# fails the session, so the next request must return EIO.
 	send_after_done '/system/linux/abi-probe session-timeout' 'session timeout: '
+	shell_ready_sequence=$((shell_ready_sequence + 1))
+	printf '/system/linux/abi-probe open-timeout-existing; __boot_ready %s\n' "$shell_ready_sequence"
+	wait_for_count open-timeout.existing '^VFS_OPEN_TIMEOUT_EXISTING_RELEASED$' 1 60 "$log"
+	printf '\n'
+	wait_for_count open-timeout.existing.done "^SHELL_READY token=$shell_ready_sequence\$" 1 60 "$log"
+	shell_ready_sequence=$((shell_ready_sequence + 1))
+	printf '/system/linux/abi-probe open-timeout-created; __boot_ready %s\n' "$shell_ready_sequence"
+	wait_for_count open-timeout.created '^VFS_OPEN_TIMEOUT_CREATED_RELEASED$' 1 60 "$log"
+	printf '\n'
+	wait_for_count open-timeout.created.done "^SHELL_READY token=$shell_ready_sequence\$" 1 60 "$log"
+	# A family member kills a task whose open the VFS has executed but not
+	# answered; the VFS must release the object while the killer still runs.
+	shell_ready_sequence=$((shell_ready_sequence + 1))
+	printf '/system/linux/abi-probe open-kill; __boot_ready %s\n' "$shell_ready_sequence"
+	wait_for_count open-kill.withheld '^VFS_OPEN_KILL_WITHHELD$' 1 60 "$log"
+	printf '\n'
+	wait_for_count open-kill.released '^VFS_OPEN_KILL_RELEASED$' 1 60 "$log"
+	printf '\n'
+	wait_for_count open-kill.done "^SHELL_READY token=$shell_ready_sequence\$" 1 60 "$log"
 	sleep 1
-	# The VFS restarts too (ADR 0099): its clients are handed new sessions,
-	# the FAT32 service restarts behind it, and the shell keeps its jobs.
+	# The VFS completes a persistent OperationOpen and dies before replying.
+	# The probe checks the failed syscall's fd cleanup and proves that its dead
+	# session is not reused. PID 1 then restarts VFS and FAT32 (ADR 0099).
 	printf 'sleep 25 &\n'
 	sleep 1
 	# A Linux program keeps the session it was launched with. It waits here
@@ -776,7 +795,7 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	# checks below match the text anywhere in a line.
 	printf 'sleep 4 | /system/linux/abi-probe session-loss &\n'
 	sleep 1
-	printf 'fault vfs\n'
+	printf '/system/linux/abi-probe open-vfs-loss\n'
 	sleep 5
 	send_after_done 'ls /tmp; echo after-vfs-fault' '^after-vfs-fault$'
 	send_after_done 'cat /home/demo/message.txt; echo after-vfs-restart' '^after-vfs-restart$'
@@ -995,7 +1014,7 @@ require_marker storage.file-cache FILE_CACHE_OK "$log"
 require_min_count storage.whole-disk-volume '^BLOCK_VOLUME_WHOLE_OK$' 2 "$log" BLOCK_VOLUME_WHOLE_OK
 # The window ends at the echoed command, not at its prompt: VFS diagnostics
 # such as VFS_MEMORY may land between the prompt and the echo.
-count_window storage.vfs-not-restarted '^VFS_SERVICE_OK$' 0 "$log" 'goos> fault fat32' 'fault vfs'
+count_window storage.vfs-not-restarted '^VFS_SERVICE_OK$' 0 "$log" 'goos> fault fat32' 'goos> /system/linux/abi-probe open-vfs-loss'
 pass_group storage
 
 for marker in RAMFS_PROTOCOL_OK RAMFS_METADATA_OK RAMFS_IO_OK RAMFS_BOUNDS_OK VFS_NAMESPACE_OK VFS_MOUNT_OK VFS_PATH_OK VFS_CACHE_OK VFS_PROTOCOL_OK VFS_SERVICE_OK FAT32_MOUNT_OK; do
@@ -1250,19 +1269,28 @@ pass_group persistence
 # and log services their state. The FAT32 service restarts behind it and is
 # attached to the new VFS, so the volume is served again; /tmp, which lived in
 # the old VFS, starts empty.
-require_marker vfs-restart.injected VFS_FAULT_INJECTED "$log" 'fault vfs'
-require_marker vfs-restart.restarted VFS_RESTARTED_OK "$log" 'fault vfs'
-require_count vfs-restart.service-started-twice '^VFS_SERVICE_OK$' 2 "$log" 'fault vfs'
-require_marker vfs-restart.config-session CONFIG_SESSION_RENEWED_OK "$log" 'fault vfs'
-require_marker vfs-restart.log-session LOG_SESSION_RENEWED_OK "$log" 'fault vfs'
-require_min_count vfs-restart.fat32-restarted '^FAT32_RESTARTED_OK$' 2 "$log" 'fault vfs'
+require_marker vfs-restart.injected VFS_FAULT_INJECTED "$log" 'open-vfs-loss'
+require_marker vfs-restart.open-received VFS_OPEN_CRASH_RECEIVED "$log" 'open-vfs-loss'
+require_regex vfs-restart.open-peer-death '^open vfs loss: EIO, fd cleanup, session EIO$' 'a received open dies without a reply, releases its fd reservation, and cannot reuse the session' "$log" 'open-vfs-loss'
+require_marker vfs-restart.restarted VFS_RESTARTED_OK "$log" 'open-vfs-loss'
+require_count vfs-restart.service-started-twice '^VFS_SERVICE_OK$' 2 "$log" 'open-vfs-loss'
+require_marker vfs-restart.config-session CONFIG_SESSION_RENEWED_OK "$log" 'open-vfs-loss'
+require_marker vfs-restart.log-session LOG_SESSION_RENEWED_OK "$log" 'open-vfs-loss'
+require_min_count vfs-restart.fat32-restarted '^FAT32_RESTARTED_OK$' 2 "$log" 'open-vfs-loss'
 require_regex vfs-restart.namespace '^after-vfs-fault$' 'the shell using the namespace after the restart' "$log" 'ls /tmp; echo after-vfs-fault'
 require_window vfs-restart.tmp-listed '^after-vfs-fault$' 'the /tmp listing after the restart' "$log" 'ls /tmp; echo after-vfs-fault' 'echo after-vfs-restart'
 forbid_window vfs-restart.tmp-empty '^redirected.txt$' 'an empty /tmp in the new VFS' "$log" 'ls /tmp; echo after-vfs-fault' 'after-vfs-fault'
 require_window vfs-restart.volume '^persistent$' 'the volume read through the new VFS' "$log" 'cat /home/demo/message.txt; echo after-vfs-restart' 'after-vfs-restart'
 require_regex vfs-restart.linux-random '^random: available$' 'getrandom and AT_RANDOM without RDRAND' "$log" 'goos> /system/linux/abi-probe random'
-require_regex vfs-restart.linux-timeout 'session timeout: ETIMEDOUT, then ok$' 'a Linux open gives up on a silent VFS and the session survives' "$log" 'goos> /system/linux/abi-probe session-timeout'
-forbid_regex vfs-restart.linux-no-reconnect 'session kept: ' 'a Linux process was not given a new session' "$log" 'goos> fault vfs'
+require_regex vfs-restart.linux-timeout 'session timeout: ETIMEDOUT, then EIO$' 'a timed-out Linux open fails its VFS session' "$log" 'goos> /system/linux/abi-probe session-timeout'
+require_regex vfs-restart.open-timeout-existing 'open timeout existing: ETIMEDOUT then EIO, waiting$' 'an existing open times out and fails its session' "$log" 'open-timeout-existing'
+require_regex vfs-restart.open-timeout-created 'open timeout created: ETIMEDOUT then EIO, waiting$' 'a created open times out and fails its session' "$log" 'open-timeout-created'
+require_marker vfs-restart.open-existing-released VFS_OPEN_TIMEOUT_EXISTING_RELEASED "$log" 'open-timeout-existing'
+require_marker vfs-restart.open-created-released VFS_OPEN_TIMEOUT_CREATED_RELEASED "$log" 'open-timeout-created'
+require_regex vfs-restart.open-kill 'open kill: SIGKILL, then EIO, waiting$' 'a remote kill of a sent open fails the family session' "$log" 'open-kill'
+require_marker vfs-restart.open-kill-released VFS_OPEN_KILL_RELEASED "$log" 'open-kill'
+require_min_count vfs-restart.open-late-rejected '^VFS_OPEN_LATE_REPLY_REJECTED$' 3 "$log" 'open-timeout-existing'
+forbid_regex vfs-restart.linux-no-reconnect 'session kept: ' 'a Linux process was not given a new session' "$log" 'goos> /system/linux/abi-probe open-vfs-loss'
 # The shell is read from the volume (ADR 0175). A program whose source is
 # served by the VFS that died can end with it when it next touches a page it
 # has not read yet (ADR 0121). Every check below looks only at what happened

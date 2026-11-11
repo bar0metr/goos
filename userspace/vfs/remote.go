@@ -41,8 +41,10 @@ type Remote struct {
 	copyFault   CopyFaultHandler
 	copyContext CopyFault
 	// readDirs and batch count directory exchanges for the DIAG listing report.
-	readDirs uint64
-	batch    BackendBatchCounters
+	readDirs           uint64
+	batch              BackendBatchCounters
+	validationAcquired uint64
+	validationReleased uint64
 }
 
 // AttachCache gives the backend the file-cache mapping it shares with its
@@ -170,6 +172,9 @@ func (remote *Remote) AcquireObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status
 		return 0, ramfs.StatusIOError
 	}
 	if status == ramfs.StatusOK {
+		if validation.Enabled {
+			remote.validationAcquired++
+		}
 		if stat, known := remote.cached(id); known {
 			stat.ID = reply.Node
 			remote.remember(stat)
@@ -191,6 +196,9 @@ func (remote *Remote) ReleaseObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status
 			status = ramfs.StatusIOError
 		}
 		return 0, status
+	}
+	if validation.Enabled {
+		remote.validationReleased++
 	}
 	if reply.Node == id {
 		return id, status

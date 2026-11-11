@@ -81,12 +81,14 @@ func linuxFamilyOf(owner *process.Process) uint64 {
 // are released.
 func deliverTaskExit(task uint64) *process.Process {
 	taskID := sched.TaskID(task)
+	// The owner is read before ForgetOwner clears the task's entry; the exit
+	// locks hold its handle table.
+	exitOwner, _ := processRegistry.Owner(taskID)
 	cancelExecutableFault(taskID)
 	forgetLinuxCaller(taskID)
 	processRegistry.ForgetOwner(taskID)
 	cancelLinuxExec(taskID)
-	wakeVFSContextWaiter(linuxcompat.CancelVFSTask(taskID))
-	linuxcompat.SyscallContinuations.Cancel(taskID)
+	wakeVFSContextWaiter(retireExitedLinuxVFS(taskID, exitOwner))
 	// A task killed on another processor may have registered a wait after
 	// its killer cancelled its waits; nothing can wake it now, so the
 	// registrations go before its slot is reused.

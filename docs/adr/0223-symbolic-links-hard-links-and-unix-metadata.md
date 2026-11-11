@@ -103,13 +103,32 @@ The standalone native `OperationCreate` and `OperationTruncate` remain valid.
 an existing file requires the requested descriptor rights. `O_TRUNC` requires
 mutation authority.
 
-If descriptor installation fails after the VFS has opened a file, the bridge
-waits for a protocol close and returns the original error on success. On timeout,
-Linux closes the family VFS channel and returns the allocation error; the VFS
-session teardown closes its handles and releases backend objects. A failed close
-returns a VFS error. Release of external backend references after VFS service
-death remains unverified. A created pathname may remain: resource cleanup does
-not roll back namespace mutations.
+When an issued `OperationOpen` reply times out, the VFS may have installed a
+handle that Linux cannot identify. Linux fails and closes the VFS session.
+Peer-death teardown closes its handles and releases their backend object
+references; the caller receives `ETIMEDOUT`. A validation boot also passed a
+VFS crash after a persistent open succeeded but before its reply.
+
+Another task can end a task whose open is in flight: a kill, a fatal signal,
+`exit_group`, or an `execve` that ends its siblings. The send and its `Sent`
+bit change under one continuation lock, so the canceller sees either an
+unsent request, which it discards, or a sent one. It keeps a sent open's
+continuation and the family VFS context. The exit delivery of that task holds
+the owner's handle table; it fails the session and closes the endpoint before
+a queued family task receives the context. The canceller does not close the
+channel itself, because it can run inside a channel wake loop that owns the
+per-CPU wake results.
+
+An `execve` killed between its open and close stages leaves its known VFS
+handle open until the session ends. This predates the atomic open work and is
+outside its contract.
+
+If Linux cannot install a descriptor after a successful open, it sends
+`OperationClose` for the known VFS handle and returns the allocation error
+when close succeeds. A close timeout fails the session and returns the
+allocation error. A failed close returns a VFS error. Release of external
+backend references after VFS service death remains unverified. A created
+pathname may remain; resource cleanup does not roll back namespace mutations.
 
 The VFS may issue separate synchronous backend `OpenName`, `CreateName`,
 `AcquireObject` and `Truncate` calls, but they execute inside the one serial

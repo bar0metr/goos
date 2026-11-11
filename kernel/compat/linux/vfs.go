@@ -1,8 +1,11 @@
 package linux
 
 import (
+	"sync/atomic"
+
 	"goos/kernel/ipc"
 	"goos/kernel/objects"
+	"goos/kernel/ramfs"
 	"goos/kernel/sched"
 	"goos/kernel/vfs"
 )
@@ -18,14 +21,14 @@ const VFSPathInline = vfs.MaxProtocolData
 // the authority PID 1 granted.
 type VFSSession struct {
 	correlation uint64
-	failed      bool
+	failed      atomic.Uint32
 }
 
 // Next returns the correlation for a new request. Values rise from one and
 // are never reused within a session, which lets a late reply to an abandoned
 // request be told apart from the reply in flight.
 func (session *VFSSession) Next() (uint64, bool) {
-	if session == nil || session.failed || session.correlation == ^uint64(0) {
+	if session == nil || session.failed.Load() != 0 || session.correlation == ^uint64(0) {
 		return 0, false
 	}
 	session.correlation++
@@ -34,11 +37,11 @@ func (session *VFSSession) Next() (uint64, bool) {
 
 func (session *VFSSession) Fail() {
 	if session != nil {
-		session.failed = true
+		session.failed.Store(1)
 	}
 }
 
-func (session *VFSSession) Failed() bool { return session == nil || session.failed }
+func (session *VFSSession) Failed() bool { return session == nil || session.failed.Load() != 0 }
 
 type VFSAccess uint8
 
@@ -230,6 +233,12 @@ func ClassifyVFSReply(message *ipc.Message, correlation uint64, operation vfs.Op
 		return vfs.Reply{}, VFSReplyStale
 	}
 	if reply.Operation != operation {
+		return vfs.Reply{}, VFSReplyMalformed
+	}
+	if operation == vfs.OperationOpen && reply.Status == vfs.StatusOK &&
+		(reply.Kind != ramfs.KindFile && reply.Kind != ramfs.KindDirectory ||
+			reply.Kind == ramfs.KindFile && reply.Handle == 0 ||
+			reply.Kind == ramfs.KindDirectory && reply.Handle != 0) {
 		return vfs.Reply{}, VFSReplyMalformed
 	}
 	return reply, VFSReplyAccepted

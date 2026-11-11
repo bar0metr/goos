@@ -8,6 +8,7 @@ package main
 // from the continuation and keeps nothing in locals across an exchange.
 
 import (
+	"goos/internal/validation"
 	linuxcompat "goos/kernel/compat/linux"
 	linuxabi "goos/kernel/compat/linux/abi"
 	"goos/kernel/mm/vm"
@@ -80,8 +81,10 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 			return linuxErrno(errno)
 		}
 	}
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
-	pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
+	pending, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	if pending.Stage == linuxcompat.OpenStageCleanup {
 		return handler.cleanupOpen(pending)
 	}
@@ -109,8 +112,19 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 		}
 		return linuxErrno(linuxcompat.VFSErrno(reply.Status, permission, linuxabi.ENFILE))
 	}
+	// The validation-only path forces a real late EMFILE without affecting the
+	// preflight Reserve. Restore the limit before entering the cleanup exchange.
+	fault := validation.Enabled && string(path) == "/home/demo/.validation-late-allocate"
+	soft, hard := 0, 0
+	if fault {
+		soft, hard = state.FDs.Limits()
+		state.FDs.SetLimits(0, uint64(hard))
+	}
 	description := linuxcompat.FileDescription{Kind: linuxcompat.FDVFSFile, Flags: intent.StatusFlags(), Object: uint64(reply.Handle)}
 	fd, errno := linuxcompat.AllocateFD(handler.root, description, intent.CloseOnExec)
+	if fault {
+		state.FDs.SetLimits(uint64(soft), uint64(hard))
+	}
 	if errno != 0 {
 		if !linuxcompat.SyscallContinuations.AdvanceOpenCleanup(handler.task, uint64(reply.Handle), errno) {
 			return linuxErrno(handler.vfsFailed())
@@ -720,8 +734,10 @@ func (handler *linuxCallHandler) status(request linuxcompat.Request, dirfd int32
 	}
 	// A call with a path stats it and keeps flags in its note. A call
 	// without one stats the open file whose VFS handle the note holds.
-	pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	pending, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	operation := vfs.Request{Operation: vfs.OperationStat, Path: path}
 	trailing := pending.Note&noteTrailing != 0
 	if len(path) == 0 {
@@ -788,8 +804,10 @@ func (handler *linuxCallHandler) access(request linuxcompat.Request, dirfd int32
 			return linuxErrno(errno)
 		}
 	}
-	pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	pending, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationStat, Path: path}, attachPaths)
 	if blocked {
 		return linuxBlocked
@@ -858,7 +876,10 @@ func (handler *linuxCallHandler) readlink(request linuxcompat.Request, dirfd int
 		}
 		return linuxErrno(linuxabi.EINVAL)
 	}
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	_, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationReadLink, Path: path, NameReturn: true}, attachName)
 	if blocked {
 		return linuxBlocked
@@ -974,9 +995,12 @@ func (handler *linuxCallHandler) getdents(request linuxcompat.Request) linuxcomp
 			return linuxErrno(errno)
 		}
 	}
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	var completed uint64
 	for {
-		pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
+		pending, path, _, snapshotOK := handler.vfsSnapshot()
+		if !snapshotOK {
+			return direntResult(completed, linuxabi.EIO)
+		}
 		written := pending.Partial
 		reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationReadDirBatch, Path: path, Offset: description.Offset, Size: linuxcompat.DirentBatchLimit(capacity - written), NameReturn: true}, attachName)
 		if blocked {
@@ -1027,6 +1051,7 @@ func (handler *linuxCallHandler) getdents(request linuxcompat.Request) linuxcomp
 		if errno := handler.vfsNext(pending.Stage, pending.Stage+1, written); errno != 0 {
 			return direntResult(written, errno)
 		}
+		completed = written
 	}
 }
 
@@ -1201,7 +1226,10 @@ func (handler *linuxCallHandler) chdir(request linuxcompat.Request) linuxcompat.
 			return linuxErrno(errno)
 		}
 	}
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	_, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationStat, Path: path}, attachPaths)
 	if blocked {
 		return linuxBlocked
@@ -1244,7 +1272,10 @@ func (handler *linuxCallHandler) mkdir(request linuxcompat.Request, dirfd int32,
 			return linuxErrno(errno)
 		}
 	}
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	_, path, _, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationMkdir, Path: path}, attachPaths)
 	if blocked {
 		return linuxBlocked
@@ -1299,9 +1330,11 @@ func (handler *linuxCallHandler) remove(request linuxcompat.Request, dirfd int32
 			return linuxErrno(errno)
 		}
 	}
-	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
 	for {
-		pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
+		pending, path, _, snapshotOK := handler.vfsSnapshot()
+		if !snapshotOK {
+			return linuxErrno(linuxabi.EIO)
+		}
 		if pending.Stage == removeStageStat {
 			// unlink removes the link, never what it names. A trailing slash
 			// asks for the directory behind it.
@@ -1387,9 +1420,11 @@ func (handler *linuxCallHandler) rename(request linuxcompat.Request, fromDirfd i
 			return linuxErrno(errno)
 		}
 	}
-	source, target := linuxcompat.SyscallContinuations.Paths(handler.task)
 	for {
-		pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
+		pending, source, target, snapshotOK := handler.vfsSnapshot()
+		if !snapshotOK {
+			return linuxErrno(linuxabi.EIO)
+		}
 		operation := vfs.OperationRename
 		switch pending.Stage {
 		case renameStageStat:
@@ -1505,7 +1540,10 @@ func (handler *linuxCallHandler) link(request linuxcompat.Request, targetAddress
 			return linuxErrno(errno)
 		}
 	}
-	name, source := linuxcompat.SyscallContinuations.Paths(handler.task)
+	_, name, source, snapshotOK := handler.vfsSnapshot()
+	if !snapshotOK {
+		return linuxErrno(linuxabi.EIO)
+	}
 	operation := vfs.Request{Operation: vfs.OperationSymlink, Path: name, Target: source}
 	if !symbolic {
 		operation = vfs.Request{Operation: vfs.OperationLink, Path: source, Target: name}

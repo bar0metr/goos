@@ -55,6 +55,7 @@
  *   limits            fork until the family budget refuses, with zombies too
  *   fork-fault        a validation kernel fails a fork mid-copy; another succeeds
  *   fpstate           x87 and SSE state survives calls, sleeps, fork, and handlers
+ *   open-vfs-loss     VFS dies after accepting open, before replying
  *   exec-vfs-loss     the validation VFS dies while execve prepares its image
  *   libc              what glibc asks at startup: RELRO mprotect, robust list,
  *                     umask, readlink, futex, gettimeofday, time, sysinfo
@@ -1717,13 +1718,125 @@ static int session_timeout(void)
 		printf("stalled open: fd=%d errno=%d\n", fd, errno);
 		return 1;
 	}
-	/* The late reply arrives with this request and must be discarded. */
+	errno = 0;
 	fd = open(IMAGE, O_RDONLY);
-	if (fd != 3 || close(fd) != 0) {
+	if (fd != -1 || errno != EIO) {
 		printf("open after timeout: fd=%d errno=%d\n", fd, errno);
 		return 1;
 	}
-	puts("session timeout: ETIMEDOUT, then ok");
+	puts("session timeout: ETIMEDOUT, then EIO");
+	return 0;
+}
+
+static int late_allocate(void)
+{
+	const char *path = "/home/demo/.validation-late-allocate";
+	int fd, expected, i;
+
+	unlink(path);
+	expected = open("/dev/null", O_RDONLY);
+	if (expected < 0 || close(expected) != 0)
+		return 1;
+	for (i = 0; i < 3; i++) {
+		errno = 0;
+		fd = open(path, O_CREAT | O_RDWR, 0600);
+		if (fd != -1 || errno != EMFILE) {
+			printf("late allocate %d: fd=%d errno=%d\n", i, fd, errno);
+			if (fd >= 0) close(fd);
+			return 1;
+		}
+		fd = open("/dev/null", O_RDONLY);
+		if (fd != expected || close(fd) != 0) {
+			printf("late allocate fd reuse: fd=%d expected=%d errno=%d\n", fd, expected, errno);
+			return 1;
+		}
+	}
+	if (unlink(path) != 0)
+		return 1;
+	puts("late allocate: EMFILE and fd reuse 3 times");
+	return 0;
+}
+
+static int open_timeout(int create)
+{
+	const char *path = create ? "/home/demo/.validation-open-create" : "/home/demo/.validation-open-existing";
+	const char *kind = create ? "created" : "existing";
+	char byte;
+	int fd;
+
+	unlink(path);
+	if (!create) {
+		fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+		if (fd < 0 || close(fd) != 0) {
+			printf("open timeout %s setup failed: errno=%d\n", kind, errno);
+			return 1;
+		}
+	}
+	errno = 0;
+	fd = open(path, create ? O_RDWR | O_CREAT | O_EXCL : O_RDONLY, 0600);
+	if (fd != -1 || errno != ETIMEDOUT) {
+		printf("open timeout %s: fd=%d errno=%d\n", kind, fd, errno);
+		return 1;
+	}
+	errno = 0;
+	fd = open(IMAGE, O_RDONLY);
+	if (fd != -1 || errno != EIO) {
+		printf("open timeout %s retry: fd=%d errno=%d\n", kind, fd, errno);
+		return 1;
+	}
+	printf("open timeout %s: ETIMEDOUT then EIO, waiting\n", kind);
+	fflush(stdout);
+	if (read(0, &byte, 1) != 1)
+		return 1;
+	printf("open timeout %s: done\n", kind);
+	return 0;
+}
+
+/*
+ * open-kill: a child's open reaches the validation VFS, which withholds the
+ * reply. After the boot test sees that, a newline lets this process kill the
+ * child. The parent stays alive in the same family: the kernel must fail and
+ * close the family session when it delivers the child's exit, and the VFS
+ * must release the child's open object while the parent still runs.
+ */
+static int open_kill(void)
+{
+	const char *path = "/home/demo/.validation-open-kill";
+	char byte;
+	int fd, status = 0;
+	pid_t child;
+
+	unlink(path);
+	fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	if (fd < 0 || close(fd) != 0) {
+		printf("open kill setup failed: errno=%d\n", errno);
+		return 1;
+	}
+	fflush(stdout);
+	child = fork();
+	if (child < 0)
+		return 1;
+	if (child == 0) {
+		fd = open(path, O_RDONLY);
+		printf("open kill child returned: fd=%d errno=%d\n", fd, errno);
+		_exit(1);
+	}
+	if (read(0, &byte, 1) != 1 || kill(child, SIGKILL) != 0 || waitpid(child, &status, 0) != child ||
+	    !WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL) {
+		printf("open kill: child status=%#x errno=%d\n", status, errno);
+		return 1;
+	}
+	errno = 0;
+	fd = open(IMAGE, O_RDONLY);
+	if (fd != -1 || errno != EIO) {
+		printf("open kill retry: fd=%d errno=%d\n", fd, errno);
+		return 1;
+	}
+	puts("open kill: SIGKILL, then EIO, waiting");
+	fflush(stdout);
+	if (read(0, &byte, 1) != 1)
+		return 1;
+	puts("open kill: done");
 	return 0;
 }
 
@@ -3456,6 +3569,43 @@ static void touch_image(void)
 }
 static int exec_loss_canary = 0x5a;
 
+/* GoOS validation builds only. The VFS completes this persistent open and
+ * dies before sending its reply. The failed call must release its reserved
+ * descriptor, while the dead VFS session must never become usable again. */
+#define OPEN_CRASH_PATH "/home/demo/.validation-vfs-open-crash"
+
+static int open_vfs_loss_test(void)
+{
+	int fd, fds[2] = {-1, -1};
+
+	if (!on_goos())
+		return 1;
+	/* The VFS death must not make the result depend on another image page. */
+	touch_image();
+	fflush(stdout);
+	errno = 0;
+	fd = open(OPEN_CRASH_PATH, O_RDWR | O_CREAT | O_EXCL, 0600);
+	if (fd != -1 || errno != EIO) {
+		printf("open vfs loss failed: fd=%d errno=%d\n", fd, errno);
+		return 1;
+	}
+	/* open reserved the lowest free descriptor before issuing OperationOpen.
+	 * Peer death must cancel that reservation before the syscall returns. */
+	if (!fails(fcntl(3, F_GETFD), EBADF) || pipe(fds) != 0 || fds[0] != 3 || fds[1] != 4 ||
+	    close(fds[0]) != 0 || close(fds[1]) != 0) {
+		printf("open vfs loss failed: fd cleanup %d,%d errno=%d\n", fds[0], fds[1], errno);
+		return 1;
+	}
+	errno = 0;
+	fd = open(IMAGE, O_RDONLY);
+	if (fd != -1 || errno != EIO) {
+		printf("open vfs loss failed: reused session fd=%d errno=%d\n", fd, errno);
+		return 1;
+	}
+	puts("open vfs loss: EIO, fd cleanup, session EIO");
+	return 0;
+}
+
 static int exec_vfs_loss_test(void)
 {
 	char *arguments[] = {EXEC_CRASH_PATH, NULL};
@@ -4826,8 +4976,16 @@ int main(int argc, char **argv)
 			return bench();
 		if (!strcmp(argv[1], "session-loss"))
 			return session_loss();
+		if (!strcmp(argv[1], "late-allocate"))
+			return late_allocate();
 		if (!strcmp(argv[1], "session-timeout"))
 			return session_timeout();
+		if (!strcmp(argv[1], "open-timeout-existing"))
+			return open_timeout(0);
+		if (!strcmp(argv[1], "open-timeout-created"))
+			return open_timeout(1);
+		if (!strcmp(argv[1], "open-kill"))
+			return open_kill();
 		if (!strcmp(argv[1], "exec"))
 			return exec_test();
 		if (!strcmp(argv[1], "fork"))
@@ -4885,6 +5043,8 @@ int main(int argc, char **argv)
 			return domains_test(argc > 2 ? argv[2] : "a");
 		if (!strcmp(argv[1], "fpstate"))
 			return fpstate_test();
+		if (!strcmp(argv[1], "open-vfs-loss"))
+			return open_vfs_loss_test();
 		if (!strcmp(argv[1], "exec-vfs-loss"))
 			return exec_vfs_loss_test();
 		if (!strcmp(argv[1], "path")) {
