@@ -63,6 +63,14 @@ type FS struct {
 	negotiation Negotiation
 	state       State
 	scratch     []byte
+	// mutable is set only by mountScratch: real mounts never stage writes
+	// while writeSupported is false.
+	mutable bool
+	txn     *txn
+	// live holds the inodes the running operation has loaded or created.
+	live    map[uint32]*Inode
+	now     func() Timestamp
+	commits uint64
 }
 
 // Mount probes device, validates the volume and returns it mounted

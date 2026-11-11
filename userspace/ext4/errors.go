@@ -17,6 +17,11 @@ const (
 	KindNameTooLong
 	KindStale
 	KindReadOnly
+	KindNoSpace
+	KindExists
+	KindNotEmpty
+	KindTooManyLinks
+	KindInternal
 )
 
 var kindNames = [...]string{
@@ -32,6 +37,11 @@ var kindNames = [...]string{
 	KindNameTooLong:   "name too long",
 	KindStale:         "stale inode",
 	KindReadOnly:      "read-only filesystem",
+	KindNoSpace:       "no space left",
+	KindExists:        "name exists",
+	KindNotEmpty:      "directory not empty",
+	KindTooManyLinks:  "too many links",
+	KindInternal:      "internal error",
 }
 
 func (kind Kind) String() string {
@@ -65,6 +75,10 @@ func corrupt(reason string) *Error { return fail(KindCorrupt, reason) }
 var errIO = &ioError
 
 var ioError = Error{Kind: KindIO, Reason: "device read failed"}
+
+var errWrite = &writeError
+
+var writeError = Error{Kind: KindIO, Reason: "device write or flush failed"}
 
 // KindOf reports the kind of err, or zero when err is nil or foreign.
 func KindOf(err error) Kind {

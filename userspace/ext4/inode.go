@@ -60,6 +60,8 @@ type Inode struct {
 	raw []byte
 	// csumSeed starts the checksum chains of blocks this inode owns.
 	csumSeed uint32
+	// dirty marks a live copy a transaction must write back.
+	dirty bool
 }
 
 // Type is the file type bits of the mode.
@@ -203,7 +205,9 @@ func decodeTime(seconds uint32, raw []byte, extraOffset int, hasExtra bool) Time
 	return stamp
 }
 
-func (fs *FS) verifyInodeChecksum(inode *Inode, raw []byte) error {
+// inodeChecksum computes the CRC32C an inode should carry and whether it
+// has room for the high half.
+func (fs *FS) inodeChecksum(inode *Inode, raw []byte) (uint32, bool) {
 	hasHigh := len(raw) > goodOldIsize && goodOldIsize+int(inode.ExtraIsize) >= inodeChecksumHi+2
 	crc := crc32c(inode.csumSeed, raw[:inodeChecksumLo])
 	crc = crc32cZeros(crc, 2)
@@ -217,11 +221,17 @@ func (fs *FS) verifyInodeChecksum(inode *Inode, raw []byte) error {
 			crc = crc32c(crc, raw[inodeChecksumHi:])
 		}
 	}
+	if !hasHigh {
+		crc &= 0xFFFF
+	}
+	return crc, hasHigh
+}
+
+func (fs *FS) verifyInodeChecksum(inode *Inode, raw []byte) error {
+	crc, hasHigh := fs.inodeChecksum(inode, raw)
 	stored := uint32(le16(raw, inodeChecksumLo))
 	if hasHigh {
 		stored |= uint32(le16(raw, inodeChecksumHi)) << 16
-	} else {
-		crc &= 0xFFFF
 	}
 	if crc != stored {
 		return corrupt("inode checksum mismatch")

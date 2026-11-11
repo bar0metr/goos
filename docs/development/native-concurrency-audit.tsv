@@ -961,3 +961,5 @@ CA-1186	goos/userspace/fsdetect	Drivers	process	immutable	TestLinuxExt4Images
 CA-1187	goos/userspace/volume	statusText	process	immutable	TestStatusText
 CA-1188	goos/userspace/ext4	crc32cFilled	process	owned	none
 CA-1189	goos/userspace/ext4	ioError	process	immutable	none
+CA-1190	goos/userspace/ext4	errWrite	process	immutable	none
+CA-1191	goos/userspace/ext4	writeError	process	immutable	none

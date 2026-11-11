@@ -46,25 +46,28 @@ type Superblock struct {
 	Revision         uint32
 	FirstInode       uint32
 	InodeSize        uint16
-	Features         FeatureSet
-	UUID             [16]byte
-	VolumeName       [16]byte
-	JournalInode     uint32
-	JournalDevice    uint32
-	LastOrphan       uint32
-	HashSeed         [4]uint32
-	DefaultHash      uint8
-	DescriptorSize   uint16
-	Flags            uint32
-	MinExtraIsize    uint16
-	WantExtraIsize   uint16
-	LogGroupsPerFlex uint8
-	ChecksumType     uint8
-	ChecksumSeed     uint32
-	ErrorCount       uint32
-	OrphanFileInode  uint32
-	Checksum         uint32
-	JournalBlocks    [17]uint32
+	// ReservedGDTBlocks are the descriptor blocks resize_inode keeps after
+	// each descriptor table copy.
+	ReservedGDTBlocks uint16
+	Features          FeatureSet
+	UUID              [16]byte
+	VolumeName        [16]byte
+	JournalInode      uint32
+	JournalDevice     uint32
+	LastOrphan        uint32
+	HashSeed          [4]uint32
+	DefaultHash       uint8
+	DescriptorSize    uint16
+	Flags             uint32
+	MinExtraIsize     uint16
+	WantExtraIsize    uint16
+	LogGroupsPerFlex  uint8
+	ChecksumType      uint8
+	ChecksumSeed      uint32
+	ErrorCount        uint32
+	OrphanFileInode   uint32
+	Checksum          uint32
+	JournalBlocks     [17]uint32
 }
 
 // BlockSize is the filesystem block size in bytes.
@@ -96,35 +99,36 @@ func ParseSuperblock(raw []byte, capacity uint64) (*Superblock, error) {
 		return nil, corrupt("bad superblock magic")
 	}
 	sb := &Superblock{
-		InodesCount:      le32(raw, 0x0),
-		BlocksCount:      uint64(le32(raw, 0x4)),
-		ReservedBlocks:   uint64(le32(raw, 0x8)),
-		FreeBlocks:       uint64(le32(raw, 0xC)),
-		FreeInodes:       le32(raw, 0x10),
-		FirstDataBlock:   le32(raw, 0x14),
-		LogBlockSize:     le32(raw, 0x18),
-		LogClusterSize:   le32(raw, 0x1C),
-		BlocksPerGroup:   le32(raw, 0x20),
-		ClustersPerGroup: le32(raw, 0x24),
-		InodesPerGroup:   le32(raw, 0x28),
-		MountTime:        le32(raw, 0x2C),
-		WriteTime:        le32(raw, 0x30),
-		State:            le16(raw, 0x3A),
-		Errors:           le16(raw, 0x3C),
-		Revision:         le32(raw, 0x4C),
-		FirstInode:       goodOldInodes,
-		InodeSize:        goodOldIsize,
-		JournalInode:     le32(raw, 0xE0),
-		JournalDevice:    le32(raw, 0xE4),
-		LastOrphan:       le32(raw, 0xE8),
-		DefaultHash:      raw[0xFC],
-		Flags:            le32(raw, 0x160),
-		LogGroupsPerFlex: raw[0x174],
-		ChecksumType:     raw[0x175],
-		ErrorCount:       le32(raw, 0x194),
-		ChecksumSeed:     le32(raw, 0x270),
-		OrphanFileInode:  le32(raw, 0x280),
-		Checksum:         le32(raw, 0x3FC),
+		InodesCount:       le32(raw, 0x0),
+		BlocksCount:       uint64(le32(raw, 0x4)),
+		ReservedBlocks:    uint64(le32(raw, 0x8)),
+		FreeBlocks:        uint64(le32(raw, 0xC)),
+		FreeInodes:        le32(raw, 0x10),
+		FirstDataBlock:    le32(raw, 0x14),
+		LogBlockSize:      le32(raw, 0x18),
+		LogClusterSize:    le32(raw, 0x1C),
+		BlocksPerGroup:    le32(raw, 0x20),
+		ClustersPerGroup:  le32(raw, 0x24),
+		InodesPerGroup:    le32(raw, 0x28),
+		MountTime:         le32(raw, 0x2C),
+		WriteTime:         le32(raw, 0x30),
+		State:             le16(raw, 0x3A),
+		Errors:            le16(raw, 0x3C),
+		Revision:          le32(raw, 0x4C),
+		FirstInode:        goodOldInodes,
+		InodeSize:         goodOldIsize,
+		JournalInode:      le32(raw, 0xE0),
+		JournalDevice:     le32(raw, 0xE4),
+		LastOrphan:        le32(raw, 0xE8),
+		DefaultHash:       raw[0xFC],
+		Flags:             le32(raw, 0x160),
+		LogGroupsPerFlex:  raw[0x174],
+		ChecksumType:      raw[0x175],
+		ErrorCount:        le32(raw, 0x194),
+		ChecksumSeed:      le32(raw, 0x270),
+		OrphanFileInode:   le32(raw, 0x280),
+		Checksum:          le32(raw, 0x3FC),
+		ReservedGDTBlocks: le16(raw, 0xCE),
 	}
 	if sb.Revision >= revisionDynamic {
 		sb.FirstInode = le32(raw, 0x54)
