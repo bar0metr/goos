@@ -10,7 +10,17 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+command -v docker >/dev/null || {
+	echo "check-mutations: docker not found; this gate cannot be skipped" >&2
+	exit 1
+}
 (cd "$repo" && GOOS_EXT4_EXPORT="$work" go test -count=1 -run '^TestExportMutatedImages$' ./userspace/ext4)
+# A skipped or renamed export test must not pass as a clean check.
+images=$(find "$work" -name '*.img' | wc -l | tr -d ' ')
+[ "$images" -eq 4 ] || {
+	echo "check-mutations: expected 4 exported images, found $images" >&2
+	exit 1
+}
 # The images go in as a tar on standard input, as in make-fixtures.sh.
 # DOCKER_FLAGS passes extra docker run options, such as --dns for a VM
 # whose resolver containers cannot reach.
@@ -32,6 +42,7 @@ manifest() {
 	done)
 }
 status=0
+checked=0
 for img in *.img; do
 	name=${img%.img}
 	if ! e2fsck -fn "$img" >"$name.fsck" 2>&1 ||
@@ -52,6 +63,8 @@ for img in *.img; do
 		continue
 	fi
 	echo "$name: e2fsck clean, $(wc -l <"$name.manifest.tsv") entries match debugfs"
+	checked=$((checked + 1))
 done
+[ "$checked" -eq 4 ] || status=1
 exit $status
 '

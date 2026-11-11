@@ -626,6 +626,7 @@ test-all:
 	$(MAKE) docs
 	$(MAKE) test-incremental
 	$(MAKE) test-crypto-frames
+	$(MAKE) test-ext4-mutations
 	$(MAKE) test-memory
 	$(MAKE) test-boot
 	$(MAKE) test-vfs-serial
@@ -662,6 +663,7 @@ release-check:
 	$(MAKE) test-incremental
 	$(MAKE) test-crypto-frames
 	$(MAKE) test-storage-stress
+	$(MAKE) test-ext4-mutations
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-memory

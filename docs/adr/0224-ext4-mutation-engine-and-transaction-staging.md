@@ -37,8 +37,8 @@ inode's generation changed, so a handle never reaches a reused inode.
 
 **Gate.** Only `mountScratch` sets `FS.mutable`. It is unexported, nothing
 outside the package's tests calls it, and it requires the writable profile
-of the feature matrix, 4 KiB blocks, and superblock free counts that match
-the descriptors. On a volume from `Mount`, every operation returns
+of the feature matrix, 4 KiB blocks, and the counts described under count
+validation below. On a volume from `Mount`, every operation returns
 `KindReadOnly`. The ext4 service and adapter do not call the operations.
 
 **Staging.** An operation runs in a transaction: a map from block number to
@@ -133,11 +133,32 @@ then the mount's backend) and must drop path, attribute and page cache
 entries for every node an operation reports changed; an operation reports
 its result only after commit.
 
-**Gaps a writable mount must close first.** There is no orphan list: an
-unlink frees the inode at once, and an unlink or truncate that spans
-transactions leaves an unreachable, allocated inode if it stops between
-them. A write that spans transactions commits a prefix and reports it.
-Neither is safe without the journal and orphan handling.
+**Gaps a writable mount must close first.** There is no orphan list, and
+two classes of operation can stop halfway once the journal makes each
+transaction atomic:
+
+- Last-link deletion: `Unlink`, `Rmdir`, and `Rename` replacing the last
+  link of a file or an empty directory. Each removes or retargets the name
+  first and then calls `release`, which frees the inode's blocks in
+  truncate steps that may each commit, and frees the inode last. Stopping
+  between those commits leaves an unreachable inode with some of its blocks
+  still allocated. An empty directory is small unless it once held many
+  names, but the path is the same.
+- Truncate across transactions: the new size commits first and the blocks
+  past it go in later steps, so stopping between them leaves blocks past
+  end of file.
+
+The orphan list must cover every caller of `release` and every
+multi-transaction truncate, not one system call. A write that spans
+transactions commits a prefix and reports its length; that matches Linux
+and needs no orphan entry.
+
+**Count validation.** `mountScratch` checks that the superblock free counts
+equal the sums over the descriptors, and that each initialized bitmap's
+clear bits equal its descriptor's free count, padding bits are set, and no
+inode in the unused table tail is in use. The allocators also refuse a run
+longer than its group's free count and a free that would push a count past
+the group's size, as corruption. A writable mount must keep both checks.
 
 ## Evidence
 
@@ -156,7 +177,8 @@ Neither is safe without the journal and orphan handling.
 - `make test-ext4-mutations` exports four mutated images and runs the
   pinned e2fsprogs 1.47.2: `e2fsck -fn` reports nothing on any of them, and
   the tree `debugfs rdump` extracts matches the GoOS reader's manifest,
-  content hashes included. It needs Docker.
+  content hashes included. It needs Docker, fails without it or with fewer
+  than four images, and `test-all` and `release-check` run it.
 
 ## Consequences
 

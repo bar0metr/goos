@@ -9,9 +9,12 @@ package ext4
 // its transactions from them.
 //
 // These operations only run on volumes mounted with mountScratch. They do
-// not keep an orphan list, so a file whose last link goes away is freed at
-// once and an interrupted multi-step truncate or unlink leaves allocated
-// blocks Linux's e2fsck would reclaim.
+// not keep an orphan list. Every path that drops an inode's last link
+// (Unlink, Rmdir, and Rename over a last link) removes the name first and
+// then frees the inode's blocks in release, whose steps may each commit;
+// so does a Truncate across transactions. Stopping between those commits
+// leaves an unreachable inode, or a short file, with blocks still
+// allocated.
 
 // Metadata credits, in blocks, at most depth-5 extent trees and 4 KiB
 // blocks. A descriptor block is counted with every bitmap even when two
@@ -62,7 +65,7 @@ const (
 // tools working on disposable images; nothing in a GoOS service calls it,
 // and Mount still refuses read-write while writeSupported is false. The
 // volume must match the writable profile, use 4 KiB blocks, and carry free
-// counts that agree with its descriptors.
+// counts that agree with its descriptors and their bitmaps.
 func mountScratch(device Device, now func() Timestamp) (*FS, error) {
 	fs, err := Mount(device, Options{})
 	if err != nil {
@@ -86,6 +89,9 @@ func mountScratch(device Device, now func() Timestamp) (*FS, error) {
 	}
 	if freeBlocks != fs.sb.FreeBlocks || freeInodes != fs.sb.FreeInodes {
 		return nil, corrupt("superblock free counts disagree with the descriptors")
+	}
+	if err := fs.verifyGroupCounts(); err != nil {
+		return nil, err
 	}
 	fs.mutable, fs.now, fs.state = true, now, StateReadyRW
 	return fs, nil

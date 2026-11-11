@@ -119,6 +119,17 @@ func TestMutationNeedsScratchMount(t *testing.T) {
 	}
 }
 
+// TestScratchMountChecksCounts refuses a checksum-consistent volume whose
+// descriptor counts disagree with its bitmaps: the allocators trust the
+// counts.
+func TestScratchMountChecksCounts(t *testing.T) {
+	device := fixture(t, "canonical")
+	setStrayBitmapBit(t, device)
+	mount(t, device)
+	_, err := mountScratch(&scratchDevice{data: device.data}, testClock())
+	wantKind(t, err, KindCorrupt)
+}
+
 func TestCreateWriteRead(t *testing.T) {
 	fs, device := scratch(t, "canonical")
 	before := fs.Info()

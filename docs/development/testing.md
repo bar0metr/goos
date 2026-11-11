@@ -315,6 +315,12 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   the fast tests, lint, documentation checks, the ISO build, the real QEMU
   boot/persistence test, and the Linux end-to-end boot in sequence so host
   builds cannot contend with QEMU.
+- `make test-ext4-mutations` writes four volumes through the ext4 mutation
+  code (ADR 0224) and checks each with `e2fsck -fn` and `debugfs` from the
+  pinned e2fsprogs 1.47.2 in a container. It needs Docker and fails without
+  it; `test-all` and `release-check` run it. `DOCKER_FLAGS` passes extra
+  `docker run` options, such as `--dns` when containers cannot resolve
+  names.
 - `make test-linux-elf` and `make test-linux-abi` run the Linux host tests:
   the ELF parser against hostile and real images with every fixture's
   checksum, and the pure translation code with the VFS protocol it speaks.
@@ -504,7 +510,7 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   a status and a decision, and the current release has notes.
 - `make release-check` is the release gate. It runs `test-reproducible`
   first — which cleans `build/` and builds twice, so a clean build is part of
-  the gate — then lint, docs, `make test`, `test-storage-stress`, the ISO, `tests/release/check.sh`,
+  the gate — then lint, docs, `make test`, `test-storage-stress`, `test-ext4-mutations`, the ISO, `tests/release/check.sh`,
   `test-memory`, `test-boot`, and a two-guest `test-stress`, and the release checks once more
   at the end. The release checks require notes for the version in
   `internal/version/version.go`, a kernel that reports it, no validation marker

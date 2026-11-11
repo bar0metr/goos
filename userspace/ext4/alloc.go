@@ -212,6 +212,9 @@ func (fs *FS) allocBlocks(goal uint64, want uint64) (uint64, uint64, error) {
 		if run == 0 {
 			continue
 		}
+		if run > uint64(desc.FreeBlocks) {
+			return 0, 0, corrupt("group free block count below its bitmap's free run")
+		}
 		if bitmap, err = fs.stage(desc.BlockBitmap); err != nil {
 			return 0, 0, err
 		}
@@ -282,6 +285,9 @@ func (fs *FS) freeBlocks(start uint64, count uint64) error {
 				return corrupt("freeing a free block")
 			}
 			clearBit(bitmap, first+index)
+		}
+		if uint64(desc.FreeBlocks)+chunk > fs.groupBlocks(group) {
+			return corrupt("group free block count above the group")
 		}
 		desc.FreeBlocks += uint32(chunk)
 		if err := fs.sealGroup(group, &desc); err != nil {
@@ -392,6 +398,9 @@ func (fs *FS) freeInode(inode *Inode) error {
 	if !testBit(bitmap, uint64(index)) {
 		return corrupt("freeing a free inode")
 	}
+	if desc.FreeInodes >= fs.sb.InodesPerGroup || (inode.IsDir() && desc.UsedDirs == 0) {
+		return corrupt("group inode counts disagree with its bitmap")
+	}
 	clearBit(bitmap, uint64(index))
 	desc.FreeInodes++
 	if inode.IsDir() {
@@ -405,4 +414,60 @@ func (fs *FS) freeInode(inode *Inode) error {
 	putLE32(inode.raw[0x14:], uint32(fs.now().Seconds))
 	inode.dirty = true
 	return nil
+}
+
+// verifyGroupCounts checks every initialized bitmap against its
+// descriptor before a volume is opened for mutation: the free counts must
+// equal the clear bits, padding bits must be set, and no inode in the
+// unused table tail may be in use. The allocators trust the counts, so a
+// checksum-consistent image whose counts disagree is refused here rather
+// than letting a count wrap.
+func (fs *FS) verifyGroupCounts() error {
+	for group := uint32(0); uint64(group) < fs.groups; group++ {
+		desc, err := fs.group(group)
+		if err != nil {
+			return err
+		}
+		if desc.Flags&groupBlockUninit == 0 {
+			bitmap, err := fs.cache.get(desc.BlockBitmap)
+			if err != nil {
+				return err
+			}
+			count := fs.groupBlocks(group)
+			if free := clearBits(bitmap, 0, count); free != uint64(desc.FreeBlocks) {
+				return corrupt("group free block count disagrees with its bitmap")
+			}
+			if clearBits(bitmap, count, uint64(fs.blockSize)*8) != 0 {
+				return corrupt("block bitmap padding bits clear")
+			}
+		}
+		if desc.Flags&groupInodeUninit == 0 {
+			bitmap, err := fs.cache.get(desc.InodeBitmap)
+			if err != nil {
+				return err
+			}
+			inodes := uint64(fs.sb.InodesPerGroup)
+			if free := clearBits(bitmap, 0, inodes); free != uint64(desc.FreeInodes) {
+				return corrupt("group free inode count disagrees with its bitmap")
+			}
+			used := inodes - uint64(desc.ItableUnused)
+			if clearBits(bitmap, used, inodes) != inodes-used {
+				return corrupt("inode in use inside the unused table tail")
+			}
+		} else if desc.FreeInodes != fs.sb.InodesPerGroup || desc.UsedDirs != 0 {
+			return corrupt("uninitialized inode group with inodes in use")
+		}
+	}
+	return nil
+}
+
+// clearBits counts the clear bits in [from, to).
+func clearBits(bitmap []byte, from uint64, to uint64) uint64 {
+	clear := uint64(0)
+	for bit := from; bit < to; bit++ {
+		if !testBit(bitmap, bit) {
+			clear++
+		}
+	}
+	return clear
 }

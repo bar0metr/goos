@@ -424,10 +424,10 @@ func TestCheckerAcceptsFixtures(t *testing.T) {
 	}
 }
 
-// TestCheckerCatchesDamage flips one bitmap bit and expects the oracle to
-// notice.
-func TestCheckerCatchesDamage(t *testing.T) {
-	device := fixture(t, "canonical")
+// setStrayBitmapBit marks one free block of group 0 used and reseals the
+// bitmap and descriptor checksums, so only the counts disagree.
+func setStrayBitmapBit(t testing.TB, device *memDevice) {
+	t.Helper()
 	fs := mount(t, device)
 	desc, err := fs.group(0)
 	if err != nil {
@@ -435,10 +435,7 @@ func TestCheckerCatchesDamage(t *testing.T) {
 	}
 	offset := desc.BlockBitmap * uint64(fs.blockSize)
 	bitmap := device.data[offset : offset+uint64(fs.blockSize)]
-	bit := bytes.IndexByte(bitmap, 0)
-	bitmap[bit] = 1
-	// Keep the bitmap checksum valid so mount succeeds and the cross-check
-	// is what fails.
+	bitmap[bytes.IndexByte(bitmap, 0)] = 1
 	desc.BlockBitmapCsum = crc32c(fs.seed, bitmap[:fs.sb.ClustersPerGroup/8])
 	block, within := fs.descriptorLocation(0)
 	raw := device.data[block*4096+uint64(within):]
@@ -446,6 +443,13 @@ func TestCheckerCatchesDamage(t *testing.T) {
 	putLE16(raw[0x38:], uint16(desc.BlockBitmapCsum>>16))
 	crc, _ := fs.descriptorChecksum(0, raw[:fs.sb.DescriptorSize])
 	putLE16(raw[0x1E:], crc)
+}
+
+// TestCheckerCatchesDamage flips one bitmap bit and expects the oracle to
+// notice.
+func TestCheckerCatchesDamage(t *testing.T) {
+	device := fixture(t, "canonical")
+	setStrayBitmapBit(t, device)
 	if err := verifyVolume(device); err == nil {
 		t.Fatal("checker missed a stray bitmap bit")
 	}
