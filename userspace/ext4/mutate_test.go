@@ -130,6 +130,30 @@ func TestScratchMountChecksCounts(t *testing.T) {
 	wantKind(t, err, KindCorrupt)
 }
 
+// TestScratchMountChecksInodePadding refuses a volume whose inode bitmap
+// has a clear bit past the group's inodes. The bitmap checksum covers only
+// the group's inodes, so the read-only mount still accepts it.
+func TestScratchMountChecksInodePadding(t *testing.T) {
+	device := fixture(t, "canonical")
+	fs := mount(t, device)
+	desc, err := fs.group(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bitmap := device.data[desc.InodeBitmap*uint64(fs.blockSize):]
+	clearBit(bitmap, uint64(fs.sb.InodesPerGroup))
+	desc.InodeBitmapCsum = crc32c(fs.seed, bitmap[:fs.sb.InodesPerGroup/8])
+	block, within := fs.descriptorLocation(0)
+	raw := device.data[block*uint64(fs.blockSize)+uint64(within):]
+	putLE16(raw[0x1A:], uint16(desc.InodeBitmapCsum))
+	putLE16(raw[0x3A:], uint16(desc.InodeBitmapCsum>>16))
+	crc, _ := fs.descriptorChecksum(0, raw[:fs.sb.DescriptorSize])
+	putLE16(raw[0x1E:], crc)
+	mount(t, device)
+	_, err = mountScratch(&scratchDevice{data: device.data}, testClock())
+	wantKind(t, err, KindCorrupt)
+}
+
 func TestCreateWriteRead(t *testing.T) {
 	fs, device := scratch(t, "canonical")
 	before := fs.Info()

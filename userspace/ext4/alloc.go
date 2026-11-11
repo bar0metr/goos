@@ -450,6 +450,9 @@ func (fs *FS) verifyGroupCounts() error {
 			if free := clearBits(bitmap, 0, inodes); free != uint64(desc.FreeInodes) {
 				return corrupt("group free inode count disagrees with its bitmap")
 			}
+			if clearBits(bitmap, inodes, uint64(fs.blockSize)*8) != 0 {
+				return corrupt("inode bitmap padding bits clear")
+			}
 			used := inodes - uint64(desc.ItableUnused)
 			if clearBits(bitmap, used, inodes) != inodes-used {
 				return corrupt("inode in use inside the unused table tail")
