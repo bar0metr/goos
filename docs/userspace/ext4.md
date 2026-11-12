@@ -81,9 +81,11 @@ grants nothing from those bits (ADR 0223). Marking a file read-only clears
 its write bits. Extended attributes stay as Linux left them, and GoOS
 cannot change owners or other mode bits.
 
-Each operation commits through the journal in ordered-data mode and is
-durable when the service replies (ADR 0225), so `fsync` has nothing more to
-wait for. A file you remove while it is open keeps its data until you close
+Operations commit through the journal in ordered-data mode, in batches
+(ADR 0227). An operation that returned is durable once `fsync`, the shell's
+`sync`, `umount`, `reboot` or `poweroff` returns, or after the service's
+one-second commit interval; a crash before that loses it, as on Linux. An
+`fsync` that returned is never lost. A file you remove while it is open keeps its data until you close
 it. `umount` empties the journal and marks the volume clean, so Linux and
 the read-only mount accept it. If the service or the machine dies first,
 the next read-write mount, Linux, or `e2fsck -fy` replays the journal.

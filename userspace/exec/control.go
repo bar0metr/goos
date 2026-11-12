@@ -13,7 +13,7 @@ import (
 // 4 adds power-off; version 5 adds the writable volume mount (ADR 0226).
 const (
 	ControlProtocolID = uint64(0x4743544c30303031)
-	ControlVersion    = uint16(5)
+	ControlVersion    = uint16(6)
 	// MaxServiceEntries is as many entries as one reply holds: eleven of
 	// 22 bytes, after the count, in a 256-byte payload. A system with both
 	// consoles and a network runs thirteen services, so a listing asks for
@@ -39,6 +39,10 @@ const (
 	// ControlPowerOff asks PID 1 to flush storage and switch the machine off
 	// (ADR 0092).
 	ControlPowerOff
+	// ControlSync asks PID 1 to have the persistent volume and every
+	// mounted additional volume make their completed writes durable
+	// (ADR 0227).
+	ControlSync
 )
 
 // The targets ControlFault may name: an interactive service to kill, the
@@ -144,7 +148,7 @@ func validControl(operation ControlOperation, argument uint8) bool {
 	switch operation {
 	case ControlServices:
 		return argument < MaxServiceIndex
-	case ControlReboot, ControlDiagnostics, ControlPowerOff:
+	case ControlReboot, ControlDiagnostics, ControlPowerOff, ControlSync:
 		return argument == 0
 	case ControlKill:
 		return argument < Slots

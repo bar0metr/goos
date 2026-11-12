@@ -116,6 +116,20 @@ func (service *Service) DetachVolume(slot uint8) vfs.Status {
 	return vfs.StatusOK
 }
 
+// SyncVolumes asks every attached additional volume to make its completed
+// writes durable and returns how many refused. An ext4 volume commits the
+// operations it holds in memory (ADR 0227).
+func (service *Service) SyncVolumes() int {
+	failed := 0
+	for index := range service.volumes {
+		volume := &service.volumes[index]
+		if volume.mounted && volume.remote.transport != nil && !volume.remote.Flush() {
+			failed++
+		}
+	}
+	return failed
+}
+
 // VolumeMounted reports whether slot holds a mounted volume.
 func (service *Service) VolumeMounted(slot uint8) bool {
 	volume := service.volume(slot)

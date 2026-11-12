@@ -145,6 +145,12 @@ func executeCommand(line []byte) {
 		shutDown(execproto.ControlReboot, "reboot")
 	case "poweroff":
 		shutDown(execproto.ControlPowerOff, "poweroff")
+	case "sync":
+		reply, ok := controlExchange(execproto.ControlSync, 0)
+		if status, valid := execproto.DecodeControlStatus(reply); !ok || !valid || status != execproto.ControlOK {
+			writeError("sync: storage did not confirm\n")
+			commandStatus = 1
+		}
 	case "exit":
 		session, _ := startupData.Env("GOOS_SESSION")
 		if !shellcmd.RemoteSession(session) {

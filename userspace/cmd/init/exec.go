@@ -289,6 +289,12 @@ func handleControl(message ipc.Message) {
 		if reply, encoded := execproto.EncodeServices(entries[:count], message.Correlation); encoded {
 			sendMessage(replying.execServer, reply)
 		}
+	case operation == execproto.ControlSync:
+		status := execproto.ControlSyncFailed
+		if syncStorage() {
+			status = execproto.ControlOK
+		}
+		sendControlStatus(status, message.Correlation)
 	case operation == execproto.ControlReboot, operation == execproto.ControlPowerOff:
 		shutDown(operation == execproto.ControlPowerOff, message.Correlation)
 	}

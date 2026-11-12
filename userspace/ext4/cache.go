@@ -29,10 +29,19 @@ type blockCache struct {
 	entries [cacheBlocks]cachedBlock
 	reads   uint64
 	hits    uint64
-	// overlay holds the blocks an open transaction has staged. Reads see
-	// them first, so a transaction observes its own changes before they
-	// reach the device.
+	// overlay holds the blocks the running operation has staged and base
+	// those of the pending transaction. Reads see overlay, then base, so
+	// operations observe changes before they reach the device.
 	overlay map[uint64]*stagedBlock
+	base    map[uint64]*stagedBlock
+}
+
+// staged returns the staged copy of block, if a transaction holds one.
+func (cache *blockCache) staged(block uint64) *stagedBlock {
+	if staged := cache.overlay[block]; staged != nil {
+		return staged
+	}
+	return cache.base[block]
 }
 
 func (cache *blockCache) init(device Device, blockSize uint32, blocks uint64) {
@@ -49,7 +58,7 @@ func (cache *blockCache) get(block uint64) ([]byte, error) {
 	if block >= cache.limit {
 		return nil, corrupt("block number beyond the volume")
 	}
-	if staged := cache.overlay[block]; staged != nil {
+	if staged := cache.staged(block); staged != nil {
 		return staged.data, nil
 	}
 	cache.clock++
@@ -84,7 +93,7 @@ func (cache *blockCache) readBlocks(block uint64, target []byte) error {
 	if end, ok := addOK(block, count); !ok || end > cache.limit {
 		return corrupt("data run beyond the volume")
 	}
-	if len(cache.overlay) != 0 {
+	if len(cache.overlay) != 0 || len(cache.base) != 0 {
 		return cache.readStaged(block, count, target)
 	}
 	if !cache.device.ReadAt(block*cache.size, target) {
@@ -98,7 +107,7 @@ func (cache *blockCache) readStaged(block uint64, count uint64, target []byte) e
 	size := cache.size
 	for index := uint64(0); index < count; index++ {
 		out := target[index*size : (index+1)*size]
-		if staged := cache.overlay[block+index]; staged != nil {
+		if staged := cache.staged(block + index); staged != nil {
 			copy(out, staged.data)
 			continue
 		}

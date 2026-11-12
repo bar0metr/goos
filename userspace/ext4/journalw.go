@@ -39,11 +39,11 @@ func (fs *FS) writeLog(data []byte) bool {
 	return true
 }
 
-// commitLog writes the open transaction through the journal. meta and data
+// commitLog writes transaction t through the journal. meta and data
 // list the staged blocks to write, ascending; revokes lists the logged
 // blocks the transaction freed.
-func (fs *FS) commitLog(meta []uint64, data []uint64, revokes []uint64) error {
-	log, t := fs.log, fs.txn
+func (fs *FS) commitLog(t *txn, meta []uint64, data []uint64, revokes []uint64) error {
+	log := fs.log
 	size := int(fs.blockSize)
 	need := log.logBlocks(len(meta), len(revokes), size)
 	if need >= log.size() {
