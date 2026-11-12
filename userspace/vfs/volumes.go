@@ -87,9 +87,12 @@ func (service *Service) VolumeOffline(slot uint8) {
 	}
 }
 
-// DetachVolume flushes and unmounts the volume of slot. Files open through it
-// make it busy. A volume whose service is gone has nothing to flush and is
-// unmounted all the same, so an administrator can always remove it.
+// DetachVolume unmounts the volume of slot. Files open through it make it
+// busy. Otherwise the service leaves the volume clean on disk first: an ext4
+// volume empties its journal and marks its superblock clean. When it cannot,
+// the mount stays, offline, and the error goes back; the next detach
+// unmounts it without a clean volume behind it. A volume whose service is
+// gone is unmounted all the same, so an administrator can always remove it.
 func (service *Service) DetachVolume(slot uint8) vfs.Status {
 	volume := service.volume(slot)
 	if volume == nil {
@@ -98,7 +101,11 @@ func (service *Service) DetachVolume(slot uint8) vfs.Status {
 	if !volume.mounted {
 		return vfs.StatusNotFound
 	}
-	if volume.remote.transport != nil && !volume.remote.Flush() {
+	if status := service.namespace.BackendInUse(&volume.remote); status != vfs.StatusOK {
+		return status
+	}
+	if volume.remote.transport != nil && volume.remote.Unmount() != ramfs.StatusOK {
+		service.VolumeOffline(slot)
 		return vfs.StatusBackendError
 	}
 	if status := service.namespace.UnmountBackend(&volume.remote); status != vfs.StatusOK {

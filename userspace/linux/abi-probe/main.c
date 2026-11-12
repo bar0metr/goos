@@ -1152,6 +1152,44 @@ static int hold_test(const char *path, int seconds)
 	return 0;
 }
 
+/* ext4_rw checks a read-write ext4 volume mounted at base as a Linux program
+ * uses it: a file written and synced, a rename onto another hard link of the
+ * same inode that changes nothing, a rename to a free name, a file written
+ * and read after its last name went, and a synced directory. */
+static int ext4_rw_test(const char *base)
+{
+	int failed_line = 0;
+	char data[16];
+	struct stat first, second;
+	int fd, dir, ok = chdir(base) == 0;
+
+	ok = ok && (fd = open("abi-a", O_CREAT | O_WRONLY | O_TRUNC, 0644)) >= 0 && write(fd, "abi", 3) == 3 &&
+	     fsync(fd) == 0 && fdatasync(fd) == 0 && close(fd) == 0 && link("abi-a", "abi-b") == 0;
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
+	/* Two names of one inode: rename leaves both. */
+	ok = ok && rename("abi-a", "abi-b") == 0 && probe_stat("abi-a", &first) == 0 && probe_stat("abi-b", &second) == 0 &&
+	     first.st_ino == second.st_ino && first.st_nlink == 2;
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
+	ok = ok && rename("abi-b", "abi-c") == 0 && fails(probe_stat("abi-b", &second), ENOENT) &&
+	     probe_stat("abi-c", &second) == 0 && second.st_ino == first.st_ino && unlink("abi-a") == 0;
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
+	/* The open file keeps its data after its last name goes. */
+	ok = ok && (fd = open("abi-c", O_RDWR)) >= 0 && unlink("abi-c") == 0 && fails(probe_stat("abi-c", &second), ENOENT) &&
+	     pwrite(fd, "-x", 2, 3) == 2 && pread(fd, data, sizeof data, 0) == 5 && !memcmp(data, "abi-x", 5) &&
+	     close(fd) == 0;
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
+	ok = ok && (dir = open(".", O_RDONLY | O_DIRECTORY)) >= 0 && fsync(dir) == 0 && close(dir) == 0;
+	if (!ok && !failed_line)
+		failed_line = __LINE__;
+	if (failed_line)
+		printf("%s failed at line %d\n", "ext4 rw", failed_line);
+	return report("ext4 rw", ok);
+}
+
 /* ext4_links checks what Linux made in the links fixture as a Linux program
  * sees it: modes, owners, link counts and device numbers from the inodes,
  * hard links sharing an inode, the 40-link bound, O_NOFOLLOW, d_type, and the
@@ -5025,6 +5063,8 @@ int main(int argc, char **argv)
 			return open_intent_test();
 		if (!strcmp(argv[1], "hold") && argc >= 4)
 			return hold_test(argv[2], atoi(argv[3]));
+		if (!strcmp(argv[1], "ext4-rw") && argc >= 3)
+			return ext4_rw_test(argv[2]);
 		if (!strcmp(argv[1], "ext4-links") && argc >= 4)
 			return ext4_links_test(argv[2], strtoull(argv[3], NULL, 10));
 		if (!strcmp(argv[1], "limits"))

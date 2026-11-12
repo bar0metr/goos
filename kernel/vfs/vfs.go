@@ -139,6 +139,16 @@ type ReplaceBackend interface {
 	ReplaceName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
 }
 
+// EntryBackend renames and replaces a name its caller spells out, for a
+// filesystem whose node IDs record no name: an ext4 inode with two hard
+// links has two names, and only the path says which one moves. The VFS
+// prefers it to RenameName and ReplaceName; a backend answering
+// StatusUnsupported gets those instead.
+type EntryBackend interface {
+	RenameEntry(sourceParent ramfs.NodeID, sourceName ramfs.Name, id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
+	ReplaceEntry(sourceParent ramfs.NodeID, sourceName ramfs.Name, id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
+}
+
 // MetadataBackend changes a node's modification time and a file's read-only
 // attribute. A backend without it answers SetMetadata with Unsupported.
 type MetadataBackend interface {
@@ -421,10 +431,10 @@ func (namespace *Namespace) Mount(path []byte, backend Backend, root ramfs.NodeI
 // UnmountBackend atomically detaches every mount served by backend. It refuses
 // while an open file still refers to any of them, so a successful return makes
 // it safe for the caller to stop the backend and release its authority.
-func (namespace *Namespace) UnmountBackend(backend Backend) Status {
-	if backend == nil {
-		return StatusInvalidArgument
-	}
+// BackendInUse reports whether UnmountBackend would refuse backend:
+// StatusNotFound when nothing mounts it, StatusBusy while a file or a scope
+// holds it, StatusOK otherwise.
+func (namespace *Namespace) BackendInUse(backend Backend) Status {
 	found := false
 	for index := range namespace.mounts {
 		if namespace.mounts[index].used && namespace.mounts[index].backend == backend {
@@ -444,6 +454,16 @@ func (namespace *Namespace) UnmountBackend(backend Backend) Status {
 		if namespace.scopes[index].backend == backend {
 			return StatusBusy
 		}
+	}
+	return StatusOK
+}
+
+func (namespace *Namespace) UnmountBackend(backend Backend) Status {
+	if backend == nil {
+		return StatusInvalidArgument
+	}
+	if status := namespace.BackendInUse(backend); status != StatusOK {
+		return status
 	}
 	if namespace.guard == backend {
 		namespace.guard, namespace.guarded = nil, 0
@@ -1238,7 +1258,7 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 		// such as /home and /persist/home, are one filesystem.
 		return StatusCrossDevice
 	}
-	status = mapStatus(namespace.mounts[sourceMount].backend.RenameName(node, parent, name))
+	status = mapStatus(namespace.renameBackend(sourceMount, path, node, parent, name, false))
 	namespace.invalidate()
 	if status == StatusOK {
 		namespace.follow(sourceMount, node, target)
@@ -1246,6 +1266,32 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 		namespace.scopeMutationFailed(namespace.mounts[sourceMount].backend)
 	}
 	return status
+}
+
+// renameBackend moves the entry path names, node, to name in parent. A
+// backend with EntryBackend gets the source's parent and name as well; the
+// source must then sit in the mount it resolved in, which a mount root does
+// not. Replace falls back to ReplaceName itself on StatusUnsupported.
+func (namespace *Namespace) renameBackend(sourceMount uint8, path []byte, node, parent ramfs.NodeID, name ramfs.Name, replace bool) ramfs.Status {
+	backend := namespace.mounts[sourceMount].backend
+	entries, ok := backend.(EntryBackend)
+	if ok {
+		if from, sourceParent, sourceName, _, status := namespace.resolveParent(path); status == StatusOK && namespace.sameFilesystem(from, sourceMount) {
+			var result ramfs.Status
+			if replace {
+				result = entries.ReplaceEntry(sourceParent, sourceName, node, parent, name)
+			} else {
+				result = entries.RenameEntry(sourceParent, sourceName, node, parent, name)
+			}
+			if result != ramfs.StatusUnsupported {
+				return result
+			}
+		}
+	}
+	if replace {
+		return ramfs.StatusUnsupported
+	}
+	return backend.RenameName(node, parent, name)
 }
 
 // follow gives files opened under a name that just moved the identity of the
@@ -1315,8 +1361,10 @@ func (namespace *Namespace) Replace(path []byte, target []byte) Status {
 	if !namespace.sameFilesystem(sourceMount, targetMount) {
 		return StatusCrossDevice
 	}
+	// Two names of one file: a rename from one onto the other changes
+	// nothing and succeeds, as rename(2) does.
 	if targetNode == node {
-		return StatusInvalidArgument
+		return StatusOK
 	}
 	if stat, backendStatus := backend.Stat(targetNode); backendStatus != ramfs.StatusOK {
 		return mapStatus(backendStatus)
@@ -1336,7 +1384,11 @@ func (namespace *Namespace) Replace(path []byte, target []byte) Status {
 	if status != StatusOK {
 		return status
 	}
-	status = mapStatus(replacer.ReplaceName(node, parent, name))
+	var backendStatus ramfs.Status
+	if backendStatus = namespace.renameBackend(sourceMount, path, node, parent, name, true); backendStatus == ramfs.StatusUnsupported {
+		backendStatus = replacer.ReplaceName(node, parent, name)
+	}
+	status = mapStatus(backendStatus)
 	namespace.invalidate()
 	if status == StatusOK {
 		namespace.follow(sourceMount, node, target)

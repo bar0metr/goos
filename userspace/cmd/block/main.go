@@ -423,7 +423,11 @@ func control() {
 		// The volume is chosen again, from the table as it is now; a
 		// restarted service without a driver chooses once it describes
 		// the device.
-		if backend.capacity != 0 {
+		// After a driver replacement the device is undescribed until a
+		// request needs it. An additional volume's grant is such a request:
+		// PID 1 makes it once the driver runs, and answering it with an I/O
+		// error would leave the volume offline.
+		if backend.capacity != 0 || volumeReply && driverHandle != 0 && describeDevice() {
 			if partition.StatusOK == scanner.Scan(deviceReader{}, backend.capacity, backend.blockSize, &table) {
 				chooseVolume(int(grant.Slot))
 			}

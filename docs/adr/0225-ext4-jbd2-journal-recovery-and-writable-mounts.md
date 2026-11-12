@@ -7,7 +7,7 @@ Accepted. Extends ADR 0220 (read-only core and feature contract), ADR 0222
 of ADR 0224 that kept `writeSupported` false and limited mutation to the
 unexported `mountScratch`. The ext4 service, the adapter, PID 1 and the
 block service are unchanged: they still mount additional volumes
-read-only, and no GoOS client can write ext4 yet.
+read-only, and no GoOS client can write ext4 yet. ADR 0226 connects them.
 
 ## Context
 

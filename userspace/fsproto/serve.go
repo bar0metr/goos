@@ -32,6 +32,23 @@ type batchVolume interface {
 	ReadDirBatch(parent ramfs.NodeID, cursor int, target []byte) (ramfs.DirBatch, ramfs.Status)
 }
 
+// entryVolume moves a name its caller spells out. A volume without it
+// answers the entry operations with StatusUnsupported, and the VFS falls
+// back to the rename and replace that name only the node. The source name
+// lies in the file cache, which the VFS can still write: a volume copies it
+// before checking it.
+type entryVolume interface {
+	RenameEntry(sourceParent ramfs.NodeID, sourceName []byte, id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
+	ReplaceEntry(sourceParent ramfs.NodeID, sourceName []byte, id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
+}
+
+// unmountVolume leaves its volume clean on disk. A volume without it
+// answers OperationUnmount with StatusOK after a flush: it has no clean
+// state to record.
+type unmountVolume interface {
+	Unmount() ramfs.Status
+}
+
 type objectVolume interface {
 	AcquireObject(ramfs.NodeID) (ramfs.NodeID, ramfs.Status)
 	ReleaseObject(ramfs.NodeID) (ramfs.NodeID, ramfs.Status)
@@ -66,7 +83,8 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 	switch request.Operation {
 	case OperationMount:
 		reply.Node, reply.Status = volume.Root()
-	case OperationOpen, OperationCreate, OperationMkdir, OperationRename, OperationReplace, OperationUnlink, OperationSymlink, OperationLink:
+	case OperationOpen, OperationCreate, OperationMkdir, OperationRename, OperationReplace, OperationUnlink, OperationSymlink, OperationLink,
+		OperationRenameEntry, OperationReplaceEntry:
 		if !named {
 			reply.Status = ramfs.StatusInvalidArgument
 			break
@@ -90,6 +108,19 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 				break
 			}
 			reply.Status = links.LinkName(request.Node, request.Parent, requested)
+		case OperationRenameEntry, OperationReplaceEntry:
+			entries, supported := volume.(entryVolume)
+			source, mapped := SlotBytes(cache, request)
+			switch {
+			case !supported:
+				reply.Status = ramfs.StatusUnsupported
+			case !mapped:
+				reply.Status = ramfs.StatusIOError
+			case request.Operation == OperationRenameEntry:
+				reply.Status = entries.RenameEntry(ramfs.NodeID(request.Offset), source, request.Node, request.Parent, requested)
+			default:
+				reply.Status = entries.ReplaceEntry(ramfs.NodeID(request.Offset), source, request.Node, request.Parent, requested)
+			}
 		case OperationReplace:
 			reply.Status = volume.ReplaceName(request.Node, request.Parent, requested)
 		case OperationOpen:
@@ -209,6 +240,12 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 		}
 	case OperationFlush:
 		if !volume.Flush() {
+			reply.Status = ramfs.StatusIOError
+		}
+	case OperationUnmount:
+		if unmounting, ok := volume.(unmountVolume); ok {
+			reply.Status = unmounting.Unmount()
+		} else if !volume.Flush() {
 			reply.Status = ramfs.StatusIOError
 		}
 	case OperationFilesystemInfo:

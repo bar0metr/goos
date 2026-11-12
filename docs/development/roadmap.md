@@ -478,7 +478,7 @@ Do not move these ahead of the milestones above unless a concrete blocker requir
 - IOMMU work beyond keeping DMA APIs ready for it;
 - USB;
 - desktop GUI;
-- writable ext4 before journal replay, ordered commits and power-cut tests exist (the read-only reader is ADR 0220 and ADR 0221);
+- ext4 as the persistent system volume before its own boot, update and recovery review (read-write additional volumes are ADR 0226);
 - broad dynamic-linker compatibility;
 - broad Linux ABI coverage for its own sake;
 - HTTP/2, HTTP/3 or QUIC without an application need;

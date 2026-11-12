@@ -818,3 +818,34 @@ func (fs *FS) Truncate(file *Inode, size uint64) error {
 		return fs.trimTo(inode, size)
 	})
 }
+
+// AttributeChange names what SetAttributes changes: the permission bits,
+// the modification time, or both.
+type AttributeChange struct {
+	SetMode   bool
+	Mode      uint16
+	SetModify bool
+	Modify    Timestamp
+}
+
+// SetAttributes applies change to inode and stamps its change time. It
+// keeps the file type: Mode contributes only its low twelve bits.
+func (fs *FS) SetAttributes(given *Inode, change AttributeChange) error {
+	return fs.mutate(func() error {
+		inode, err := fs.liveMatch(given)
+		if err != nil {
+			return err
+		}
+		if err := fs.checkMutable(inode); err != nil {
+			return err
+		}
+		if change.SetMode {
+			inode.Mode = inode.Mode&modeTypeMask | change.Mode&^modeTypeMask
+		}
+		if change.SetModify {
+			inode.Modify = change.Modify
+		}
+		fs.touch(inode, "c")
+		return nil
+	})
+}

@@ -9,8 +9,11 @@ import (
 	"goos/userspace/volume"
 )
 
+const mountUsage = "usage: mount [-t TYPE] [-o ro|rw] SOURCE PATH\n"
+
 // runVolumeCommand asks PID 1 to mount or unmount an additional volume
-// (ADR 0222): mount [-t TYPE] SOURCE PATH, umount PATH.
+// (ADR 0222, ADR 0226): mount [-t TYPE] [-o ro|rw] SOURCE PATH, umount PATH.
+// A mount is read-only unless -o rw asks for a writable one.
 func runVolumeCommand(invocation shellcmd.Invocation) uint64 {
 	arguments := invocation.Arguments[1:invocation.Count]
 	var command execproto.VolumeCommand
@@ -18,15 +21,27 @@ func runVolumeCommand(invocation shellcmd.Invocation) uint64 {
 		command.Path = arguments[0]
 	} else {
 		command.Mount = true
-		if len(arguments) > 0 && argumentIs(arguments[0], "-t") {
-			if len(arguments) != 4 {
-				writeError("usage: mount [-t TYPE] SOURCE PATH\n")
+		for len(arguments) > 2 {
+			switch {
+			case argumentIs(arguments[0], "-t") && command.Type == nil:
+				command.Type = arguments[1]
+			case argumentIs(arguments[0], "-o"):
+				writable, ok := volume.ParseMode(arguments[1])
+				if !ok {
+					writeError("mount: ")
+					writeError(volume.InvalidMode.String())
+					writeError("\n")
+					return shellcmd.StatusUsage
+				}
+				command.Writable = writable
+			default:
+				writeError(mountUsage)
 				return shellcmd.StatusUsage
 			}
-			command.Type, arguments = arguments[1], arguments[2:]
+			arguments = arguments[2:]
 		}
 		if len(arguments) != 2 {
-			writeError("usage: mount [-t TYPE] SOURCE PATH\n")
+			writeError(mountUsage)
 			return shellcmd.StatusUsage
 		}
 		command.Source, command.Path = arguments[0], arguments[1]

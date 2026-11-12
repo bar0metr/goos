@@ -6,8 +6,10 @@ in the kernel, and none holds more authority than its layer needs.
 ```text
 utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /tmp, /run)
                                ├─ image backend            (/bootstrap and /etc, read-only boot archive)
-                               └─ remote backend ──GFSPRT01──▶ FAT32 service ──GBLK001──▶ block service ──IPC──▶ virtio-blk driver ──▶ disk
-                                  (/persist, /system, /apps, /home, /state)       (one slice)   (partition table)
+                               ├─ remote backend ──GFSPRT01──▶ FAT32 service ──GBLK001──▶ block service ──IPC──▶ virtio-blk driver ──▶ disk
+                               │  (/persist, /system, /apps, /home, /state)       (one slice)   (partition table)
+                               └─ remote backends ──GFSPRT01──▶ ext4 services ──GBLK001──▶ block service
+                                  (/mnt/NAME, up to four)          (one slice each, ro or rw)
 ```
 
 | Component | Process | Holds | Details |
@@ -16,6 +18,7 @@ utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /
 | RAMFS | inside VFS | a page pool in the VFS's address space | [ramfs.md](../userspace/ramfs.md), ADR 0017, 0105 |
 | Boot archive | inside VFS | image capability, read-only mapping of the boot archive | ADR 0070, ADR 0175 |
 | FAT32 | `/bootstrap/fat32` | server end of the VFS channel, a block client endpoint bounded to its partition, file cache mapping | [storage.md](../userspace/storage.md), ADR 0036, 0096, 0098, 0115 |
+| ext4 | `/bootstrap/ext4`, one process per additional volume | server end of its VFS channel, a block endpoint bounded to one partition (writable only for a `rw` mount), a file cache of its own | [ext4.md](../userspace/ext4.md), ADR 0221, 0222, 0225, 0226 |
 | Block service | `/bootstrap/block` | public and filesystem server endpoints, driver client endpoint; reads the partition table and serves the filesystem endpoint through a slice | [storage.md](../userspace/storage.md), ADR 0033, 0115 |
 | virtio-blk | `/bootstrap/virtio-blk` | port range, IRQ 11, DMA domain, driver server endpoint | [storage.md](../userspace/storage.md), ADR 0034, 0035 |
 

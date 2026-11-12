@@ -24,7 +24,7 @@ type Driver struct {
 // started, whatever a probe or a mount command says.
 var Drivers = [...]Driver{
 	{Type: ramfs.FilesystemFAT32, Name: "fat32", Executable: "/bootstrap/fat32", Writable: true},
-	{Type: ramfs.FilesystemExt4, Name: "ext4", Executable: "/bootstrap/ext4", Additional: true},
+	{Type: ramfs.FilesystemExt4, Name: "ext4", Executable: "/bootstrap/ext4", Writable: true, Additional: true},
 }
 
 // DriverFor returns the registry entry for a type.

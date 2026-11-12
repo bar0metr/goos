@@ -32,8 +32,10 @@ const (
 	// replacement (ADR 0129); version 12 adds batched directory listing
 	// (ADR 0208); version 13 adds symbolic-link and special kinds, Unix
 	// metadata in every reply that describes a node, and the read-link,
-	// symlink and link operations (ADR 0223).
-	Version = uint16(13)
+	// symlink and link operations (ADR 0223); version 14 adds the entry
+	// rename and replace that name their source, and the clean unmount
+	// (ADR 0226).
+	Version = uint16(14)
 	// RequestDeadline bounds one exchange. A filesystem service that stalls
 	// surfaces as an I/O error on its mounts rather than a hung namespace. It
 	// is above the block protocol's own deadline, so a slow device is reported
@@ -109,6 +111,17 @@ const (
 	// OperationLink gives the existing node Node the further name Name in
 	// Parent.
 	OperationLink
+	// OperationRenameEntry moves Node, called by the Size bytes at the start
+	// of the request's slot in the directory Offset names, to Name in
+	// Parent. A filesystem whose node IDs carry no name, such as ext4 with
+	// its hard links, needs the source name to find the entry to move.
+	OperationRenameEntry
+	// OperationReplaceEntry is OperationReplace with the source named as
+	// OperationRenameEntry names it.
+	OperationReplaceEntry
+	// OperationUnmount makes the volume clean on disk and ends every later
+	// request with an I/O error. The VFS sends it once no file is open.
+	OperationUnmount
 )
 
 // The flags of OperationSetMetadata, in the request's Parent field.
@@ -207,6 +220,10 @@ func validTransfer(request Request) bool {
 	case OperationReadLink, OperationSymlink:
 		// A link target is one slot's worth at most, at its start.
 		return request.Slot < CachePages && request.Offset == 0 && request.Size != 0 && request.Size <= ramfs.MaxLinkTarget
+	case OperationRenameEntry, OperationReplaceEntry:
+		// Offset names the source directory; the source name fills the
+		// start of the slot.
+		return request.Slot < CachePages && request.Offset != 0 && request.Size != 0 && request.Size <= ramfs.MaxName
 	default:
 		return request.Slot == 0
 	}
@@ -220,17 +237,19 @@ func SlotBytes(cache []byte, request Request) ([]byte, bool) {
 	if len(cache) != CacheSize || !validTransfer(request) {
 		return nil, false
 	}
+	start := uint64(request.Slot) * PageSize
 	switch request.Operation {
 	case OperationRead, OperationWrite, OperationReadLink, OperationSymlink:
+		start += request.Offset % PageSize
+	case OperationRenameEntry, OperationReplaceEntry:
 	default:
 		return nil, false
 	}
-	start := uint64(request.Slot)*PageSize + request.Offset%PageSize
 	return cache[start : start+uint64(request.Size)], true
 }
 
 func validOperation(operation Operation) bool {
-	return operation >= OperationMount && operation <= OperationLink
+	return operation >= OperationMount && operation <= OperationUnmount
 }
 
 // validName accepts an empty name, for operations that take none, or one a

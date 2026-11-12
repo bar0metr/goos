@@ -2,11 +2,15 @@
 // tests that need several volumes on one disk (ADR 0222):
 //
 //	diskcompose -part NAME:TYPE:SOURCE [-part ...] OUTPUT
+//	diskcompose -extract NAME DISK OUTPUT
 //
 // TYPE is data (Microsoft basic data, what the persistent volume uses) or
 // linux (Linux filesystem data). SOURCE is an image file, gzip-compressed
 // when it ends in .gz, or zero:MiB for an empty partition. Partitions start
 // on MiB boundaries in the order given. The output is written sparse.
+//
+// -extract copies the bytes of the GPT partition called NAME out of DISK, so
+// a test can check a volume a guest wrote with host tools.
 package main
 
 import (
@@ -123,8 +127,37 @@ func deterministicGUID(name string) partition.GUID {
 	return guid
 }
 
+// extract writes the partition called name in disk to output.
+func extract(name, disk, output string) error {
+	data, err := os.ReadFile(disk)
+	if err != nil {
+		return err
+	}
+	var scanner partition.Scanner
+	var table partition.Table
+	if status := scanner.Scan(imageReader{data}, uint64(len(data)), blockSize, &table); status != partition.StatusOK {
+		return fmt.Errorf("partition table: status %d", status)
+	}
+	selector, ok := partition.NameSelector(name)
+	if !ok {
+		return fmt.Errorf("bad partition name %q", name)
+	}
+	chosen, status := partition.Select(&table, &selector)
+	if status != partition.StatusOK {
+		return fmt.Errorf("partition %q: status %d", name, status)
+	}
+	return os.WriteFile(output, data[chosen.Start:chosen.Start+chosen.Length], 0o644)
+}
+
+type imageReader struct{ data []byte }
+
+func (reader imageReader) ReadAt(offset uint64, target []byte) bool {
+	return offset+uint64(len(target)) <= uint64(len(reader.data)) && copy(target, reader.data[offset:]) == len(target)
+}
+
 func run() error {
 	var parts []part
+	extractName := flag.String("extract", "", "copy the partition NAME out of a disk: -extract NAME DISK OUTPUT")
 	flag.Func("part", "add a partition NAME:TYPE:SOURCE (repeatable)", func(value string) error {
 		fields := strings.SplitN(value, ":", 3)
 		if len(fields) != 3 || fields[0] == "" {
@@ -143,6 +176,12 @@ func run() error {
 		return nil
 	})
 	flag.Parse()
+	if *extractName != "" {
+		if flag.NArg() != 2 || len(parts) != 0 {
+			return errors.New("usage: diskcompose -extract NAME DISK OUTPUT")
+		}
+		return extract(*extractName, flag.Arg(0), flag.Arg(1))
+	}
 	if flag.NArg() != 1 || len(parts) == 0 {
 		return errors.New("usage: diskcompose -part NAME:TYPE:SOURCE [-part ...] OUTPUT")
 	}

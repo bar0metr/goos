@@ -161,7 +161,7 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	// through lifecycle events, not handles.
 	session, tty, interactive := sessionOfService(name)
 	volumeSlot, volumeService := volumeOfService(name)
-	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || interactive || name == "vfs" || name == "block") ||
+	keep := validation.Enabled && (name == driverName || interactive || name == "vfs" || name == "block") ||
 		name == filesystemName || diskService(name) || networkService(name) || name == linuxSockName || remoteListener || volumeService
 	if keep && launched == supervisor.LaunchOK {
 		switch {
@@ -172,7 +172,9 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 		}
 		switch name {
 		case driverName:
-			driverProcessHandle = event.ProcessHandle
+			// The newest driver: a block restart replaces the driver too,
+			// and the handle of the one it ended names a dead process.
+			driverProcessHandle = keepProcess(driverProcessHandle, event.ProcessHandle)
 		case filesystemName:
 			filesystemProcessHandle = keepProcess(filesystemProcessHandle, event.ProcessHandle)
 		case "vfs":

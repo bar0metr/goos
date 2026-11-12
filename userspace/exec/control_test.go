@@ -148,3 +148,32 @@ func TestVolumeCommands(t *testing.T) {
 		t.Fatal("a volume reply decoded as a control status")
 	}
 }
+
+func TestWritableVolumeCommand(t *testing.T) {
+	mount := VolumeCommand{Mount: true, Writable: true, Type: []byte("ext4"), Source: []byte("part:2"), Path: []byte("/mnt/data")}
+	message, ok := EncodeVolumeCommand(mount, 9)
+	decoded, valid := DecodeVolumeCommand(&message)
+	if !ok || !valid || !decoded.Mount || !decoded.Writable || string(decoded.Source) != "part:2" {
+		t.Fatalf("writable mount: %+v %v", decoded, valid)
+	}
+	plain := VolumeCommand{Mount: true, Source: []byte("part:2"), Path: []byte("/mnt/data")}
+	message, _ = EncodeVolumeCommand(plain, 10)
+	if decoded, _ := DecodeVolumeCommand(&message); decoded.Writable {
+		t.Fatal("plain mount decoded writable")
+	}
+	if _, ok := EncodeVolumeCommand(VolumeCommand{Writable: true, Path: []byte("/mnt/data")}, 11); ok {
+		t.Fatal("writable unmount encoded")
+	}
+}
+
+// A version 4 mount is refused: version 5 gave the command a writable kind.
+func TestVolumeCommandRefusesVersion4(t *testing.T) {
+	message, ok := EncodeVolumeCommand(VolumeCommand{Mount: true, Writable: true, Source: []byte("part:2"), Path: []byte("/mnt/data")}, 3)
+	if !ok || message.Version != 5 {
+		t.Fatalf("encoded version %d", message.Version)
+	}
+	message.Version = 4
+	if _, ok := DecodeVolumeCommand(&message); ok {
+		t.Fatal("version 4 mount accepted")
+	}
+}

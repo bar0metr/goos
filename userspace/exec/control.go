@@ -9,10 +9,11 @@ import (
 // that launch nothing: listing supervised services, stopping a running job,
 // rebooting, and dumping kernel diagnostics. Version 3 adds the diagnostics
 // dump, which the shell can no longer make itself because it holds no console
-// capability, and the validation build's fault injection (ADR 0089).
+// capability, and the validation build's fault injection (ADR 0089). Version
+// 4 adds power-off; version 5 adds the writable volume mount (ADR 0226).
 const (
 	ControlProtocolID = uint64(0x4743544c30303031)
-	ControlVersion    = uint16(4)
+	ControlVersion    = uint16(5)
 	// MaxServiceEntries is as many entries as one reply holds: eleven of
 	// 22 bytes, after the count, in a 256-byte payload. A system with both
 	// consoles and a network runs thirteen services, so a listing asks for
@@ -229,17 +230,21 @@ func DecodeControlStatus(message ipc.Message) (ControlStatus, bool) {
 const (
 	volumeMount   = byte(0x80)
 	volumeUnmount = byte(0x81)
-	volumeReply   = byte(0x82)
+	// volumeMountWritable is a mount that asks for a writable slice.
+	volumeMountWritable = byte(0x82)
+	volumeReply         = byte(0x82)
 	// MaxVolumeArgument bounds each text argument.
 	MaxVolumeArgument = 120
 )
 
 // VolumeCommand is a decoded mount or unmount.
 type VolumeCommand struct {
-	Mount  bool
-	Type   []byte
-	Source []byte
-	Path   []byte
+	Mount bool
+	// Writable asks for a read-write mount; a mount is read-only without it.
+	Writable bool
+	Type     []byte
+	Source   []byte
+	Path     []byte
 }
 
 func appendArgument(payload []byte, at int, argument []byte) (int, bool) {
@@ -265,13 +270,16 @@ func takeArgument(payload []byte, at int) ([]byte, int, bool) {
 // EncodeVolumeCommand encodes a mount (with type, source and path) or an
 // unmount (with the path alone).
 func EncodeVolumeCommand(command VolumeCommand, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || len(command.Path) == 0 || command.Mount == (len(command.Source) == 0) {
+	if correlation == 0 || len(command.Path) == 0 || command.Mount == (len(command.Source) == 0) || command.Writable && !command.Mount {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest, Correlation: correlation}
 	at, ok := 1, true
 	if command.Mount {
 		message.Payload[0] = volumeMount
+		if command.Writable {
+			message.Payload[0] = volumeMountWritable
+		}
 		if at, ok = appendArgument(message.Payload[:], at, command.Type); !ok {
 			return ipc.Message{}, false
 		}
@@ -298,8 +306,8 @@ func DecodeVolumeCommand(message *ipc.Message) (VolumeCommand, bool) {
 	payload := message.Payload[:message.PayloadSize]
 	at, ok := 1, true
 	switch payload[0] {
-	case volumeMount:
-		command.Mount = true
+	case volumeMount, volumeMountWritable:
+		command.Mount, command.Writable = true, payload[0] == volumeMountWritable
 		if command.Type, at, ok = takeArgument(payload, at); !ok {
 			return VolumeCommand{}, false
 		}

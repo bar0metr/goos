@@ -45,6 +45,9 @@ type Remote struct {
 	batch              BackendBatchCounters
 	validationAcquired uint64
 	validationReleased uint64
+	// noEntries records that the service answered an entry rename as
+	// unsupported, so later renames go straight to RenameName.
+	noEntries bool
 }
 
 // AttachCache gives the backend the file-cache mapping it shares with its
@@ -276,6 +279,43 @@ func (remote *Remote) SymlinkName(parent ramfs.NodeID, name ramfs.Name, target [
 	remote.forget(parent)
 	copy(remote.pages.Slot(scratchSlot), target)
 	return remote.looked(remote.call(fsproto.Request{Operation: fsproto.OperationSymlink, Parent: parent, Name: remote.name[:size], Slot: scratchSlot, Size: uint32(len(target))}))
+}
+
+// RenameEntry moves sourceName in sourceParent, which names id, to name in
+// parent. The source name travels in the scratch slot.
+func (remote *Remote) RenameEntry(sourceParent ramfs.NodeID, sourceName ramfs.Name, id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
+	return remote.entry(fsproto.OperationRenameEntry, sourceParent, sourceName, id, parent, name)
+}
+
+// ReplaceEntry is ReplaceName with the source spelled out.
+func (remote *Remote) ReplaceEntry(sourceParent ramfs.NodeID, sourceName ramfs.Name, id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
+	return remote.entry(fsproto.OperationReplaceEntry, sourceParent, sourceName, id, parent, name)
+}
+
+func (remote *Remote) entry(operation fsproto.Operation, sourceParent ramfs.NodeID, sourceName ramfs.Name, id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
+	if remote.noEntries || !remote.pages.Ready() || sourceParent == 0 {
+		return ramfs.StatusUnsupported
+	}
+	size := name.CopyTo(remote.name[:])
+	sourceSize := sourceName.CopyTo(remote.pages.Slot(scratchSlot))
+	if size == 0 || sourceSize == 0 {
+		return ramfs.StatusInvalidArgument
+	}
+	remote.forgetAll()
+	_, status := remote.call(fsproto.Request{Operation: operation, Node: id, Parent: parent, Name: remote.name[:size],
+		Offset: uint64(sourceParent), Slot: scratchSlot, Size: uint32(sourceSize)})
+	if status == ramfs.StatusUnsupported {
+		remote.noEntries = true
+	}
+	return status
+}
+
+// Unmount asks the service to leave its volume clean on disk. The service
+// answers every later request with an error.
+func (remote *Remote) Unmount() ramfs.Status {
+	remote.forgetAll()
+	_, status := remote.call(fsproto.Request{Operation: fsproto.OperationUnmount})
+	return status
 }
 
 // LinkName gives id a further name. Its link count changes, so its cached

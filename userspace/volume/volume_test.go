@@ -182,3 +182,109 @@ func TestStatusText(t *testing.T) {
 		}
 	}
 }
+
+func TestMountMode(t *testing.T) {
+	for text, want := range map[string]bool{"": false, "ro": false, "rw": true} {
+		if writable, ok := ParseMode([]byte(text)); !ok || writable != want {
+			t.Errorf("%q: %v %v", text, writable, ok)
+		}
+	}
+	for _, text := range []string{"RW", "w", "rw,sync", "read-write"} {
+		if _, ok := ParseMode([]byte(text)); ok {
+			t.Errorf("accepted %q", text)
+		}
+	}
+	var table Table
+	writable := request(t, "auto", "part:2", "/mnt/a")
+	writable.Writable = true
+	slot, _ := table.Reserve(writable)
+	if status := table.Probed(slot, ext4Probe(1), physical(1)); status != OK || !table.Slot(slot).Request.Writable {
+		t.Fatalf("writable ext4: %v", status)
+	}
+	// A driver without write support never gets a writable slice.
+	for index := range fsdetect.Drivers {
+		if fsdetect.Drivers[index].Type == ramfs.FilesystemExt4 {
+			fsdetect.Drivers[index].Writable = false
+			defer func() { fsdetect.Drivers[index].Writable = true }()
+		}
+	}
+	other := request(t, "auto", "part:3", "/mnt/b")
+	other.Writable = true
+	slot, _ = table.Reserve(other)
+	if status := table.Probed(slot, ext4Probe(2), physical(2)); status != NotWritable {
+		t.Fatalf("read-only driver: %v", status)
+	}
+}
+
+func mountedSlot(t *testing.T, table *Table) (uint8, uint64) {
+	t.Helper()
+	slot, _ := table.Reserve(request(t, "auto", "part:2", "/mnt/a"))
+	table.Probed(slot, ext4Probe(1), physical(1))
+	generation := table.Launching(slot)
+	table.Attached(slot, generation, vfs.StatusOK)
+	return slot, generation
+}
+
+// The order PID 1 sees: the storage goes, then the instance it ended exits.
+func TestStorageLossBeforeTheExitChargesNothing(t *testing.T) {
+	var table Table
+	slot, generation := mountedSlot(t, &table)
+	table.StorageLost()
+	if !table.Interrupted(slot, generation) {
+		t.Fatal("interrupted instance not replaced")
+	}
+	if got := table.Slot(slot); got.Restarts != 0 || got.State != Lost {
+		t.Fatalf("after an interrupted exit: %+v", got)
+	}
+	if table.Interrupted(slot, generation+1) {
+		t.Fatal("a stale generation interrupted the slot")
+	}
+}
+
+// An instance that saw the storage go exits before PID 1 learns of it: Lost
+// counts the exit, and the storage loss that follows takes the count back.
+func TestStorageLossAfterTheExitRenewsTheBudget(t *testing.T) {
+	var table Table
+	slot, generation := mountedSlot(t, &table)
+	if !table.Lost(slot, generation) {
+		t.Fatal("first exit refused")
+	}
+	table.StorageLost()
+	if table.Slot(slot).Restarts != 0 {
+		t.Fatalf("restarts %d after the storage loss", table.Slot(slot).Restarts)
+	}
+}
+
+// More storage losses than the budget, in either order, then crashes with the
+// storage up: every crash within the budget is replaced, the next one is not.
+func TestStorageLossesLeaveTheCrashBudget(t *testing.T) {
+	var table Table
+	slot, generation := mountedSlot(t, &table)
+	for cycle := range 2 * MaxRestarts {
+		if cycle%2 == 0 {
+			table.StorageLost()
+			if !table.Interrupted(slot, generation) {
+				t.Fatalf("cycle %d: interrupted exit refused", cycle)
+			}
+		} else {
+			table.Lost(slot, generation)
+			table.StorageLost()
+		}
+		generation = table.Launching(slot)
+		table.Attached(slot, generation, vfs.StatusOK)
+	}
+	for crash := range MaxRestarts {
+		if !table.Lost(slot, generation) {
+			t.Fatalf("crash %d within the budget refused", crash+1)
+		}
+		generation = table.Launching(slot)
+		table.Attached(slot, generation, vfs.StatusOK)
+	}
+	if table.Lost(slot, generation) || table.Slot(slot).State != Offline {
+		t.Fatal("a crash past the budget was replaced")
+	}
+	table.StorageLost()
+	if table.Interrupted(slot, generation) || table.Slot(slot).State != Offline {
+		t.Fatal("a storage loss revived an offline slot")
+	}
+}

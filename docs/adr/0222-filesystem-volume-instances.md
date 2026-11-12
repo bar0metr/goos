@@ -3,7 +3,9 @@
 ## Status
 
 Accepted. Extends ADR 0096 (separate filesystem service), ADR 0098 (file
-cache), ADR 0115 (block slices) and ADR 0221 (ext4 adapter).
+cache), ADR 0115 (block slices) and ADR 0221 (ext4 adapter). ADR 0226
+replaces the read-only rule for additional slices and probe authority:
+a read-write mount gets a writable slice on a new endpoint.
 
 ## Context
 

@@ -216,7 +216,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: stress-linux-stream FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-ext4-unit test-ext4-stress test-ext4-mutations test-volumes test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-aslr test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware bench-pve-linux-network bench-pve-linux-network-diag bench-pve-linux-network-hz
+.PHONY: stress-linux-stream FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-ext4-unit test-ext4-stress test-ext4-mutations test-volumes test-ext4-rw test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-aslr test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware bench-pve-linux-network bench-pve-linux-network-diag bench-pve-linux-network-hz
 
 all: iso
 
@@ -641,6 +641,7 @@ test-all:
 	$(MAKE) test-goroutine-io
 	$(MAKE) test-goroutine-panic
 	$(MAKE) test-system-boot
+	$(MAKE) test-ext4-rw
 	$(MAKE) test-network
 	$(MAKE) test-tls
 	$(MAKE) test-remote
@@ -680,6 +681,7 @@ release-check:
 	$(MAKE) test-goroutine-io
 	$(MAKE) test-goroutine-panic
 	$(MAKE) test-system-boot
+	$(MAKE) test-ext4-rw
 	$(MAKE) test-network
 	$(MAKE) test-tls
 	$(MAKE) test-remote
@@ -879,6 +881,20 @@ test-system-boot:
 test-volumes:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
 	@MEMORY=$(MEMORY) tests/boot/volumes.sh $(ISO) $(OVMF_CODE)
+
+# Read-write additional volumes (ADR 0226): ext4 mounted read-write from the
+# configuration and the shell, writes, refusals, a killed instance recovered
+# from its journal, a Linux program (abi-probe ext4-rw), the VFS, the block
+# service and the driver restarted under both volumes with held descriptors
+# revoked, the full crash budget left afterwards, and a clean unmount. The
+# partitions the guest wrote are then checked by the GoOS reader and recovery
+# and by the pinned e2fsck, which needs docker (DOCKER_FLAGS as for
+# test-ext4-mutations).
+test-ext4-rw:
+	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
+	@MEMORY=$(MEMORY) tests/boot/ext4-rw.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/ext4-rw
+	@$(BUILD_ENV) GOOS_EXT4_GUEST=$(abspath $(BUILD_DIR)/ext4-rw) go test -count=1 -run '^TestGuestImages$$' ./userspace/ext4vol
+	@tools/ext4fixture/check-guest-images.sh $(BUILD_DIR)/ext4-rw
 
 # The network gate (ADR 0190, 0191): DHCP and ping on QEMU user networking
 # with a driver replacement, two guests on a private stream backend, and a
@@ -1508,6 +1524,7 @@ help:
 	  '  test-fat32         run the FAT32 format tests, host FAT tools included' \
 	  '  test-ext4-unit     run the ext4 reader and mutation tests against pinned Linux images' \
 	  '  test-ext4-mutations check mutated images with the pinned e2fsck and debugfs (Docker)' \
+	  '  test-ext4-rw       boot read-write ext4 volumes, restart faults, check them with e2fsck (Docker)' \
 	  '  test-fat32-stress  run them at scale: huge files and clusters, fuzzing' \
 	  '  test-partitions    run the MBR/GPT partition and block-slice tests' \
 	  '  test-latency    measure command latency in QEMU into build/reports (LATENCY_REPEATS)' \
