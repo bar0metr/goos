@@ -7,7 +7,8 @@ VFS -> filesystem service -> block service -> device driver -> device
                              (partition table, block slice)
 ```
 
-The block service contract is `GBLK001` version 1. It exposes device
+The block service contract is `GBLK001` version 3 (version 2 adds bulk
+transfers, version 3 the writable flag of the `Info` reply). It exposes device
 information, bounded byte-range reads and writes, and flush. Payload transfers
 are limited to 232 bytes by the current inline IPC envelope. Every request is
 correlated, reserved fields must be zero, integer ranges are checked without

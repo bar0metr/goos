@@ -76,3 +76,18 @@ func TestUnmount(t *testing.T) {
 		t.Fatal("a volume without a clean state is flushed")
 	}
 }
+
+// A version 13 request is refused: version 14 added the entry operations
+// and the clean unmount.
+func TestRequestRefusesVersion13(t *testing.T) {
+	cache := make([]byte, CacheSize)
+	var message ipc.Message
+	var name [ramfs.MaxName]byte
+	if !EncodeRequest(Request{Operation: OperationUnmount}, 1, &message, cache) || message.Version != 14 {
+		t.Fatalf("encoded version %d", message.Version)
+	}
+	message.Version = 13
+	if _, ok := DecodeRequest(&message, cache, &name); ok {
+		t.Fatal("version 13 request accepted")
+	}
+}

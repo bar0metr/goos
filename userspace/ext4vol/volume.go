@@ -56,6 +56,13 @@ func (volume *Volume) mount(device ext4.Device, options ext4.Options) bool {
 	return true
 }
 
+// Failed reports whether a write or flush failed on a writable volume. The
+// engine then refuses every operation and leaves the journal for the next
+// writable mount to replay.
+func (volume *Volume) Failed() bool {
+	return volume.fs != nil && volume.fs.State() == ext4.StateFailed
+}
+
 // Writable reports whether the volume accepts mutations.
 func (volume *Volume) Writable() bool { return volume.fs != nil && volume.writable }
 
@@ -668,7 +675,7 @@ func (volume *Volume) RenameEntry(sourceParent ramfs.NodeID, sourceName []byte, 
 
 // ReplaceEntry moves the regular file sourceName onto the regular file name
 // in parent, which goes in the same transaction (ADR 0129). With no such
-// file it is a rename.
+// file it is a rename; onto another name of the same inode it does nothing.
 func (volume *Volume) ReplaceEntry(sourceParent ramfs.NodeID, sourceName []byte, id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
 	from, source, moved, status := volume.moving(sourceParent, sourceName, id)
 	if status != ramfs.StatusOK {
@@ -682,8 +689,10 @@ func (volume *Volume) ReplaceEntry(sourceParent ramfs.NodeID, sourceName []byte,
 		if !target.IsRegular() {
 			return ramfs.StatusIsDirectory
 		}
+		// Another link of the same inode: nothing changes, as rename(2)
+		// leaves both names in place.
 		if target.Number == moved.Number {
-			return ramfs.StatusInvalidArgument
+			return ramfs.StatusOK
 		}
 	case ramfs.StatusNotFound:
 	default:

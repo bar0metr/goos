@@ -464,6 +464,22 @@ func volumeExited(pid uint64) {
 	}
 }
 
+// volumesStorageLost ends every additional instance after the VFS, the block
+// service or the driver went. An instance would otherwise keep a VFS channel
+// nobody reads, a block endpoint the new block service never granted, or a
+// journal whose writes the old driver dropped. Each replacement waits for the
+// storage to come back, gets a new grant and a new cache, and replays its
+// journal before the VFS attaches it; open handles stay revoked.
+func volumesStorageLost() {
+	volumes.StorageLost()
+	for slot := uint8(1); slot <= volume.Slots; slot++ {
+		state := volumes.Slot(slot).State
+		if runtime := runtimeOf(slot); runtime.process != 0 && (state == volume.Mounted || state == volume.Lost) {
+			sys.ProcessKill(runtime.process)
+		}
+	}
+}
+
 // volumeLost acts on the VFS's notice that a volume's instance stopped
 // answering: the process is ended, and its exit starts the replacement.
 func volumeLost(slot uint8, generation uint64) {

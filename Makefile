@@ -641,6 +641,7 @@ test-all:
 	$(MAKE) test-goroutine-io
 	$(MAKE) test-goroutine-panic
 	$(MAKE) test-system-boot
+	$(MAKE) test-ext4-rw
 	$(MAKE) test-network
 	$(MAKE) test-tls
 	$(MAKE) test-remote
@@ -680,6 +681,7 @@ release-check:
 	$(MAKE) test-goroutine-io
 	$(MAKE) test-goroutine-panic
 	$(MAKE) test-system-boot
+	$(MAKE) test-ext4-rw
 	$(MAKE) test-network
 	$(MAKE) test-tls
 	$(MAKE) test-remote
@@ -1519,6 +1521,7 @@ help:
 	  '  test-fat32         run the FAT32 format tests, host FAT tools included' \
 	  '  test-ext4-unit     run the ext4 reader and mutation tests against pinned Linux images' \
 	  '  test-ext4-mutations check mutated images with the pinned e2fsck and debugfs (Docker)' \
+	  '  test-ext4-rw       boot read-write ext4 volumes, restart faults, check them with e2fsck (Docker)' \
 	  '  test-fat32-stress  run them at scale: huge files and clusters, fuzzing' \
 	  '  test-partitions    run the MBR/GPT partition and block-slice tests' \
 	  '  test-latency    measure command latency in QEMU into build/reports (LATENCY_REPEATS)' \

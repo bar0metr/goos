@@ -1361,8 +1361,10 @@ func (namespace *Namespace) Replace(path []byte, target []byte) Status {
 	if !namespace.sameFilesystem(sourceMount, targetMount) {
 		return StatusCrossDevice
 	}
+	// Two names of one file: a rename from one onto the other changes
+	// nothing and succeeds, as rename(2) does.
 	if targetNode == node {
-		return StatusInvalidArgument
+		return StatusOK
 	}
 	if stat, backendStatus := backend.Stat(targetNode); backendStatus != ramfs.StatusOK {
 		return mapStatus(backendStatus)

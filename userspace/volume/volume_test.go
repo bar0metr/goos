@@ -215,3 +215,32 @@ func TestMountMode(t *testing.T) {
 		t.Fatalf("read-only driver: %v", status)
 	}
 }
+
+func TestStorageLossRenewsTheBudget(t *testing.T) {
+	var table Table
+	slot, _ := table.Reserve(request(t, "auto", "part:2", "/mnt/a"))
+	table.Probed(slot, ext4Probe(1), physical(1))
+	generation := table.Launching(slot)
+	table.Attached(slot, generation, vfs.StatusOK)
+	for range MaxRestarts {
+		if !table.Lost(slot, generation) {
+			t.Fatal("restart within the budget refused")
+		}
+		table.StorageLost()
+		generation = table.Launching(slot)
+		table.Attached(slot, generation, vfs.StatusOK)
+	}
+	if table.Slot(slot).Restarts != 0 || table.Slot(slot).State != Mounted {
+		t.Fatalf("after storage losses: %+v", table.Slot(slot))
+	}
+	for range MaxRestarts {
+		table.Lost(slot, generation)
+	}
+	if table.Lost(slot, generation) || table.Slot(slot).State != Offline {
+		t.Fatal("a crash loop with the storage up kept restarting")
+	}
+	table.StorageLost()
+	if table.Slot(slot).State != Offline || table.Slot(slot).Restarts != MaxRestarts {
+		t.Fatal("storage loss revived an offline slot")
+	}
+}

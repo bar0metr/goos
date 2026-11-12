@@ -354,6 +354,19 @@ func (table *Table) Lost(index uint8, generation uint64) bool {
 	return true
 }
 
+// StorageLost gives every mounted slot a fresh restart budget after the VFS,
+// the block service or the driver went. Their instances end with the storage
+// they served and start again once it is back; only an instance that keeps
+// failing with the storage up uses its budget up. An offline slot stays
+// offline.
+func (table *Table) StorageLost() {
+	for index := range table.slots {
+		if slot := &table.slots[index]; slot.State == Mounted || slot.State == Lost {
+			slot.Restarts = 0
+		}
+	}
+}
+
 // Stopping marks a slot whose unmount the VFS accepted.
 func (table *Table) Stopping(index uint8) {
 	if slot := table.Slot(index); slot != nil {

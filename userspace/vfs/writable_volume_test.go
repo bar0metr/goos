@@ -68,6 +68,14 @@ func TestWritableExt4VolumeThroughTheVFS(t *testing.T) {
 	if text, _ := readPath(t, service, "/mnt/w/a"); text != "alpha" {
 		t.Fatal("rename of a link moved its target")
 	}
+	// Replacing one hard link of a file with another changes nothing.
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationLink, Path: []byte("/mnt/w/a"), Target: []byte("/mnt/w/twin")})
+	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationReplace, Path: []byte("/mnt/w/a"), Target: []byte("/mnt/w/twin")})
+	for _, path := range []string{"/mnt/w/a", "/mnt/w/twin"} {
+		if text, status := readPath(t, service, path); status != vfs.StatusOK || text != "alpha" {
+			t.Fatalf("%s after a same-inode replace: %q %v", path, text, status)
+		}
+	}
 	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationMkdir, Path: []byte("/mnt/w/fresh-dir")})
 	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationRename, Path: []byte("/mnt/w/fresh-dir"), Target: []byte("/mnt/w/moved")})
 	dispatchOK(t, service, vfs.Request{Operation: vfs.OperationUnlink, Path: []byte("/mnt/w/moved")})

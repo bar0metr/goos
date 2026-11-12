@@ -34,7 +34,8 @@ not a persistent ext4 system volume.
 takes `mount [-t TYPE] [-o ro|rw] SOURCE PATH`, and a configuration entry
 `system.mount.N` takes an optional fourth field, `TYPE SOURCE PATH rw`. The
 mount command travels to PID 1 as its own command kind, so an older
-read-only mount message cannot become writable. The static driver registry
+read-only mount message cannot become writable; the shell's control
+protocol `GCTL0001` moves to version 5 for it. The static driver registry
 marks ext4 `Writable`; PID 1 refuses `rw` for a driver without that mark
 before any grant.
 
@@ -48,7 +49,8 @@ identity again and moves the writable end to the driver unused. A grant is
 never widened in place: write authority always arrives on a new endpoint.
 
 **Mode follows the slice.** The block service's `Info` reply now says
-whether the client's slice is writable. The ext4 service mounts read-write
+whether the client's slice is writable, in a byte version 2 required to be
+zero, so `GBLK001` moves to version 3. The ext4 service mounts read-write
 on a writable slice and read-only otherwise, so the service cannot hold
 more authority than its mount uses, and a mount option cannot make a
 read-only slice writable.
@@ -65,8 +67,21 @@ process that outlived its kill cannot write. The replacement replays the
 journal before it answers. Open handles on the volume stay revoked, as ADR
 0222 requires; callers reopen after the replacement attaches.
 
-**Renames name their source.** Two filesystem operations carry the source
-entry: `OperationRenameEntry` and `OperationReplaceEntry` put the moving
+An instance also ends when the storage under it goes. When the VFS, the
+block service or the driver exits, PID 1 kills every additional instance:
+its VFS channel or block endpoint is dead, or the old driver dropped writes
+the journal counted on. The replacements wait for the storage to come back
+and then run the path above. These ends do not use the restart budget,
+which starts again from zero for every mounted slot, as the session
+services' budgets do after a storage fault; an instance that keeps failing
+with the storage up still goes offline. A writable instance whose write or
+flush fails exits as well, so that a replacement replays the journal rather
+than the failed instance answering errors. After a driver replacement the
+block service describes the device again before it answers an additional
+grant.
+
+**Renames name their source.** `GFSPRT01` version 14 adds two filesystem
+operations that carry the source entry, and the clean unmount below: `OperationRenameEntry` and `OperationReplaceEntry` put the moving
 node in `Node`, the source directory in `Offset`, the source name at the
 start of the request's cache slot, and the target as before. The VFS sends
 them to any backend with `EntryBackend`, after resolving the source path's
@@ -75,7 +90,9 @@ parent within the same mount, and falls back to `RenameName` and
 backend then stops trying entry renames for that service. FAT32 keeps its
 node-only renames. The ext4 adapter copies the source name out of the
 shared cache, checks that it still names the moving node with the same
-generation, and refuses a node-only rename as unsupported.
+generation, and refuses a node-only rename as unsupported. A replace onto
+another name of the same inode succeeds and changes nothing, as rename(2)
+does; the VFS answers a replace of a file by itself the same way.
 
 **Unmount.** `OperationUnmount` asks a service to leave its volume clean
 and answer every later request with an I/O error. The VFS detach checks
@@ -124,14 +141,23 @@ identity, decides what the volume holds.
 - `userspace/fsproto`, `userspace/block`, `userspace/exec`,
   `userspace/volume`, `userspace/fsdetect` and `tools/diskcompose` cover the
   wire changes, the writable `Info` flag, the writable mount command, the
-  mount mode and the driver check, and partition extraction.
+  mount mode and the driver check, the restart budget a storage loss
+  renews, and partition extraction. Each of the three protocols refuses a
+  message of its previous version.
 - `make test-ext4-rw` boots a disk with the installed system and three
   Linux ext4 partitions. It mounts one read-write from the configuration
   and one from the shell, writes, renames and unlinks through the shell,
   checks `mount` and `df`, refuses `rw` on a 1 KiB volume and an unknown
   mode, kills the configured instance and reads back what it wrote from
-  the replacement, unmounts the shell volume and mounts it read-only, and
-  then cuts the guest off with the configured volume mounted. On the host,
+  the replacement, and runs `abi-probe ext4-rw`: a rename onto another
+  link of the same inode, a rename to a free name, a file written after
+  its last name went, and file and directory `fsync`. It then restarts the
+  VFS, the block service and the driver in turn, reads what each volume
+  held, writes a new marker after each, and for the block service and the
+  driver holds a descriptor across the restart that must fail while a new
+  open succeeds. Last it unmounts the shell volume, mounts it read-only,
+  and cuts the guest off with the configured volume mounted.
+  `test-all` and `release-check` run it. On the host,
   the GoOS reader mounts the unmounted partition read-only, GoOS recovery
   reads the cut one, and the pinned `e2fsck -fn` passes the first while
   `e2fsck -fy` only replays the journal of the second before `-fn` passes

@@ -36,6 +36,7 @@ holds() {
 }
 clean clean.img
 holds clean.img /moved.txt payload
+holds clean.img /after-driver.txt shell-after-driver
 debugfs -R "stat /hello.txt" clean.img 2>&1 | grep -q "File not found" || { echo "clean.img: /hello.txt survived its unlink" >&2; exit 1; }
 dumpe2fs -h dirty.img 2>/dev/null | grep -q needs_recovery || { echo "dirty.img: no journal to recover" >&2; exit 1; }
 rc=0
@@ -52,5 +53,8 @@ fi
 clean dirty.img
 holds dirty.img /journal.txt before-fault
 holds dirty.img /second.txt after-fault
+holds dirty.img /after-vfs.txt after-vfs
+holds dirty.img /after-block.txt after-block
+holds dirty.img /after-driver.txt after-driver
 echo "guest images: clean.img clean, dirty.img replayed by e2fsck, contents match"
 '

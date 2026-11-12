@@ -47,6 +47,7 @@ func TestGuestImages(t *testing.T) {
 	}
 	expect(&clean, []string{"moved.txt"}, "payload\n")
 	expect(&clean, []string{"made"}, "")
+	expect(&clean, []string{"after-driver.txt"}, "shell-after-driver\n")
 	root, _ := clean.Root()
 	if _, status := clean.OpenName(root, name(t, "hello.txt")); status != ramfs.StatusNotFound {
 		t.Fatalf("unlinked name: %d", status)
@@ -63,5 +64,9 @@ func TestGuestImages(t *testing.T) {
 	}
 	expect(&recovered, []string{"journal.txt"}, "before-fault\n")
 	expect(&recovered, []string{"second.txt"}, "after-fault\n")
+	// Written after the VFS, the block service and the driver restarted.
+	expect(&recovered, []string{"after-vfs.txt"}, "after-vfs\n")
+	expect(&recovered, []string{"after-block.txt"}, "after-block\n")
+	expect(&recovered, []string{"after-driver.txt"}, "after-driver\n")
 	must(t, recovered.Unmount())
 }

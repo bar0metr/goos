@@ -3,8 +3,10 @@
 # partitions (ADR 0226) and writes two of them: one mounted read-write from
 # the configuration at boot, one from the shell. It checks the mount modes,
 # writes through the shell, the refusals of a read-write mount, an instance
-# killed with its journal live and recovered by its replacement, and a clean
-# unmount that a read-only mount accepts. The guest is then cut off with the
+# killed with its journal live and recovered by its replacement, a Linux
+# program on a writable volume, the VFS, the block service and the driver
+# each restarted under both writable volumes, and a clean unmount that a
+# read-only mount accepts. The guest is then cut off with the
 # configured volume still mounted, and both written partitions are copied to
 # OUT for the host checks: the GoOS reader and recovery, and e2fsck.
 set -eu
@@ -77,6 +79,53 @@ run() {
 
 expect() { grep -q "$1" "$work/output" || fail "$2"; }
 refuse() { ! grep -q "$1" "$work/output" || fail "$2"; }
+
+# await_content PATH TEXT WHAT reads PATH until it holds TEXT: a volume comes
+# back only after its replacement replayed the journal and the VFS attached
+# it.
+await_content() {
+	for attempt in $(seq 1 40); do
+		run "cat $1"
+		grep -q "^$2\$" "$work/output" && return 0
+		sleep 1
+	done
+	fail "$3"
+}
+
+# write_marker PATH TEXT writes TEXT to PATH and reads it back.
+write_marker() {
+	run "echo $2 > $1"
+	run "cat $1"
+	expect "^$2\$" "a write after recovery to $1"
+}
+
+# held_fault FAULT PATH TEXT MARKER holds PATH open in a Linux program,
+# injects FAULT, which must print MARKER, and requires the old descriptor to
+# fail and a new open to read TEXT once the volume is back.
+held_fault() {
+	injected=$(grep -c "$4" "$log" || true)
+	opened=$(grep -c 'hold opened' "$log" || true)
+	settled=$(grep -c 'hold reopened\|hold stale accepted\|hold reopen failed\|hold failed' "$log" || true)
+	rejected=$(grep -c 'hold stale rejected' "$log" || true)
+	run "/system/linux/abi-probe hold $2 40 &"
+	held=
+	for attempt in $(seq 1 40); do
+		[ "$(grep -c 'hold opened' "$log" || true)" -gt "$opened" ] && held=1 && break
+		sleep 0.5
+	done
+	[ -n "$held" ] || fail "a descriptor held on $2 before fault $1"
+	run "fault $1"
+	[ "$(grep -c "$4" "$log" || true)" -gt "$injected" ] || fail "fault $1 not injected"
+	await_content "$2" "$3" "$2 after fault $1"
+	finished=
+	for attempt in $(seq 1 120); do
+		[ "$(grep -c 'hold reopened\|hold stale accepted\|hold reopen failed\|hold failed' "$log" || true)" -gt "$settled" ] && finished=1 && break
+		sleep 0.5
+	done
+	[ -n "$finished" ] || fail "the held descriptor after fault $1 never finished"
+	[ "$(grep -c 'hold stale rejected' "$log" || true)" -gt "$rejected" ] && grep 'hold reopened\|hold stale accepted\|hold reopen failed\|hold failed' "$log" | tail -1 | grep -q 'hold reopened' ||
+		fail "a descriptor from before fault $1"
+}
 
 # The disk is a throwaway copy written in place: the host checks read what
 # the guest left on it.
@@ -153,6 +202,40 @@ expect '/mnt/cfg.*ext4.*rw' 'replacement mounted read-write'
 run 'echo after-fault > /mnt/cfg/second.txt'
 run 'cat /mnt/cfg/second.txt'
 expect '^after-fault$' 'a write to the replacement'
+
+# A Linux program renames onto another link of the same inode, writes a
+# file whose last name went, and syncs files and directories.
+run '/system/linux/abi-probe ext4-rw /mnt/w'
+expect '^ext4 rw ok$' 'a Linux program on a writable volume'
+
+# A restarted VFS has no volumes; each instance ends with it, and its
+# replacement replays the journal and is attached again at its path.
+write_marker /mnt/cfg/vfs.txt vfs-marker
+restarts=$(grep -c 'VFS_RESTARTED_OK' "$log" || true)
+run 'fault vfs'
+restarted=
+for attempt in $(seq 1 60); do
+	[ "$(grep -c 'VFS_RESTARTED_OK' "$log" || true)" -gt "$restarts" ] && restarted=1 && break
+	sleep 0.5
+done
+[ -n "$restarted" ] || fail 'the VFS was not restarted'
+await_content /mnt/cfg/vfs.txt vfs-marker 'the configured volume after a VFS restart'
+await_content /mnt/w/moved.txt payload 'the shell volume after a VFS restart'
+write_marker /mnt/cfg/after-vfs.txt after-vfs
+
+# The block service and the driver: every instance gets a new writable
+# grant from the storage that came back, and a descriptor opened before
+# stays dead.
+held_fault block /mnt/w/moved.txt payload BLOCK_FAULT_INJECTED
+await_content /mnt/cfg/after-vfs.txt after-vfs 'the configured volume after a block restart'
+write_marker /mnt/cfg/after-block.txt after-block
+held_fault driver /mnt/cfg/journal.txt before-fault BLOCK_DRIVER_FAULT_INJECTED
+await_content /mnt/w/moved.txt payload 'the shell volume after a driver restart'
+write_marker /mnt/cfg/after-driver.txt after-driver
+write_marker /mnt/w/after-driver.txt shell-after-driver
+run 'mount'
+expect '/mnt/cfg.*ext4.*rw' 'the configured volume read-write after the restarts'
+expect '/mnt/w.*ext4.*rw' 'the shell volume read-write after the restarts'
 
 # A clean unmount leaves a volume the read-only mount accepts.
 run 'umount /mnt/w'

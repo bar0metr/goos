@@ -83,7 +83,8 @@ func TestReplaceRefusals(t *testing.T) {
 	if status := namespace.Replace([]byte("/dir"), []byte("/doc")); status != StatusIsDirectory {
 		t.Fatalf("replace with a directory = %d", status)
 	}
-	if status := namespace.Replace([]byte("/doc"), []byte("/doc")); status != StatusInvalidArgument {
+	// A file replaced by itself stays as it is, as rename(2) leaves it.
+	if status := namespace.Replace([]byte("/doc"), []byte("/doc")); status != StatusOK {
 		t.Fatalf("replace a file with itself = %d", status)
 	}
 	if status := namespace.Replace([]byte("/missing"), []byte("/doc")); status != StatusNotFound {

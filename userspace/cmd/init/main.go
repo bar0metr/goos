@@ -354,6 +354,9 @@ func userspaceMain() {
 		for _, name := range [...]string{"vfs", "block", driverName, filesystemName} {
 			if snapshot, _ := manager.Snapshot(name); snapshot.State == supervisor.StateRunning && snapshot.PID == event.Process {
 				storageExited(name)
+				if name != filesystemName {
+					volumesStorageLost()
+				}
 			}
 		}
 		volumeExited(event.Process)

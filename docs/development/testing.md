@@ -327,10 +327,11 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-ext4-rw` boots a disk with the installed system and three
   Linux ext4 partitions, mounts two read-write (ADR 0226), writes through
   the shell, kills one instance and checks that its replacement replays
-  the journal, unmounts the other cleanly, and cuts the guest off. It then
-  checks the two partitions with the GoOS reader and recovery and with the
-  pinned `e2fsck` and `debugfs`, so it needs Docker as
-  `test-ext4-mutations` does.
+  the journal, runs `abi-probe ext4-rw`, restarts the VFS, the block
+  service and the driver under both volumes, unmounts one cleanly, and cuts
+  the guest off. It then checks the two partitions with the GoOS reader and
+  recovery and with the pinned `e2fsck` and `debugfs`, so it needs Docker
+  as `test-ext4-mutations` does. `test-all` and `release-check` run it.
 - `make test-linux-elf` and `make test-linux-abi` run the Linux host tests:
   the ELF parser against hostile and real images with every fixture's
   checksum, and the pure translation code with the VFS protocol it speaks.

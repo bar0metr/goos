@@ -32,8 +32,10 @@ const (
 	// replacement (ADR 0129); version 12 adds batched directory listing
 	// (ADR 0208); version 13 adds symbolic-link and special kinds, Unix
 	// metadata in every reply that describes a node, and the read-link,
-	// symlink and link operations (ADR 0223).
-	Version = uint16(13)
+	// symlink and link operations (ADR 0223); version 14 adds the entry
+	// rename and replace that name their source, and the clean unmount
+	// (ADR 0226).
+	Version = uint16(14)
 	// RequestDeadline bounds one exchange. A filesystem service that stalls
 	// surfaces as an I/O error on its mounts rather than a hung namespace. It
 	// is above the block protocol's own deadline, so a slow device is reported

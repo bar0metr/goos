@@ -8,9 +8,15 @@ import (
 )
 
 // writableDevice is a copy of a fixture the tests may write.
-type writableDevice struct{ memDevice }
+type writableDevice struct {
+	memDevice
+	refuseWrites bool
+}
 
 func (device *writableDevice) WriteAt(offset uint64, data []byte) bool {
+	if device.refuseWrites {
+		return false
+	}
 	end := offset + uint64(len(data))
 	if end < offset || end > uint64(len(device.data)) {
 		return false
@@ -112,6 +118,18 @@ func TestWritableVolumeOperations(t *testing.T) {
 	if status := volume.ReplaceEntry(root, []byte("draft"), other, root, name(t, "box")); status != ramfs.StatusIsDirectory {
 		t.Fatalf("replace onto a directory %d", status)
 	}
+	// Onto another link of the same inode: both names stay.
+	must(t, volume.LinkName(other, root, name(t, "draft-link")))
+	must(t, volume.ReplaceEntry(root, []byte("draft"), other, root, name(t, "draft-link")))
+	for _, kept := range []string{"draft", "draft-link"} {
+		if id, status := volume.OpenName(root, name(t, kept)); status != ramfs.StatusOK || id != other {
+			t.Fatalf("%s after a same-inode replace: %d", kept, status)
+		}
+	}
+	if stat, _ := volume.Stat(other); stat.Unix.Links != 2 {
+		t.Fatalf("links after a same-inode replace: %d", stat.Unix.Links)
+	}
+	must(t, volume.UnlinkName(root, name(t, "draft-link")))
 	must(t, volume.ReplaceEntry(root, []byte("draft"), other, root, name(t, "notes")))
 	if replaced, _ := volume.OpenName(root, name(t, "notes")); replaced != other {
 		t.Fatal("replace kept the old file")
@@ -207,4 +225,27 @@ func TestWritableMountRecoversDirtyVolume(t *testing.T) {
 		t.Fatalf("recovered tree %d", status)
 	}
 	must(t, recovered.Unmount())
+}
+
+// A write the device refuses fails the volume, so its service can hand the
+// journal to a replacement.
+func TestFailedWriteFailsTheVolume(t *testing.T) {
+	volume, device := writable(t)
+	root, _ := volume.Root()
+	if volume.Failed() {
+		t.Fatal("fresh volume failed")
+	}
+	device.refuseWrites = true
+	if _, status := volume.CreateName(root, name(t, "lost")); status == ramfs.StatusOK {
+		t.Fatal("create on a dead device")
+	}
+	if !volume.Failed() {
+		t.Fatal("refused write did not fail the volume")
+	}
+	device.refuseWrites = false
+	var replacement Volume
+	if !replacement.MountWritable(device, clock()) {
+		t.Fatalf("replacement: %s", replacement.Refusal())
+	}
+	must(t, replacement.Unmount())
 }

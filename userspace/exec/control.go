@@ -9,10 +9,11 @@ import (
 // that launch nothing: listing supervised services, stopping a running job,
 // rebooting, and dumping kernel diagnostics. Version 3 adds the diagnostics
 // dump, which the shell can no longer make itself because it holds no console
-// capability, and the validation build's fault injection (ADR 0089).
+// capability, and the validation build's fault injection (ADR 0089). Version
+// 4 adds power-off; version 5 adds the writable volume mount (ADR 0226).
 const (
 	ControlProtocolID = uint64(0x4743544c30303031)
-	ControlVersion    = uint16(4)
+	ControlVersion    = uint16(5)
 	// MaxServiceEntries is as many entries as one reply holds: eleven of
 	// 22 bytes, after the count, in a 256-byte payload. A system with both
 	// consoles and a network runs thirteen services, so a listing asks for

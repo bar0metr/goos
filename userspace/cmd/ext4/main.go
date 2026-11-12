@@ -241,6 +241,13 @@ func userspaceMain() {
 			continue
 		}
 		serve()
+		if volume.Failed() {
+			// The device refused a write or a flush: the driver may have
+			// been replaced under the volume. A new instance replays the
+			// journal; this one could only answer errors.
+			syslog.Error("volume failed", syslog.Str("action", "exit for recovery"))
+			sys.Exit(exitVolumeFailed)
+		}
 	}
 }
 
@@ -309,6 +316,9 @@ const (
 	exitFailed    = 1
 	exitVFSGone   = 2
 	exitBlockGone = 3
+	// exitVolumeFailed: a write or flush failed and the journal needs a
+	// replay by the next writable mount.
+	exitVolumeFailed = 4
 )
 
 func fatal(message string) {

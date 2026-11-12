@@ -12,8 +12,9 @@ import (
 
 const (
 	ProtocolID = uint64(0x47424c4b30303100)
-	// Version 2 adds the bulk operations (ADR 0107).
-	Version    = uint16(2)
+	// Version 2 adds the bulk operations (ADR 0107); version 3 adds the
+	// writable flag of the Info reply (ADR 0226).
+	Version    = uint16(3)
 	headerSize = 24
 	// RequestDeadline bounds one storage exchange. A stalled peer must surface
 	// an I/O error rather than block the caller indefinitely.
