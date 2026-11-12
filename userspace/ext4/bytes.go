@@ -21,6 +21,11 @@ func putLE32(data []byte, value uint32) {
 	data[3] = byte(value >> 24)
 }
 
+func putLE16(data []byte, value uint16) {
+	data[0] = byte(value)
+	data[1] = byte(value >> 8)
+}
+
 func be32(data []byte, offset int) uint32 {
 	return uint32(data[offset])<<24 | uint32(data[offset+1])<<16 |
 		uint32(data[offset+2])<<8 | uint32(data[offset+3])

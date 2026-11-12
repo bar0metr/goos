@@ -66,6 +66,14 @@ error.
 - Every mutation fails with permission denied, the read-only backend
   status, including new symbolic and hard links.
 
+## Mutation code
+
+The package also holds the code that changes a volume: allocation, extent
+trees, directories and the file operations, staged in transactions held in
+memory (ADR 0224). It only runs on volumes the package's tests mount with
+`mountScratch`; `Mount` still refuses read-write, and the service never
+calls it. Commit has no journal yet, so it is not crash safe.
+
 ## Tests
 
 `make test-ext4-unit` runs the reader and adapter tests against images that
@@ -76,3 +84,7 @@ ext4 partitions and checks mounting, the refusals, symbolic links, the
 metadata a Linux program sees (`abi-probe ext4-links`), and a replaced
 instance.
 `tools/ext4fixture/make-fixtures.sh` rebuilds the images; it needs Docker.
+`make test-ext4-mutations` writes images through the mutation code and
+checks each one with the pinned `e2fsck -fn` and `debugfs`; it needs
+Docker too, and `DOCKER_FLAGS` passes extra `docker run` options such as
+`--dns`.

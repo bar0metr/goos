@@ -56,17 +56,8 @@ func (fs *FS) Xattrs(inode *Inode) ([]Xattr, error) {
 		if le32(data, 0) != xattrMagic || le32(data, 8) != 1 {
 			return nil, corrupt("attribute block header invalid")
 		}
-		if fs.sb.HasMetadataCsum() {
-			var number [8]byte
-			putLE32(number[:4], uint32(inode.FileACL))
-			putLE32(number[4:], uint32(inode.FileACL>>32))
-			crc := crc32c(fs.seed, number[:])
-			crc = crc32c(crc, data[:0x10])
-			crc = crc32cZeros(crc, 4)
-			crc = crc32c(crc, data[0x14:])
-			if crc != le32(data, 0x10) {
-				return nil, corrupt("attribute block checksum mismatch")
-			}
+		if fs.sb.HasMetadataCsum() && fs.xattrBlockChecksum(inode.FileACL, data) != le32(data, 0x10) {
+			return nil, corrupt("attribute block checksum mismatch")
 		}
 		if out, err = parseXattrs(data[xattrBlockHeader:], data, out); err != nil {
 			return nil, err
@@ -117,4 +108,49 @@ func parseXattrs(entries []byte, base []byte, out []Xattr) ([]Xattr, error) {
 		out = append(out, attr)
 		offset += (xattrEntryHeader + nameLen + 3) &^ 3
 	}
+}
+
+// xattrBlockChecksum is the CRC32C an attribute block should carry: the
+// filesystem seed, the block number, and the block with its checksum field
+// zeroed.
+func (fs *FS) xattrBlockChecksum(block uint64, data []byte) uint32 {
+	var number [8]byte
+	putLE32(number[:4], uint32(block))
+	putLE32(number[4:], uint32(block>>32))
+	crc := crc32c(fs.seed, number[:])
+	crc = crc32c(crc, data[:0x10])
+	crc = crc32cZeros(crc, 4)
+	return crc32c(crc, data[0x14:])
+}
+
+// dropXattrBlock releases an inode's reference to its attribute block,
+// freeing the block with its last reference. Attribute blocks are shared
+// between inodes with equal attribute sets.
+func (fs *FS) dropXattrBlock(inode *Inode) error {
+	block := inode.FileACL
+	if block <= uint64(fs.sb.FirstDataBlock) || block >= fs.sb.BlocksCount {
+		return corrupt("attribute block outside the volume")
+	}
+	data, err := fs.stage(block)
+	if err != nil {
+		return err
+	}
+	if le32(data, 0) != xattrMagic || le32(data, 8) != 1 {
+		return corrupt("attribute block header invalid")
+	}
+	if fs.sb.HasMetadataCsum() && fs.xattrBlockChecksum(block, data) != le32(data, 0x10) {
+		return corrupt("attribute block checksum mismatch")
+	}
+	if refs := le32(data, 4); refs > 1 {
+		putLE32(data[4:], refs-1)
+		if fs.sb.HasMetadataCsum() {
+			putLE32(data[0x10:], fs.xattrBlockChecksum(block, data))
+		}
+	} else if err := fs.freeBlocks(block, 1); err != nil {
+		return err
+	}
+	inode.FileACL = 0
+	inode.Blocks512 -= uint64(fs.blockSize / 512)
+	inode.dirty = true
+	return nil
 }

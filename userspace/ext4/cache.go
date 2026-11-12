@@ -29,6 +29,10 @@ type blockCache struct {
 	entries [cacheBlocks]cachedBlock
 	reads   uint64
 	hits    uint64
+	// overlay holds the blocks an open transaction has staged. Reads see
+	// them first, so a transaction observes its own changes before they
+	// reach the device.
+	overlay map[uint64]*stagedBlock
 }
 
 func (cache *blockCache) init(device Device, blockSize uint32, blocks uint64) {
@@ -44,6 +48,9 @@ func (cache *blockCache) init(device Device, blockSize uint32, blocks uint64) {
 func (cache *blockCache) get(block uint64) ([]byte, error) {
 	if block >= cache.limit {
 		return nil, corrupt("block number beyond the volume")
+	}
+	if staged := cache.overlay[block]; staged != nil {
+		return staged.data, nil
 	}
 	cache.clock++
 	cache.reads++
@@ -77,8 +84,45 @@ func (cache *blockCache) readBlocks(block uint64, target []byte) error {
 	if end, ok := addOK(block, count); !ok || end > cache.limit {
 		return corrupt("data run beyond the volume")
 	}
+	if len(cache.overlay) != 0 {
+		return cache.readStaged(block, count, target)
+	}
 	if !cache.device.ReadAt(block*cache.size, target) {
 		return errIO
 	}
 	return nil
+}
+
+// readStaged serves a run block by block, preferring staged contents.
+func (cache *blockCache) readStaged(block uint64, count uint64, target []byte) error {
+	size := cache.size
+	for index := uint64(0); index < count; index++ {
+		out := target[index*size : (index+1)*size]
+		if staged := cache.overlay[block+index]; staged != nil {
+			copy(out, staged.data)
+			continue
+		}
+		if !cache.device.ReadAt((block+index)*size, out) {
+			return errIO
+		}
+	}
+	return nil
+}
+
+// update replaces the cached copy of block, if one is resident, after a
+// transaction wrote it.
+func (cache *blockCache) update(block uint64, data []byte) {
+	for index := range cache.entries {
+		entry := &cache.entries[index]
+		if entry.valid && entry.block == block {
+			copy(entry.data, data)
+		}
+	}
+}
+
+// invalidate drops every resident block.
+func (cache *blockCache) invalidate() {
+	for index := range cache.entries {
+		cache.entries[index].valid = false
+	}
 }
