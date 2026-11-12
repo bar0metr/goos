@@ -157,7 +157,7 @@ func (fs *FS) validateGroups() error {
 		if !fs.groupsInitialized() && desc.Flags&(groupInodeUninit|groupBlockUninit) != 0 {
 			return corrupt("uninitialized group flags without group checksums")
 		}
-		if fs.sb.HasMetadataCsum() {
+		if fs.sb.HasMetadataCsum() && !fs.beforeReplay {
 			if err := fs.verifyBitmaps(group, &desc); err != nil {
 				return err
 			}

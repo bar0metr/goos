@@ -107,7 +107,7 @@ func TestExportMutatedImages(t *testing.T) {
 	}
 	for name, scenario := range scenarios {
 		t.Run(name, func(t *testing.T) {
-			device := scenario(t)
+			device := ok(settled(scenario(t))).(*scratchDevice)
 			checkVolume(t, device)
 			if err := os.WriteFile(filepath.Join(out, name+".img"), device.data, 0o644); err != nil {
 				t.Fatal(err)

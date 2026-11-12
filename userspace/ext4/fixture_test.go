@@ -92,6 +92,10 @@ func pinnedSum(t testing.TB, file string) string {
 
 func mount(t testing.TB, device Device) *FS {
 	t.Helper()
+	device, err := settled(device)
+	if err != nil {
+		t.Fatal(err)
+	}
 	fs, err := Mount(device, Options{})
 	if err != nil {
 		t.Fatalf("mount: %v", err)
@@ -569,8 +573,13 @@ func TestStatus(t *testing.T) {
 }
 
 func TestWritableMountRefused(t *testing.T) {
-	_, err := Mount(fixture(t, "canonical"), Options{Writable: true})
+	_, err := Mount(fixture(t, "legacy"), Options{Writable: true, Clock: testClock()})
 	if KindOf(err) != KindReadOnly {
-		t.Fatalf("writable mount: %v", err)
+		t.Fatalf("writable mount of the legacy profile: %v", err)
+	}
+	// memDevice refuses writes, so the journal superblock write fails.
+	_, err = Mount(fixture(t, "canonical"), Options{Writable: true, Clock: testClock()})
+	if KindOf(err) != KindIO {
+		t.Fatalf("writable mount of a read-only device: %v", err)
 	}
 }

@@ -8,13 +8,13 @@ package ext4
 // which keeps the estimates below honest for the journal that will size
 // its transactions from them.
 //
-// These operations only run on volumes mounted with mountScratch. They do
-// not keep an orphan list. Every path that drops an inode's last link
-// (Unlink, Rmdir, and Rename over a last link) removes the name first and
-// then frees the inode's blocks in release, whose steps may each commit;
-// so does a Truncate across transactions. Stopping between those commits
-// leaves an unreachable inode, or a short file, with blocks still
-// allocated.
+// The operations need a writable mount. Every path that drops an inode's
+// last link (Unlink, Rmdir, and Rename over a last link) removes the name
+// and puts the inode on the orphan list in one transaction, then frees its
+// blocks in release, whose steps may each commit; a shrinking Truncate
+// lists the inode with its new size the same way. A crash between those
+// commits leaves the work on the orphan list, and the next writable mount
+// finishes it (orphan.go).
 
 // Metadata credits, in blocks, at most depth-5 extent trees and 4 KiB
 // blocks. A descriptor block is counted with every bitmap even when two
@@ -60,42 +60,6 @@ const (
 	// commit adds.
 	txnHeadroom = 8
 )
-
-// mountScratch mounts a volume for mutation. It exists for host tests and
-// tools working on disposable images; nothing in a GoOS service calls it,
-// and Mount still refuses read-write while writeSupported is false. The
-// volume must match the writable profile, use 4 KiB blocks, and carry free
-// counts that agree with its descriptors and their bitmaps.
-func mountScratch(device Device, now func() Timestamp) (*FS, error) {
-	fs, err := Mount(device, Options{})
-	if err != nil {
-		return nil, err
-	}
-	if fs.negotiation.Support != ReadWrite {
-		return nil, fail(KindReadOnly, fs.negotiation.Reason)
-	}
-	if fs.blockSize != 4096 {
-		return nil, fail(KindUnsupported, "mutation needs 4 KiB blocks")
-	}
-	var freeBlocks uint64
-	var freeInodes uint32
-	for group := uint32(0); uint64(group) < fs.groups; group++ {
-		desc, err := fs.group(group)
-		if err != nil {
-			return nil, err
-		}
-		freeBlocks += uint64(desc.FreeBlocks)
-		freeInodes += desc.FreeInodes
-	}
-	if freeBlocks != fs.sb.FreeBlocks || freeInodes != fs.sb.FreeInodes {
-		return nil, corrupt("superblock free counts disagree with the descriptors")
-	}
-	if err := fs.verifyGroupCounts(); err != nil {
-		return nil, err
-	}
-	fs.mutable, fs.now, fs.state = true, now, StateReadyRW
-	return fs, nil
-}
 
 func fileTypeOf(mode uint16) uint8 {
 	switch mode & modeTypeMask {
@@ -396,6 +360,9 @@ func (fs *FS) release(inode *Inode) error {
 			return err
 		}
 	}
+	if err := fs.removeOrphan(inode); err != nil {
+		return err
+	}
 	return fs.freeInode(inode)
 }
 
@@ -430,7 +397,7 @@ func (fs *FS) Unlink(dir *Inode, name []byte) error {
 		inode.Links--
 		fs.touch(inode, "c")
 		if inode.Links == 0 {
-			return fs.release(inode)
+			return fs.dropLastLink(inode)
 		}
 		return nil
 	})
@@ -473,7 +440,7 @@ func (fs *FS) Rmdir(dir *Inode, name []byte) error {
 		decDirLinks(parent)
 		fs.touch(parent, "mc")
 		child.Links = 0
-		return fs.release(child)
+		return fs.dropLastLink(child)
 	})
 }
 
@@ -626,7 +593,7 @@ func (fs *FS) Rename(fromDir *Inode, fromName []byte, toDir *Inode, toName []byt
 		}
 		fs.touch(victim, "c")
 		if victim.Links == 0 {
-			return fs.release(victim)
+			return fs.dropLastLink(victim)
 		}
 		return nil
 	})
@@ -795,6 +762,29 @@ func (fs *FS) WriteFile(file *Inode, offset uint64, data []byte) (int, error) {
 	return len(data), nil
 }
 
+// trimTo frees every block of inode at or past size, one extent per step,
+// and takes the inode off the orphan list in the last step. An inode with
+// no links stays listed: release frees it next.
+func (fs *FS) trimTo(inode *Inode, size uint64) error {
+	blockSize := uint64(fs.blockSize)
+	end := uint32((size + blockSize - 1) / blockSize)
+	for {
+		if _, err := fs.reserve(creditsTrimStep, 0); err != nil {
+			return err
+		}
+		done, err := fs.trimStep(inode, end)
+		if err != nil {
+			return err
+		}
+		if done {
+			if inode.Links == 0 {
+				return nil
+			}
+			return fs.removeOrphan(inode)
+		}
+	}
+}
+
 // Truncate sets the size of a regular file. Growing leaves a hole; shrinking
 // frees the blocks past the new end and clears the rest of the last block.
 func (fs *FS) Truncate(file *Inode, size uint64) error {
@@ -822,19 +812,9 @@ func (fs *FS) Truncate(file *Inode, size uint64) error {
 		}
 		inode.Size = size
 		fs.touch(inode, "mc")
-		blockSize := uint64(fs.blockSize)
-		end := uint32((size + blockSize - 1) / blockSize)
-		for {
-			if _, err := fs.reserve(creditsTrimStep, 0); err != nil {
-				return err
-			}
-			done, err := fs.trimStep(inode, end)
-			if err != nil {
-				return err
-			}
-			if done {
-				return nil
-			}
-		}
+		// The orphan entry commits with the new size, so a crash part way
+		// through still frees the blocks past it.
+		fs.addOrphan(inode)
+		return fs.trimTo(inode, size)
 	})
 }

@@ -317,7 +317,10 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   builds cannot contend with QEMU.
 - `make test-ext4-mutations` writes four volumes through the ext4 mutation
   code (ADR 0224) and checks each with `e2fsck -fn` and `debugfs` from the
-  pinned e2fsprogs 1.47.2 in a container. It needs Docker and fails without
+  pinned e2fsprogs 1.47.2 in a container. It also has `e2fsck -fy` replay
+  six journals GoOS left after a simulated power cut and compares the tree
+  with GoOS recovery, and has GoOS replay three journals `debugfs` wrote
+  (ADR 0225). It needs Docker and fails without
   it; `test-all` and `release-check` run it. `DOCKER_FLAGS` passes extra
   `docker run` options, such as `--dns` when containers cannot resolve
   names.

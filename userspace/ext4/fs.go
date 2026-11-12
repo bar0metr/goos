@@ -1,8 +1,8 @@
 package ext4
 
-// State is where a volume stands in the mount sequence. A read-only core
-// only ever reaches ReadyRO; the other states exist so the service and its
-// status output report the same names the recovery path will use.
+// State is where a volume stands in the mount sequence. A read-only mount
+// reaches ReadyRO; a writable one passes through Recovering to ReadyRW and
+// ends in CleanUnmounted, or in Failed after a write or flush error.
 type State uint8
 
 const (
@@ -42,14 +42,19 @@ func (state State) String() string {
 
 // Options select how a volume is mounted.
 type Options struct {
-	// Writable asks for a read-write mount.
+	// Writable asks for a read-write mount. It replays the journal and
+	// finishes the orphan list first, so it also recovers a volume a
+	// read-only mount refuses.
 	Writable bool
+	// Clock stamps inode times and commit blocks; a writable mount needs
+	// one.
+	Clock func() Timestamp
 }
 
-// writeSupported gates every read-write mount. It stays false until journal
-// replay, ordered commits and orphan cleanup exist: until then a writable
-// mount could leave a volume Linux would have to repair.
-const writeSupported = false
+// writeSupported gates every read-write mount. Writable mounts need the
+// writable profile of the feature matrix, 4 KiB blocks, an internal
+// journal with a version 2 superblock, and a device whose flush succeeds.
+const writeSupported = true
 
 // FS is a mounted ext4 volume.
 type FS struct {
@@ -63,22 +68,64 @@ type FS struct {
 	negotiation Negotiation
 	state       State
 	scratch     []byte
-	// mutable is set only by mountScratch: real mounts never stage writes
-	// while writeSupported is false.
+	// mutable is set by a writable mount once recovery has finished.
 	mutable bool
 	txn     *txn
 	// live holds the inodes the running operation has loaded or created.
 	live    map[uint32]*Inode
 	now     func() Timestamp
 	commits uint64
+	log     *journalLog
+	// orphans is the committed orphan list, head first; pins counts the
+	// callers holding each inode open.
+	orphans []uint32
+	pins    map[uint32]uint32
+	// beforeReplay skips the bitmap checksums while a writable mount
+	// opens the journal: a home write the last flush did not cover may
+	// leave a bitmap newer than its descriptor until replay rewrites both.
+	beforeReplay bool
+	recovery     Replay
 }
 
-// Mount probes device, validates the volume and returns it mounted
-// read-only. It refuses volumes whose features, state or metadata it cannot
-// interpret, and every refusal names the first check that failed. A volume
-// whose journal needs replay is refused with KindNeedsRecovery: it is never
-// shown as if it were consistent.
+// Mount probes device, validates the volume and mounts it. It refuses
+// volumes whose features, state or metadata it cannot interpret, and every
+// refusal names the first check that failed. A read-only mount of a volume
+// whose journal or orphan list holds work is refused with
+// KindNeedsRecovery: it is never shown as if it were consistent. A
+// writable mount does that work first.
 func Mount(device Device, options Options) (*FS, error) {
+	fs, err := probe(device)
+	if err != nil {
+		return nil, err
+	}
+	if options.Writable {
+		return fs.mountWritable(options)
+	}
+	sb := fs.sb
+	if sb.NeedsRecovery() {
+		return nil, fail(KindNeedsRecovery, "journal holds transactions to replay")
+	}
+	if sb.Features.ROCompat&roCompatOrphanPresent != 0 {
+		return nil, fail(KindNeedsRecovery, "orphan file holds inodes to clean up")
+	}
+	if sb.State&stateValid == 0 {
+		return nil, fail(KindNeedsRecovery, "volume was not cleanly unmounted")
+	}
+	if sb.LastOrphan != 0 {
+		return nil, fail(KindNeedsRecovery, "orphan list holds inodes to clean up")
+	}
+	if err := fs.open(); err != nil {
+		return nil, err
+	}
+	if !fs.journal.Clean() {
+		return nil, fail(KindNeedsRecovery, "journal is not empty")
+	}
+	fs.state = StateReadyRO
+	return fs, nil
+}
+
+// probe reads and parses the superblock and negotiates features.
+func probe(device Device) (*FS, error) {
 	capacity := device.Capacity()
 	if capacity < superblockOffset+superblockSize {
 		return nil, corrupt("partition smaller than the superblock")
@@ -96,47 +143,254 @@ func Mount(device Device, options Options) (*FS, error) {
 	if fs.negotiation.Support == Reject {
 		return nil, fail(KindUnsupported, fs.negotiation.Reason)
 	}
-	if options.Writable {
-		switch {
-		case !writeSupported:
-			return nil, fail(KindReadOnly, "read-write ext4 mounts are not enabled in this build")
-		case fs.negotiation.Support != ReadWrite:
-			return nil, fail(KindReadOnly, fs.negotiation.Reason)
-		}
-	}
-	if sb.NeedsRecovery() {
-		return nil, fail(KindNeedsRecovery, "journal holds transactions to replay")
-	}
-	if sb.Features.ROCompat&roCompatOrphanPresent != 0 {
-		return nil, fail(KindNeedsRecovery, "orphan file holds inodes to clean up")
-	}
-	if sb.State&stateValid == 0 {
-		return nil, fail(KindNeedsRecovery, "volume was not cleanly unmounted")
-	}
 	if sb.HasMetadataCsum() || sb.Features.Incompat&incompatCsumSeed != 0 {
 		fs.seed = sb.checksumSeed()
 	}
-	fs.cache.init(device, fs.blockSize, sb.BlocksCount)
+	return fs, nil
+}
+
+// open validates the group descriptors, the root and the journal
+// superblock.
+func (fs *FS) open() error {
+	fs.cache.init(fs.device, fs.blockSize, fs.sb.BlocksCount)
 	fs.scratch = make([]byte, fs.blockSize)
 	if err := fs.validateGroups(); err != nil {
-		return nil, err
+		return err
 	}
 	root, err := fs.Inode(RootInode)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if !root.IsDir() {
-		return nil, corrupt("root inode is not a directory")
+		return corrupt("root inode is not a directory")
 	}
-	if err := fs.openJournal(); err != nil {
+	return fs.openJournal()
+}
+
+// mountWritable replays the journal, finishes the orphan list and opens
+// the volume for mutation. The journal superblock records a live log and
+// the superblock needs_recovery before the first transaction, so a power
+// cut from here on leaves a volume the next writable mount recovers.
+func (fs *FS) mountWritable(options Options) (*FS, error) {
+	switch {
+	case !writeSupported:
+		return nil, fail(KindReadOnly, "read-write ext4 mounts are not enabled in this build")
+	case fs.negotiation.Support != ReadWrite:
+		return nil, fail(KindReadOnly, fs.negotiation.Reason)
+	case fs.blockSize != 4096:
+		return nil, fail(KindUnsupported, "read-write needs 4 KiB blocks")
+	case fs.sb.Features.Compat&compatHasJournal == 0:
+		return nil, fail(KindReadOnly, "read-write needs an internal journal")
+	case fs.sb.State&stateErrors != 0:
+		return nil, fail(KindNeedsRecovery, "volume recorded errors; check it with e2fsck")
+	case options.Clock == nil:
+		return nil, fail(KindInvalid, "writable mount without a clock")
+	}
+	// A device that cannot flush cannot order a commit after its log.
+	if !fs.device.Flush() {
+		return nil, fail(KindUnsupported, "device cannot flush its write cache")
+	}
+	fs.now = options.Clock
+	fs.state = StateRecovering
+	fs.beforeReplay = true
+	if err := fs.open(); err != nil {
 		return nil, err
 	}
-	if !fs.journal.Clean() {
-		return nil, fail(KindNeedsRecovery, "journal is not empty")
+	log, err := fs.loadLog()
+	if err != nil {
+		return nil, err
 	}
-	fs.state = StateReadyRO
+	fs.log = log
+	fs.beforeReplay = false
+	if log.tail != 0 {
+		end, err := fs.replay(log, &fs.recovery)
+		if err != nil {
+			return nil, err
+		}
+		// The sequence after a replay skips one number: blocks of the
+		// transaction that never committed may still carry it.
+		log.seq = end + 1
+		if !fs.device.Flush() || !fs.writeLogSuper(0, log.seq) || !fs.device.Flush() {
+			return nil, errWrite
+		}
+		if err := fs.reload(); err != nil {
+			return nil, err
+		}
+		log = fs.log
+	} else {
+		log.seq = log.tailSeq
+		if err := fs.validateGroups(); err != nil {
+			return nil, err
+		}
+	}
+	if err := fs.verifyGroupCounts(); err != nil {
+		return nil, err
+	}
+	if err := fs.loadOrphans(); err != nil {
+		return nil, err
+	}
+	fs.enableFeatures()
+	log.head = log.first
+	log.journaled = make(map[uint64]uint32)
+	if !fs.writeLogSuper(log.head, log.seq) || !fs.device.Flush() {
+		return nil, errWrite
+	}
+	if err := fs.markMounted(true); err != nil {
+		return nil, err
+	}
+	fs.mutable = true
+	if err := fs.cleanupOrphans(&fs.recovery); err != nil {
+		fs.mutable = false
+		fs.state = StateFailed
+		return nil, err
+	}
+	fs.state = StateReadyRW
 	return fs, nil
 }
+
+// reload reads the volume again after replay rewrote its metadata.
+func (fs *FS) reload() error {
+	log := fs.log
+	fresh, err := probe(fs.device)
+	if err != nil {
+		return err
+	}
+	fs.sb, fs.negotiation, fs.seed = fresh.sb, fresh.negotiation, fresh.seed
+	if fs.negotiation.Support != ReadWrite {
+		return fail(KindReadOnly, fs.negotiation.Reason)
+	}
+	if err := fs.open(); err != nil {
+		return err
+	}
+	reloaded, err := fs.loadLog()
+	if err != nil {
+		return err
+	}
+	reloaded.seq = log.seq
+	fs.log = reloaded
+	return nil
+}
+
+// markMounted writes the superblock directly, outside any transaction. A
+// mounted volume carries needs_recovery and lacks the valid state bit, as
+// Linux leaves it; clean unmount reverses both. The free counts are the
+// sums of the descriptors: Linux recomputes them at mount the same way.
+func (fs *FS) markMounted(mounted bool) error {
+	block := uint64(superblockOffset) / uint64(fs.blockSize)
+	within := superblockOffset % int(fs.blockSize)
+	current, err := fs.cache.get(block)
+	if err != nil {
+		return err
+	}
+	data := make([]byte, fs.blockSize)
+	copy(data, current)
+	raw := data[within : within+superblockSize]
+	var freeBlocks uint64
+	var freeInodes uint32
+	for group := uint32(0); uint64(group) < fs.groups; group++ {
+		desc, err := fs.group(group)
+		if err != nil {
+			return err
+		}
+		freeBlocks += uint64(desc.FreeBlocks)
+		freeInodes += desc.FreeInodes
+	}
+	incompat := le32(raw, 0x60)
+	state := le16(raw, 0x3A)
+	if mounted {
+		incompat |= incompatRecover
+		state &^= stateValid
+	} else {
+		incompat &^= incompatRecover
+		state |= stateValid
+	}
+	putLE32(raw[0x60:], incompat)
+	putLE16(raw[0x3A:], state)
+	putLE32(raw[0xC:], uint32(freeBlocks))
+	if fs.sb.Features.Incompat&incompat64Bit != 0 {
+		putLE32(raw[0x158:], uint32(freeBlocks>>32))
+	}
+	putLE32(raw[0x10:], freeInodes)
+	sealSuperblock(raw)
+	if !fs.device.WriteAt(block*uint64(fs.blockSize), data) || !fs.device.Flush() {
+		return errWrite
+	}
+	fs.cache.update(block, data)
+	fs.sb.FreeBlocks, fs.sb.FreeInodes = freeBlocks, freeInodes
+	fs.sb.State = state
+	fs.sb.Features.Incompat = incompat
+	return nil
+}
+
+// Sync makes every committed transaction durable at its home location and
+// empties the log. Each operation is already durable in the log when it
+// returns; Sync only shortens the next replay.
+func (fs *FS) Sync() error {
+	if !fs.mutable {
+		if fs.state == StateFailed {
+			return errWrite
+		}
+		return nil
+	}
+	if err := fs.reclaim(); err != nil {
+		return fs.failWrite()
+	}
+	return nil
+}
+
+// Unmount releases pinned inodes that lost their last link, empties the
+// log and marks the volume clean. After a failed write the volume stays
+// as the journal left it, for the next writable mount to recover.
+func (fs *FS) Unmount() error {
+	if !fs.mutable {
+		if fs.state == StateFailed {
+			return errWrite
+		}
+		fs.state = StateCleanUnmounted
+		return nil
+	}
+	for number := range fs.pins {
+		delete(fs.pins, number)
+	}
+	if err := fs.cleanupPinned(); err != nil {
+		return err
+	}
+	fs.state = StateQuiescing
+	log := fs.log
+	if !fs.device.Flush() || !fs.writeLogSuper(0, log.seq) || !fs.device.Flush() {
+		return fs.failWrite()
+	}
+	if err := fs.markMounted(false); err != nil {
+		return fs.failWrite()
+	}
+	fs.mutable = false
+	fs.state = StateCleanUnmounted
+	return nil
+}
+
+// cleanupPinned releases the listed inodes that have no links: they were
+// kept only for callers that held them open.
+func (fs *FS) cleanupPinned() error {
+	for _, number := range append([]uint32(nil), fs.orphans...) {
+		err := fs.mutate(func() error {
+			inode, err := fs.liveInode(number)
+			if err != nil {
+				return err
+			}
+			if inode.Links != 0 {
+				return nil
+			}
+			return fs.release(inode)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Recovery reports what the writable mount replayed and cleaned up.
+func (fs *FS) Recovery() Replay { return fs.recovery }
 
 // Superblock returns the decoded superblock.
 func (fs *FS) Superblock() *Superblock { return fs.sb }
@@ -289,6 +543,10 @@ type Status struct {
 	Journal     Journal
 	CacheReads  uint64
 	CacheHits   uint64
+	// Commits counts the transactions this mount committed; Recovery is
+	// what a writable mount replayed and cleaned up before it.
+	Commits  uint64
+	Recovery Replay
 }
 
 // Status reports the volume's mount state and counters.
@@ -303,5 +561,7 @@ func (fs *FS) Status() Status {
 		Journal:     fs.journal,
 		CacheReads:  fs.cache.reads,
 		CacheHits:   fs.cache.hits,
+		Commits:     fs.commits,
+		Recovery:    fs.recovery,
 	}
 }

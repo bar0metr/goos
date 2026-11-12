@@ -5,7 +5,9 @@
 Accepted. Extends ADR 0220 (read-only core and feature contract), ADR 0221
 (adapter) and ADR 0222 (volume instances). Real mounts stay read-only:
 `writeSupported` is false, `Mount` refuses `Options{Writable: true}`, and
-additional volumes still get read-only block slices.
+additional volumes still get read-only block slices. ADR 0225 replaces the
+in-place commit and the `mountScratch` gate with the journal and a writable
+`Mount`.
 
 ## Context
 
