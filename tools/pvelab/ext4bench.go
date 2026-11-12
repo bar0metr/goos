@@ -5,25 +5,38 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // ext4BenchScenario measures an ext4 volume mounted read-write (ADR 0226,
 // ADR 0227) with fsbench, the static Linux program the Linux reference runs
-// on the same volume layout: names, sequential and random 4 KiB I/O, fsync
-// latency, the replace pattern, a sparse file past 4 GiB and 1, 2, 4 and 8
-// processes at once, then once on RAMFS and once on the persistent FAT32
-// volume for comparison. The disk carries a partition labelled goos-bench that
+// on the same volume layout. On ext4 it runs five full rounds and reads the
+// system's settled page count after each, so a leak shows as growth from
+// round to round; then 10000 names in one directory, then fills the volume
+// and writes again after freeing it. One round on RAMFS, with a data file
+// that fits /tmp, and one on the persistent FAT32 volume give comparisons.
+// The disk carries a partition labelled goos-bench that
 // tools/ext4fixture/make-bench-volume.sh made; make test-pve-ext4 builds it.
 type ext4BenchScenario struct{}
 
-// ext4BenchRounds is how many times fsbench runs; the report keeps every
-// round so a reader can take the median.
-const ext4BenchRounds = 3
+// ext4BenchRounds is how many times the full fsbench runs on ext4; the
+// report keeps every round so a reader can take the median.
+const ext4BenchRounds = 5
 
 // ext4BenchTimeout bounds one fsbench run.
-const ext4BenchTimeout = 10 * time.Minute
+const ext4BenchTimeout = 15 * time.Minute
+
+// ext4PlateauPages is how far the settled page count after the last full
+// round may rise above the highest count of the rounds before it: 1 MiB.
+// Collected heaps settle a few hundred pages apart from run to run, up or
+// down; a leak keeps rising. ext4KernelPages bounds the kernel's own
+// growth over all rounds, which does not move with heaps.
+const (
+	ext4PlateauPages = 256
+	ext4KernelPages  = 64
+)
 
 func (ext4BenchScenario) Name() string { return "ext4-bench" }
 
@@ -45,40 +58,83 @@ func (ext4BenchScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	}
 	g.pass("ext4-mount")
 	var measured []string
+	record := func(label string, lines []string) {
+		for _, line := range lines {
+			measured = append(measured, label+" "+line)
+			s.logf("%s %s", label, line)
+		}
+	}
+	var pages, kernel []uint64
 	for round := 1; round <= ext4BenchRounds; round++ {
-		out, ending, err := runWorkloadStep(ctx, g, "/system/linux/fsbench /mnt/bench", ext4BenchTimeout)
+		lines, err := runFsbench(ctx, g, "/mnt/bench", fmt.Sprintf("round %d", round))
 		if err != nil {
 			return "", err
 		}
-		if ending != "" || !hasLine(out, "bench ok") {
-			return "", failf(ClassScenario, "fsbench", "round %d did not finish (%s):\n%s", round, ending, tailLines(out, 20))
+		record(fmt.Sprintf("ext4 round=%d", round), lines)
+		used, inKernel, err := settledPages(ctx, g)
+		if err != nil {
+			return "", err
 		}
-		for _, line := range strings.Split(out, "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "bench ") && line != "bench ok" {
-				measured = append(measured, fmt.Sprintf("ext4 round=%d %s", round, line))
-				s.logf("round %d %s", round, line)
-			}
-		}
+		pages, kernel = append(pages, used), append(kernel, inKernel)
+		record(fmt.Sprintf("ext4 round=%d", round), []string{fmt.Sprintf("mem pages=%d kernel=%d", used, inKernel)})
 		g.pass(fmt.Sprintf("fsbench-%d", round))
 	}
+	highest := uint64(0)
+	for _, used := range pages[:len(pages)-1] {
+		highest = max(highest, used)
+	}
+	if last := pages[len(pages)-1]; last > highest+ext4PlateauPages {
+		return "", failf(ClassScenario, "ext4-memory", "settled pages %v: the last round rose past the earlier ones", pages)
+	}
+	if kernel[len(kernel)-1] > kernel[0]+ext4KernelPages {
+		return "", failf(ClassScenario, "ext4-memory", "kernel pages %v grew over the rounds", kernel)
+	}
+	g.pass("ext4-memory-plateau")
+
+	// 10000 names in one directory and 8 MiB of data.
+	lines, err := runFsbench(ctx, g, "/mnt/bench 5 8", "names")
+	if err != nil {
+		return "", err
+	}
+	record("ext4 names", lines)
+	g.pass("fsbench-names")
+
+	// Fill the volume, check the refusals, free it and write again.
+	before, err := g.Run(ctx, "df", commandTimeout)
+	if err != nil {
+		return "", fail(ClassScenario, "df", err)
+	}
+	lines, err = runFsbench(ctx, g, "/mnt/bench fill", "fill")
+	if err != nil {
+		return "", err
+	}
+	if !containsLine(lines, "bench refill ok=1") {
+		return "", failf(ClassScenario, "fill", "no write after freeing the full volume:\n%s", strings.Join(lines, "\n"))
+	}
+	record("ext4 fill", lines)
+	after, err := g.Run(ctx, "df", commandTimeout)
+	if err != nil {
+		return "", fail(ClassScenario, "df", err)
+	}
+	record("ext4 df-before", dfLines(before, "/mnt/bench"))
+	record("ext4 df-after", dfLines(after, "/mnt/bench"))
+	g.pass("ext4-fill")
+	used, inKernel, err := settledPages(ctx, g)
+	if err != nil {
+		return "", err
+	}
+	record("ext4 after-fill", []string{fmt.Sprintf("mem pages=%d kernel=%d", used, inKernel)})
+
 	// One round on RAMFS and one on the persistent FAT32 volume separate
-	// what the VFS and the Linux ABI cost from what ext4 adds.
-	for _, base := range []struct{ name, dir string }{{"ramfs", "/tmp"}, {"fat32", "/persist/home"}} {
-		out, ending, err := runWorkloadStep(ctx, g, "/system/linux/fsbench "+base.dir, ext4BenchTimeout)
+	// what the VFS and the Linux ABI cost from what ext4 adds. /tmp holds
+	// 16 MiB, so its data file is 8 MiB.
+	for _, base := range []struct{ name, args string }{{"ramfs", "/tmp 1 8"}, {"fat32", "/persist/home"}} {
+		lines, err := runFsbench(ctx, g, base.args, base.name)
 		if err != nil {
 			return "", err
 		}
-		if ending != "" {
-			return "", failf(ClassScenario, "fsbench-"+base.name, "%s did not finish (%s):\n%s", base.dir, ending, tailLines(out, 20))
-		}
-		for _, line := range strings.Split(out, "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "bench ") && line != "bench ok" {
-				measured = append(measured, fmt.Sprintf("%s %s", base.name, line))
-				s.logf("%s %s", base.name, line)
-			}
-		}
+		record(base.name, lines)
+		g.pass("fsbench-" + base.name)
 	}
 	out, err = g.Run(ctx, "umount /mnt/bench", commandTimeout)
 	if err != nil {
@@ -94,6 +150,80 @@ func (ext4BenchScenario) Run(ctx context.Context, s *Session) (Result, error) {
 		}
 	}
 	return ResultPass, nil
+}
+
+// runFsbench runs fsbench with args and returns its bench lines. A run that
+// does not end with "bench ok" fails the scenario.
+func runFsbench(ctx context.Context, g *Guest, args string, label string) ([]string, error) {
+	out, ending, err := runWorkloadStep(ctx, g, "/system/linux/fsbench "+args, ext4BenchTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if ending != "" || !hasLine(out, "bench ok") {
+		return nil, failf(ClassScenario, "fsbench", "%s did not finish (%s):\n%s", label, ending, tailLines(out, 20))
+	}
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "bench ") && line != "bench ok" {
+			lines = append(lines, line)
+		}
+	}
+	return lines, nil
+}
+
+// settledPages reads the system's page count, and the kernel's part of it,
+// once the collector settled, as the leak checks do; it retries an
+// unsettled sample a few times.
+func settledPages(ctx context.Context, g *Guest) (uint64, uint64, error) {
+	for attempt := 0; attempt < 5; attempt++ {
+		out, err := g.Run(ctx, "mem -p", commandTimeout)
+		if err != nil {
+			return 0, 0, fail(ClassScenario, "mem", err)
+		}
+		if !hasLine(out, "pages stable: yes") {
+			time.Sleep(time.Second)
+			continue
+		}
+		used, usedOK := memField(out, "pages used: ")
+		inKernel, kernelOK := memField(out, "pages in the kernel: ")
+		if !usedOK || !kernelOK {
+			return 0, 0, failf(ClassScenario, "mem", "unexpected mem -p output:\n%s", out)
+		}
+		return used, inKernel, nil
+	}
+	return 0, 0, failf(ClassScenario, "mem", "the page count never settled")
+}
+
+// memField reads the number after prefix in mem -p output.
+func memField(out string, prefix string) (uint64, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		if value, found := strings.CutPrefix(strings.TrimSpace(line), prefix); found {
+			number, err := strconv.ParseUint(value, 10, 64)
+			return number, err == nil
+		}
+	}
+	return 0, false
+}
+
+// dfLines returns the df lines that name mount.
+func dfLines(out string, mount string) []string {
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, mount) {
+			lines = append(lines, "df "+strings.Join(strings.Fields(line), " "))
+		}
+	}
+	return lines
+}
+
+func containsLine(lines []string, want string) bool {
+	for _, line := range lines {
+		if line == want {
+			return true
+		}
+	}
+	return false
 }
 
 // tailLines returns the last count lines of text.

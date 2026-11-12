@@ -20,6 +20,11 @@ mke2fs -q -F -t ext4 -b 4096 -I 256 -O "none,$2" -L goos-bench -J size=32 \
 e2fsck -fn /tmp/bench.img >/dev/null
 gzip -1 </tmp/bench.img
 EOF
+[ -s "$out.gz" ] || {
+	echo "make-bench-volume: the container wrote no volume; check docker and its network (DOCKER_FLAGS)" >&2
+	rm -f "$out.gz"
+	exit 1
+}
 gzip -dc "$out.gz" >"$out"
 rm -f "$out.gz"
 printf 'bench volume %s\n' "$out"

@@ -155,7 +155,7 @@ Linker flags:
 | `prebuilt/tty-probe` | `5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957` |
 | `prebuilt/netprobe` | `dca2339b9c61ea9f190613aa58b6289e6166a58463e1a4441bfd8ba661d742cb` |
 | `prebuilt/pie-probe` | `4e1822fc5fd6c174726c8751cabb0c298e67adfa46e7a82c9b425732b00c7144` |
-| `prebuilt/fsbench` | `2a8692b20f8f6bca08f496ea482a21fc86e7b457b1ad23c30b0db2840a5e88ab` |
+| `prebuilt/fsbench` | `4c475795b3f4873da73161b2a52b2a721accbc662b69ff2570346a6c12c942e7` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF
@@ -341,11 +341,13 @@ prints its own base. `make test-linux-aslr` runs it (ADR 0219).
 
 ## File system benchmark
 
-`fsbench DIR [SCALE]` times file system calls in `DIR/fsbench.PID` and
-removes that directory when it finishes. Run the same binary on GoOS, with
-an ext4 volume mounted read-write, and on Linux with ext4 on a virtio disk
-in the same KVM node. SCALE runs from 1 to 16 and multiplies the file counts
-and the 64 MiB data file.
+`fsbench DIR [SCALE [DATA_MIB]]` times file system calls in
+`DIR/fsbench.PID` and removes that directory when it finishes. Run the same
+binary on GoOS, with an ext4 volume mounted read-write, and on Linux with
+ext4 on a virtio disk in the same KVM node. SCALE runs from 1 to 16 and
+multiplies the file counts. DATA_MIB, 1 to 1024, sets the data file, 64
+MiB times SCALE by default; a small file system such as GoOS's `/tmp`
+takes a smaller one.
 
 Each workload prints one `bench NAME key=value` line. `us_per_op` and
 `mib_s` carry one decimal. Times come from `CLOCK_MONOTONIC` and include
@@ -357,7 +359,8 @@ the `fsync` that ends a workload.
 | `stat` | `stat` of each file |
 | `readdir` | `getdents64` to the end of that directory; `entries=` must equal the file count |
 | `unlink` | `unlink` of each file, then `fsync` of the directory |
-| `seq-write` | `64*SCALE` MiB in 1 MiB writes, then `fsync` |
+| `deep` | 100 nested directories, a file at the bottom created, `stat`-ed by its full path and removed, then the directories removed |
+| `seq-write` | DATA_MIB in 1 MiB writes, then `fsync` |
 | `seq-read` | that file in 1 MiB reads |
 | `rand-write` | 2000 aligned 4 KiB `pwrite` calls at offsets from a seeded LCG, then one `fsync` |
 | `rand-read` | 2000 aligned 4 KiB `pread` calls at seeded offsets |
@@ -365,6 +368,12 @@ the `fsync` that ends a workload.
 | `replace` | 200 rounds of `open(O_CREAT\|O_TRUNC)`, 4 KiB write, `fsync`, `close`, and `rename` over a fixed name |
 | `sparse` | one byte at 5 GiB in a new file, `fstat`, and a `pread` of that byte |
 | `parallel` | for 1, 2, 4 and 8 forked processes, each in its own directory, `200*SCALE` rounds of create, 4 KiB write, close and unlink; `us_per_op` and `ops_s` cover all processes |
+
+`fsbench DIR fill` fills the file system instead: it writes 1 MiB pieces
+into one file until a write fails with `ENOSPC`, prints `bench fill
+mib=N`, checks that a further write fails with `ENOSPC` and nothing else,
+removes the file, syncs the directory, writes 8 MiB again and prints
+`bench refill ok=1`. Run it only on a volume you mean to fill.
 
 The run ends with `bench ok`. A failed call prints `fsbench: STEP: errno N`
 on stderr and exits with status 1, leaving its files in place. `sparse`

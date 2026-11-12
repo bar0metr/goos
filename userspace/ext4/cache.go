@@ -10,8 +10,15 @@ type Device interface {
 	Capacity() uint64
 }
 
-// cacheBlocks bounds the resident metadata window.
-const cacheBlocks = 32
+// cacheBlocks bounds the resident metadata window: 1 MiB at 4 KiB blocks,
+// enough for the inode table blocks of a few thousand files listed in hash
+// order. A block can sit only in the cacheWays entries of its set, so a
+// lookup compares four entries, not all of them.
+const (
+	cacheBlocks = 256
+	cacheWays   = 4
+	cacheSets   = cacheBlocks / cacheWays
+)
 
 type cachedBlock struct {
 	block uint64
@@ -67,9 +74,11 @@ func (cache *blockCache) get(block uint64) ([]byte, error) {
 	}
 	cache.clock++
 	cache.reads++
-	victim := &cache.entries[0]
-	for index := range cache.entries {
-		entry := &cache.entries[index]
+	first := int(block%cacheSets) * cacheWays
+	set := cache.entries[first : first+cacheWays]
+	victim := &set[0]
+	for index := range set {
+		entry := &set[index]
 		if entry.valid && entry.block == block {
 			entry.stamp = cache.clock
 			cache.hits++
@@ -125,7 +134,8 @@ func (cache *blockCache) readStaged(block uint64, count uint64, target []byte) e
 // update replaces the cached copy of block, if one is resident, after a
 // transaction wrote it.
 func (cache *blockCache) update(block uint64, data []byte) {
-	for index := range cache.entries {
+	first := int(block%cacheSets) * cacheWays
+	for index := first; index < first+cacheWays; index++ {
 		entry := &cache.entries[index]
 		if entry.valid && entry.block == block {
 			copy(entry.data, data)

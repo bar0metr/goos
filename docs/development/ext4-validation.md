@@ -78,14 +78,14 @@ otherwise. Metadata from the disk cannot raise them.
 
 | What | Bound |
 |---|---|
-| Resident metadata blocks | 32 (`cacheBlocks`) |
+| Resident metadata blocks | 256 in 64 sets of 4, 1 MiB at 4 KiB (`cacheBlocks`, ADR 0229) |
 | Metadata blocks one transaction stages | 256 (`maxTxnCredits`), 8 of them kept for inode tables and the superblock |
 | File data blocks one transaction holds | 256, 1 MiB at 4 KiB blocks (`maxTxnData`) |
 | Freed runs one transaction remembers | 512 (`maxTxnFrees`) |
 | Batch size that commits at once | half of each of the three above (ADR 0227) |
 | Commit interval | one second (`commitInterval`, `userspace/cmd/ext4`) |
 | Extent tree depth | 5 (`extentMaxDepth`) |
-| Hash-tree levels | 3 |
+| Hash-tree levels | 3 read; one index level written, 507 leaves at 4 KiB (ADR 0229) |
 | Directory size written | 2 GiB; directories above 4 GiB are refused on read |
 | Symbolic link target | 4095 bytes; 40 links in one VFS lookup (ADR 0223) |
 | Journal extents mapped | 1024 (`maxLogRuns`) |

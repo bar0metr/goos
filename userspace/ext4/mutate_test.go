@@ -871,3 +871,59 @@ func syncCheck(t testing.TB, fs *FS, device Device) {
 	}
 	checkVolume(t, device)
 }
+
+// TestLinearDirectoryBecomesIndexed fills a new directory past its first
+// block: it turns into a hash tree, as Linux makes it, every name stays
+// reachable through the index, and the counts check out.
+func TestLinearDirectoryBecomesIndexed(t *testing.T) {
+	fs, device := scratch(t, "canonical")
+	dir := ok(fs.Mkdir(root(t, fs), []byte("grows"), 0o755, 0, 0))
+	for index := 0; index < 600; index++ {
+		ok(fs.Create(ok(fs.Inode(dir.Number)), []byte(fmt.Sprintf("name-%04d", index)), ModeRegular|0o644, 0, 0))
+		if index == 50 && fs.isIndexed(ok(fs.Inode(dir.Number))) {
+			t.Fatal("a directory of one block became indexed")
+		}
+	}
+	grown := ok(fs.Inode(dir.Number))
+	if !fs.isIndexed(grown) {
+		t.Fatal("a directory of several blocks stayed linear")
+	}
+	for index := 0; index < 600; index += 2 {
+		if err := fs.Unlink(ok(fs.Inode(dir.Number)), []byte(fmt.Sprintf("name-%04d", index))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	syncCheck(t, fs, device)
+	reread := mount(t, device)
+	listed := 0
+	if _, err := reread.ReadDir(lookupInode(t, reread, root(t, reread), "grows"), 0, func(*DirEntry) bool { listed++; return true }); err != nil {
+		t.Fatal(err)
+	}
+	if listed != 300 {
+		t.Fatalf("listed %d names, want 300", listed)
+	}
+	for index := 1; index < 600; index += 2 {
+		lookupInode(t, reread, lookupInode(t, reread, root(t, reread), "grows"), fmt.Sprintf("name-%04d", index))
+	}
+}
+
+// TestReadDirSurvivesEviction lists a directory while the callback reads
+// more blocks than the cache holds, as a caller that reads each entry's
+// inode does in a large hash-ordered directory: the listing stays whole.
+func TestReadDirSurvivesEviction(t *testing.T) {
+	fs, _ := scratch(t, "canonical")
+	big := resolve(t, fs, "/big")
+	listed := 0
+	if _, err := fs.ReadDir(big, 0, func(*DirEntry) bool {
+		for block := uint64(0); block < 2*cacheBlocks; block++ {
+			ok(fs.cache.get(block))
+		}
+		listed++
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if listed != 2000 {
+		t.Fatalf("listed %d of 2000 names", listed)
+	}
+}

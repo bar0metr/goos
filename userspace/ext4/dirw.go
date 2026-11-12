@@ -1,8 +1,9 @@
 package ext4
 
-// Directory mutation. Linear directories grow by whole blocks and stay
-// linear. In a hash-indexed directory a name goes to the leaf its hash
-// selects; a full leaf is split by hash into a new block whose index entry
+// Directory mutation. A linear directory that fills its one block becomes
+// hash-indexed, as Linux makes it (ADR 0229); one that is already longer
+// grows by whole blocks and stays linear. In a hash-indexed directory a
+// name goes to the leaf its hash selects; a full leaf is split by hash into a new block whose index entry
 // joins the parent node. A full index node is refused: growing the index by
 // a level is not implemented, which bounds an indexed directory at the
 // leaves one index node holds (507 at 4 KiB blocks).
@@ -196,6 +197,18 @@ func (fs *FS) addEntry(dir *Inode, name []byte, inode uint32, fileType uint8) er
 		fs.sealLeaf(dir, data)
 		return nil
 	}
+	if blocks == 1 {
+		indexed, err := fs.indexDir(dir)
+		if err != nil {
+			return err
+		}
+		if indexed {
+			if err := fs.reserveDirStep(); err != nil {
+				return err
+			}
+			return fs.addIndexed(dir, name, inode, fileType)
+		}
+	}
 	_, data, err := fs.growDir(dir)
 	if err != nil {
 		return err
@@ -204,6 +217,91 @@ func (fs *FS) addEntry(dir *Inode, name []byte, inode uint32, fileType uint8) er
 	placeDirent(data, 0, 0, inode, name, fileType)
 	fs.sealLeaf(dir, data)
 	return nil
+}
+
+// reserveDirStep starts a step for one more directory insert inside an
+// operation that reserved for one. The operation's own transaction is far
+// below a transaction's limit, so the step can only commit the batch before
+// it, never split the operation.
+func (fs *FS) reserveDirStep() error {
+	committed, err := fs.reserve(creditsDirInsert, 0)
+	if err == nil && committed {
+		err = fail(KindInternal, "a directory insert split its operation")
+	}
+	return err
+}
+
+// indexDir turns a linear directory whose one block is full into a hash
+// tree: the names other than "." and ".." move to a new leaf, and block 0
+// becomes the root, with the two dot entries and one index entry pointing
+// at that leaf. The insert that follows splits the leaf. A volume without
+// dir_index, or with a default hash this reader cannot compute, keeps the
+// directory linear.
+func (fs *FS) indexDir(dir *Inode) (bool, error) {
+	if fs.sb.Features.Compat&compatDirIndex == 0 || dir.Flags&inodeFlagIndex != 0 || dir.Size != uint64(fs.blockSize) {
+		return false, nil
+	}
+	version := fs.sb.DefaultHash
+	hashed := version
+	if hashed <= hashTEA && fs.sb.Flags&flagUnsignedHash != 0 {
+		hashed += 3
+	}
+	if _, supported := dirHash([]byte("."), hashed, &fs.sb.HashSeed); !supported {
+		return false, nil
+	}
+	if err := fs.reserveDirStep(); err != nil {
+		return false, err
+	}
+	block, err := fs.dirBlock(dir, 0)
+	if err != nil {
+		return false, err
+	}
+	if block == nil {
+		return false, corrupt("hole in a directory")
+	}
+	if le16(block, 4) != 12 || block[6] != 1 || block[8] != '.' || block[12+6] != 2 || block[20] != '.' || block[21] != '.' {
+		return false, corrupt("directory block does not start with . and ..")
+	}
+	self, parent := le32(block, 0), le32(block, 12)
+	entries, err := fs.leafEntries(dir, block, hashed)
+	if err != nil {
+		return false, err
+	}
+	names := entries[:0]
+	for _, entry := range entries {
+		if string(entry.name) != "." && string(entry.name) != ".." {
+			names = append(names, entry)
+		}
+	}
+	_, leaf, err := fs.growDir(dir)
+	if err != nil {
+		return false, err
+	}
+	fs.packLeaf(leaf, names)
+	fs.sealLeaf(dir, leaf)
+	root, err := fs.stageDirBlock(dir, 0)
+	if err != nil {
+		return false, err
+	}
+	for index := range root {
+		root[index] = 0
+	}
+	size := int(fs.blockSize)
+	putDirent(root, 0, self, 12, []byte("."), FileTypeDir)
+	putDirent(root, 12, parent, size-12, []byte(".."), FileTypeDir)
+	root[dxRootInfo+4] = version
+	root[dxRootInfo+5] = 8
+	space := size - dxRootEntries
+	if fs.sb.HasMetadataCsum() {
+		space -= dxTailSize
+	}
+	putLE16(root[dxRootEntries:], uint16(space/8))
+	putLE16(root[dxRootEntries+2:], 1)
+	putLE32(root[dxRootEntries+4:], 1)
+	fs.sealDx(dir, root, dxRootEntries)
+	dir.Flags |= inodeFlagIndex
+	dir.dirty = true
+	return true, nil
 }
 
 // dxDescent is the walk from the hash-tree root to a leaf.
@@ -302,6 +400,12 @@ func (fs *FS) addIndexed(dir *Inode, name []byte, inode uint32, fileType uint8) 
 		fs.sealLeaf(dir, data)
 		return nil
 	}
+	// The leaf's records are copied out before the parent is read: a
+	// cache read may reuse the leaf's buffer.
+	entries, err := fs.leafEntries(dir, data, descent.version)
+	if err != nil {
+		return err
+	}
 	parent := descent.frames[descent.levels]
 	parentOffset := dxNodeEntries
 	if descent.levels == 0 {
@@ -313,10 +417,6 @@ func (fs *FS) addIndexed(dir *Inode, name []byte, inode uint32, fileType uint8) 
 	}
 	if int(le16(parentData, parentOffset+2)) >= int(le16(parentData, parentOffset)) {
 		return fail(KindNoSpace, "directory index node full")
-	}
-	entries, err := fs.leafEntries(dir, data, descent.version)
-	if err != nil {
-		return err
 	}
 	if len(entries) < 2 {
 		return fail(KindNoSpace, "directory leaf cannot be split")

@@ -1,14 +1,19 @@
 /*
- * fsbench DIR [SCALE] times file system calls under DIR and prints one
- * "bench NAME key=value ..." line per workload, then "bench ok". The same
- * binary runs on GoOS and on Linux, so the two can be compared on the same
- * machine. SCALE, 1 to 16, multiplies the file counts and the file size.
+ * fsbench DIR [SCALE [DATA_MIB]] times file system calls under DIR and
+ * prints one "bench NAME key=value ..." line per workload, then "bench ok".
+ * The same binary runs on GoOS and on Linux, so the two can be compared on
+ * the same machine. SCALE, 1 to 16, multiplies the file counts; DATA_MIB,
+ * 1 to 1024, sets the size of the data file, 64*SCALE MiB by default, so a
+ * small file system can run the data workloads too.
  *
  *   create      2000*SCALE empty files in one directory, then fsync of it
  *   stat        stat of each of those files
  *   readdir     getdents64 over the directory to its end
  *   unlink      unlink of each file, then fsync of the directory
- *   seq-write   64*SCALE MiB in 1 MiB writes, then fsync
+ *   deep        a chain of 100 nested directories, a file at the bottom
+ *               created, stat-ed by its full path and removed, then the
+ *               chain removed from the bottom
+ *   seq-write   DATA_MIB in 1 MiB writes, then fsync
  *   seq-read    the same file in 1 MiB reads
  *   rand-write  2000 aligned 4 KiB pwrites at seeded offsets, then fsync
  *   rand-read   2000 aligned 4 KiB preads at seeded offsets
@@ -18,6 +23,11 @@
  *   sparse      one byte at 5 GiB in a new file, read back
  *   parallel    1, 2, 4 and 8 processes, each in its own directory doing
  *               200*SCALE rounds of create, write 4 KiB, close, unlink
+ *
+ * fsbench DIR fill writes 1 MiB pieces into one file until the file system
+ * refuses one with ENOSPC, fsyncs it, checks that a small write into the
+ * full file system fails cleanly, removes the file, fsyncs the directory,
+ * and writes 8 MiB again: "bench fill mib=N" and "bench refill ok=1".
  *
  * fsbench works in DIR/fsbench.PID and removes it at the end. A failed call
  * prints "fsbench: STEP: errno N" on stderr and exits with status 1. Times
@@ -44,6 +54,7 @@
 #define SYNC_OPS 200
 #define REPLACE_OPS 200
 #define SPARSE_OFFSET (5LL << 30)
+#define DEEP_LEVELS 100
 
 struct listed {
 	unsigned long long inode;
@@ -277,6 +288,96 @@ static void bench_data(long size)
 		die("data remove");
 }
 
+static void bench_deep(void)
+{
+	char path[4096];
+	long long start = now_us();
+	size_t length = strlen(base);
+	struct stat st;
+	int fd;
+
+	memcpy(path, base, length + 1);
+	for (int level = 0; level < DEEP_LEVELS; level++) {
+		memcpy(path + length, "/d", 3);
+		length += 2;
+		make_dir(path);
+	}
+	memcpy(path + length, "/leaf", 6);
+	fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+	if (fd < 0 || close(fd) != 0)
+		die("deep create");
+	if (syscall(SYS_stat, path, &st) != 0 || !S_ISREG(st.st_mode))
+		die("deep stat");
+	if (unlink(path) != 0)
+		die("deep unlink");
+	path[length] = 0;
+	for (int level = 0; level < DEEP_LEVELS; level++) {
+		if (rmdir(path) != 0)
+			die("deep rmdir");
+		length -= 2;
+		path[length] = 0;
+	}
+	printf("bench deep levels=%d us=%lld\n", DEEP_LEVELS, now_us() - start);
+}
+
+/* fill runs fsbench DIR fill. */
+static void fill(void)
+{
+	char path[512], small[512];
+	long long start = now_us(), filled = 0;
+	int fd;
+
+	memset(buffer, 0x5a, MIB);
+	join(path, base, "fill");
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0)
+		die("fill open");
+	for (;;) {
+		ssize_t n = write(fd, buffer, MIB);
+
+		if (n < 0 && errno == ENOSPC)
+			break;
+		if (n <= 0)
+			die("fill write");
+		filled += n;
+		if (n < MIB)
+			break;
+	}
+	if (fsync(fd) != 0 && errno != ENOSPC)
+		die("fill fsync");
+	if (close(fd) != 0)
+		die("fill close");
+	printf("bench fill mib=%lld us=%lld\n", filled / MIB, now_us() - start);
+	/* A full file system refuses more data with ENOSPC and nothing else. */
+	join(small, base, "small");
+	fd = open(small, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd >= 0) {
+		ssize_t n = write(fd, buffer, MIB);
+
+		if (n == MIB) {
+			errno = EIO;
+			die("full write accepted");
+		}
+		if (n < 0 && errno != ENOSPC)
+			die("full write");
+		if (close(fd) != 0 || unlink(small) != 0)
+			die("full cleanup");
+	} else if (errno != ENOSPC) {
+		die("full create");
+	}
+	if (unlink(path) != 0)
+		die("fill unlink");
+	sync_dir(base, "fill sync");
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0)
+		die("refill open");
+	for (int i = 0; i < 8; i++)
+		write_full(fd, buffer, MIB, "refill");
+	if (fsync(fd) != 0 || close(fd) != 0 || unlink(path) != 0)
+		die("refill");
+	puts("bench refill ok=1");
+}
+
 static void bench_sync(void)
 {
 	char path[512];
@@ -455,17 +556,25 @@ int main(int argc, char **argv)
 {
 	struct stat st;
 	char *end;
-	long scale = 1;
+	long scale = 1, data = 0;
+	int filling = argc == 3 && strcmp(argv[2], "fill") == 0;
 
-	if (argc == 3) {
+	if (argc >= 3 && !filling) {
 		scale = strtol(argv[2], &end, 10);
 		if (*end != 0)
 			scale = 0;
 	}
-	if (argc < 2 || argc > 3 || scale < 1 || scale > 16) {
-		fputs("usage: fsbench DIR [SCALE]  (SCALE 1 to 16)\n", stderr);
+	if (argc == 4) {
+		data = strtol(argv[3], &end, 10);
+		if (*end != 0 || data < 1 || data > 1024)
+			scale = 0;
+	}
+	if (argc < 2 || argc > 4 || scale < 1 || scale > 16) {
+		fputs("usage: fsbench DIR [SCALE [DATA_MIB]] | fsbench DIR fill  (SCALE 1 to 16, DATA_MIB 1 to 1024)\n", stderr);
 		return 2;
 	}
+	if (data == 0)
+		data = 64 * scale;
 	if (syscall(SYS_stat, argv[1], &st) != 0)
 		die("stat DIR");
 	if (!S_ISDIR(st.st_mode)) {
@@ -477,10 +586,19 @@ int main(int argc, char **argv)
 		die("path");
 	}
 	make_dir(base);
-	printf("bench start dir=%s scale=%ld\n", base, scale);
+	if (filling) {
+		printf("bench start dir=%s fill\n", base);
+		fill();
+		if (rmdir(base) != 0)
+			die("rmdir");
+		puts("bench ok");
+		return 0;
+	}
+	printf("bench start dir=%s scale=%ld data_mib=%ld\n", base, scale, data);
 
 	bench_files(2000 * (int)scale);
-	bench_data(64 * MIB * scale);
+	bench_deep();
+	bench_data(data * MIB);
 	bench_sync();
 	bench_replace();
 	bench_sparse();

@@ -237,6 +237,7 @@ func (fs *FS) ReadDir(dir *Inode, cursor uint64, emit func(*DirEntry) bool) (uin
 	indexed := fs.isIndexed(dir)
 	blockSize := uint64(fs.blockSize)
 	var entry DirEntry
+	var leaf []byte
 	for index := cursor / blockSize; index < blocks; index++ {
 		data, err := fs.dirBlock(dir, index)
 		if err != nil {
@@ -269,7 +270,13 @@ func (fs *FS) ReadDir(dir *Inode, cursor uint64, emit func(*DirEntry) bool) (uin
 		if err != nil {
 			return 0, err
 		}
-		reader := direntReader{data: data, end: end, fs: fs}
+		// emit may read inodes, and each read can evict this block from
+		// the cache and reuse its buffer, so the walk reads a copy.
+		if leaf == nil {
+			leaf = make([]byte, blockSize)
+		}
+		copy(leaf, data)
+		reader := direntReader{data: leaf, end: end, fs: fs}
 		base := index * blockSize
 		for {
 			raw, ok, err := reader.next()

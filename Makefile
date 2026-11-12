@@ -627,6 +627,7 @@ test-all:
 	$(MAKE) test-incremental
 	$(MAKE) test-crypto-frames
 	$(MAKE) test-ext4-mutations
+	$(MAKE) test-ext4-stress
 	$(MAKE) test-memory
 	$(MAKE) test-boot
 	$(MAKE) test-vfs-serial
@@ -665,6 +666,7 @@ release-check:
 	$(MAKE) test-crypto-frames
 	$(MAKE) test-storage-stress
 	$(MAKE) test-ext4-mutations
+	$(MAKE) test-ext4-stress
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-memory
@@ -739,7 +741,7 @@ test-ext4-mutations:
 	$(BUILD_ENV) tools/ext4fixture/check-mutations.sh
 
 test-ext4-stress:
-	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -timeout 60m -run 'RandomMetadataDamage|PowerCutRecovery' ./userspace/ext4
+	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -timeout 60m -run 'RandomMetadataDamage|PowerCutRecovery|PowerCutBatched' ./userspace/ext4
 
 test-partitions:
 	$(BUILD_ENV) go test -count=1 ./userspace/partition ./userspace/block ./internal/imagefixture
@@ -1371,7 +1373,7 @@ test-pve-nano:
 	@$(MAKE) --no-print-directory pve-artifacts DIAG=1 LINUX_EXTRA=$(abspath $(BUSYBOX)):$(abspath $(NANO))
 	@$(PVELAB) run --scenario nano --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
 
-# ext4 under KVM on four host cores (ADR 0227): fsbench, three rounds, on a
+# ext4 under KVM on four host cores (ADR 0227): fsbench, five rounds, on a
 # 1 GiB ext4 partition mounted read-write beside the installed system. The
 # Linux reference runs the same fsbench on a volume from the same script.
 test-pve-ext4: iso system-tree

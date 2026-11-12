@@ -96,7 +96,9 @@ Do not mount one partition in GoOS and Linux at the same time.
 `make test-ext4-unit` runs the reader and adapter tests against images that
 e2fsprogs 1.47.2 built (docs/development/ext4-reference-versions.md).
 `make test-ext4-stress` repeats the random-damage walk 3000 times and
-cuts power at every flush of the crash workload.
+cuts power before and after every event of the crash workload, once with a
+sync after each operation and once batched; `test-all` and
+`release-check` run it.
 `make test-volumes` boots a disk with the installed system and three Linux
 ext4 partitions and checks mounting, the refusals, symbolic links, the
 metadata a Linux program sees (`abi-probe ext4-links`), and a replaced

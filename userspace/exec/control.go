@@ -10,7 +10,8 @@ import (
 // rebooting, and dumping kernel diagnostics. Version 3 adds the diagnostics
 // dump, which the shell can no longer make itself because it holds no console
 // capability, and the validation build's fault injection (ADR 0089). Version
-// 4 adds power-off; version 5 adds the writable volume mount (ADR 0226).
+// 4 adds power-off; version 5 adds the writable volume mount (ADR 0226);
+// version 6 adds the storage sync behind the shell's `sync` (ADR 0227).
 const (
 	ControlProtocolID = uint64(0x4743544c30303031)
 	ControlVersion    = uint16(6)
