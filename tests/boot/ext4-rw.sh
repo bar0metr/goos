@@ -237,6 +237,17 @@ run 'mount'
 expect '/mnt/cfg.*ext4.*rw' 'the configured volume read-write after the restarts'
 expect '/mnt/w.*ext4.*rw' 'the shell volume read-write after the restarts'
 
+# The storage restarts charged no restart budget: the configured volume
+# still survives as many crashes of its own as the budget allows.
+for crash in 1 2 3; do
+	injected=$(grep -c 'VOLUME_FAULT_INJECTED' "$log" || true)
+	run 'fault volume'
+	[ "$(grep -c 'VOLUME_FAULT_INJECTED' "$log" || true)" -gt "$injected" ] || fail "volume crash $crash not injected"
+	await_content /mnt/cfg/after-driver.txt after-driver "the configured volume after crash $crash past the storage restarts"
+	write_marker /mnt/cfg/crash-$crash.txt crash-$crash
+done
+grep -q 'VOLUME_OFFLINE' "$log" && fail 'a volume went offline'
+
 # A clean unmount leaves a volume the read-only mount accepts.
 run 'umount /mnt/w'
 refuse '^umount:' 'unmount of a writable volume'

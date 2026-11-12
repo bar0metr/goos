@@ -359,8 +359,11 @@ func userspaceMain() {
 				}
 			}
 		}
-		volumeExited(event.Process)
+		interruptedSlot, interrupted := volumeExited(event.Process)
 		exitStatus := manager.Exit(event.Process, event.Code, supervisionTicks)
+		if interrupted {
+			renewVolumeBudget(interruptedSlot)
+		}
 		if filesystemCheckComplete && manager.Resume(filesystemName, supervisionTicks) == supervisor.StatusOK {
 			filesystemCheckComplete = false
 			manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)

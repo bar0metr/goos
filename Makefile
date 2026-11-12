@@ -884,9 +884,12 @@ test-volumes:
 
 # Read-write additional volumes (ADR 0226): ext4 mounted read-write from the
 # configuration and the shell, writes, refusals, a killed instance recovered
-# from its journal, and a clean unmount. The partitions the guest wrote are
-# then checked by the GoOS reader and recovery and by the pinned e2fsck,
-# which needs docker (DOCKER_FLAGS as for test-ext4-mutations).
+# from its journal, a Linux program (abi-probe ext4-rw), the VFS, the block
+# service and the driver restarted under both volumes with held descriptors
+# revoked, the full crash budget left afterwards, and a clean unmount. The
+# partitions the guest wrote are then checked by the GoOS reader and recovery
+# and by the pinned e2fsck, which needs docker (DOCKER_FLAGS as for
+# test-ext4-mutations).
 test-ext4-rw:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
 	@MEMORY=$(MEMORY) tests/boot/ext4-rw.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/ext4-rw

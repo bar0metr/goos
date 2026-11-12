@@ -411,3 +411,39 @@ func TestFollowerOfRestartedDependencyBlocksItsDependents(t *testing.T) {
 		}
 	}
 }
+
+// An exit the supervisor counted as a failure and Rebase took back, as PID 1
+// does for a volume service that the storage under it ended, leaves the
+// whole budget for real crashes, however many such exits come first.
+func TestRebaseAfterExitKeepsTheCrashBudget(t *testing.T) {
+	var manager Manager
+	if manager.Register(Definition{Name: "volume1", Executable: "/bootstrap/ext4", Restart: RestartOnFailure}) != StatusOK {
+		t.Fatal("registration failed")
+	}
+	pid := uint64(1)
+	launch := func(LaunchSpec) (uint64, bool) { pid++; return pid, true }
+	now := uint64(0)
+	manager.StartReady(now, launch)
+	for range 2 * MaxRestarts {
+		manager.Exit(pid, 3, now)
+		manager.Rebase("volume1", "/bootstrap/ext4", now)
+		if snapshot, _ := manager.Snapshot("volume1"); snapshot.Restarts != 0 || snapshot.State == StateFailed {
+			t.Fatalf("after a storage exit: %#v", snapshot)
+		}
+		now += RestartBackoff
+		if manager.StartReady(now, launch) != 1 {
+			t.Fatal("replacement not started")
+		}
+	}
+	for crash := range MaxRestarts {
+		manager.Exit(pid, 1, now)
+		now += RestartBackoff
+		if manager.StartReady(now, launch) != 1 {
+			t.Fatalf("crash %d within the budget not restarted", crash+1)
+		}
+	}
+	manager.Exit(pid, 1, now)
+	if snapshot, _ := manager.Snapshot("volume1"); snapshot.State != StateFailed {
+		t.Fatalf("a crash past the budget = %#v", snapshot)
+	}
+}

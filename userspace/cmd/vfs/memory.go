@@ -23,17 +23,22 @@ func reportMemory() {
 		return
 	}
 	stats := arena.HeapStats()
-	write("VFS_MEMORY requests=")
-	writeDecimal(requestsServed)
-	write(" live=")
-	writeDecimal(stats.Live)
-	write(" objects=")
-	writeDecimal(stats.Objects)
-	write(" collections=")
-	writeDecimal(uint64(stats.Collections))
-	write(" pages=")
-	writeDecimal(ownPages())
-	write("\n")
+	// One console write for the whole line: written in pieces, it let a
+	// shell marker printed at the same moment land inside it, and the boot
+	// test missed the marker at the start of its line.
+	var line [160]byte
+	used := appendText(line[:0], "VFS_MEMORY requests=")
+	used = appendDecimal(used, requestsServed)
+	used = appendText(used, " live=")
+	used = appendDecimal(used, stats.Live)
+	used = appendText(used, " objects=")
+	used = appendDecimal(used, stats.Objects)
+	used = appendText(used, " collections=")
+	used = appendDecimal(used, uint64(stats.Collections))
+	used = appendText(used, " pages=")
+	used = appendDecimal(used, ownPages())
+	used = appendText(used, "\n")
+	sys.ConsoleWrite(consoleHandle, used)
 	// The profile is four console lines. The boot test reads the console
 	// for the shell's prompts, and a service line printed as a prompt
 	// appears can join it, so the profile comes rarely.
@@ -62,6 +67,26 @@ func ownPages() uint64 {
 		}
 	}
 	return 0
+}
+
+// appendText and appendDecimal add to a line without growing it past its
+// capacity, so building one allocates nothing.
+func appendText(line []byte, text string) []byte {
+	return line[:len(line)+copy(line[len(line):cap(line)], text)]
+}
+
+func appendDecimal(line []byte, value uint64) []byte {
+	var digits [20]byte
+	index := len(digits)
+	for {
+		index--
+		digits[index] = byte('0' + value%10)
+		value /= 10
+		if value == 0 {
+			break
+		}
+	}
+	return line[:len(line)+copy(line[len(line):cap(line)], digits[index:])]
 }
 
 func writeDecimal(value uint64) {

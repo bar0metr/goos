@@ -49,6 +49,9 @@ type volumeRuntime struct {
 	// goes out when the attach or the launch completes.
 	replyServer      uint64
 	replyCorrelation uint64
+	// storageRestart marks an instance PID 1 ended because the storage
+	// under it went: its exit charges neither restart budget.
+	storageRestart bool
 }
 
 var (
@@ -439,10 +442,11 @@ func unmountVolume(path []byte) volume.Status {
 }
 
 // volumeExited is called for every process exit before the supervisor sees
-// it. A planned stop releases the slot; any other exit of a mounted volume's
+// it. It returns the slot whose budget renewVolumeBudget must restore once
+// the supervisor has counted the exit, if the storage caused it. A planned stop releases the slot; any other exit of a mounted volume's
 // instance is a loss, which the supervisor's restart replaces within the
 // budget and otherwise leaves offline.
-func volumeExited(pid uint64) {
+func volumeExited(pid uint64) (uint8, bool) {
 	for slot := uint8(1); slot <= volume.Slots; slot++ {
 		runtime := runtimeOf(slot)
 		if runtime.pid == 0 || runtime.pid != pid {
@@ -453,15 +457,30 @@ func volumeExited(pid uint64) {
 		state := volumes.Slot(slot)
 		if state.State == volume.Stopping {
 			releaseVolumeSlot(slot)
-			return
+			return 0, false
+		}
+		if runtime.storageRestart {
+			runtime.storageRestart = false
+			if volumes.Interrupted(slot, state.Generation) {
+				return slot, true
+			}
 		}
 		if !volumes.Lost(slot, state.Generation) && state.State != volume.Lost {
 			manager.Hold(volumeServiceNames[slot-1])
 			syslog.Error("volume offline", syslog.Uint("slot", uint64(slot)), syslog.Str("path", string(state.Request.PathBytes())))
 			mark("VOLUME_OFFLINE\n")
 		}
-		return
+		return 0, false
 	}
+	return 0, false
+}
+
+// renewVolumeBudget gives a slot's service a fresh supervisor restart budget
+// after an exit the storage caused. The supervisor counts every unplanned
+// exit, and a restart it schedules must still happen, so the count is undone
+// rather than the exit planned.
+func renewVolumeBudget(slot uint8) {
+	manager.Rebase(volumeServiceNames[slot-1], volumes.Slot(slot).Driver.Executable, supervisionTicks)
 }
 
 // volumesStorageLost ends every additional instance after the VFS, the block
@@ -470,11 +489,21 @@ func volumeExited(pid uint64) {
 // journal whose writes the old driver dropped. Each replacement waits for the
 // storage to come back, gets a new grant and a new cache, and replays its
 // journal before the VFS attaches it; open handles stay revoked.
+//
+// Neither restart budget pays for it. An instance that saw the storage go and
+// exited before PID 1 did had its exit counted already; both counts start
+// again here. Every instance still running is marked, so its exit is not
+// counted at all.
 func volumesStorageLost() {
 	volumes.StorageLost()
 	for slot := uint8(1); slot <= volume.Slots; slot++ {
 		state := volumes.Slot(slot).State
-		if runtime := runtimeOf(slot); runtime.process != 0 && (state == volume.Mounted || state == volume.Lost) {
+		if state != volume.Mounted && state != volume.Lost {
+			continue
+		}
+		renewVolumeBudget(slot)
+		if runtime := runtimeOf(slot); runtime.process != 0 {
+			runtime.storageRestart = true
 			sys.ProcessKill(runtime.process)
 		}
 	}

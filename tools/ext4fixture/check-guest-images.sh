@@ -56,5 +56,6 @@ holds dirty.img /second.txt after-fault
 holds dirty.img /after-vfs.txt after-vfs
 holds dirty.img /after-block.txt after-block
 holds dirty.img /after-driver.txt after-driver
+holds dirty.img /crash-3.txt crash-3
 echo "guest images: clean.img clean, dirty.img replayed by e2fsck, contents match"
 '

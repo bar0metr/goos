@@ -71,10 +71,14 @@ An instance also ends when the storage under it goes. When the VFS, the
 block service or the driver exits, PID 1 kills every additional instance:
 its VFS channel or block endpoint is dead, or the old driver dropped writes
 the journal counted on. The replacements wait for the storage to come back
-and then run the path above. These ends do not use the restart budget,
-which starts again from zero for every mounted slot, as the session
-services' budgets do after a storage fault; an instance that keeps failing
-with the storage up still goes offline. A writable instance whose write or
+and then run the path above. These ends charge neither restart budget,
+the slot's own or the supervisor's. PID 1 marks each instance it kills, so
+the slot records its exit without counting it and the supervisor's count of
+it is taken back once the exit is processed. An instance that saw the
+storage go and exited first was counted already; the storage loss resets
+both counts for every mounted slot, as the session services' budgets reset
+after a storage fault. An instance that keeps failing with the storage up
+still goes offline after three restarts. A writable instance whose write or
 flush fails exits as well, so that a replacement replays the journal rather
 than the failed instance answering errors. After a driver replacement the
 block service describes the device again before it answers an additional
@@ -155,7 +159,9 @@ identity, decides what the volume holds.
   VFS, the block service and the driver in turn, reads what each volume
   held, writes a new marker after each, and for the block service and the
   driver holds a descriptor across the restart that must fail while a new
-  open succeeds. Last it unmounts the shell volume, mounts it read-only,
+  open succeeds. Three more crashes of the configured instance then each
+  recover, which the restart budget allows only if the storage restarts
+  charged nothing. Last it unmounts the shell volume, mounts it read-only,
   and cuts the guest off with the configured volume mounted.
   `test-all` and `release-check` run it. On the host,
   the GoOS reader mounts the unmounted partition read-only, GoOS recovery

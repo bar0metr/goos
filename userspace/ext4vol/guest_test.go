@@ -68,5 +68,8 @@ func TestGuestImages(t *testing.T) {
 	expect(&recovered, []string{"after-vfs.txt"}, "after-vfs\n")
 	expect(&recovered, []string{"after-block.txt"}, "after-block\n")
 	expect(&recovered, []string{"after-driver.txt"}, "after-driver\n")
+	for _, crash := range []string{"crash-1", "crash-2", "crash-3"} {
+		expect(&recovered, []string{crash + ".txt"}, crash+"\n")
+	}
 	must(t, recovered.Unmount())
 }
