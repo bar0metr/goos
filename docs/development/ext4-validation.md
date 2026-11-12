@@ -29,7 +29,47 @@ RESULTS
 
 ## Performance
 
-PERFORMANCE
+`make test-pve-ext4` on the lab node (KVM, `cpu host`, 4 cores, 1 GiB),
+three rounds of `fsbench` on a 1 GiB volume with a 32 MiB journal; the
+table gives the median round. "Before" is commit `dca58276`, which already
+batched commits (ADR 0227); "after" is `1e2a345a`, with the checksum,
+write coalescing, path cache and RAMFS changes of ADR 0227 and ADR 0228.
+Times are per operation.
+
+| Workload | ext4 before | ext4 after | RAMFS after | FAT32 after |
+|---|---|---|---|---|
+| create (2000 names in one directory) | 2.29 ms | 1.28 ms | 0.27 ms | 68.7 ms |
+| stat | 1.18 ms | 0.25 ms | 0.10 ms | 14.1 ms |
+| readdir of 2000 entries | 59.7 ms | 53.1 ms | 92.1 ms | 48.7 ms |
+| unlink | 1.01 ms | 0.61 ms | 0.14 ms | 28.5 ms |
+| sequential write, 64 MiB, then fsync | 18.9 MiB/s | 91.2 MiB/s | (RAMFS full) | 37.1 MiB/s |
+| sequential read | 106.8 MiB/s | 112.4 MiB/s | | 109.7 MiB/s |
+| random 4 KiB write, one fsync at the end | 0.61 ms | 0.50 ms | | 28.6 ms |
+| random 4 KiB read | 0.62 ms | 0.52 ms | | 10.0 ms |
+| 4 KiB write and fsync | 1.82 ms | 1.51 ms | | 0.86 ms |
+| write, fsync, rename over a target | 6.55 ms | 3.63 ms | | 6.44 ms |
+| 1 process, create, write, unlink | 258 ops/s | 552 ops/s | | 175 ops/s |
+| 8 processes at once | 288 ops/s | 543 ops/s | | 161 ops/s |
+
+A sparse write at 5 GiB allocated 8 blocks and read back on every round.
+Before the RAMFS and VFS changes, RAMFS took 4.57 ms per create and 2.66
+ms per `stat` in the same run.
+
+What the numbers show:
+
+- One ext4 service handles one request at a time, so 2, 4 and 8
+  processes reach the throughput of one.
+- `fsync` costs two device flushes on ext4 and one on FAT32, which has no
+  journal.
+- On ext4 a `stat` costs about 2.5 times one on RAMFS; the difference is
+  the request to the ext4 service and its lookup. A create costs
+  about 1.3 ms. Part of that is the walk from the mount: every namespace
+  change empties the VFS path cache, so each create resolves its
+  directory again (ADR 0228).
+
+The same `fsbench` on Linux 6.12 comes from
+`tools/ext4fixture/linux-ext4-reference.sh` on the same node; its numbers
+belong in this table once that run is recorded for the release commit.
 
 ## Resource bounds
 

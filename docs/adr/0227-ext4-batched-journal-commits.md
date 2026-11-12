@@ -71,6 +71,16 @@ report a persistent volume that refuses. A new shell builtin, `sync`, sends
 that request through PID 1: `GCTL0001` moves to version 6 for the new
 control operation `ControlSync`, and refuses version 5.
 
+**Coalesced writes.** A commit writes consecutive blocks, file data,
+the log body or home metadata, as one device write of up to 128 KiB, the
+bulk window of the service's block endpoint, instead of one write per
+block.
+
+**Checksums.** CRC32C folds eight bytes per step with eight 256-entry
+tables. A directory block that passed its checksum keeps that result
+while it stays in the block cache, for the directory seed it was checked
+under; a block read again, or rewritten by a commit, is checked anew.
+
 **Diagnostics.** `ext4.Status` reports `PendingBlocks`, the blocks the
 batch holds.
 
@@ -83,7 +93,9 @@ batch holds.
 | any point inside a commit | the tree before that commit or after it, as ADR 0225 lists |
 
 The commit order inside one transaction is unchanged: file data at home,
-the log body, a flush, the commit block, a flush, then the home metadata.
+the log body, a flush, the commit block, a flush, then the home metadata. A
+write that covers several blocks may tear at any sector, as any write
+may; the power-cut tests record it block by block.
 
 ## Evidence
 
@@ -91,12 +103,19 @@ the log body, a flush, the commit block, a flush, then the home metadata.
   operation and batched, and fails when a batched operation costs a tenth
   of a flush or more. On the canonical volume, 200 operations each:
 
-  | Workload | Synced flushes / writes per op | Batched flushes / writes per op |
-  |---|---|---|
-  | create | 2.01 / 13.88 | 0.01 / 0.21 |
-  | append 4 KiB | 2.01 / 11.04 | 0.02 / 1.13 |
-  | overwrite 4 KiB | 2.00 / 5.38 | 0.01 / 0.40 |
-  | create and unlink | 2.01 / 14.01 | 0.01 / 0.07 |
+  | Workload | Before | Synced | Batched |
+  |---|---|---|---|
+  | create | 2.03 / 13.95 | 2.01 / 6.86 | 0.01 / 0.04 |
+  | append 4 KiB | 2.03 / 11.08 | 2.01 / 6.03 | 0.02 / 0.10 |
+  | overwrite 4 KiB | 2.03 / 5.45 | 2.00 / 4.03 | 0.01 / 0.05 |
+  | create and unlink | 4.04 / 28.02 | 2.01 / 7.01 | 0.01 / 0.04 |
+
+  Each cell gives flushes and device writes per operation. "Before" is
+  ADR 0225's commit per operation; "Synced" calls `Sync` after each
+  operation, as an application calling `fsync` each time would; both new
+  columns write consecutive blocks of a commit, data, log or home
+  metadata, as one device write of up to 128 KiB, the bulk window of the
+  service's block endpoint.
 
 - `TestPowerCutBatched` cuts power at 150 points of the 71-operation
   crash workload synced every fifth operation, and accepts only trees from
