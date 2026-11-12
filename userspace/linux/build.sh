@@ -112,7 +112,7 @@ pielibrary=$(sed -e 's|/|_|g' -e "s|^|$pieobj/|" -e 's|$|.o|' "$sources")
 	-o "$out/pie-probe" "$work/pie-probe.o" \
 	--start-lib $pielibrary --end-lib
 
-for fixture in musl-hello fsprobe dirprobe abi-probe tty-probe netprobe; do
+for fixture in musl-hello fsprobe dirprobe abi-probe tty-probe netprobe fsbench; do
 	# shellcheck disable=SC2086
 	"$tinygo" clang $cflags -c "$here/$fixture/main.c" -o "$work/$fixture.o"
 	# shellcheck disable=SC2086
@@ -122,4 +122,4 @@ for fixture in musl-hello fsprobe dirprobe abi-probe tty-probe netprobe; do
 		--start-lib $library --end-lib
 done
 
-(cd "$out" && shasum -a 256 hello hello-pie musl-hello fsprobe dirprobe abi-probe tty-probe netprobe pie-probe)
+(cd "$out" && shasum -a 256 hello hello-pie musl-hello fsprobe dirprobe abi-probe tty-probe netprobe pie-probe fsbench)
