@@ -92,6 +92,13 @@ func (sb *Superblock) NeedsRecovery() bool {
 // ParseSuperblock decodes and validates the 1024-byte primary superblock.
 // capacity is the size in bytes of the partition the volume lives in.
 func ParseSuperblock(raw []byte, capacity uint64) (*Superblock, error) {
+	return parseSuperblock(raw, capacity, true)
+}
+
+// parseSuperblock skips the checksum when checksum is false. Only the
+// recovery bootstrap does that, to find the journal that may repair a
+// superblock whose last write tore.
+func parseSuperblock(raw []byte, capacity uint64, checksum bool) (*Superblock, error) {
 	if len(raw) < superblockSize {
 		return nil, corrupt("superblock truncated")
 	}
@@ -164,7 +171,7 @@ func ParseSuperblock(raw []byte, capacity uint64) (*Superblock, error) {
 		if sb.ChecksumType != 1 {
 			return nil, corrupt("unknown metadata checksum type")
 		}
-		if crc32c(^uint32(0), raw[:0x3FC]) != sb.Checksum {
+		if checksum && crc32c(^uint32(0), raw[:0x3FC]) != sb.Checksum {
 			return nil, corrupt("superblock checksum mismatch")
 		}
 	}

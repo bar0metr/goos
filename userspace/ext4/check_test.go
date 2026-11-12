@@ -30,6 +30,10 @@ type volumeCheck struct {
 }
 
 func verifyVolume(device Device) error {
+	device, err := settled(device)
+	if err != nil {
+		return err
+	}
 	fs, err := Mount(device, Options{})
 	if err != nil {
 		return fmt.Errorf("mount: %w", err)

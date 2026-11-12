@@ -3,11 +3,8 @@ package ext4
 // Mutations stage every block they change in a transaction held in memory.
 // Reads made while the transaction is open see the staged copies first, so
 // an operation observes its own changes; nothing reaches the device until
-// commit, and an abort only drops the staged copies. Commit writes file data
-// first, flushes, then writes metadata and flushes again. That order is the
-// one ordered-data journaling needs, but without a journal a power cut in
-// the middle of the metadata writes still leaves a damaged volume: commit
-// is only used on scratch devices (see mountScratch).
+// commit, and an abort only drops the staged copies. Commit goes through
+// the JBD2 journal in ordered-data mode (journalw.go).
 
 const (
 	// maxTxnCredits bounds the metadata blocks one transaction stages. A
@@ -52,6 +49,10 @@ type txn struct {
 	// than it reserved.
 	stepStart int
 	stepCost  int
+	// orphans is the orphan list as this transaction leaves it, head
+	// first. It replaces FS.orphans at commit.
+	orphans       []uint32
+	orphansEdited bool
 }
 
 // begin opens a transaction.
@@ -62,7 +63,7 @@ func (fs *FS) begin() error {
 	if fs.txn != nil {
 		return fail(KindInternal, "transaction already open")
 	}
-	fs.txn = &txn{blocks: make(map[uint64]*stagedBlock), stepCost: -1}
+	fs.txn = &txn{blocks: make(map[uint64]*stagedBlock), stepCost: -1, orphans: fs.orphans}
 	fs.cache.overlay = fs.txn.blocks
 	return nil
 }
@@ -231,8 +232,9 @@ func (t *txn) noteFreed(start uint64, count uint64) error {
 	return nil
 }
 
-// commit writes the open transaction. A failed write leaves the device in
-// an unknown state, so the volume stops accepting mutations.
+// commit writes the open transaction through the journal. A failed write
+// leaves the device in an unknown state, so the volume stops accepting
+// mutations; the next writable mount replays what committed.
 func (fs *FS) commit() error {
 	t := fs.txn
 	t.stepCost = -1
@@ -244,32 +246,43 @@ func (fs *FS) commit() error {
 		fs.abort()
 		return err
 	}
-	order := make([]uint64, 0, len(t.blocks))
-	for block := range t.blocks {
-		order = append(order, block)
-	}
-	sortBlocks(order)
-	size := uint64(fs.blockSize)
-	for pass := 0; pass < 2; pass++ {
-		wantMeta := pass == 1
-		for _, block := range order {
-			staged := t.blocks[block]
-			if staged.meta != wantMeta {
-				continue
-			}
-			if !fs.device.WriteAt(block*size, staged.data) {
-				return fs.failWrite()
-			}
+	var meta, data []uint64
+	for block, staged := range t.blocks {
+		// A block the transaction freed needs no copy: it is free once
+		// the transaction commits, and a revoke record cancels any older
+		// copy in the log.
+		if t.wasFreed(block) {
+			continue
 		}
-		if !fs.device.Flush() {
+		if staged.meta {
+			meta = append(meta, block)
+		} else {
+			data = append(data, block)
+		}
+	}
+	sortBlocks(meta)
+	sortBlocks(data)
+	if len(meta) == 0 && len(data) == 0 && len(t.freed) == 0 {
+		fs.txn = nil
+		fs.cache.overlay = nil
+		return nil
+	}
+	if err := fs.commitLog(meta, data, fs.revokesFor(t)); err != nil {
+		if KindOf(err) == KindIO {
 			return fs.failWrite()
 		}
+		fs.abort()
+		return err
 	}
-	for _, block := range order {
+	for _, block := range meta {
 		fs.cache.update(block, t.blocks[block].data)
 	}
 	fs.sb.FreeBlocks = uint64(int64(fs.sb.FreeBlocks) + t.freeBlocks)
 	fs.sb.FreeInodes = uint32(int64(fs.sb.FreeInodes) + t.freeInodes)
+	if t.orphansEdited {
+		fs.orphans = t.orphans
+		fs.sb.LastOrphan = fs.orphanHead()
+	}
 	fs.txn = nil
 	fs.cache.overlay = nil
 	fs.commits++
@@ -284,12 +297,12 @@ func (fs *FS) failWrite() error {
 	return errWrite
 }
 
-// flushSuperblock stages the primary superblock with the new free counts.
-// Backup superblocks keep their counts; Linux updates them only when it
-// resizes the volume.
+// flushSuperblock stages the primary superblock with the new free counts
+// and orphan list head. Backup superblocks keep their counts; Linux
+// updates them only when it resizes the volume.
 func (fs *FS) flushSuperblock() error {
 	t := fs.txn
-	if t.freeBlocks == 0 && t.freeInodes == 0 {
+	if t.freeBlocks == 0 && t.freeInodes == 0 && !t.orphansEdited {
 		return nil
 	}
 	block := uint64(superblockOffset) / uint64(fs.blockSize)
@@ -306,7 +319,14 @@ func (fs *FS) flushSuperblock() error {
 		putLE32(raw[0x158:], uint32(freeBlocks>>32))
 	}
 	putLE32(raw[0x10:], freeInodes)
-	putLE32(raw[0x3FC:], crc32c(^uint32(0), raw[:0x3FC]))
+	if t.orphansEdited {
+		head := uint32(0)
+		if len(t.orphans) > 0 {
+			head = t.orphans[0]
+		}
+		putLE32(raw[0xE8:], head)
+	}
+	sealSuperblock(raw)
 	return nil
 }
 
@@ -323,5 +343,13 @@ func sortBlocks(blocks []uint64) {
 			}
 			blocks[at] = value
 		}
+	}
+}
+
+// sealSuperblock recomputes the superblock checksum when the volume has
+// one.
+func sealSuperblock(raw []byte) {
+	if le32(raw, 0x64)&roCompatMetadataCsum != 0 {
+		putLE32(raw[0x3FC:], crc32c(^uint32(0), raw[:0x3FC]))
 	}
 }

@@ -17,13 +17,13 @@ read-only mount only, because some compat features (`orphan_file`,
 `fast_commit`) change what a writer must maintain.
 
 A read-write mount also needs all of `has_journal`, `extent`, `filetype`
-and `metadata_csum`. This build refuses every read-write mount whatever the
-features say: writes stay disabled until journal replay, ordered commits and
-orphan cleanup exist (ADR 0220).
+and `metadata_csum`, 4 KiB blocks, and a version 2 journal superblock
+without async commit, fast commit or the CRC32 commit checksum (ADR 0225).
+The GoOS ext4 service still mounts every volume read-only.
 
-`needs_recovery` describes the mount state, so negotiation ignores it. The
-mount sequence refuses a volume that has it, or a non-empty journal, with a
-"needs recovery" error.
+`needs_recovery` describes the mount state, so negotiation ignores it. A
+read-only mount refuses a volume that has it, or a non-empty journal, with
+a "needs recovery" error; a writable mount replays the journal first.
 
 <!-- matrix:begin -->
 | Feature | Word | Bit | Support | Constraint |
@@ -82,8 +82,11 @@ mount sequence refuses a volume that has it, or a non-empty journal, with a
 |---|---|
 | Block size other than 1, 2 or 4 KiB | reject |
 | More than 2^20 block groups | reject |
-| `s_state` without the clean bit | refuse as needing recovery |
-| `needs_recovery` set, or a journal whose `s_start` is not zero | refuse as needing recovery |
+| `s_state` without the clean bit | read-only: refuse as needing recovery; writable: recover |
+| `s_state` with the error bit | writable: refuse as needing recovery |
+| `needs_recovery` set, or a journal whose `s_start` is not zero | read-only: refuse as needing recovery; writable: replay the journal |
+| `s_last_orphan` not zero | read-only: refuse as needing recovery; writable: finish the orphan list |
+| Journal `s_errno` not zero | writable: refuse as needing recovery |
 | External journal (`s_journal_dev` or `journal_dev`) | reject |
 | Superblock, descriptor, bitmap, inode, extent, directory, hash-tree or attribute checksum mismatch | refuse the volume at mount, or fail the operation that read the structure |
 | Inode with `inline_data`, encryption or casefold flags | the operation on that inode fails as unsupported |

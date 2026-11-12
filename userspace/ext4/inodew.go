@@ -17,7 +17,11 @@ func (fs *FS) liveInode(number uint32) (*Inode, error) {
 	if inode := fs.live[number]; inode != nil {
 		return inode, nil
 	}
-	inode, err := fs.Inode(number)
+	read := fs.Inode
+	if fs.isOrphan(number) {
+		read = fs.orphanInode
+	}
+	inode, err := read(number)
 	if err != nil {
 		return nil, err
 	}

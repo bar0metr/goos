@@ -35,6 +35,22 @@ func be64(data []byte, offset int) uint64 {
 	return uint64(be32(data, offset))<<32 | uint64(be32(data, offset+4))
 }
 
+func be16(data []byte, offset int) uint16 {
+	return uint16(data[offset])<<8 | uint16(data[offset+1])
+}
+
+func putBE32(data []byte, value uint32) {
+	data[0] = byte(value >> 24)
+	data[1] = byte(value >> 16)
+	data[2] = byte(value >> 8)
+	data[3] = byte(value)
+}
+
+func putBE64(data []byte, value uint64) {
+	putBE32(data, uint32(value>>32))
+	putBE32(data[4:], uint32(value))
+}
+
 // join64 combines the low and high halves ext4 splits wide fields into.
 func join64(low uint32, high uint32) uint64 { return uint64(high)<<32 | uint64(low) }
 

@@ -737,7 +737,7 @@ test-ext4-mutations:
 	$(BUILD_ENV) tools/ext4fixture/check-mutations.sh
 
 test-ext4-stress:
-	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -timeout 60m -run 'RandomMetadataDamage' ./userspace/ext4
+	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -timeout 60m -run 'RandomMetadataDamage|PowerCutRecovery' ./userspace/ext4
 
 test-partitions:
 	$(BUILD_ENV) go test -count=1 ./userspace/partition ./userspace/block ./internal/imagefixture

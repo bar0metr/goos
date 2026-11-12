@@ -47,6 +47,34 @@ func (device *scratchDevice) WriteAt(offset uint64, data []byte) bool {
 func (device *scratchDevice) Flush() bool      { device.flushes++; return true }
 func (device *scratchDevice) Capacity() uint64 { return uint64(len(device.data)) }
 
+// mountScratch mounts a disposable volume for mutation.
+func mountScratch(device Device, now func() Timestamp) (*FS, error) {
+	return Mount(device, Options{Writable: true, Clock: now})
+}
+
+// settled returns device as the next writable mount would leave it after
+// a clean unmount: a copy, recovered when the volume is still mounted or
+// dirty, so read-only checks can open it.
+func settled(device Device) (Device, error) {
+	scratchCopy, isScratch := device.(*scratchDevice)
+	if !isScratch {
+		return device, nil
+	}
+	raw := scratchCopy.data[superblockOffset : superblockOffset+superblockSize]
+	if le32(raw, 0x60)&incompatRecover == 0 && le16(raw, 0x3A)&stateValid != 0 {
+		return device, nil
+	}
+	copied := &scratchDevice{data: append([]byte(nil), scratchCopy.data...)}
+	fs, err := mountScratch(copied, testClock())
+	if err != nil {
+		return nil, fmt.Errorf("recovery: %w", err)
+	}
+	if err := fs.Unmount(); err != nil {
+		return nil, fmt.Errorf("unmount after recovery: %w", err)
+	}
+	return copied, nil
+}
+
 func testClock() func() Timestamp {
 	nanos := uint32(0)
 	return func() Timestamp {
@@ -99,19 +127,16 @@ func lookupInode(t testing.TB, fs *FS, dir *Inode, name string) *Inode {
 	return ok(fs.Inode(number))
 }
 
-func TestMutationNeedsScratchMount(t *testing.T) {
-	if writeSupported {
-		t.Fatal("writeSupported must stay false until the journal lands")
-	}
+func TestMutationNeedsWritableMount(t *testing.T) {
 	device := fixture(t, "canonical")
 	fs := mount(t, device)
 	_, err := fs.Create(root(t, fs), []byte("x"), ModeRegular|0o644, 0, 0)
 	wantKind(t, err, KindReadOnly)
 	_, err = fs.WriteFile(resolve(t, fs, "/hello.txt"), 0, []byte("x"))
 	wantKind(t, err, KindReadOnly)
-	if _, err := Mount(device, Options{Writable: true}); KindOf(err) != KindReadOnly {
-		t.Fatalf("writable mount: %v", err)
-	}
+	wantKind(t, fs.Pin(root(t, fs)), KindReadOnly)
+	_, err = Mount(&scratchDevice{data: device.data}, Options{Writable: true})
+	wantKind(t, err, KindInvalid)
 	for _, name := range []string{"legacy", "blockmap-1k"} {
 		if _, err := mountScratch(&scratchDevice{data: fixture(t, name).data}, testClock()); err == nil {
 			t.Fatalf("%s mounted for mutation outside the writable profile", name)
