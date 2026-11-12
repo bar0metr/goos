@@ -111,6 +111,11 @@ func (ext4BenchScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	if !containsLine(lines, "bench refill ok=1") {
 		return "", failf(ClassScenario, "fill", "no write after freeing the full volume:\n%s", strings.Join(lines, "\n"))
 	}
+	free, freeOK := dfFreeMiB(before, "/mnt/bench")
+	filled, filledOK := fillMiB(lines)
+	if !freeOK || !filledOK || filled*10 < free*9 {
+		return "", failf(ClassScenario, "fill", "filled %d MiB of %d MiB free:\n%s", filled, free, strings.Join(lines, "\n"))
+	}
 	record("ext4 fill", lines)
 	after, err := g.Run(ctx, "df", commandTimeout)
 	if err != nil {
@@ -215,6 +220,43 @@ func dfLines(out string, mount string) []string {
 		}
 	}
 	return lines
+}
+
+// dfFreeMiB reads the free column of the df line for mount, given as
+// 973.4M or 1.2G.
+func dfFreeMiB(out string, mount string) (uint64, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[1] != mount {
+			continue
+		}
+		value := fields[4]
+		scale := 1.0
+		switch {
+		case strings.HasSuffix(value, "G"):
+			scale = 1024
+		case strings.HasSuffix(value, "M"):
+		default:
+			return 0, false
+		}
+		number, err := strconv.ParseFloat(value[:len(value)-1], 64)
+		if err != nil {
+			return 0, false
+		}
+		return uint64(number * scale), true
+	}
+	return 0, false
+}
+
+// fillMiB reads N from the "bench fill mib=N" line.
+func fillMiB(lines []string) (uint64, bool) {
+	for _, line := range lines {
+		if rest, found := strings.CutPrefix(line, "bench fill mib="); found {
+			number, err := strconv.ParseUint(strings.Fields(rest)[0], 10, 64)
+			return number, err == nil
+		}
+	}
+	return 0, false
 }
 
 func containsLine(lines []string, want string) bool {

@@ -332,6 +332,7 @@ static void fill(void)
 	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (fd < 0)
 		die("fill open");
+	/* A write may take less than it was given; only ENOSPC ends the fill. */
 	for (;;) {
 		ssize_t n = write(fd, buffer, MIB);
 
@@ -340,8 +341,6 @@ static void fill(void)
 		if (n <= 0)
 			die("fill write");
 		filled += n;
-		if (n < MIB)
-			break;
 	}
 	if (fsync(fd) != 0 && errno != ENOSPC)
 		die("fill fsync");

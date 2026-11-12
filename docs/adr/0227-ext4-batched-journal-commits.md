@@ -92,6 +92,13 @@ batch holds.
 | a `Sync` returned | at least every operation that returned before it |
 | any point inside a commit | the tree before that commit or after it, as ADR 0225 lists |
 
+Names, sizes, links and allocation always come from one of those trees.
+File contents follow ordered mode as Linux has it: a commit writes file
+data at home before its log, so a block the batch overwrote in a file that
+existed before the batch can hold the new bytes while the batch's
+metadata never committed. A file the batch created shows only data its
+committed metadata points at.
+
 The commit order inside one transaction is unchanged: file data at home,
 the log body, a flush, the commit block, a flush, then the home metadata. A
 write that covers several blocks may tear at any sector, as any write
@@ -118,8 +125,10 @@ may; the power-cut tests record it block by block.
   service's block endpoint.
 
 - `TestPowerCutBatched` cuts power at 150 points of the 71-operation
-  crash workload synced every fifth operation, and accepts only trees from
-  the last completed sync through the operation in flight.
+  crash workload synced every fifth operation, and at every point under
+  `make test-ext4-stress`. It accepts the trees from the last completed
+  sync through the operation in flight, with the contents of files that
+  existed at that sync free to show in-place writes made after it.
   `TestPowerCutRecovery` keeps the old model with a sync after every
   operation. `TestSyncCommitsBatch` checks that a cut keeps what a sync
   covered and loses an operation after it.

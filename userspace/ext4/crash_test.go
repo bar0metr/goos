@@ -368,6 +368,67 @@ func (run *crashRun) allowed(point int) map[string]bool {
 	return result
 }
 
+// window returns the operations a cut at point may show: from the last one
+// a completed sync covered through the one in flight.
+func (run *crashRun) window(point int) (int, int) {
+	done := 0
+	for done+1 < len(run.ends) && run.ends[done+1] <= point {
+		done++
+	}
+	floor := 0
+	for k := 0; k <= done; k++ {
+		if run.synced[k] >= 0 && run.synced[k] <= point {
+			floor = k
+		}
+	}
+	return floor, min(done+1, len(run.manifests)-1)
+}
+
+// sameShape reports whether manifest matches an allowed tree in every
+// directory, link and file size, with each file's contents equal to the
+// same path's in some tree of the window. A file that already existed when
+// the last completed sync returned may hold anything: writes after the
+// sync overwrite its blocks in place, even after its name went.
+func (run *crashRun) sameShape(point int, allowed map[string]bool, manifest string) bool {
+	floor, last := run.window(point)
+	contents := map[string]bool{}
+	for _, tree := range run.manifests[floor : last+1] {
+		for _, line := range strings.Split(tree, "\n") {
+			if strings.HasPrefix(line, "file\t") {
+				contents[line] = true
+			}
+		}
+	}
+	existed := map[string]bool{}
+	for _, line := range strings.Split(run.manifests[floor], "\n") {
+		if fields := strings.Split(line, "\t"); fields[0] == "file" && len(fields) == 4 {
+			existed[fields[1]] = true
+		}
+	}
+	for _, line := range strings.Split(manifest, "\n") {
+		fields := strings.Split(line, "\t")
+		if fields[0] == "file" && len(fields) == 4 && !contents[line] && !existed[fields[1]] {
+			return false
+		}
+	}
+	shape := func(tree string) string {
+		lines := strings.Split(tree, "\n")
+		for index, line := range lines {
+			if fields := strings.Split(line, "\t"); fields[0] == "file" && len(fields) == 4 {
+				lines[index] = strings.Join(fields[:3], "\t")
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+	want := shape(manifest)
+	for tree := range allowed {
+		if shape(tree) == want {
+			return true
+		}
+	}
+	return false
+}
+
 // recoverAt rebuilds the disk after a cut and mounts it writable, which
 // replays the journal and finishes the orphan list.
 func recoverAt(t *testing.T, image []byte) (*scratchDevice, *FS) {
@@ -425,17 +486,22 @@ func (run *crashRun) crashPoints(t *testing.T, random *rand.Rand, limit int) []i
 }
 
 func TestPowerCutRecovery(t *testing.T) {
-	powerCuts(t, recordCrashRun(t, 1), rand.New(rand.NewSource(1)), 150)
+	powerCuts(t, recordCrashRun(t, 1), rand.New(rand.NewSource(1)), 150, false)
 }
 
 // TestPowerCutBatched cuts power under a workload that syncs only every
 // fifth operation, so several operations share a commit: a cut recovers
 // at least what the last completed sync covered.
 func TestPowerCutBatched(t *testing.T) {
-	powerCuts(t, recordCrashRun(t, 5), rand.New(rand.NewSource(7)), 150)
+	powerCuts(t, recordCrashRun(t, 5), rand.New(rand.NewSource(7)), 150, true)
 }
 
-func powerCuts(t *testing.T, run *crashRun, random *rand.Rand, limit int) {
+// powerCuts cuts power at each chosen point and checks what recovery
+// finds. With inPlace, a file's contents may come from any operation
+// after the last completed sync: ordered mode writes an overwritten
+// block at home before the commit that carries the batch's metadata, as
+// Linux does, so those bytes can land while the batch does not.
+func powerCuts(t *testing.T, run *crashRun, random *rand.Rand, limit int, inPlace bool) {
 	points := run.crashPoints(t, random, limit)
 	t.Logf("%d events, %d operations, %d cuts", len(run.device.events), len(run.ops), len(points))
 	for _, point := range points {
@@ -443,7 +509,7 @@ func powerCuts(t *testing.T, run *crashRun, random *rand.Rand, limit int) {
 		device, fs := recoverAt(t, image)
 		allowed := run.allowed(point)
 		manifest := volumeManifest(t, fs)
-		if !allowed[manifest] {
+		if !allowed[manifest] && !(inPlace && run.sameShape(point, allowed, manifest)) {
 			t.Fatalf("cut at event %d recovered a tree no operation sequence produces:\n%s", point, manifest)
 		}
 		if err := verifyVolume(device); err != nil {
