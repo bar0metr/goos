@@ -71,12 +71,12 @@ func (ext4BenchScenario) Run(ctx context.Context, s *Session) (Result, error) {
 			return "", err
 		}
 		record(fmt.Sprintf("ext4 round=%d", round), lines)
-		used, inKernel, err := settledPages(ctx, g)
+		used, inKernel, processes, err := quiescedPages(ctx, g)
 		if err != nil {
 			return "", err
 		}
 		pages, kernel = append(pages, used), append(kernel, inKernel)
-		record(fmt.Sprintf("ext4 round=%d", round), []string{fmt.Sprintf("mem pages=%d kernel=%d", used, inKernel)})
+		record(fmt.Sprintf("ext4 round=%d", round), append([]string{fmt.Sprintf("mem pages=%d kernel=%d", used, inKernel)}, processes...))
 		g.pass(fmt.Sprintf("fsbench-%d", round))
 	}
 	highest := uint64(0)
@@ -124,11 +124,11 @@ func (ext4BenchScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	record("ext4 df-before", dfLines(before, "/mnt/bench"))
 	record("ext4 df-after", dfLines(after, "/mnt/bench"))
 	g.pass("ext4-fill")
-	used, inKernel, err := settledPages(ctx, g)
+	used, inKernel, processes, err := quiescedPages(ctx, g)
 	if err != nil {
 		return "", err
 	}
-	record("ext4 after-fill", []string{fmt.Sprintf("mem pages=%d kernel=%d", used, inKernel)})
+	record("ext4 after-fill", append([]string{fmt.Sprintf("mem pages=%d kernel=%d", used, inKernel)}, processes...))
 
 	// One round on RAMFS and one on the persistent FAT32 volume separate
 	// what the VFS and the Linux ABI cost from what ext4 adds. /tmp holds
@@ -175,6 +175,37 @@ func runFsbench(ctx context.Context, g *Guest, args string, label string) ([]str
 		}
 	}
 	return lines, nil
+}
+
+// quiescedPages commits what the volumes hold, waits for the services to
+// go idle and collect, and then reads the settled page count, the
+// kernel's part, and each process's pages from ps. Without the sync a
+// round can end with a batch still in the ext4 service's memory, and
+// without the wait a heap that has not returned its free pages yet.
+func quiescedPages(ctx context.Context, g *Guest) (uint64, uint64, []string, error) {
+	out, err := g.Run(ctx, "sync", commandTimeout)
+	if err != nil {
+		return 0, 0, nil, fail(ClassScenario, "sync", err)
+	}
+	if strings.Contains(out, "sync:") {
+		return 0, 0, nil, failf(ClassScenario, "sync", "%s", out)
+	}
+	time.Sleep(2 * time.Second)
+	used, inKernel, err := settledPages(ctx, g)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	listing, err := g.Run(ctx, "ps", commandTimeout)
+	if err != nil {
+		return 0, 0, nil, fail(ClassScenario, "ps", err)
+	}
+	var processes []string
+	for _, line := range strings.Split(listing, "\n") {
+		if fields := strings.Fields(line); len(fields) >= 5 && strings.Contains(line, "native") {
+			processes = append(processes, "ps "+strings.Join(fields, " "))
+		}
+	}
+	return used, inKernel, processes, nil
 }
 
 // settledPages reads the system's page count, and the kernel's part of it,
