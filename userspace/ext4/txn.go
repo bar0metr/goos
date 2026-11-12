@@ -30,7 +30,38 @@ const (
 	batchMeta  = maxTxnCredits / 2
 	batchData  = maxTxnData / 2
 	batchFrees = maxTxnFrees / 2
+	// maxSpare bounds the block buffers kept for reuse: 256 KiB at 4 KiB.
+	maxSpare = 64
 )
+
+// blockBuffer returns a block-sized buffer, reused when one is spare. A
+// zeroed one is cleared; otherwise the caller overwrites all of it.
+func (fs *FS) blockBuffer(zeroed bool) []byte {
+	n := len(fs.spare)
+	if n == 0 {
+		return make([]byte, fs.blockSize)
+	}
+	data := fs.spare[n-1]
+	fs.spare = fs.spare[:n-1]
+	if zeroed {
+		for index := range data {
+			data[index] = 0
+		}
+	}
+	return data
+}
+
+// recycle keeps the buffers of staged copies nothing refers to any more.
+func (fs *FS) recycle(blocks map[uint64]*stagedBlock) {
+	for _, staged := range blocks {
+		if len(fs.spare) >= maxSpare {
+			return
+		}
+		if len(staged.data) == int(fs.blockSize) {
+			fs.spare = append(fs.spare, staged.data)
+		}
+	}
+}
 
 // stagedBlock is one block a transaction will write.
 type stagedBlock struct {
@@ -100,6 +131,9 @@ func (fs *FS) begin() error {
 // abort drops the running operation's transaction and every inode loaded
 // under it. The pending transaction stays.
 func (fs *FS) abort() {
+	if fs.txn != nil {
+		fs.recycle(fs.txn.blocks)
+	}
 	fs.txn = nil
 	fs.cache.overlay = nil
 	fs.live = nil
@@ -154,11 +188,16 @@ func (fs *FS) fold() error {
 		fs.cache.base = p.blocks
 	}
 	for block, staged := range t.blocks {
-		if old := p.blocks[block]; old != nil && old.meta != staged.meta {
-			if staged.meta {
-				p.meta, p.data = p.meta+1, p.data-1
-			} else {
-				p.meta, p.data = p.meta-1, p.data+1
+		if old := p.blocks[block]; old != nil {
+			if old.meta != staged.meta {
+				if staged.meta {
+					p.meta, p.data = p.meta+1, p.data-1
+				} else {
+					p.meta, p.data = p.meta-1, p.data+1
+				}
+			}
+			if len(fs.spare) < maxSpare {
+				fs.spare = append(fs.spare, old.data)
 			}
 		}
 		p.blocks[block] = staged
@@ -267,7 +306,9 @@ func (fs *FS) pendingCopy(block uint64) *stagedBlock {
 	if held == nil {
 		return nil
 	}
-	staged := &stagedBlock{data: append(make([]byte, 0, len(held.data)), held.data...), meta: held.meta}
+	data := fs.blockBuffer(false)
+	copy(data, held.data)
+	staged := &stagedBlock{data: data, meta: held.meta}
 	fs.txn.blocks[block] = staged
 	return staged
 }
@@ -292,7 +333,7 @@ func (fs *FS) stage(block uint64) ([]byte, error) {
 	if err := fs.charge(block, true); err != nil {
 		return nil, err
 	}
-	data := make([]byte, fs.blockSize)
+	data := fs.blockBuffer(false)
 	copy(data, current)
 	t.blocks[block] = &stagedBlock{data: data, meta: true}
 	return data, nil
@@ -324,7 +365,7 @@ func (fs *FS) stageZero(block uint64, meta bool) ([]byte, error) {
 	if err := fs.charge(block, meta); err != nil {
 		return nil, err
 	}
-	data := make([]byte, fs.blockSize)
+	data := fs.blockBuffer(true)
 	t.blocks[block] = &stagedBlock{data: data, meta: meta}
 	return data, nil
 }
@@ -348,7 +389,7 @@ func (fs *FS) stageData(block uint64, keep bool) ([]byte, error) {
 	if err := fs.charge(block, false); err != nil {
 		return nil, err
 	}
-	data := make([]byte, fs.blockSize)
+	data := fs.blockBuffer(false)
 	if !fs.device.ReadAt(block*uint64(fs.blockSize), data) {
 		return nil, errIO
 	}
@@ -453,6 +494,12 @@ func (fs *FS) commitPending() error {
 	}
 	fs.pending = nil
 	fs.cache.base = nil
+	if fs.live == nil {
+		// Between operations nothing holds the batch's buffers. In the
+		// middle of one, which keeps its live inodes, the operation may
+		// still read a slice of them.
+		fs.recycle(t.blocks)
+	}
 	if r := fs.txn; r != nil {
 		// The running operation's copies of blocks the batch held now
 		// count against the next transaction.

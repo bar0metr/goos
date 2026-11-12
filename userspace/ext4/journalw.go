@@ -28,11 +28,60 @@ func (log *journalLog) logBlocks(meta int, revokes int, blockSize int) uint32 {
 	return uint32(descriptors + meta + revokeBlocks + 1)
 }
 
-// writeLog writes block at the log head and advances it.
-func (fs *FS) writeLog(data []byte) bool {
+// maxRunBytes bounds one coalesced device write: the 128 KiB bulk window
+// of the ext4 service's block endpoint.
+const maxRunBytes = 128 << 10
+
+// blockRun gathers writes of consecutive blocks into one device write, so
+// a commit costs one block-service exchange per run instead of per block.
+// The crash model is unchanged: until a flush, any sector of any write may
+// land or not.
+type blockRun struct {
+	fs     *FS
+	buffer []byte
+	start  uint64
+	size   int
+}
+
+func (fs *FS) newRun() *blockRun {
+	if fs.runBuffer == nil {
+		fs.runBuffer = make([]byte, maxRunBytes)
+	}
+	return &blockRun{fs: fs, buffer: fs.runBuffer}
+}
+
+// add queues data for block, writing out what was queued first unless
+// block follows it.
+func (run *blockRun) add(block uint64, data []byte) bool {
+	blockSize := uint64(run.fs.blockSize)
+	if run.size != 0 && (block != run.start+uint64(run.size)/blockSize || run.size+len(data) > len(run.buffer)) {
+		if !run.flush() {
+			return false
+		}
+	}
+	if run.size == 0 {
+		run.start = block
+	}
+	copy(run.buffer[run.size:], data)
+	run.size += len(data)
+	return true
+}
+
+// flush writes what is queued.
+func (run *blockRun) flush() bool {
+	if run.size == 0 {
+		return true
+	}
+	ok := run.fs.device.WriteAt(run.start*uint64(run.fs.blockSize), run.buffer[:run.size])
+	run.size = 0
+	return ok
+}
+
+// writeLog queues block for the log head and advances it.
+func (fs *FS) writeLog(run *blockRun, data []byte) bool {
 	log := fs.log
 	block := log.physical(log.head)
-	if block == 0 || !fs.device.WriteAt(block*uint64(fs.blockSize), data) {
+	if block == 0 || !run.add(block, data) {
 		return false
 	}
 	log.head = log.next(log.head)
@@ -55,10 +104,14 @@ func (fs *FS) commitLog(t *txn, meta []uint64, data []uint64, revokes []uint64) 
 		}
 	}
 	seq := log.seq
+	run := fs.newRun()
 	for _, block := range data {
-		if !fs.device.WriteAt(block*uint64(size), t.blocks[block].data) {
+		if !run.add(block, t.blocks[block].data) {
 			return errWrite
 		}
+	}
+	if !run.flush() {
+		return errWrite
 	}
 	// Descriptor blocks and their copies.
 	descriptor := make([]byte, size)
@@ -107,7 +160,7 @@ func (fs *FS) commitLog(t *txn, meta []uint64, data []uint64, revokes []uint64) 
 			}
 		}
 		log.sealTail(descriptor)
-		if !fs.writeLog(descriptor) {
+		if !fs.writeLog(run, descriptor) {
 			return errWrite
 		}
 		for index := start; index < end; index++ {
@@ -115,7 +168,7 @@ func (fs *FS) commitLog(t *txn, meta []uint64, data []uint64, revokes []uint64) 
 			if be32(copyBuffer, 0) == jbd2Magic {
 				putBE32(copyBuffer, 0)
 			}
-			if !fs.writeLog(copyBuffer) {
+			if !fs.writeLog(run, copyBuffer) {
 				return errWrite
 			}
 		}
@@ -140,11 +193,11 @@ func (fs *FS) commitLog(t *txn, meta []uint64, data []uint64, revokes []uint64) 
 		}
 		putBE32(descriptor[jbd2HeaderBytes:], uint32(offset))
 		log.sealTail(descriptor)
-		if !fs.writeLog(descriptor) {
+		if !fs.writeLog(run, descriptor) {
 			return errWrite
 		}
 	}
-	if !fs.device.Flush() {
+	if !run.flush() || !fs.device.Flush() {
 		return errWrite
 	}
 	// The commit block.
@@ -158,7 +211,7 @@ func (fs *FS) commitLog(t *txn, meta []uint64, data []uint64, revokes []uint64) 
 	if log.csum != 0 {
 		putBE32(descriptor[0x10:], log.blockChecksum(descriptor, 0x10))
 	}
-	if !fs.writeLog(descriptor) || !fs.device.Flush() {
+	if !fs.writeLog(run, descriptor) || !run.flush() || !fs.device.Flush() {
 		return errWrite
 	}
 	log.seq++
@@ -167,9 +220,12 @@ func (fs *FS) commitLog(t *txn, meta []uint64, data []uint64, revokes []uint64) 
 	}
 	for _, block := range meta {
 		log.journaled[block] = seq
-		if !fs.device.WriteAt(block*uint64(size), t.blocks[block].data) {
+		if !run.add(block, t.blocks[block].data) {
 			return errWrite
 		}
+	}
+	if !run.flush() {
+		return errWrite
 	}
 	return nil
 }

@@ -13,7 +13,8 @@ import (
 // ADR 0227) with fsbench, the static Linux program the Linux reference runs
 // on the same volume layout: names, sequential and random 4 KiB I/O, fsync
 // latency, the replace pattern, a sparse file past 4 GiB and 1, 2, 4 and 8
-// processes at once. The disk carries a partition labelled goos-bench that
+// processes at once, then once on RAMFS and once on the persistent FAT32
+// volume for comparison. The disk carries a partition labelled goos-bench that
 // tools/ext4fixture/make-bench-volume.sh made; make test-pve-ext4 builds it.
 type ext4BenchScenario struct{}
 
@@ -55,11 +56,29 @@ func (ext4BenchScenario) Run(ctx context.Context, s *Session) (Result, error) {
 		for _, line := range strings.Split(out, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "bench ") && line != "bench ok" {
-				measured = append(measured, fmt.Sprintf("round=%d %s", round, line))
+				measured = append(measured, fmt.Sprintf("ext4 round=%d %s", round, line))
 				s.logf("round %d %s", round, line)
 			}
 		}
 		g.pass(fmt.Sprintf("fsbench-%d", round))
+	}
+	// One round on RAMFS and one on the persistent FAT32 volume separate
+	// what the VFS and the Linux ABI cost from what ext4 adds.
+	for _, base := range []struct{ name, dir string }{{"ramfs", "/tmp"}, {"fat32", "/persist/home"}} {
+		out, ending, err := runWorkloadStep(ctx, g, "/system/linux/fsbench "+base.dir, ext4BenchTimeout)
+		if err != nil {
+			return "", err
+		}
+		if ending != "" {
+			return "", failf(ClassScenario, "fsbench-"+base.name, "%s did not finish (%s):\n%s", base.dir, ending, tailLines(out, 20))
+		}
+		for _, line := range strings.Split(out, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "bench ") && line != "bench ok" {
+				measured = append(measured, fmt.Sprintf("%s %s", base.name, line))
+				s.logf("%s %s", base.name, line)
+			}
+		}
 	}
 	out, err = g.Run(ctx, "umount /mnt/bench", commandTimeout)
 	if err != nil {

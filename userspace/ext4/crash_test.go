@@ -130,11 +130,18 @@ func (device *crashDevice) WriteAt(offset uint64, data []byte) bool {
 	if end < offset || end > uint64(len(device.current)) {
 		return false
 	}
-	if device.failAfter != 0 && len(device.events) >= device.failAfter {
-		return false
+	// A write of several blocks is recorded block by block. The model
+	// lets every sector of an unflushed write land or not, so this changes
+	// nothing it allows, and each block keeps its own class.
+	for start := 0; start < len(data); start += int(device.blockSize) {
+		if device.failAfter != 0 && len(device.events) >= device.failAfter {
+			return false
+		}
+		block := data[start:min(start+int(device.blockSize), len(data))]
+		at := offset + uint64(start)
+		device.events = append(device.events, crashEvent{offset: at, data: append([]byte(nil), block...)})
+		copy(device.current[at:at+uint64(len(block))], block)
 	}
-	device.events = append(device.events, crashEvent{offset: offset, data: append([]byte(nil), data...)})
-	copy(device.current[offset:end], data)
 	return true
 }
 

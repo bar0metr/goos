@@ -18,6 +18,10 @@ type cachedBlock struct {
 	stamp uint64
 	valid bool
 	data  []byte
+	// checked records that the block passed a directory checksum under
+	// seed since it was read, so later lookups need not compute it again.
+	checked bool
+	seed    uint32
 }
 
 // blockCache keeps recently used metadata blocks. File data bypasses it.
@@ -78,7 +82,7 @@ func (cache *blockCache) get(block uint64) ([]byte, error) {
 			victim = entry
 		}
 	}
-	victim.valid = false
+	victim.valid, victim.checked = false, false
 	if !cache.device.ReadAt(block*cache.size, victim.data) {
 		return nil, errIO
 	}
@@ -125,6 +129,7 @@ func (cache *blockCache) update(block uint64, data []byte) {
 		entry := &cache.entries[index]
 		if entry.valid && entry.block == block {
 			copy(entry.data, data)
+			entry.checked = false
 		}
 	}
 }
@@ -133,5 +138,21 @@ func (cache *blockCache) update(block uint64, data []byte) {
 func (cache *blockCache) invalidate() {
 	for index := range cache.entries {
 		cache.entries[index].valid = false
+		cache.entries[index].checked = false
 	}
+}
+
+// resident returns the cache entry whose buffer data is, or nil for a
+// staged copy or any other buffer.
+func (cache *blockCache) resident(data []byte) *cachedBlock {
+	if len(data) == 0 {
+		return nil
+	}
+	for index := range cache.entries {
+		entry := &cache.entries[index]
+		if entry.valid && len(entry.data) == len(data) && &entry.data[0] == &data[0] {
+			return entry
+		}
+	}
+	return nil
 }

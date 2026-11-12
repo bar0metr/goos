@@ -127,8 +127,15 @@ func (fs *FS) leafEnd(dir *Inode, data []byte) (int, error) {
 	if le32(data, tail) != 0 || recLen(data, tail) != dirTailSize || data[tail+6] != 0 || data[tail+7] != dirTailFileType {
 		return 0, corrupt("directory block has no checksum tail")
 	}
+	entry := fs.cache.resident(data)
+	if entry != nil && entry.checked && entry.seed == dir.csumSeed {
+		return tail, nil
+	}
 	if crc32c(dir.csumSeed, data[:tail]) != le32(data, tail+8) {
 		return 0, corrupt("directory block checksum mismatch")
+	}
+	if entry != nil {
+		entry.checked, entry.seed = true, dir.csumSeed
 	}
 	return tail, nil
 }

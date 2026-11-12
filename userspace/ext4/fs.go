@@ -74,6 +74,11 @@ type FS struct {
 	// operations that finished since the last commit (txn.go).
 	txn     *txn
 	pending *txn
+	// runBuffer gathers consecutive blocks of a commit into one write.
+	runBuffer []byte
+	// spare holds block buffers of dropped staged copies for the next
+	// ones, so a batch of small operations does not churn the heap.
+	spare [][]byte
 	// live holds the inodes the running operation has loaded or created.
 	live    map[uint32]*Inode
 	now     func() Timestamp
