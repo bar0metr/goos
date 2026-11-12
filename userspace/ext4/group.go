@@ -69,7 +69,7 @@ func (fs *FS) group(group uint32) (Group, error) {
 		desc.BlockBitmapCsum |= uint32(le16(raw, 0x38)) << 16
 		desc.InodeBitmapCsum |= uint32(le16(raw, 0x3A)) << 16
 	}
-	if want, checked := fs.descriptorChecksum(group, raw); checked && want != desc.Checksum {
+	if want, checked := fs.descriptorChecksum(group, raw); checked && want != desc.Checksum && !fs.beforeReplay {
 		return Group{}, corrupt("group descriptor checksum mismatch")
 	}
 	return desc, nil
@@ -157,7 +157,7 @@ func (fs *FS) validateGroups() error {
 		if !fs.groupsInitialized() && desc.Flags&(groupInodeUninit|groupBlockUninit) != 0 {
 			return corrupt("uninitialized group flags without group checksums")
 		}
-		if fs.sb.HasMetadataCsum() && !fs.beforeReplay {
+		if fs.sb.HasMetadataCsum() {
 			if err := fs.verifyBitmaps(group, &desc); err != nil {
 				return err
 			}

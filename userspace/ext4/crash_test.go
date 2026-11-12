@@ -15,15 +15,15 @@ import (
 // crashDevice records every write and flush a mount makes, so a test can
 // rebuild what the disk would hold after a power cut at any point. Writes
 // before the last flush are durable; writes after it reach the disk in any
-// subset, and one may be torn at a sector boundary. The superblock's block
-// and the journal superblock's are written whole or not at all: Linux
-// assumes the same of the superblock's two sectors.
+// subset, and any of them may be torn: each of its 512-byte sectors lands
+// or not on its own. No block is exempt, the superblock's included.
 type crashDevice struct {
-	// whole lists the offsets of blocks that never tear.
-	whole   map[uint64]bool
 	base    []byte
 	current []byte
 	events  []crashEvent
+	// log locates the journal of base, to classify events.
+	log       *journalLog
+	blockSize uint64
 	// failAfter, when nonzero, refuses every write and flush past that
 	// many events, as a dead device would.
 	failAfter int
@@ -35,18 +35,85 @@ type crashEvent struct {
 	data   []byte
 }
 
-func newCrashDevice(image []byte) *crashDevice {
-	device := &crashDevice{base: append([]byte(nil), image...), current: append([]byte(nil), image...)}
-	// Every image here comes from the canonical fixture, whose journal
-	// superblock is the first block of the journal inode.
-	fs := ok(probe(&scratchDevice{data: device.base}))
+// bootstrapLog reads the journal location of image the way the recovery
+// bootstrap does.
+func bootstrapLog(image []byte) (*journalLog, uint64) {
+	fs := ok(probe(&scratchDevice{data: image}, false))
+	fs.cache.init(fs.device, fs.blockSize, fs.sb.BlocksCount)
 	fs.beforeReplay = true
-	if err := fs.open(); err != nil {
+	inode := ok(fs.journalInode())
+	if err := fs.readJournalSuper(inode); err != nil {
 		panic(err)
 	}
-	log := ok(fs.loadLog())
-	device.whole = map[uint64]bool{log.superBlock * uint64(fs.blockSize): true}
+	return ok(fs.loadLog(inode)), uint64(fs.blockSize)
+}
+
+func newCrashDevice(image []byte) *crashDevice {
+	device := &crashDevice{base: append([]byte(nil), image...), current: append([]byte(nil), image...)}
+	device.log, device.blockSize = bootstrapLog(device.base)
 	return device
+}
+
+// Event classes, the boundaries of the commit and recovery protocol.
+const (
+	classFlush      = "flush"
+	classData       = "data"
+	classDescriptor = "descriptor"
+	classCopy       = "log copy"
+	classRevoke     = "revoke"
+	classCommit     = "commit"
+	classHome       = "home metadata"
+	classSuper      = "superblock"
+	classLogSuper   = "journal superblock"
+)
+
+var eventClasses = []string{classFlush, classData, classDescriptor, classCopy, classRevoke,
+	classCommit, classHome, classSuper, classLogSuper}
+
+// classify names the class of every event. A write outside the log is
+// home metadata when the last descriptor tagged its block, file data
+// otherwise; the block holding the superblock has its own class.
+func (device *crashDevice) classify() []string {
+	log := device.log
+	classes := make([]string, len(device.events))
+	tagged := map[uint64]bool{}
+	for index, event := range device.events {
+		block := event.offset / device.blockSize
+		switch {
+		case event.flush:
+			classes[index] = classFlush
+		case block == log.superBlock:
+			classes[index] = classLogSuper
+		case log.inLog(block) && be32(event.data, 0) == jbd2Magic && be32(event.data, 4) == jbd2Descriptor:
+			classes[index] = classDescriptor
+			tagged = map[uint64]bool{}
+			size := log.tagBytes()
+			for offset := jbd2HeaderBytes; offset+size <= len(event.data)-log.tailBytes(); {
+				tag := log.decodeTag(event.data[offset:])
+				tagged[tag.block] = true
+				offset += size
+				if tag.flags&jbd2FlagSameUUID == 0 {
+					offset += jbd2UUIDBytes
+				}
+				if tag.flags&jbd2FlagLastTag != 0 {
+					break
+				}
+			}
+		case log.inLog(block) && be32(event.data, 0) == jbd2Magic && be32(event.data, 4) == jbd2Revoke:
+			classes[index] = classRevoke
+		case log.inLog(block) && be32(event.data, 0) == jbd2Magic && be32(event.data, 4) == jbd2Commit:
+			classes[index] = classCommit
+		case log.inLog(block):
+			classes[index] = classCopy
+		case block == uint64(superblockOffset)/device.blockSize:
+			classes[index] = classSuper
+		case tagged[block]:
+			classes[index] = classHome
+		default:
+			classes[index] = classData
+		}
+	}
+	return classes
 }
 
 func (device *crashDevice) ReadAt(offset uint64, target []byte) bool {
@@ -81,6 +148,18 @@ func (device *crashDevice) Flush() bool {
 
 func (device *crashDevice) Capacity() uint64 { return uint64(len(device.current)) }
 
+// landed returns the disk with every one of the first point events fully
+// written, as if the device had flushed after each.
+func (device *crashDevice) landed(point int) []byte {
+	image := append([]byte(nil), device.base...)
+	for index := 0; index < point; index++ {
+		if event := &device.events[index]; !event.flush {
+			copy(image[event.offset:], event.data)
+		}
+	}
+	return image
+}
+
 // imageAt returns the disk after a power cut once the first point events
 // happened.
 func (device *crashDevice) imageAt(point int, random *rand.Rand) []byte {
@@ -96,17 +175,20 @@ func (device *crashDevice) imageAt(point int, random *rand.Rand) []byte {
 		if event.flush {
 			continue
 		}
-		data := event.data
 		if index > lastFlush {
 			if random.Intn(2) == 0 {
 				continue
 			}
-			if event.offset >= superblockOffset+superblockSize && !device.whole[event.offset] &&
-				len(data) > 512 && random.Intn(4) == 0 {
-				data = data[:512*(1+random.Intn(len(data)/512-1))]
+			if random.Intn(4) == 0 {
+				for sector := 0; sector < len(event.data); sector += 512 {
+					if random.Intn(2) == 0 {
+						copy(image[event.offset+uint64(sector):], event.data[sector:sector+512])
+					}
+				}
+				continue
 			}
 		}
-		copy(image[event.offset:], data)
+		copy(image[event.offset:], event.data)
 	}
 	return image
 }
@@ -154,6 +236,7 @@ func crashWorkload(t *testing.T) []crashOp {
 		{name: "truncate many extents", run: func(fs *FS) error { return fs.Truncate(in(fs, "/fragmented"), 10*8192) }},
 		{name: "create big", run: create("/", "bigfile")},
 		{name: "large write", run: write("/bigfile", big), prefix: "./bigfile", data: big},
+		{name: "checkpoint", run: func(fs *FS) error { return fs.Sync() }},
 		{name: "unlink large", run: func(fs *FS) error { return fs.Unlink(in(fs, "/"), []byte("fragmented")) }},
 		{name: "replace by rename", run: func(fs *FS) error { return fs.Rename(in(fs, "/d1"), []byte("b"), in(fs, "/"), []byte("hello.txt")) }},
 		{name: "mkdir for rmdir", run: func(fs *FS) error { _, err := fs.Mkdir(in(fs, "/"), []byte("d2"), 0o755, 0, 0); return err }},
@@ -268,28 +351,46 @@ func recoverAt(t *testing.T, image []byte) (*scratchDevice, *FS) {
 	return device, fs
 }
 
-// crashPoints picks the cuts to try: around every flush, the first and
-// last events of each operation, and a sample in between.
-func (run *crashRun) crashPoints(random *rand.Rand, extra int) []int {
-	seen := map[int]bool{}
+// crashPoints picks the cuts to try. Under GOOS_STORAGE_STRESS it is
+// every point: before and after each event. Otherwise it is a cut before
+// and after the first two, a middle and the last two events of every
+// class, plus a sample up to limit cuts. Every class must occur.
+func (run *crashRun) crashPoints(t *testing.T, random *rand.Rand, limit int) []int {
+	classes := run.device.classify()
+	byClass := map[string][]int{}
+	for index, class := range classes {
+		byClass[class] = append(byClass[class], index)
+	}
+	for _, class := range eventClasses {
+		if len(byClass[class]) == 0 {
+			t.Fatalf("the crash workload has no %s event", class)
+		}
+		t.Logf("%-18s %d events", class, len(byClass[class]))
+	}
 	var points []int
+	if os.Getenv("GOOS_STORAGE_STRESS") != "" {
+		for point := 0; point <= len(run.device.events); point++ {
+			points = append(points, point)
+		}
+		return points
+	}
+	seen := map[int]bool{}
 	add := func(point int) {
 		if point >= 0 && point <= len(run.device.events) && !seen[point] {
 			seen[point] = true
 			points = append(points, point)
 		}
 	}
-	for index, event := range run.device.events {
-		if event.flush {
-			add(index)
-			add(index + 1)
+	for _, class := range eventClasses {
+		list := byClass[class]
+		for _, at := range []int{0, 1, len(list) / 2, len(list) - 2, len(list) - 1} {
+			if at >= 0 && at < len(list) {
+				add(list[at])
+				add(list[at] + 1)
+			}
 		}
 	}
-	for _, end := range run.ends {
-		add(end - 1)
-		add(end + 1)
-	}
-	for count := 0; count < extra; count++ {
+	for len(points) < limit {
 		add(random.Intn(len(run.device.events) + 1))
 	}
 	return points
@@ -298,12 +399,7 @@ func (run *crashRun) crashPoints(random *rand.Rand, extra int) []int {
 func TestPowerCutRecovery(t *testing.T) {
 	run := recordCrashRun(t)
 	random := rand.New(rand.NewSource(1))
-	points := run.crashPoints(random, 200)
-	// The full sweep takes over a minute; test-ext4-stress runs it.
-	if os.Getenv("GOOS_STORAGE_STRESS") == "" {
-		random.Shuffle(len(points), func(a, b int) { points[a], points[b] = points[b], points[a] })
-		points = points[:120]
-	}
+	points := run.crashPoints(t, random, 150)
 	t.Logf("%d events, %d operations, %d cuts", len(run.device.events), len(run.ops), len(points))
 	for _, point := range points {
 		image := run.device.imageAt(point, random)
@@ -568,7 +664,7 @@ func TestExportCrashImages(t *testing.T) {
 	run := recordCrashRun(t)
 	random := rand.New(rand.NewSource(6))
 	exported := 0
-	for _, op := range []int{2, 11, 13, 14, 18, 30} {
+	for _, op := range []int{2, 11, 13, 15, 19, 31} {
 		point := run.ends[op] - 2
 		image := run.device.imageAt(point, random)
 		_, fs := recoverAt(t, append([]byte(nil), image...))

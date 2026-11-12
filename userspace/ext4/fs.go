@@ -80,11 +80,12 @@ type FS struct {
 	// callers holding each inode open.
 	orphans []uint32
 	pins    map[uint32]uint32
-	// beforeReplay skips the bitmap checksums while a writable mount
-	// opens the journal: a home write the last flush did not cover may
-	// leave a bitmap newer than its descriptor until replay rewrites both.
+	// beforeReplay skips descriptor checksums while the recovery
+	// bootstrap reads the journal inode: replay may be what repairs them.
 	beforeReplay bool
-	recovery     Replay
+	// sbSuspect marks a superblock read without its checksum.
+	sbSuspect bool
+	recovery  Replay
 }
 
 // Mount probes device, validates the volume and mounts it. It refuses
@@ -94,7 +95,16 @@ type FS struct {
 // KindNeedsRecovery: it is never shown as if it were consistent. A
 // writable mount does that work first.
 func Mount(device Device, options Options) (*FS, error) {
-	fs, err := probe(device)
+	fs, err := probe(device, true)
+	if options.Writable && KindOf(err) == KindCorrupt {
+		// A superblock whose only fault is its checksum may be a torn
+		// home write that the journal repairs; the bootstrap uses it only
+		// to find the journal.
+		if suspect, lenientErr := probe(device, false); lenientErr == nil {
+			fs, err = suspect, nil
+			fs.sbSuspect = true
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -124,8 +134,9 @@ func Mount(device Device, options Options) (*FS, error) {
 	return fs, nil
 }
 
-// probe reads and parses the superblock and negotiates features.
-func probe(device Device) (*FS, error) {
+// probe reads and parses the superblock and negotiates features. With
+// checksum false it accepts a superblock whose checksum fails.
+func probe(device Device, checksum bool) (*FS, error) {
 	capacity := device.Capacity()
 	if capacity < superblockOffset+superblockSize {
 		return nil, corrupt("partition smaller than the superblock")
@@ -134,7 +145,7 @@ func probe(device Device) (*FS, error) {
 	if !device.ReadAt(superblockOffset, raw) {
 		return nil, errIO
 	}
-	sb, err := ParseSuperblock(raw, capacity)
+	sb, err := parseSuperblock(raw, capacity, checksum)
 	if err != nil {
 		return nil, err
 	}
@@ -168,9 +179,18 @@ func (fs *FS) open() error {
 }
 
 // mountWritable replays the journal, finishes the orphan list and opens
-// the volume for mutation. The journal superblock records a live log and
-// the superblock needs_recovery before the first transaction, so a power
-// cut from here on leaves a volume the next writable mount recovers.
+// the volume for mutation.
+//
+// Before replay, a home write the last flush did not cover may have torn
+// any block outside the journal, the superblock included. The bootstrap
+// therefore reads only what finds the journal: the superblock's geometry
+// with its checksum unchecked, the journal inode's descriptor without its
+// checksum, and the journal inode, which GoOS never rewrites. Everything
+// else is validated after replay, from a fresh read. A superblock whose
+// checksum fails and that the journal does not rewrite is refused.
+//
+// Every later superblock change goes through the journal, so a torn
+// superblock always has a committed copy in the live log.
 func (fs *FS) mountWritable(options Options) (*FS, error) {
 	switch {
 	case !writeSupported:
@@ -192,16 +212,22 @@ func (fs *FS) mountWritable(options Options) (*FS, error) {
 	}
 	fs.now = options.Clock
 	fs.state = StateRecovering
+	fs.cache.init(fs.device, fs.blockSize, fs.sb.BlocksCount)
+	fs.scratch = make([]byte, fs.blockSize)
 	fs.beforeReplay = true
-	if err := fs.open(); err != nil {
-		return nil, err
+	inode, err := fs.journalInode()
+	if err == nil {
+		err = fs.readJournalSuper(inode)
 	}
-	log, err := fs.loadLog()
+	var log *journalLog
+	if err == nil {
+		log, err = fs.loadLog(inode)
+	}
+	fs.beforeReplay = false
 	if err != nil {
 		return nil, err
 	}
 	fs.log = log
-	fs.beforeReplay = false
 	if log.tail != 0 {
 		end, err := fs.replay(log, &fs.recovery)
 		if err != nil {
@@ -213,16 +239,16 @@ func (fs *FS) mountWritable(options Options) (*FS, error) {
 		if !fs.device.Flush() || !fs.writeLogSuper(0, log.seq) || !fs.device.Flush() {
 			return nil, errWrite
 		}
-		if err := fs.reload(); err != nil {
-			return nil, err
-		}
-		log = fs.log
 	} else {
 		log.seq = log.tailSeq
-		if err := fs.validateGroups(); err != nil {
-			return nil, err
+		if fs.sbSuspect {
+			return nil, corrupt("superblock checksum mismatch, and the journal holds no copy to replay")
 		}
 	}
+	if err := fs.reload(); err != nil {
+		return nil, err
+	}
+	log = fs.log
 	if err := fs.verifyGroupCounts(); err != nil {
 		return nil, err
 	}
@@ -235,10 +261,11 @@ func (fs *FS) mountWritable(options Options) (*FS, error) {
 	if !fs.writeLogSuper(log.head, log.seq) || !fs.device.Flush() {
 		return nil, errWrite
 	}
+	fs.mutable = true
 	if err := fs.markMounted(true); err != nil {
+		fs.mutable = false
 		return nil, err
 	}
-	fs.mutable = true
 	if err := fs.cleanupOrphans(&fs.recovery); err != nil {
 		fs.mutable = false
 		fs.state = StateFailed
@@ -248,10 +275,11 @@ func (fs *FS) mountWritable(options Options) (*FS, error) {
 	return fs, nil
 }
 
-// reload reads the volume again after replay rewrote its metadata.
+// reload reads and validates the volume again, with every checksum, after
+// the bootstrap and any replay.
 func (fs *FS) reload() error {
-	log := fs.log
-	fresh, err := probe(fs.device)
+	seq := fs.log.seq
+	fresh, err := probe(fs.device, true)
 	if err != nil {
 		return err
 	}
@@ -262,60 +290,72 @@ func (fs *FS) reload() error {
 	if err := fs.open(); err != nil {
 		return err
 	}
-	reloaded, err := fs.loadLog()
+	inode, err := fs.Inode(fs.sb.JournalInode)
 	if err != nil {
 		return err
 	}
-	reloaded.seq = log.seq
+	reloaded, err := fs.loadLog(inode)
+	if err != nil {
+		return err
+	}
+	reloaded.seq = seq
 	fs.log = reloaded
 	return nil
 }
 
-// markMounted writes the superblock directly, outside any transaction. A
-// mounted volume carries needs_recovery and lacks the valid state bit, as
-// Linux leaves it; clean unmount reverses both. The free counts are the
-// sums of the descriptors: Linux recomputes them at mount the same way.
+// markMounted changes the superblock in a journal transaction. A mounted
+// volume carries needs_recovery and lacks the valid state bit, as Linux
+// leaves it; clean unmount reverses both. The free counts become the sums
+// of the descriptors: Linux recomputes them at mount the same way.
+//
+// Linux discards the log of a volume without needs_recovery. The mounting
+// transaction is safe to lose that way: the next transaction's first flush
+// makes its home write durable before that transaction can commit. The
+// unmounting one follows a reclaim, so the log holds nothing else.
 func (fs *FS) markMounted(mounted bool) error {
 	block := uint64(superblockOffset) / uint64(fs.blockSize)
 	within := superblockOffset % int(fs.blockSize)
-	current, err := fs.cache.get(block)
-	if err != nil {
-		return err
-	}
-	data := make([]byte, fs.blockSize)
-	copy(data, current)
-	raw := data[within : within+superblockSize]
 	var freeBlocks uint64
 	var freeInodes uint32
-	for group := uint32(0); uint64(group) < fs.groups; group++ {
-		desc, err := fs.group(group)
+	var incompat uint32
+	var state uint16
+	err := fs.mutate(func() error {
+		data, err := fs.stage(block)
 		if err != nil {
 			return err
 		}
-		freeBlocks += uint64(desc.FreeBlocks)
-		freeInodes += desc.FreeInodes
+		raw := data[within : within+superblockSize]
+		freeBlocks, freeInodes = 0, 0
+		for group := uint32(0); uint64(group) < fs.groups; group++ {
+			desc, err := fs.group(group)
+			if err != nil {
+				return err
+			}
+			freeBlocks += uint64(desc.FreeBlocks)
+			freeInodes += desc.FreeInodes
+		}
+		incompat = le32(raw, 0x60)
+		state = le16(raw, 0x3A)
+		if mounted {
+			incompat |= incompatRecover
+			state &^= stateValid
+		} else {
+			incompat &^= incompatRecover
+			state |= stateValid
+		}
+		putLE32(raw[0x60:], incompat)
+		putLE16(raw[0x3A:], state)
+		putLE32(raw[0xC:], uint32(freeBlocks))
+		if fs.sb.Features.Incompat&incompat64Bit != 0 {
+			putLE32(raw[0x158:], uint32(freeBlocks>>32))
+		}
+		putLE32(raw[0x10:], freeInodes)
+		sealSuperblock(raw)
+		return nil
+	})
+	if err != nil {
+		return err
 	}
-	incompat := le32(raw, 0x60)
-	state := le16(raw, 0x3A)
-	if mounted {
-		incompat |= incompatRecover
-		state &^= stateValid
-	} else {
-		incompat &^= incompatRecover
-		state |= stateValid
-	}
-	putLE32(raw[0x60:], incompat)
-	putLE16(raw[0x3A:], state)
-	putLE32(raw[0xC:], uint32(freeBlocks))
-	if fs.sb.Features.Incompat&incompat64Bit != 0 {
-		putLE32(raw[0x158:], uint32(freeBlocks>>32))
-	}
-	putLE32(raw[0x10:], freeInodes)
-	sealSuperblock(raw)
-	if !fs.device.WriteAt(block*uint64(fs.blockSize), data) || !fs.device.Flush() {
-		return errWrite
-	}
-	fs.cache.update(block, data)
 	fs.sb.FreeBlocks, fs.sb.FreeInodes = freeBlocks, freeInodes
 	fs.sb.State = state
 	fs.sb.Features.Incompat = incompat
@@ -356,11 +396,16 @@ func (fs *FS) Unmount() error {
 		return err
 	}
 	fs.state = StateQuiescing
-	log := fs.log
-	if !fs.device.Flush() || !fs.writeLogSuper(0, log.seq) || !fs.device.Flush() {
+	if err := fs.reclaim(); err != nil {
 		return fs.failWrite()
 	}
 	if err := fs.markMounted(false); err != nil {
+		if fs.state != StateFailed {
+			fs.failWrite()
+		}
+		return err
+	}
+	if !fs.device.Flush() || !fs.writeLogSuper(0, fs.log.seq) || !fs.device.Flush() {
 		return fs.failWrite()
 	}
 	fs.mutable = false

@@ -72,12 +72,8 @@ type journalLog struct {
 func tidAfter(a uint32, b uint32) bool { return int32(a-b) > 0 }
 
 // loadLog maps the journal inode and reads the journal superblock that
-// openJournal validated.
-func (fs *FS) loadLog() (*journalLog, error) {
-	inode, err := fs.Inode(fs.sb.JournalInode)
-	if err != nil {
-		return nil, err
-	}
+// readJournalSuper validated.
+func (fs *FS) loadLog(inode *Inode) (*journalLog, error) {
 	journal := &fs.journal
 	log := &journalLog{first: journal.First, last: journal.MaxLen}
 	for logical := uint64(0); logical < uint64(journal.MaxLen); {
@@ -115,6 +111,9 @@ func (fs *FS) loadLog() (*journalLog, error) {
 	}
 	if journal.Compat&jbd2CompatChecksum != 0 {
 		return nil, fail(KindUnsupported, "journal uses CRC32 commit checksums")
+	}
+	if journal.ROCompat != 0 {
+		return nil, fail(KindUnsupported, "journal has read-only compatible features")
 	}
 	if journal.Incompat&^jbd2KnownIncompat != 0 {
 		return nil, fail(KindUnsupported, "journal has async commits, fast commits or unknown features")

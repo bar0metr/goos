@@ -49,6 +49,29 @@ func (fs *FS) openJournal() error {
 	if err != nil {
 		return err
 	}
+	return fs.readJournalSuper(inode)
+}
+
+// journalInode reads the journal inode without consulting the inode
+// bitmap, for the recovery bootstrap. GoOS never rewrites the journal
+// inode, so its bytes are the same in every version of its inode table
+// block and a torn write of that block cannot damage them.
+func (fs *FS) journalInode() (*Inode, error) {
+	inode, err := fs.readInode(fs.sb.JournalInode)
+	if err != nil {
+		return nil, err
+	}
+	if inode.Mode == 0 || inode.Links == 0 {
+		return nil, corrupt("journal inode not in use")
+	}
+	if err := fs.checkInode(inode); err != nil {
+		return nil, err
+	}
+	return inode, nil
+}
+
+// readJournalSuper validates the journal superblock of inode.
+func (fs *FS) readJournalSuper(inode *Inode) error {
 	if !inode.IsRegular() {
 		return corrupt("journal inode is not a regular file")
 	}
@@ -93,6 +116,9 @@ func (fs *FS) openJournal() error {
 	}
 	if journal.Start != 0 && (journal.Start < journal.First || journal.Start >= journal.MaxLen) {
 		return corrupt("journal start outside the log")
+	}
+	if journal.Incompat&jbd2IncompatCsumV2 != 0 && journal.Incompat&jbd2IncompatCsumV3 != 0 {
+		return corrupt("journal claims checksum v2 and v3")
 	}
 	if journal.Incompat&(jbd2IncompatCsumV2|jbd2IncompatCsumV3) != 0 {
 		if data[0x50] != jbd2ChecksumCRC32C {
