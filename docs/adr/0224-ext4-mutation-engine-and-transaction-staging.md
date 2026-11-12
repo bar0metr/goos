@@ -77,7 +77,8 @@ child back into the root while its records fit there. Block-mapped,
 `huge_file`-flagged, verity and attribute-value inodes are refused, not
 converted.
 
-**Directories.** Linear directories grow by a block and stay linear. In a
+**Directories.** Linear directories grow by a block and stay linear
+(ADR 0229 later indexes one that outgrows its first block). In a
 hash-indexed directory a name goes to the leaf its hash selects; a full
 leaf is sorted by hash and split at the middle, with the low bit of the new
 index entry set when the split falls inside a run of equal hashes, as

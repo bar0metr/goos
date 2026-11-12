@@ -187,7 +187,7 @@ func TestCreateWriteRead(t *testing.T) {
 	if n, err := fs.WriteFile(file, 0, payload); err != nil || n != len(payload) {
 		t.Fatalf("write %d %v", n, err)
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	reread := mount(t, device)
 	got := lookupInode(t, reread, root(t, reread), "new.txt")
 	if got.UID != 1000 || got.GID != 1001 || got.Permissions() != 0o640 || got.Links != 1 {
@@ -212,7 +212,7 @@ func TestMkdirRmdirRestoresCounts(t *testing.T) {
 	dir := ok(fs.Mkdir(top, []byte("d"), 0o755, 0, 0))
 	sub := ok(fs.Mkdir(dir, []byte("sub"), 0o700, 0, 0))
 	ok(fs.Create(sub, []byte("f"), ModeRegular|0o644, 0, 0))
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	wantKind(t, fs.Rmdir(root(t, fs), []byte("d")), KindNotEmpty)
 	wantKind(t, fs.Unlink(root(t, fs), []byte("d")), KindIsDirectory)
 	sub = lookupInode(t, fs, lookupInode(t, fs, root(t, fs), "d"), "sub")
@@ -226,7 +226,7 @@ func TestMkdirRmdirRestoresCounts(t *testing.T) {
 	if err := fs.Rmdir(root(t, fs), []byte("d")); err != nil {
 		t.Fatal(err)
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	after := mount(t, device).Info()
 	if after.FreeBlocks != before.FreeBlocks || after.FreeInodes != before.FreeInodes {
 		t.Fatalf("free %d/%d, was %d/%d", after.FreeBlocks, after.FreeInodes, before.FreeBlocks, before.FreeInodes)
@@ -245,7 +245,7 @@ func TestSymlinks(t *testing.T) {
 	if !fs.fastSymlink(fast) || fs.fastSymlink(slow) {
 		t.Fatal("symlink storage")
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	reread := mount(t, device)
 	for name, want := range map[string][]byte{"short": short, "long": long} {
 		got := ok(reread.Readlink(lookupInode(t, reread, root(t, reread), name)))
@@ -258,7 +258,7 @@ func TestSymlinks(t *testing.T) {
 			t.Fatalf("unlink %s: %v", name, err)
 		}
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 }
 
 func TestHardLinks(t *testing.T) {
@@ -270,7 +270,7 @@ func TestHardLinks(t *testing.T) {
 	}
 	wantKind(t, fs.Link(root(t, fs), []byte("dirlink"), dir), KindIsDirectory)
 	wantKind(t, fs.Link(root(t, fs), []byte("hello.txt"), hello), KindExists)
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	if got := resolve(t, fs, "/hello.txt"); got.Links != 3 {
 		t.Fatalf("links %d", got.Links)
 	}
@@ -287,7 +287,7 @@ func TestHardLinks(t *testing.T) {
 	if len(attrs) != 2 {
 		t.Fatalf("attributes lost: %d", len(attrs))
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 }
 
 func TestStaleGeneration(t *testing.T) {
@@ -324,14 +324,14 @@ func TestRename(t *testing.T) {
 	if err := fs.Rename(refresh("/"), []byte("hello.txt"), refresh("/b"), []byte("g")); err != nil {
 		t.Fatal(err)
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	// A directory over an empty one, across parents; its ".." follows.
 	if err := fs.Rename(refresh("/a"), []byte("child"), refresh("/b"), []byte("empty")); err != nil {
 		t.Fatal(err)
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	wantKind(t, fs.Rename(refresh("/"), []byte("a"), refresh("/b/empty"), []byte("a")), 0)
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	// Refusals leave the volume as it was.
 	snapshot := append([]byte(nil), device.data...)
 	wantKind(t, fs.Rename(refresh("/"), []byte("b"), refresh("/b/empty/a"), []byte("loop")), KindInvalid)
@@ -349,7 +349,7 @@ func TestRename(t *testing.T) {
 	if !bytes.Equal(snapshot, device.data) {
 		t.Fatal("rename onto the same inode changed the volume")
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 }
 
 func TestSparseAndLargeWrites(t *testing.T) {
@@ -368,7 +368,7 @@ func TestSparseAndLargeWrites(t *testing.T) {
 	if n, err := fs.WriteFile(ok(fs.Inode(file.Number)), 1<<20, big); err != nil || n != len(big) {
 		t.Fatalf("big write %d %v", n, err)
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	reread := mount(t, device)
 	inode := lookupInode(t, reread, root(t, reread), "sparse-new")
 	if inode.Size != far+4 {
@@ -397,7 +397,7 @@ func TestOverwriteAndAppend(t *testing.T) {
 	if _, err := fs.WriteFile(resolve(t, fs, "/digests"), uint64(len(original)), []byte("appended")); err != nil {
 		t.Fatal(err)
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	want := append(append([]byte(nil), original...), "appended"...)
 	copy(want[4090:], patch)
 	if got := readAll(t, fs, resolve(t, fs, "/digests")); !bytes.Equal(got, want) {
@@ -428,7 +428,7 @@ func TestUnwrittenConversion(t *testing.T) {
 	if want := append(make([]byte, 100), "inside"...); !bytes.Equal(got[:106], want) || !bytes.Equal(got[106:], make([]byte, 4096-106)) {
 		t.Fatal("converted block content")
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 }
 
 func TestTruncate(t *testing.T) {
@@ -439,7 +439,7 @@ func TestTruncate(t *testing.T) {
 	if err := fs.Truncate(fragmented, 100*8192+10); err != nil {
 		t.Fatal(err)
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	inode := resolve(t, fs, "/fragmented")
 	got := make([]byte, 4096)
 	ok(fs.ReadFile(inode, 100*8192, got))
@@ -452,7 +452,7 @@ func TestTruncate(t *testing.T) {
 	if err := fs.Truncate(resolve(t, fs, "/fragmented"), 0); err != nil {
 		t.Fatal(err)
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	inode = resolve(t, fs, "/fragmented")
 	if inode.Blocks512 != 0 || le16(inode.blockArea[:], 6) != 0 {
 		t.Fatalf("truncated inode keeps %d sectors, depth %d", inode.Blocks512, le16(inode.blockArea[:], 6))
@@ -479,7 +479,7 @@ func TestDeepExtentTree(t *testing.T) {
 	if depth := le16(inode.blockArea[:], 6); depth < 2 {
 		t.Fatalf("depth %d after %d extents", depth, extents)
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	for index := 0; index < extents; index += 97 {
 		got := make([]byte, 6)
 		ok(fs.ReadFile(inode, uint64(index)*8192, got))
@@ -490,7 +490,7 @@ func TestDeepExtentTree(t *testing.T) {
 	if err := fs.Truncate(inode, 3*8192); err != nil {
 		t.Fatal(err)
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	inode = ok(fs.Inode(file.Number))
 	if depth := le16(inode.blockArea[:], 6); depth != 0 {
 		t.Fatalf("depth %d after truncating to two extents", depth)
@@ -517,7 +517,7 @@ func TestIndexedDirectory(t *testing.T) {
 			if grown := resolve(t, fs, "/names").Size / 4096; grown <= startBlocks {
 				t.Fatal("no leaf split")
 			}
-			checkVolume(t, device)
+			syncCheck(t, fs, device)
 			for index := 0; index < 2500; index += 2 {
 				if err := fs.Unlink(resolve(t, fs, "/names"), []byte(fmt.Sprintf("added-%d-\xe9\xff", index))); err != nil {
 					t.Fatalf("unlink %d: %v", index, err)
@@ -528,7 +528,7 @@ func TestIndexedDirectory(t *testing.T) {
 					t.Fatalf("unlink fixture name %d: %v", index, err)
 				}
 			}
-			checkVolume(t, device)
+			syncCheck(t, fs, device)
 		})
 	}
 }
@@ -545,7 +545,7 @@ func TestLinearDirectoryGrowth(t *testing.T) {
 	if size := ok(fs.Inode(dir.Number)).Size; size < 3*4096 {
 		t.Fatalf("directory size %d", size)
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 }
 
 // TestNoSpace fills the volume, checks the write reports what committed and
@@ -564,7 +564,7 @@ func TestNoSpace(t *testing.T) {
 			break
 		}
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	inode := ok(fs.Inode(file.Number))
 	if inode.Size != offset || fs.Info().AvailableBytes != 0 {
 		t.Fatalf("size %d, written %d, available %d", inode.Size, offset, fs.Info().AvailableBytes)
@@ -574,7 +574,7 @@ func TestNoSpace(t *testing.T) {
 	if err := fs.Unlink(root(t, fs), []byte("fill")); err != nil {
 		t.Fatal(err)
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	if after := fs.Info(); after.FreeBlocks != before.FreeBlocks || after.FreeInodes != before.FreeInodes {
 		t.Fatalf("free %d/%d, was %d/%d", after.FreeBlocks, after.FreeInodes, before.FreeBlocks, before.FreeInodes)
 	}
@@ -595,7 +595,7 @@ func TestInodeExhaustion(t *testing.T) {
 	if fs.Info().FreeInodes != 0 {
 		t.Fatalf("stopped with %d free inodes", fs.Info().FreeInodes)
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 }
 
 // TestReadFaults fails each device read of an operation in turn: every
@@ -661,7 +661,7 @@ func TestReadFaults(t *testing.T) {
 				err := operation(fs)
 				device.failRead = 0
 				if err == nil {
-					checkVolume(t, device)
+					syncCheck(t, fs, device)
 					return
 				}
 				if KindOf(err) != KindIO {
@@ -672,7 +672,7 @@ func TestReadFaults(t *testing.T) {
 				if !bytes.Equal(snapshot, device.data) && device.writes == 0 {
 					t.Fatalf("fault %d changed the volume without writing", fault)
 				}
-				checkVolume(t, device)
+				syncCheck(t, fs, device)
 				if fault > 2000 {
 					t.Fatal("operation never completed")
 				}
@@ -704,12 +704,12 @@ func pathOf(fs *FS, path string) (*Inode, error) {
 func TestWriteFailureStopsMutation(t *testing.T) {
 	fs, device := scratch(t, "canonical")
 	device.failWrite = device.writes + 2
-	_, err := fs.Create(root(t, fs), []byte("x"), ModeRegular|0o644, 0, 0)
-	wantKind(t, err, KindIO)
+	ok(fs.Create(root(t, fs), []byte("x"), ModeRegular|0o644, 0, 0))
+	wantKind(t, fs.Sync(), KindIO)
 	if fs.State() != StateFailed {
 		t.Fatalf("state %v", fs.State())
 	}
-	_, err = fs.Create(root(t, fs), []byte("y"), ModeRegular|0o644, 0, 0)
+	_, err := fs.Create(root(t, fs), []byte("y"), ModeRegular|0o644, 0, 0)
 	wantKind(t, err, KindReadOnly)
 }
 
@@ -829,7 +829,12 @@ func runRandomOperations(t *testing.T, seed int64, steps int) *scratchDevice {
 			delete(files, path)
 		}
 		if step%100 == 99 {
-			checkVolume(t, device)
+			// The remount below drops the old mount as a crash would:
+			// only what the sync committed may come back.
+			if err := fs.Sync(); err != nil {
+				t.Fatalf("step %d sync: %v", step, err)
+			}
+			syncCheck(t, fs, device)
 			fs = ok(mountScratch(device, testClock()))
 			for path, file := range files {
 				if got := readAll(t, fs, resolve(t, fs, path)); !bytes.Equal(got, file.data) {
@@ -838,7 +843,7 @@ func runRandomOperations(t *testing.T, seed int64, steps int) *scratchDevice {
 			}
 		}
 	}
-	checkVolume(t, device)
+	syncCheck(t, fs, device)
 	return device
 }
 
@@ -855,5 +860,70 @@ func sortStrings(values []string) {
 		for at := index; at > 0 && values[at-1] > values[at]; at-- {
 			values[at-1], values[at] = values[at], values[at-1]
 		}
+	}
+}
+
+// syncCheck commits what fs holds and checks the volume on device.
+func syncCheck(t testing.TB, fs *FS, device Device) {
+	t.Helper()
+	if err := fs.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	checkVolume(t, device)
+}
+
+// TestLinearDirectoryBecomesIndexed fills a new directory past its first
+// block: it turns into a hash tree, as Linux makes it, every name stays
+// reachable through the index, and the counts check out.
+func TestLinearDirectoryBecomesIndexed(t *testing.T) {
+	fs, device := scratch(t, "canonical")
+	dir := ok(fs.Mkdir(root(t, fs), []byte("grows"), 0o755, 0, 0))
+	for index := 0; index < 600; index++ {
+		ok(fs.Create(ok(fs.Inode(dir.Number)), []byte(fmt.Sprintf("name-%04d", index)), ModeRegular|0o644, 0, 0))
+		if index == 50 && fs.isIndexed(ok(fs.Inode(dir.Number))) {
+			t.Fatal("a directory of one block became indexed")
+		}
+	}
+	grown := ok(fs.Inode(dir.Number))
+	if !fs.isIndexed(grown) {
+		t.Fatal("a directory of several blocks stayed linear")
+	}
+	for index := 0; index < 600; index += 2 {
+		if err := fs.Unlink(ok(fs.Inode(dir.Number)), []byte(fmt.Sprintf("name-%04d", index))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	syncCheck(t, fs, device)
+	reread := mount(t, device)
+	listed := 0
+	if _, err := reread.ReadDir(lookupInode(t, reread, root(t, reread), "grows"), 0, func(*DirEntry) bool { listed++; return true }); err != nil {
+		t.Fatal(err)
+	}
+	if listed != 300 {
+		t.Fatalf("listed %d names, want 300", listed)
+	}
+	for index := 1; index < 600; index += 2 {
+		lookupInode(t, reread, lookupInode(t, reread, root(t, reread), "grows"), fmt.Sprintf("name-%04d", index))
+	}
+}
+
+// TestReadDirSurvivesEviction lists a directory while the callback reads
+// more blocks than the cache holds, as a caller that reads each entry's
+// inode does in a large hash-ordered directory: the listing stays whole.
+func TestReadDirSurvivesEviction(t *testing.T) {
+	fs, _ := scratch(t, "canonical")
+	big := resolve(t, fs, "/big")
+	listed := 0
+	if _, err := fs.ReadDir(big, 0, func(*DirEntry) bool {
+		for block := uint64(0); block < 2*cacheBlocks; block++ {
+			ok(fs.cache.get(block))
+		}
+		listed++
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if listed != 2000 {
+		t.Fatalf("listed %d of 2000 names", listed)
 	}
 }

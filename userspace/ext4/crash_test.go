@@ -130,11 +130,18 @@ func (device *crashDevice) WriteAt(offset uint64, data []byte) bool {
 	if end < offset || end > uint64(len(device.current)) {
 		return false
 	}
-	if device.failAfter != 0 && len(device.events) >= device.failAfter {
-		return false
+	// A write of several blocks is recorded block by block. The model
+	// lets every sector of an unflushed write land or not, so this changes
+	// nothing it allows, and each block keeps its own class.
+	for start := 0; start < len(data); start += int(device.blockSize) {
+		if device.failAfter != 0 && len(device.events) >= device.failAfter {
+			return false
+		}
+		block := data[start:min(start+int(device.blockSize), len(data))]
+		at := offset + uint64(start)
+		device.events = append(device.events, crashEvent{offset: at, data: append([]byte(nil), block...)})
+		copy(device.current[at:at+uint64(len(block))], block)
 	}
-	device.events = append(device.events, crashEvent{offset: offset, data: append([]byte(nil), data...)})
-	copy(device.current[offset:end], data)
 	return true
 }
 
@@ -236,7 +243,7 @@ func crashWorkload(t *testing.T) []crashOp {
 		{name: "truncate many extents", run: func(fs *FS) error { return fs.Truncate(in(fs, "/fragmented"), 10*8192) }},
 		{name: "create big", run: create("/", "bigfile")},
 		{name: "large write", run: write("/bigfile", big), prefix: "./bigfile", data: big},
-		{name: "checkpoint", run: func(fs *FS) error { return fs.Sync() }},
+		{name: "sync", run: func(fs *FS) error { return fs.Sync() }},
 		{name: "unlink large", run: func(fs *FS) error { return fs.Unlink(in(fs, "/"), []byte("fragmented")) }},
 		{name: "replace by rename", run: func(fs *FS) error { return fs.Rename(in(fs, "/d1"), []byte("b"), in(fs, "/"), []byte("hello.txt")) }},
 		{name: "mkdir for rmdir", run: func(fs *FS) error { _, err := fs.Mkdir(in(fs, "/"), []byte("d2"), 0o755, 0, 0); return err }},
@@ -249,10 +256,10 @@ func crashWorkload(t *testing.T) []crashOp {
 			return fs.Unlink(in(fs, "/"), []byte("bigfile"))
 		}},
 		{name: "write to unlinked", run: func(fs *FS) error {
-			_, err := fs.WriteFile(ok(fs.orphanInode(fs.orphans[0])), 0, []byte("still open"))
+			_, err := fs.WriteFile(ok(fs.orphanInode(fs.orphanList()[0])), 0, []byte("still open"))
 			return err
 		}},
-		{name: "last close", run: func(fs *FS) error { return fs.Unpin(ok(fs.orphanInode(fs.orphans[0]))) }},
+		{name: "last close", run: func(fs *FS) error { return fs.Unpin(ok(fs.orphanInode(fs.orphanList()[0]))) }},
 	}
 	for index := 0; index < 30; index++ {
 		ops = append(ops, crashOp{name: "create indexed", run: create("/big", fmt.Sprintf("crash-%d", index))})
@@ -280,23 +287,36 @@ func crashBase(t *testing.T) []byte {
 type crashRun struct {
 	device *crashDevice
 	// manifests[k] is the tree after the first k operations; ends[k] is
-	// the event count when operation k returned (ends[0]: the mount).
+	// the event count when operation k returned (ends[0]: the mount), and
+	// synced[k] the count when a sync after it returned, or -1.
 	manifests []string
 	ends      []int
+	synced    []int
 	ops       []crashOp
 }
 
-func recordCrashRun(t *testing.T) *crashRun {
+// recordCrashRun runs the crash workload and syncs after every
+// syncEvery-th operation; zero syncs only at unmount.
+func recordCrashRun(t *testing.T, syncEvery int) *crashRun {
 	run := &crashRun{device: newCrashDevice(crashBase(t)), ops: crashWorkload(t)}
 	fs := ok(mountScratch(run.device, testClock()))
 	run.manifests = append(run.manifests, volumeManifest(t, fs))
 	run.ends = append(run.ends, len(run.device.events))
-	for _, op := range run.ops {
+	run.synced = append(run.synced, len(run.device.events))
+	for index, op := range run.ops {
 		if err := op.run(fs); err != nil {
 			t.Fatalf("%s: %v", op.name, err)
 		}
 		run.manifests = append(run.manifests, volumeManifest(t, fs))
 		run.ends = append(run.ends, len(run.device.events))
+		synced := -1
+		if syncEvery > 0 && (index+1)%syncEvery == 0 {
+			if err := fs.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			synced = len(run.device.events)
+		}
+		run.synced = append(run.synced, synced)
 	}
 	if err := fs.Unmount(); err != nil {
 		t.Fatal(err)
@@ -305,8 +325,8 @@ func recordCrashRun(t *testing.T) *crashRun {
 }
 
 // allowed lists the trees a cut at point may recover to: the tree after
-// the last operation that returned, the one after the operation in
-// flight, and for a multi-transaction write every committed prefix.
+// any operation from the last one a completed sync covered through the
+// one in flight, and for a multi-transaction write every committed prefix.
 func (run *crashRun) allowed(point int) map[string]bool {
 	done := 0
 	for done+1 < len(run.ends) && run.ends[done+1] <= point {
@@ -317,27 +337,96 @@ func (run *crashRun) allowed(point int) map[string]bool {
 		result[run.manifests[0]] = true
 		return result
 	}
-	result[run.manifests[done]] = true
-	if done+1 >= len(run.manifests) {
-		return result
+	floor := 0
+	for k := 0; k <= done; k++ {
+		if run.synced[k] >= 0 && run.synced[k] <= point {
+			floor = k
+		}
 	}
-	result[run.manifests[done+1]] = true
-	op := run.ops[done]
-	if op.prefix == "" {
-		return result
+	last := done + 1
+	if last >= len(run.manifests) {
+		last = len(run.manifests) - 1
 	}
-	lines := strings.Split(run.manifests[done], "\n")
-	for at, line := range lines {
-		if !strings.HasPrefix(line, "file\t"+op.prefix+"\t") {
+	for k := floor; k <= last; k++ {
+		result[run.manifests[k]] = true
+		if k == 0 || run.ops[k-1].prefix == "" {
 			continue
 		}
-		for length := 0; length <= len(op.data); length += 4096 {
-			sum := sha256.Sum256(op.data[:length])
-			lines[at] = fmt.Sprintf("file\t%s\t%d\t%s", op.prefix, length, hex.EncodeToString(sum[:]))
-			result[strings.Join(lines, "\n")] = true
+		op := run.ops[k-1]
+		lines := strings.Split(run.manifests[k-1], "\n")
+		for at, line := range lines {
+			if !strings.HasPrefix(line, "file\t"+op.prefix+"\t") {
+				continue
+			}
+			for length := 0; length <= len(op.data); length += 4096 {
+				sum := sha256.Sum256(op.data[:length])
+				lines[at] = fmt.Sprintf("file\t%s\t%d\t%s", op.prefix, length, hex.EncodeToString(sum[:]))
+				result[strings.Join(lines, "\n")] = true
+			}
 		}
 	}
 	return result
+}
+
+// window returns the operations a cut at point may show: from the last one
+// a completed sync covered through the one in flight.
+func (run *crashRun) window(point int) (int, int) {
+	done := 0
+	for done+1 < len(run.ends) && run.ends[done+1] <= point {
+		done++
+	}
+	floor := 0
+	for k := 0; k <= done; k++ {
+		if run.synced[k] >= 0 && run.synced[k] <= point {
+			floor = k
+		}
+	}
+	return floor, min(done+1, len(run.manifests)-1)
+}
+
+// sameShape reports whether manifest matches an allowed tree in every
+// directory, link and file size, with each file's contents equal to the
+// same path's in some tree of the window. A file that already existed when
+// the last completed sync returned may hold anything: writes after the
+// sync overwrite its blocks in place, even after its name went.
+func (run *crashRun) sameShape(point int, allowed map[string]bool, manifest string) bool {
+	floor, last := run.window(point)
+	contents := map[string]bool{}
+	for _, tree := range run.manifests[floor : last+1] {
+		for _, line := range strings.Split(tree, "\n") {
+			if strings.HasPrefix(line, "file\t") {
+				contents[line] = true
+			}
+		}
+	}
+	existed := map[string]bool{}
+	for _, line := range strings.Split(run.manifests[floor], "\n") {
+		if fields := strings.Split(line, "\t"); fields[0] == "file" && len(fields) == 4 {
+			existed[fields[1]] = true
+		}
+	}
+	for _, line := range strings.Split(manifest, "\n") {
+		fields := strings.Split(line, "\t")
+		if fields[0] == "file" && len(fields) == 4 && !contents[line] && !existed[fields[1]] {
+			return false
+		}
+	}
+	shape := func(tree string) string {
+		lines := strings.Split(tree, "\n")
+		for index, line := range lines {
+			if fields := strings.Split(line, "\t"); fields[0] == "file" && len(fields) == 4 {
+				lines[index] = strings.Join(fields[:3], "\t")
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+	want := shape(manifest)
+	for tree := range allowed {
+		if shape(tree) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // recoverAt rebuilds the disk after a cut and mounts it writable, which
@@ -397,16 +486,30 @@ func (run *crashRun) crashPoints(t *testing.T, random *rand.Rand, limit int) []i
 }
 
 func TestPowerCutRecovery(t *testing.T) {
-	run := recordCrashRun(t)
-	random := rand.New(rand.NewSource(1))
-	points := run.crashPoints(t, random, 150)
+	powerCuts(t, recordCrashRun(t, 1), rand.New(rand.NewSource(1)), 150, false)
+}
+
+// TestPowerCutBatched cuts power under a workload that syncs only every
+// fifth operation, so several operations share a commit: a cut recovers
+// at least what the last completed sync covered.
+func TestPowerCutBatched(t *testing.T) {
+	powerCuts(t, recordCrashRun(t, 5), rand.New(rand.NewSource(7)), 150, true)
+}
+
+// powerCuts cuts power at each chosen point and checks what recovery
+// finds. With inPlace, a file's contents may come from any operation
+// after the last completed sync: ordered mode writes an overwritten
+// block at home before the commit that carries the batch's metadata, as
+// Linux does, so those bytes can land while the batch does not.
+func powerCuts(t *testing.T, run *crashRun, random *rand.Rand, limit int, inPlace bool) {
+	points := run.crashPoints(t, random, limit)
 	t.Logf("%d events, %d operations, %d cuts", len(run.device.events), len(run.ops), len(points))
 	for _, point := range points {
 		image := run.device.imageAt(point, random)
 		device, fs := recoverAt(t, image)
 		allowed := run.allowed(point)
 		manifest := volumeManifest(t, fs)
-		if !allowed[manifest] {
+		if !allowed[manifest] && !(inPlace && run.sameShape(point, allowed, manifest)) {
 			t.Fatalf("cut at event %d recovered a tree no operation sequence produces:\n%s", point, manifest)
 		}
 		if err := verifyVolume(device); err != nil {
@@ -422,7 +525,7 @@ func TestPowerCutRecovery(t *testing.T) {
 // recovers again: replay must give the same volume however often it is
 // interrupted.
 func TestPowerCutDuringReplay(t *testing.T) {
-	run := recordCrashRun(t)
+	run := recordCrashRun(t, 1)
 	random := rand.New(rand.NewSource(2))
 	for attempt := 0; attempt < 12; attempt++ {
 		point := run.ends[2+random.Intn(len(run.ends)-3)] - 1 - random.Intn(3)
@@ -455,8 +558,17 @@ func TestCommitOrder(t *testing.T) {
 	device := newCrashDevice(crashBase(t))
 	fs := ok(mountScratch(device, testClock()))
 	file := ok(fs.Create(root(t, fs), []byte("ordered"), ModeRegular|0o644, 0, 0))
+	if err := fs.Sync(); err != nil {
+		t.Fatal(err)
+	}
 	start := len(device.events)
 	if _, err := fs.WriteFile(file, 0, bytes.Repeat([]byte{'x'}, 8192)); err != nil {
+		t.Fatal(err)
+	}
+	if start != len(device.events) {
+		t.Fatal("a write reached the device before the sync")
+	}
+	if err := fs.Sync(); err != nil {
 		t.Fatal(err)
 	}
 	events := device.events[start:]
@@ -487,19 +599,19 @@ func TestCommitOrder(t *testing.T) {
 }
 
 // TestFailedFlushStopsMutation fails the device in the middle of a commit:
-// the operation reports an I/O error, the volume refuses further work and
-// the next mount recovers a consistent tree.
+// the sync reports an I/O error, the volume refuses further work and the
+// next mount recovers a consistent tree.
 func TestFailedFlushStopsMutation(t *testing.T) {
 	device := newCrashDevice(crashBase(t))
 	fs := ok(mountScratch(device, testClock()))
 	before := volumeManifest(t, fs)
 	device.failAfter = len(device.events) + 3
-	_, err := fs.Create(root(t, fs), []byte("lost"), ModeRegular|0o644, 0, 0)
-	wantKind(t, err, KindIO)
+	ok(fs.Create(root(t, fs), []byte("lost"), ModeRegular|0o644, 0, 0))
+	wantKind(t, fs.Sync(), KindIO)
 	if fs.State() != StateFailed {
 		t.Fatalf("state after a failed commit: %v", fs.State())
 	}
-	_, err = fs.Create(root(t, fs), []byte("after"), ModeRegular|0o644, 0, 0)
+	_, err := fs.Create(root(t, fs), []byte("after"), ModeRegular|0o644, 0, 0)
 	wantKind(t, err, KindReadOnly)
 	wantKind(t, fs.Unmount(), KindIO)
 	recovered, again := recoverAt(t, append([]byte(nil), device.current...))
@@ -534,20 +646,31 @@ func TestCleanUnmountState(t *testing.T) {
 	lookupInode(t, reread, root(t, reread), "kept")
 }
 
-// TestSyncEmptiesLog checks that Sync checkpoints: a cut right after it
-// leaves nothing to replay.
-func TestSyncEmptiesLog(t *testing.T) {
+// TestSyncCommitsBatch checks what a cut keeps: operations a Sync covered
+// come back from the log, and one after it, still in memory, does not.
+func TestSyncCommitsBatch(t *testing.T) {
 	device := newCrashDevice(crashBase(t))
 	fs := ok(mountScratch(device, testClock()))
+	events := len(device.events)
 	ok(fs.Create(root(t, fs), []byte("synced"), ModeRegular|0o644, 0, 0))
+	ok(fs.Create(root(t, fs), []byte("also"), ModeRegular|0o644, 0, 0))
+	if len(device.events) != events {
+		t.Fatal("an operation reached the device before the sync")
+	}
 	if err := fs.Sync(); err != nil {
 		t.Fatal(err)
 	}
+	ok(fs.Create(root(t, fs), []byte("unsynced"), ModeRegular|0o644, 0, 0))
 	_, again := recoverAt(t, device.imageAt(len(device.events), rand.New(rand.NewSource(3))))
-	if replay := again.Recovery(); replay.Transactions != 0 {
-		t.Fatalf("replayed %+v after Sync", replay)
+	// The log holds the mounting transaction and the one batch.
+	if replay := again.Recovery(); replay.Transactions != 2 {
+		t.Fatalf("replayed %+v, want the mount and the batch", replay)
 	}
 	lookupInode(t, again, root(t, again), "synced")
+	lookupInode(t, again, root(t, again), "also")
+	if _, _, err := again.Lookup(root(t, again), []byte("unsynced")); KindOf(err) != KindNotFound {
+		t.Fatalf("an operation after the sync survived the cut: %v", err)
+	}
 }
 
 // TestLogWrapsAndRevokes runs enough transactions to wrap the log several
@@ -572,6 +695,9 @@ func TestLogWrapsAndRevokes(t *testing.T) {
 			if err := fs.Unlink(dir, []byte(fmt.Sprintf("f%d", round-1))); err != nil {
 				t.Fatal(err)
 			}
+		}
+		if err := fs.Sync(); err != nil {
+			t.Fatal(err)
 		}
 	}
 	if fs.log.tailSeq == startSeq {
@@ -633,6 +759,9 @@ func TestOrphanCleanupAfterCut(t *testing.T) {
 	if err := fs.Unlink(root(t, fs), []byte("held")); err != nil {
 		t.Fatal(err)
 	}
+	if err := fs.Sync(); err != nil {
+		t.Fatal(err)
+	}
 	if fs.sb.LastOrphan != file.Number {
 		t.Fatalf("orphan head %d, want %d", fs.sb.LastOrphan, file.Number)
 	}
@@ -661,11 +790,11 @@ func TestExportCrashImages(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	run := recordCrashRun(t)
+	run := recordCrashRun(t, 1)
 	random := rand.New(rand.NewSource(6))
 	exported := 0
 	for _, op := range []int{2, 11, 13, 15, 19, 31} {
-		point := run.ends[op] - 2
+		point := run.synced[op] - 2
 		image := run.device.imageAt(point, random)
 		_, fs := recoverAt(t, append([]byte(nil), image...))
 		if fs.Recovery().Transactions == 0 {

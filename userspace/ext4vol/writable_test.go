@@ -207,6 +207,9 @@ func TestWritableMountRecoversDirtyVolume(t *testing.T) {
 	root, _ := volume.Root()
 	_, status := volume.CreateName(root, name(t, "kept"))
 	must(t, status)
+	if !volume.Flush() {
+		t.Fatal("flush")
+	}
 	// No unmount: the service died with the journal live.
 	snapshot := &writableDevice{memDevice: memDevice{data: append([]byte(nil), device.data...)}}
 	var readOnly Volume
@@ -236,8 +239,12 @@ func TestFailedWriteFailsTheVolume(t *testing.T) {
 		t.Fatal("fresh volume failed")
 	}
 	device.refuseWrites = true
-	if _, status := volume.CreateName(root, name(t, "lost")); status == ramfs.StatusOK {
-		t.Fatal("create on a dead device")
+	// The create waits in the pending transaction; the flush that commits
+	// it reaches the dead device.
+	_, status := volume.CreateName(root, name(t, "lost"))
+	must(t, status)
+	if volume.Flush() {
+		t.Fatal("flush on a dead device")
 	}
 	if !volume.Failed() {
 		t.Fatal("refused write did not fail the volume")

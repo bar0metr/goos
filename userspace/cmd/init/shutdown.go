@@ -36,14 +36,7 @@ func shutDown(powerOff bool, correlationOfShell uint64) {
 		name = "poweroff"
 	}
 	syslog.Info("shutdown requested", syslog.Str("action", name))
-	correlation++
-	sync, encoded := vfs.SyncRequest(correlation)
-	if !encoded {
-		sendControlStatus(execproto.ControlSyncFailed, correlationOfShell)
-		return
-	}
-	synced, status, _ := filesystemRequests.Control(handle.ID(vfsControlHandle), &sync, vfsSessionDeadline)
-	if status != ipc.StatusOK || synced != vfs.StatusOK {
+	if !syncStorage() {
 		syslog.Error("shutdown: storage sync failed", syslog.Str("action", name))
 		sendControlStatus(execproto.ControlSyncFailed, correlationOfShell)
 		return
@@ -70,6 +63,18 @@ func shutDown(powerOff bool, correlationOfShell uint64) {
 		return
 	}
 	performShutdown(powerOff, correlationOfShell)
+}
+
+// syncStorage asks the VFS to make every completed write durable, on the
+// persistent volume and on each mounted additional volume.
+func syncStorage() bool {
+	correlation++
+	sync, encoded := vfs.SyncRequest(correlation)
+	if !encoded {
+		return false
+	}
+	synced, status, _ := filesystemRequests.Control(handle.ID(vfsControlHandle), &sync, vfsSessionDeadline)
+	return status == ipc.StatusOK && synced == vfs.StatusOK
 }
 
 func performShutdown(powerOff bool, correlationOfShell uint64) {

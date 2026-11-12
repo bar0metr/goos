@@ -36,6 +36,7 @@ The following foundation is implemented.
 - immutable installed `/system`, bootstrap/recovery `/bootstrap`, persistent `/home` and mutable `/state`;
 - userspace virtio-blk and virtio-net drivers;
 - persistent FAT32 storage with interoperable metadata, VFAT long names, MBR/GPT slices, checking/repair, stable open-file identity and restart recovery;
+- Linux ext4 on up to four additional volumes: read-only for any supported profile, read-write with a JBD2 journal, batched commits, orphan recovery and `e2fsck`-checked interchange with Linux (ADR 0220 to ADR 0227, [validation](ext4-validation.md));
 - versioned typed configuration and persistent system log;
 - independent restart of storage/network/terminal-facing services where supported;
 - capability-scoped VFS authorities for sensitive paths and administration operations;
@@ -302,6 +303,10 @@ Implemented:
 - bounded load randomization for Linux static PIE images (ADR 0219).
 
 See the [0.2.9 release notes](../releases/0.2.9.md).
+
+## 0.3.0 — ext4
+
+Added a userspace ext4 reader with a pinned feature contract (ADR 0220), read-only additional volumes in four slots beside the persistent FAT32 volume (ADR 0221, 0222), symbolic links, hard links and Unix metadata through the VFS (ADR 0223), the mutation engine (ADR 0224), the JBD2 journal with replay and orphan cleanup (ADR 0225), opt-in read-write additional volumes (ADR 0226) and batched journal commits with the shell's `sync` (ADR 0227). The persistent volume stays FAT32. See the [0.3.0 release notes](../releases/0.3.0.md).
 
 ---
 

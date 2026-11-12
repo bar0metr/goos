@@ -81,9 +81,11 @@ grants nothing from those bits (ADR 0223). Marking a file read-only clears
 its write bits. Extended attributes stay as Linux left them, and GoOS
 cannot change owners or other mode bits.
 
-Each operation commits through the journal in ordered-data mode and is
-durable when the service replies (ADR 0225), so `fsync` has nothing more to
-wait for. A file you remove while it is open keeps its data until you close
+Operations commit through the journal in ordered-data mode, in batches
+(ADR 0227). An operation that returned is durable once `fsync`, the shell's
+`sync`, `umount`, `reboot` or `poweroff` returns, or after the service's
+one-second commit interval; a crash before that loses it, as on Linux. An
+`fsync` that returned is never lost. A file you remove while it is open keeps its data until you close
 it. `umount` empties the journal and marks the volume clean, so Linux and
 the read-only mount accept it. If the service or the machine dies first,
 the next read-write mount, Linux, or `e2fsck -fy` replays the journal.
@@ -94,7 +96,9 @@ Do not mount one partition in GoOS and Linux at the same time.
 `make test-ext4-unit` runs the reader and adapter tests against images that
 e2fsprogs 1.47.2 built (docs/development/ext4-reference-versions.md).
 `make test-ext4-stress` repeats the random-damage walk 3000 times and
-cuts power at every flush of the crash workload.
+cuts power before and after every event of the crash workload, once with a
+sync after each operation and once batched; `test-all` and
+`release-check` run it.
 `make test-volumes` boots a disk with the installed system and three Linux
 ext4 partitions and checks mounting, the refusals, symbolic links, the
 metadata a Linux program sees (`abi-probe ext4-links`), and a replaced

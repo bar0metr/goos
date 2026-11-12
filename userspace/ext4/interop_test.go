@@ -81,6 +81,40 @@ func TestExportMutatedImages(t *testing.T) {
 			}
 			return device
 		},
+		// 10000 names in one hashed directory, as hard links since the
+		// fixture has 4096 inodes, and a chain of 200 directories with a
+		// file at the bottom that a rename moves to the top.
+		"scale": func(t *testing.T) *scratchDevice {
+			fs, device := scratch(t, "canonical")
+			if err := fs.Unlink(root(t, fs), []byte("sparse")); err != nil {
+				t.Fatal(err)
+			}
+			names := ok(fs.Mkdir(root(t, fs), []byte("many"), 0o755, 0, 0))
+			target := ok(fs.Create(root(t, fs), []byte("target"), ModeRegular|0o644, 0, 0))
+			if _, err := fs.WriteFile(target, 0, []byte("linked\n")); err != nil {
+				t.Fatal(err)
+			}
+			for index := 0; index < 10000; index++ {
+				if err := fs.Link(ok(fs.Inode(names.Number)), []byte(fmt.Sprintf("link-%05d", index)), ok(fs.Inode(target.Number))); err != nil {
+					t.Fatalf("link %d: %v", index, err)
+				}
+			}
+			if !fs.isIndexed(ok(fs.Inode(names.Number))) {
+				t.Fatal("10000 names left the directory linear")
+			}
+			dir := root(t, fs)
+			for depth := 0; depth < 200; depth++ {
+				dir = ok(fs.Mkdir(dir, []byte("d"), 0o755, 0, 0))
+			}
+			ok(fs.Create(dir, []byte("bottom"), ModeRegular|0o644, 0, 0))
+			if err := fs.Rename(dir, []byte("bottom"), root(t, fs), []byte("from-bottom")); err != nil {
+				t.Fatal(err)
+			}
+			if links := ok(fs.Inode(target.Number)).Links; links != 10001 {
+				t.Fatalf("target has %d links, want 10001", links)
+			}
+			return device
+		},
 		"full": func(t *testing.T) *scratchDevice {
 			fs, device := scratch(t, "canonical")
 			if err := fs.Unlink(root(t, fs), []byte("sparse")); err != nil {

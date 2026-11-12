@@ -70,7 +70,15 @@ type FS struct {
 	scratch     []byte
 	// mutable is set by a writable mount once recovery has finished.
 	mutable bool
+	// txn is the running operation's transaction; pending holds the
+	// operations that finished since the last commit (txn.go).
 	txn     *txn
+	pending *txn
+	// runBuffer gathers consecutive blocks of a commit into one write.
+	runBuffer []byte
+	// spare holds block buffers of dropped staged copies for the next
+	// ones, so a batch of small operations does not churn the heap.
+	spare [][]byte
 	// live holds the inodes the running operation has loaded or created.
 	live    map[uint32]*Inode
 	now     func() Timestamp
@@ -271,6 +279,10 @@ func (fs *FS) mountWritable(options Options) (*FS, error) {
 		fs.state = StateFailed
 		return nil, err
 	}
+	if err := fs.Sync(); err != nil {
+		fs.mutable = false
+		return nil, err
+	}
 	fs.state = StateReadyRW
 	return fs, nil
 }
@@ -353,6 +365,9 @@ func (fs *FS) markMounted(mounted bool) error {
 		sealSuperblock(raw)
 		return nil
 	})
+	if err == nil {
+		err = fs.Sync()
+	}
 	if err != nil {
 		return err
 	}
@@ -362,9 +377,9 @@ func (fs *FS) markMounted(mounted bool) error {
 	return nil
 }
 
-// Sync makes every committed transaction durable at its home location and
-// empties the log. Each operation is already durable in the log when it
-// returns; Sync only shortens the next replay.
+// Sync commits the pending transaction: when it returns, every operation
+// that returned before it survives a power cut. A failed commit leaves the
+// volume failed.
 func (fs *FS) Sync() error {
 	if !fs.mutable {
 		if fs.state == StateFailed {
@@ -372,10 +387,10 @@ func (fs *FS) Sync() error {
 		}
 		return nil
 	}
-	if err := fs.reclaim(); err != nil {
-		return fs.failWrite()
+	if fs.txn != nil {
+		return fail(KindInternal, "sync inside an operation")
 	}
-	return nil
+	return fs.commitPending()
 }
 
 // Unmount releases pinned inodes that lost their last link, empties the
@@ -393,6 +408,9 @@ func (fs *FS) Unmount() error {
 		delete(fs.pins, number)
 	}
 	if err := fs.cleanupPinned(); err != nil {
+		return err
+	}
+	if err := fs.Sync(); err != nil {
 		return err
 	}
 	fs.state = StateQuiescing
@@ -416,7 +434,7 @@ func (fs *FS) Unmount() error {
 // cleanupPinned releases the listed inodes that have no links: they were
 // kept only for callers that held them open.
 func (fs *FS) cleanupPinned() error {
-	for _, number := range append([]uint32(nil), fs.orphans...) {
+	for _, number := range append([]uint32(nil), fs.orphanList()...) {
 		err := fs.mutate(func() error {
 			inode, err := fs.liveInode(number)
 			if err != nil {
@@ -560,17 +578,19 @@ type Info struct {
 
 // Info reports capacity from the superblock counters.
 func (fs *FS) Info() Info {
+	// The counts include the operations still waiting for a commit.
+	freeBlocks, freeInodes := fs.freeCounts()
 	available := uint64(0)
-	if fs.sb.FreeBlocks > fs.sb.ReservedBlocks {
-		available = (fs.sb.FreeBlocks - fs.sb.ReservedBlocks) * uint64(fs.blockSize)
+	if uint64(freeBlocks) > fs.sb.ReservedBlocks {
+		available = (uint64(freeBlocks) - fs.sb.ReservedBlocks) * uint64(fs.blockSize)
 	}
 	return Info{
 		BlockSize:      fs.blockSize,
 		Blocks:         fs.sb.BlocksCount,
-		FreeBlocks:     fs.sb.FreeBlocks,
+		FreeBlocks:     uint64(freeBlocks),
 		AvailableBytes: available,
 		Inodes:         fs.sb.InodesCount,
-		FreeInodes:     fs.sb.FreeInodes,
+		FreeInodes:     uint32(freeInodes),
 		ReadOnly:       fs.state != StateReadyRW,
 		Label:          fs.sb.Label(),
 		UUID:           fs.sb.UUID,
@@ -592,21 +612,25 @@ type Status struct {
 	// what a writable mount replayed and cleaned up before it.
 	Commits  uint64
 	Recovery Replay
+	// PendingBlocks counts the metadata and file data blocks that
+	// finished operations hold in memory until the next commit.
+	PendingBlocks int
 }
 
 // Status reports the volume's mount state and counters.
 func (fs *FS) Status() Status {
 	return Status{
-		State:       fs.state,
-		Negotiation: fs.negotiation,
-		Features:    fs.sb.Features,
-		SBState:     fs.sb.State,
-		ErrorCount:  fs.sb.ErrorCount,
-		LastOrphan:  fs.sb.LastOrphan,
-		Journal:     fs.journal,
-		CacheReads:  fs.cache.reads,
-		CacheHits:   fs.cache.hits,
-		Commits:     fs.commits,
-		Recovery:    fs.recovery,
+		State:         fs.state,
+		Negotiation:   fs.negotiation,
+		Features:      fs.sb.Features,
+		SBState:       fs.sb.State,
+		ErrorCount:    fs.sb.ErrorCount,
+		LastOrphan:    fs.sb.LastOrphan,
+		Journal:       fs.journal,
+		CacheReads:    fs.cache.reads,
+		CacheHits:     fs.cache.hits,
+		Commits:       fs.commits,
+		PendingBlocks: fs.pendingBlocks(),
+		Recovery:      fs.recovery,
 	}
 }

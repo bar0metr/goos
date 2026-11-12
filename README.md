@@ -109,6 +109,10 @@ capability-oriented native userspace built from isolated services. The
 installed system includes persistent FAT32 storage, VFS, supervision, a native
 shell and utilities, serial and framebuffer terminals, configuration and
 logging services, and full-screen tools such as `gfm`, `gview`, and `edit`.
+Partitions of the boot disk that Linux formatted as ext4 mount below
+`/mnt`, read-only by default and read-write with `mount -o rw`; each runs
+in its own service with a JBD2 journal that GoOS, Linux and `e2fsck`
+recover alike ([ext4](docs/userspace/ext4.md)).
 A userspace IPv4 service over a virtio-net driver configures its address
 with DHCP or static settings and answers and sends ICMP echo; `ping` and
 `net status` use it from the shell. A loopback interface, a hosts table and a

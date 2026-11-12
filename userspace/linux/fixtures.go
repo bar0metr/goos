@@ -33,6 +33,8 @@ var (
 	netprobe []byte
 	//go:embed prebuilt/pie-probe
 	pieProbe []byte
+	//go:embed prebuilt/fsbench
+	fsbench []byte
 )
 
 // All lists the fixtures in the order the image stores them.
@@ -47,5 +49,6 @@ func All() []Fixture {
 		{"tty-probe", ttyProbe, "5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957"},
 		{"netprobe", netprobe, "dca2339b9c61ea9f190613aa58b6289e6166a58463e1a4441bfd8ba661d742cb"},
 		{"pie-probe", pieProbe, "4e1822fc5fd6c174726c8751cabb0c298e67adfa46e7a82c9b425732b00c7144"},
+		{"fsbench", fsbench, "5b6ec1f4dc8f2fa205579a2c11065da0bf6ca22ca71d40f4817dd4aa8664d083"},
 	}
 }

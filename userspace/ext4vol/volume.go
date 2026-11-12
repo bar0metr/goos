@@ -746,13 +746,20 @@ func (volume *Volume) SetMetadata(id ramfs.NodeID, change ramfs.MetadataChange) 
 	return statusOf(volume.fs.SetAttributes(inode, attributes))
 }
 
-// Flush checkpoints a writable volume. Each mutation is durable in the
-// journal when it returns, so this only shortens the next replay.
+// Flush commits the mutations a writable volume holds in memory: when it
+// returns true, every mutation that returned before it survives a power
+// cut (ADR 0227).
 func (volume *Volume) Flush() bool {
 	if volume.fs == nil {
 		return false
 	}
 	return !volume.writable || volume.fs.Sync() == nil
+}
+
+// Pending reports whether a writable volume holds mutations it has not
+// committed yet.
+func (volume *Volume) Pending() bool {
+	return volume.fs != nil && volume.writable && volume.fs.Pending()
 }
 
 // Unmount leaves the volume clean on disk and closes it: every later

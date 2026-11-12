@@ -10,14 +10,25 @@ type Device interface {
 	Capacity() uint64
 }
 
-// cacheBlocks bounds the resident metadata window.
-const cacheBlocks = 32
+// cacheBlocks bounds the resident metadata window: 1 MiB at 4 KiB blocks,
+// enough for the inode table blocks of a few thousand files listed in hash
+// order. A block can sit only in the cacheWays entries of its set, so a
+// lookup compares four entries, not all of them.
+const (
+	cacheBlocks = 256
+	cacheWays   = 4
+	cacheSets   = cacheBlocks / cacheWays
+)
 
 type cachedBlock struct {
 	block uint64
 	stamp uint64
 	valid bool
 	data  []byte
+	// checked records that the block passed a directory checksum under
+	// seed since it was read, so later lookups need not compute it again.
+	checked bool
+	seed    uint32
 }
 
 // blockCache keeps recently used metadata blocks. File data bypasses it.
@@ -29,10 +40,19 @@ type blockCache struct {
 	entries [cacheBlocks]cachedBlock
 	reads   uint64
 	hits    uint64
-	// overlay holds the blocks an open transaction has staged. Reads see
-	// them first, so a transaction observes its own changes before they
-	// reach the device.
+	// overlay holds the blocks the running operation has staged and base
+	// those of the pending transaction. Reads see overlay, then base, so
+	// operations observe changes before they reach the device.
 	overlay map[uint64]*stagedBlock
+	base    map[uint64]*stagedBlock
+}
+
+// staged returns the staged copy of block, if a transaction holds one.
+func (cache *blockCache) staged(block uint64) *stagedBlock {
+	if staged := cache.overlay[block]; staged != nil {
+		return staged
+	}
+	return cache.base[block]
 }
 
 func (cache *blockCache) init(device Device, blockSize uint32, blocks uint64) {
@@ -49,14 +69,16 @@ func (cache *blockCache) get(block uint64) ([]byte, error) {
 	if block >= cache.limit {
 		return nil, corrupt("block number beyond the volume")
 	}
-	if staged := cache.overlay[block]; staged != nil {
+	if staged := cache.staged(block); staged != nil {
 		return staged.data, nil
 	}
 	cache.clock++
 	cache.reads++
-	victim := &cache.entries[0]
-	for index := range cache.entries {
-		entry := &cache.entries[index]
+	first := int(block%cacheSets) * cacheWays
+	set := cache.entries[first : first+cacheWays]
+	victim := &set[0]
+	for index := range set {
+		entry := &set[index]
 		if entry.valid && entry.block == block {
 			entry.stamp = cache.clock
 			cache.hits++
@@ -69,7 +91,7 @@ func (cache *blockCache) get(block uint64) ([]byte, error) {
 			victim = entry
 		}
 	}
-	victim.valid = false
+	victim.valid, victim.checked = false, false
 	if !cache.device.ReadAt(block*cache.size, victim.data) {
 		return nil, errIO
 	}
@@ -84,7 +106,7 @@ func (cache *blockCache) readBlocks(block uint64, target []byte) error {
 	if end, ok := addOK(block, count); !ok || end > cache.limit {
 		return corrupt("data run beyond the volume")
 	}
-	if len(cache.overlay) != 0 {
+	if len(cache.overlay) != 0 || len(cache.base) != 0 {
 		return cache.readStaged(block, count, target)
 	}
 	if !cache.device.ReadAt(block*cache.size, target) {
@@ -98,7 +120,7 @@ func (cache *blockCache) readStaged(block uint64, count uint64, target []byte) e
 	size := cache.size
 	for index := uint64(0); index < count; index++ {
 		out := target[index*size : (index+1)*size]
-		if staged := cache.overlay[block+index]; staged != nil {
+		if staged := cache.staged(block + index); staged != nil {
 			copy(out, staged.data)
 			continue
 		}
@@ -112,10 +134,12 @@ func (cache *blockCache) readStaged(block uint64, count uint64, target []byte) e
 // update replaces the cached copy of block, if one is resident, after a
 // transaction wrote it.
 func (cache *blockCache) update(block uint64, data []byte) {
-	for index := range cache.entries {
+	first := int(block%cacheSets) * cacheWays
+	for index := first; index < first+cacheWays; index++ {
 		entry := &cache.entries[index]
 		if entry.valid && entry.block == block {
 			copy(entry.data, data)
+			entry.checked = false
 		}
 	}
 }
@@ -124,5 +148,21 @@ func (cache *blockCache) update(block uint64, data []byte) {
 func (cache *blockCache) invalidate() {
 	for index := range cache.entries {
 		cache.entries[index].valid = false
+		cache.entries[index].checked = false
 	}
+}
+
+// resident returns the cache entry whose buffer data is, or nil for a
+// staged copy or any other buffer.
+func (cache *blockCache) resident(data []byte) *cachedBlock {
+	if len(data) == 0 {
+		return nil
+	}
+	for index := range cache.entries {
+		entry := &cache.entries[index]
+		if entry.valid && len(entry.data) == len(data) && &entry.data[0] == &data[0] {
+			return entry
+		}
+	}
+	return nil
 }

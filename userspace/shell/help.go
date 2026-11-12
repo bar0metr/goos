@@ -30,6 +30,7 @@ var Commands = [...]CommandInfo{
 	{Name: "mount", Usage: "mount | mount [-t TYPE] [-o ro|rw] SOURCE PATH", Summary: "list mounts, or mount a partition (part:N, guid:GUID, name:LABEL) at /mnt/NAME, read-only unless -o rw", MaxArgs: 6},
 	{Name: "umount", Usage: "umount PATH", Summary: "unmount an additional volume", MinArgs: 1, MaxArgs: 1},
 	{Name: "diag", Usage: "diag", Summary: "dump kernel diagnostics (diagnostic builds only)"},
+	{Name: "sync", Usage: "sync", Summary: "make every completed write durable on every mounted volume"},
 	{Name: "reboot", Usage: "reboot", Summary: "flush storage and restart the machine"},
 	{Name: "poweroff", Usage: "poweroff", Summary: "flush storage and switch the machine off"},
 	{Name: "exit", Usage: "exit", Summary: "close a remote shell session"},
