@@ -217,3 +217,13 @@ func (fs *FS) Unpin(given *Inode) error {
 		return fs.release(inode)
 	})
 }
+
+// HeldInode returns inode number as Inode does, and also while it has lost
+// its last link but a caller still pins it: such an inode stays readable and
+// writable until the last Unpin.
+func (fs *FS) HeldInode(number uint32) (*Inode, error) {
+	if fs.pins[number] != 0 && fs.isOrphan(number) {
+		return fs.orphanInode(number)
+	}
+	return fs.Inode(number)
+}

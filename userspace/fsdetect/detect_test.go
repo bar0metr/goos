@@ -59,7 +59,7 @@ func TestLinuxExt4Images(t *testing.T) {
 			t.Fatalf("%s: label %q", name, result.Label[:result.LabelSize])
 		}
 		driver, status, ok := Choose(&result, 0)
-		if !ok || status != Recognized || driver.Executable != "/bootstrap/ext4" || driver.Writable {
+		if !ok || status != Recognized || driver.Executable != "/bootstrap/ext4" || !driver.Writable {
 			t.Fatalf("%s: driver %+v %v", name, driver, status)
 		}
 		if _, _, ok := Choose(&result, ramfs.FilesystemFAT32); ok {

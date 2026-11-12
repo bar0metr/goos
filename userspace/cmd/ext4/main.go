@@ -1,21 +1,26 @@
 //go:build goos_userspace
 
-// The ext4 filesystem service (ADR 0221, ADR 0222). One process serves one
-// additional volume: it parses the untrusted on-disk format, reads its block
-// slice through the block service, and answers the VFS over the filesystem
-// protocol. It holds no namespace authority, no device, and no other
-// volume's slice. A volume it cannot read safely is refused, and the service
-// keeps answering with the refusal rather than crashing in a restart loop.
+// The ext4 filesystem service (ADR 0221, ADR 0222, ADR 0226). One process
+// serves one additional volume: it parses the untrusted on-disk format,
+// reaches its block slice through the block service, and answers the VFS over
+// the filesystem protocol. It holds no namespace authority, no device, and no
+// other volume's slice. The slice decides the mode: a writable slice gets a
+// writable mount, which recovers the journal first; a read-only slice gets
+// a read-only mount. A volume it cannot serve safely is refused, and the
+// service keeps answering with the refusal rather than crashing in a restart
+// loop.
 package main
 
 import (
 	"goos/internal/capability"
+	"goos/internal/timekeeping"
 	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/ramfs"
 	blockproto "goos/userspace/block"
+	"goos/userspace/ext4"
 	"goos/userspace/ext4vol"
 	"goos/userspace/fsproto"
 	syslog "goos/userspace/log"
@@ -45,6 +50,7 @@ var (
 	volume        ext4vol.Volume
 	correlation   uint64
 	blockCapacity uint64
+	sliceWritable bool
 	bulkObject    handle.ID
 	bulkMemory    []byte
 )
@@ -67,17 +73,22 @@ func setUpBulk() {
 	bulkObject, bulkMemory = object, sys.Window(base, size)
 }
 
+// bulkTransfer moves count bytes between the bulk buffer and the slice.
+func bulkTransfer(operation blockproto.Operation, offset uint64, count int) bool {
+	duplicate, status := sys.HandleDuplicate(bulkObject, capability.Read|capability.Write|capability.Transfer)
+	if status != kcall.StatusOK {
+		return false
+	}
+	reply, ok := blockExchange(blockproto.Request{Operation: operation, Offset: offset, Length: uint32(count), Object: duplicate})
+	return ok && reply.Status == blockproto.StatusOK
+}
+
 // ReadAt reads through the bulk buffer in large pieces and through messages
 // for the rest. The block service checks every range against the slice.
 func (blockDevice) ReadAt(offset uint64, target []byte) bool {
 	for len(target) > blockproto.MaxData && bulkMemory != nil {
 		chunk := min(len(target), len(bulkMemory))
-		duplicate, status := sys.HandleDuplicate(bulkObject, capability.Read|capability.Write|capability.Transfer)
-		if status != kcall.StatusOK {
-			return false
-		}
-		reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationReadBulk, Offset: offset, Length: uint32(chunk), Object: duplicate})
-		if !ok || reply.Status != blockproto.StatusOK {
+		if !bulkTransfer(blockproto.OperationReadBulk, offset, chunk) {
 			return false
 		}
 		copy(target[:chunk], bulkMemory[:chunk])
@@ -97,12 +108,39 @@ func (blockDevice) ReadAt(offset uint64, target []byte) bool {
 	return true
 }
 
-// WriteAt refuses: this build serves ext4 read-only, and the slice PID 1
-// grants is read-only as well.
-func (blockDevice) WriteAt(uint64, []byte) bool { return false }
+// WriteAt returns once the block service accepted the bytes; Flush makes
+// them durable. A read-only slice refuses every write.
+func (blockDevice) WriteAt(offset uint64, data []byte) bool {
+	for len(data) > blockproto.MaxData && bulkMemory != nil {
+		chunk := min(len(data), len(bulkMemory))
+		copy(bulkMemory[:chunk], data[:chunk])
+		if !bulkTransfer(blockproto.OperationWriteBulk, offset, chunk) {
+			return false
+		}
+		data = data[chunk:]
+		offset += uint64(chunk)
+	}
+	for len(data) != 0 {
+		chunk := min(len(data), blockproto.MaxData)
+		reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationWrite, Offset: offset, Length: uint32(chunk), Data: data[:chunk]})
+		if !ok || reply.Status != blockproto.StatusOK {
+			return false
+		}
+		data = data[chunk:]
+		offset += uint64(chunk)
+	}
+	return true
+}
 
-func (blockDevice) Flush() bool { return true }
+// Flush returns once every accepted write is durable, or false when the
+// device refused the flush (ADR 0225).
+func (blockDevice) Flush() bool {
+	reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationFlush})
+	return ok && reply.Status == blockproto.StatusOK
+}
 
+// Capacity is asked once; the same reply says whether the slice is
+// writable.
 func (blockDevice) Capacity() uint64 {
 	if blockCapacity != 0 {
 		return blockCapacity
@@ -111,8 +149,18 @@ func (blockDevice) Capacity() uint64 {
 	if !ok || reply.Status != blockproto.StatusOK {
 		return 0
 	}
-	blockCapacity = reply.Capacity
+	blockCapacity, sliceWritable = reply.Capacity, reply.Writable
 	return blockCapacity
+}
+
+// realtime stamps inode times with UTC Unix time; a clock that cannot be
+// read stamps zero.
+func realtime() ext4.Timestamp {
+	now, status := sys.ClockNow(timekeeping.Realtime)
+	if status != kcall.StatusOK || now.Seconds < 0 || !now.Valid() {
+		return ext4.Timestamp{}
+	}
+	return ext4.Timestamp{Seconds: now.Seconds, Nanos: now.Nanoseconds}
 }
 
 //export userspaceMain
@@ -144,9 +192,19 @@ func userspaceMain() {
 	}
 	cache = sys.Window(base, size)
 	setUpBulk()
-	if volume.Mount(blockDevice{}) {
+	device := blockDevice{}
+	device.Capacity()
+	mounted, mode := false, "read-only"
+	if sliceWritable {
+		mounted, mode = volume.MountWritable(device, realtime), "read-write"
+	} else {
+		mounted = volume.Mount(device)
+	}
+	if mounted {
 		mark("EXT4_SERVICE_OK\n")
-		syslog.Info("volume mounted", syslog.Uint("capacity-mib", blockCapacity>>20), syslog.Str("mode", "read-only"))
+		status, _ := volume.Status()
+		syslog.Info("volume mounted", syslog.Uint("capacity-mib", blockCapacity>>20), syslog.Str("mode", mode),
+			syslog.Uint("replayed", uint64(status.Recovery.Transactions)), syslog.Uint("orphans", uint64(status.Recovery.Orphans)))
 	} else {
 		syslog.Error("volume refused", syslog.Str("reason", volume.Refusal()))
 		mark("EXT4_VOLUME_REFUSED\n")
@@ -191,7 +249,7 @@ func serve() {
 	var reply fsproto.Reply
 	if !valid {
 		operation := fsproto.Operation(requestMessage.Payload[0])
-		if requestMessage.Correlation == 0 || operation < fsproto.OperationMount || operation > fsproto.OperationReadDirBatch {
+		if requestMessage.Correlation == 0 || operation < fsproto.OperationMount || operation > fsproto.OperationUnmount {
 			return
 		}
 		reply = fsproto.Reply{Operation: operation, Status: ramfs.StatusInvalidArgument}

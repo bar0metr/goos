@@ -946,6 +946,7 @@ CA-1171	goos/userspace/cmd/ext4	listedName	process	owned	none
 CA-1172	goos/userspace/cmd/ext4	replyMessage	process	owned	none
 CA-1173	goos/userspace/cmd/ext4	requestMessage	process	owned	none
 CA-1174	goos/userspace/cmd/ext4	requestedName	process	owned	none
+CA-1192	goos/userspace/cmd/ext4	sliceWritable	process	owned	none
 CA-1175	goos/userspace/cmd/ext4	vfsHandle	process	owned	none
 CA-1176	goos/userspace/cmd/ext4	volume	process	owned	none
 CA-1177	goos/userspace/cmd/ext4	wire	process	owned	none

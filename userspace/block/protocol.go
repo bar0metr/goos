@@ -79,7 +79,10 @@ type Reply struct {
 	Status    Status
 	Capacity  uint64
 	BlockSize uint32
-	Data      []byte
+	// Writable says, in an Info reply, whether the client's slice accepts
+	// writes. A filesystem service mounts read-write only when it does.
+	Writable bool
+	Data     []byte
 }
 
 func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
@@ -170,6 +173,12 @@ func EncodeReplyInto(reply Reply, correlation uint64, message *ipc.Message) bool
 	message.ProtocolID, message.Version, message.Kind = ProtocolID, Version, ipc.KindReply
 	message.Correlation, message.PayloadSize, message.HandleCount = correlation, uint16(headerSize+len(reply.Data)), 0
 	message.Payload[0], message.Payload[1] = byte(reply.Operation), byte(reply.Status)
+	if reply.Writable {
+		if reply.Operation != OperationInfo {
+			return false
+		}
+		message.Payload[2] = replyWritable
+	}
 	binary.LittleEndian.PutUint64(message.Payload[8:16], reply.Capacity)
 	binary.LittleEndian.PutUint32(message.Payload[16:20], reply.BlockSize)
 	binary.LittleEndian.PutUint16(message.Payload[20:22], uint16(len(reply.Data)))
@@ -185,11 +194,12 @@ func DecodeReplyFrom(message *ipc.Message) (Reply, bool) {
 	if message == nil {
 		return Reply{}, false
 	}
-	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindReply || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < headerSize || !zero(message.Payload[2:8]) || message.Payload[22] != 0 || message.Payload[23] != 0 {
+	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindReply || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < headerSize || !zero(message.Payload[3:8]) ||
+		message.Payload[2]&^replyWritable != 0 || message.Payload[2] != 0 && Operation(message.Payload[0]) != OperationInfo || message.Payload[22] != 0 || message.Payload[23] != 0 {
 		return Reply{}, false
 	}
 	dataSize := int(binary.LittleEndian.Uint16(message.Payload[20:22]))
-	reply := Reply{Operation: Operation(message.Payload[0]), Status: Status(message.Payload[1]), Capacity: binary.LittleEndian.Uint64(message.Payload[8:16]), BlockSize: binary.LittleEndian.Uint32(message.Payload[16:20]), Data: message.Payload[headerSize : headerSize+dataSize]}
+	reply := Reply{Operation: Operation(message.Payload[0]), Status: Status(message.Payload[1]), Capacity: binary.LittleEndian.Uint64(message.Payload[8:16]), BlockSize: binary.LittleEndian.Uint32(message.Payload[16:20]), Writable: message.Payload[2] != 0, Data: message.Payload[headerSize : headerSize+dataSize]}
 	if reply.Operation < OperationInfo || reply.Operation > lastOperation || reply.Status > StatusIOError || dataSize > MaxData || headerSize+dataSize != int(message.PayloadSize) || reply.Operation != OperationRead && dataSize != 0 || reply.Status != StatusOK && dataSize != 0 {
 		return Reply{}, false
 	}
@@ -262,6 +272,8 @@ const (
 	volumePayload    = identityEnd
 	volumeReplySize  = 1 + identityEnd - identityScheme
 	flagWritable     = 1
+	// replyWritable marks an Info reply for a writable slice.
+	replyWritable = 1
 )
 
 // MaxVolumeSlots is the number of filesystem endpoints the block service

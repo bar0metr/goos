@@ -182,3 +182,36 @@ func TestStatusText(t *testing.T) {
 		}
 	}
 }
+
+func TestMountMode(t *testing.T) {
+	for text, want := range map[string]bool{"": false, "ro": false, "rw": true} {
+		if writable, ok := ParseMode([]byte(text)); !ok || writable != want {
+			t.Errorf("%q: %v %v", text, writable, ok)
+		}
+	}
+	for _, text := range []string{"RW", "w", "rw,sync", "read-write"} {
+		if _, ok := ParseMode([]byte(text)); ok {
+			t.Errorf("accepted %q", text)
+		}
+	}
+	var table Table
+	writable := request(t, "auto", "part:2", "/mnt/a")
+	writable.Writable = true
+	slot, _ := table.Reserve(writable)
+	if status := table.Probed(slot, ext4Probe(1), physical(1)); status != OK || !table.Slot(slot).Request.Writable {
+		t.Fatalf("writable ext4: %v", status)
+	}
+	// A driver without write support never gets a writable slice.
+	for index := range fsdetect.Drivers {
+		if fsdetect.Drivers[index].Type == ramfs.FilesystemExt4 {
+			fsdetect.Drivers[index].Writable = false
+			defer func() { fsdetect.Drivers[index].Writable = true }()
+		}
+	}
+	other := request(t, "auto", "part:3", "/mnt/b")
+	other.Writable = true
+	slot, _ = table.Reserve(other)
+	if status := table.Probed(slot, ext4Probe(2), physical(2)); status != NotWritable {
+		t.Fatalf("read-only driver: %v", status)
+	}
+}

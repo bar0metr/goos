@@ -19,7 +19,7 @@ read-only mount only, because some compat features (`orphan_file`,
 A read-write mount also needs all of `has_journal`, `extent`, `filetype`
 and `metadata_csum`, 4 KiB blocks, and a version 2 journal superblock
 without async commit, fast commit or the CRC32 commit checksum (ADR 0225).
-The GoOS ext4 service still mounts every volume read-only.
+The ext4 service mounts a volume read-write only for a `rw` mount (ADR 0226).
 
 `needs_recovery` describes the mount state, so negotiation ignores it. A
 read-only mount refuses a volume that has it, or a non-empty journal, with

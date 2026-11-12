@@ -42,7 +42,10 @@ const (
 	Busy
 	LaunchFailed
 	Failed
-	lastStatus = Failed
+	InvalidMode
+	// NotWritable: the driver cannot serve the volume read-write.
+	NotWritable
+	lastStatus = NotWritable
 )
 
 var statusText = [...]string{
@@ -63,6 +66,8 @@ var statusText = [...]string{
 	Busy:             "files are open on the volume",
 	LaunchFailed:     "the filesystem service did not start",
 	Failed:           "the volume failed",
+	InvalidMode:      "invalid mount mode: use ro or rw",
+	NotWritable:      "the filesystem type cannot be mounted read-write",
 }
 
 func (status Status) String() string {
@@ -112,13 +117,34 @@ func cut(text []byte, separator byte) ([]byte, []byte, bool) {
 	return text, nil, false
 }
 
-// Request is one mount: what to mount, where, and as which type (zero for
-// whatever the probe recognizes).
+// Request is one mount: what to mount, where, as which type (zero for
+// whatever the probe recognizes), and whether the driver gets a writable
+// slice.
 type Request struct {
 	Source   partition.Selector
 	Path     [vfs.MaxVolumePath]byte
 	PathSize uint8
 	Type     ramfs.FilesystemType
+	Writable bool
+}
+
+// ParseMode reads a mount mode: ro, the default when mode is empty, or rw.
+func ParseMode(mode []byte) (bool, bool) {
+	switch string(mode) {
+	case "", "ro":
+		return false, true
+	case "rw":
+		return true, true
+	}
+	return false, false
+}
+
+// ModeName is the mode a request asks for, as ParseMode reads it.
+func (request *Request) ModeName() string {
+	if request.Writable {
+		return "rw"
+	}
+	return "ro"
 }
 
 // MakeRequest checks and builds a request from its textual parts.
@@ -275,6 +301,9 @@ func (table *Table) Probed(index uint8, result fsdetect.Result, physical partiti
 			return TypeMismatch
 		}
 		return Unrecognized
+	}
+	if slot.Request.Writable && !driver.Writable {
+		return NotWritable
 	}
 	slot.Driver, slot.Probe, slot.Physical = driver, result, physical
 	return OK

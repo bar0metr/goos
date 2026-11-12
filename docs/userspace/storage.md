@@ -134,7 +134,11 @@ partition crashes its own process and nothing else.
 goos> mount -t auto name:data /mnt/data
 goos> cat /mnt/data/hello.txt
 goos> umount /mnt/data
+goos> mount -t ext4 -o rw name:linux-data /mnt/linux
 ```
+
+A mount is read-only unless `-o rw` asks for writing, which ext4 supports
+(ADR 0226). `mount` and `df` show each volume's `ro` or `rw` flag.
 
 A source names a partition: `part:N` by number, `guid:GUID` by GPT unique
 GUID, `name:LABEL` by GPT name. The path is `/mnt/` and one name. `mount`
@@ -146,23 +150,38 @@ filesystem. The probe only picks a driver from a static registry (ext4,
 FAT32); the driver checks the volume before it serves anything and refuses
 what it cannot read safely. A partition whose signatures match two
 filesystems is refused, and no second driver is tried after a refusal.
-The endpoint PID 1 probed through goes to the driver, so the driver gets a
-read-only slice and nothing more. The block service refuses a slot whose
-partition overlaps another slot's, the persistent volume's included.
+For a read-only mount the endpoint PID 1 probed through goes to the driver,
+so the driver gets a read-only slice and nothing more. For a read-write
+mount PID 1 asks for a writable grant on the same partition, with the
+identity the probe found; the block service closes the probe endpoint as it
+installs the writable one, and PID 1 moves that to the driver without using
+it. The driver mounts read-write only on a writable slice. The block
+service refuses a slot whose partition overlaps another slot's, the
+persistent volume's included.
 
 Each launch gets a file cache of its own, which PID 1 creates and the VFS
 drops when the instance goes. An instance that crashes or stops answering is
 replaced up to three times; the replacement must probe the same filesystem
 type and identity (ext4 UUID, FAT32 serial), or the volume goes offline.
-Its mount stays in the namespace and answers errors until `umount`. Other
-volumes and the persistent one keep running throughout.
+A read-write replacement gets a new writable grant, which closes the old
+endpoint, and replays the ext4 journal before it serves. Files open on the
+volume must be opened again after the replacement attaches. A mount that
+goes offline stays in the namespace and answers errors until `umount`.
+Other volumes and the persistent one keep running throughout.
 
-`umount` refuses while files are open on the volume. Otherwise it removes
-the mount, ends the instance, and frees its slot, block endpoint and cache.
+`umount` refuses while files are open on the volume. Otherwise the instance
+leaves the volume clean on disk (an ext4 volume empties its journal and
+marks its superblock clean), and `umount` removes the mount, ends the
+instance, and frees its slot, block endpoint and cache. When the instance
+cannot leave the volume clean, `umount` fails and the mount goes offline; a
+second `umount` removes it, and the next read-write mount recovers the
+journal.
 
 Configuration mounts volumes at boot, once the configuration service runs:
-`system.mount.1` to `system.mount.4` each hold `TYPE SOURCE PATH`, such as
-`auto name:data /mnt/data`, or nothing. Recovery mode mounts none. A
+`system.mount.1` to `system.mount.4` each hold `TYPE SOURCE PATH` or
+`TYPE SOURCE PATH MODE` with MODE `ro` or `rw`, such as
+`auto name:data /mnt/data` or `ext4 name:linux-data /mnt/linux rw`, or
+nothing. Recovery mode mounts none. A
 partition that is present on the disk but named nowhere is never mounted.
 
 ## The FAT32 volume

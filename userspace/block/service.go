@@ -73,7 +73,7 @@ func (service *Service) DispatchIn(request Request, slice Slice) Reply {
 	}
 	switch request.Operation {
 	case OperationInfo:
-		reply.Capacity, reply.BlockSize = slice.Length, service.backend.BlockSize()
+		reply.Capacity, reply.BlockSize, reply.Writable = slice.Length, service.backend.BlockSize(), slice.Writable
 	case OperationRead:
 		offset, ok := slice.Translate(request.Offset, uint64(request.Length))
 		if !ok {

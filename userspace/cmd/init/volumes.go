@@ -2,11 +2,12 @@
 
 package main
 
-// Additional filesystem volumes (ADR 0222). Each mounted volume is one
-// supervised service instance, volume1 to volume4, running the driver the
-// probe chose. PID 1 probes the partition through a read-only block endpoint,
-// hands that same endpoint to the driver, creates a file cache for each
-// launch, and attaches the instance to the VFS at its mount path. The policy
+// Additional filesystem volumes (ADR 0222, ADR 0226). Each mounted volume is
+// one supervised service instance, volume1 to volume4, running the driver the
+// probe chose. PID 1 probes the partition through a read-only block endpoint
+// and hands that endpoint to the driver, or for a read-write mount a writable
+// one that replaces it. It creates a file cache for each launch and attaches
+// the instance to the VFS at its mount path. The policy
 // decisions live in userspace/volume; this file does the I/O.
 
 import (
@@ -113,43 +114,55 @@ func blockCall(endpoint handle.ID, request blockproto.Request) (blockproto.Reply
 	return reply, valid && volumeMessage.Correlation == correlation
 }
 
-// probeVolume asks the block service for a read-only endpoint on the slot's
-// partition and reads the probe window through it. The endpoint is kept for
-// the instance: the driver gets no more than the probe had.
-func probeVolume(slot uint8) (fsdetect.Result, partition.Identity, volume.Status) {
-	runtime := runtimeOf(slot)
-	closeHandle(&runtime.blockClient)
+// grantVolume asks the block service for an endpoint on the slot's
+// partition, read-only or writable, and returns PID 1's end. A new grant
+// replaces the slot's earlier endpoint, which the block service closes, so
+// the holder of the old one loses its access before the new one exists.
+// identity, when valid, must match what the partition resolves to.
+func grantVolume(slot uint8, writable bool, identity partition.Identity) (handle.ID, partition.Identity, volume.Status) {
 	var pair [2]uint64
 	if !createChannel(&pair) {
-		return fsdetect.Result{}, partition.Identity{}, volume.Failed
+		return 0, partition.Identity{}, volume.Failed
 	}
 	correlation++
 	requestCorrelation := correlation
 	grant := blockproto.VolumeGrant{Server: handle.ID(pair[1]), Slot: slot, Selector: volumes.Slot(slot).Request.Source,
-		Identity: volumes.Slot(slot).Physical}
+		Identity: identity, Writable: writable}
 	request, ok := blockproto.SetVolumeRequest(grant, correlation)
 	if !ok || !sendMessage(uint64(blockControl[0]), request) {
 		closePair(pair)
-		return fsdetect.Result{}, partition.Identity{}, volume.Failed
+		return 0, partition.Identity{}, volume.Failed
 	}
 	reply, received := receive(uint64(blockControl[0]), vfsSessionDeadline)
 	status, physical, valid := blockproto.DecodeSetVolumeReply(reply, requestCorrelation)
-	if received != ipc.StatusOK || !valid {
-		sys.HandleClose(handle.ID(pair[0]))
-		return fsdetect.Result{}, partition.Identity{}, volume.Failed
-	}
 	client := handle.ID(pair[0])
+	if received != ipc.StatusOK || !valid {
+		sys.HandleClose(client)
+		return 0, partition.Identity{}, volume.Failed
+	}
 	switch status {
 	case blockproto.StatusOK:
+		return client, physical, volume.OK
 	case blockproto.StatusStale:
 		sys.HandleClose(client)
-		return fsdetect.Result{}, partition.Identity{}, volume.IdentityMismatch
+		return 0, partition.Identity{}, volume.IdentityMismatch
 	case blockproto.StatusInvalidArgument:
 		sys.HandleClose(client)
-		return fsdetect.Result{}, partition.Identity{}, volume.PartitionInUse
-	default:
-		sys.HandleClose(client)
-		return fsdetect.Result{}, partition.Identity{}, volume.NoPartition
+		return 0, partition.Identity{}, volume.PartitionInUse
+	}
+	sys.HandleClose(client)
+	return 0, partition.Identity{}, volume.NoPartition
+}
+
+// probeVolume asks the block service for a read-only endpoint on the slot's
+// partition and reads the probe window through it. A read-only mount keeps
+// the endpoint for the instance: the driver gets no more than the probe had.
+func probeVolume(slot uint8) (fsdetect.Result, partition.Identity, volume.Status) {
+	runtime := runtimeOf(slot)
+	closeHandle(&runtime.blockClient)
+	client, physical, status := grantVolume(slot, false, volumes.Slot(slot).Physical)
+	if status != volume.OK {
+		return fsdetect.Result{}, partition.Identity{}, status
 	}
 	info, ok := blockCall(client, blockproto.Request{Operation: blockproto.OperationInfo})
 	if !ok || info.Status != blockproto.StatusOK {
@@ -171,6 +184,26 @@ func probeVolume(slot uint8) (fsdetect.Result, partition.Identity, volume.Status
 	return fsdetect.Probe(window, info.Capacity), physical, volume.OK
 }
 
+// upgradeVolume replaces the slot's read-only probe endpoint with a writable
+// one for the driver (ADR 0226). The block service closes the probe endpoint
+// as it installs the new one, refuses a partition that overlaps another
+// slot, and checks that the partition still has the identity the probe
+// found. PID 1 only moves the writable end to the driver; it never writes.
+func upgradeVolume(slot uint8) volume.Status {
+	runtime := runtimeOf(slot)
+	closeHandle(&runtime.blockClient)
+	client, physical, status := grantVolume(slot, true, volumes.Slot(slot).Physical)
+	if status != volume.OK {
+		return status
+	}
+	if !physical.Same(volumes.Slot(slot).Physical) {
+		sys.HandleClose(client)
+		return volume.IdentityMismatch
+	}
+	runtime.blockClient = client
+	return volume.OK
+}
+
 // prepareVolumeLaunch gets a slot ready to launch: a probed block endpoint,
 // a fresh channel to the VFS and a fresh file cache. A replacement launch
 // probes again and must find the same volume.
@@ -183,6 +216,9 @@ func prepareVolumeLaunch(slot uint8) volume.Status {
 		result, physical, status := probeVolume(slot)
 		if status == volume.OK {
 			status = volumes.Probed(slot, result, physical)
+		}
+		if status == volume.OK && volumes.Slot(slot).Request.Writable {
+			status = upgradeVolume(slot)
 		}
 		if status != volume.OK {
 			closeHandle(&runtime.blockClient)
@@ -271,7 +307,7 @@ func volumeLaunched(slot uint8, process handle.ID, pid uint64) {
 	if volumes.Attached(slot, generation, attachStatus) == volume.OK {
 		mark("VOLUME_MOUNT_OK\n")
 		syslog.Info("volume mounted", syslog.Uint("slot", uint64(slot)), syslog.Str("path", string(volumes.Slot(slot).Request.PathBytes())),
-			syslog.Str("type", volumes.Slot(slot).Driver.Name))
+			syslog.Str("type", volumes.Slot(slot).Driver.Name), syslog.Str("mode", volumes.Slot(slot).Request.ModeName()))
 		finishMount(slot, volume.OK, vfs.StatusOK)
 		return
 	}
@@ -459,6 +495,7 @@ func handleVolumeCommand(command execproto.VolumeCommand, correlationID uint64) 
 	detail := vfs.StatusOK
 	if command.Mount {
 		request, made := volume.MakeRequest(command.Type, command.Source, command.Path)
+		request.Writable = command.Writable
 		status = made
 		if made == volume.OK {
 			done := false
@@ -477,7 +514,7 @@ func handleVolumeCommand(command execproto.VolumeCommand, correlationID uint64) 
 
 // mountConfiguredVolumes mounts the volumes configuration names, once the
 // configuration service runs: system.mount.1 to system.mount.4, each
-// "TYPE SOURCE PATH" or empty.
+// "TYPE SOURCE PATH", "TYPE SOURCE PATH MODE" with MODE ro or rw, or empty.
 func mountConfiguredVolumes() {
 	session, ok := openConfigSession("system.mount.", configproto.Read)
 	if !ok {
@@ -492,11 +529,16 @@ func mountConfiguredVolumes() {
 			continue
 		}
 		fields, count := splitFields(value)
-		if count != 3 {
+		if count != 3 && count != 4 {
 			syslog.Warn("mount setting malformed", syslog.Str("key", string(key)))
 			continue
 		}
 		request, status := volume.MakeRequest(fields[0], fields[1], fields[2])
+		if writable, ok := volume.ParseMode(fields[3]); !ok {
+			status = volume.InvalidMode
+		} else {
+			request.Writable = writable
+		}
 		if status == volume.OK {
 			status, _, _ = mountVolume(request, 0, 0)
 		}
@@ -526,9 +568,9 @@ func configText(session handle.ID, key []byte) ([]byte, bool) {
 	return configTextValue[:copy(configTextValue[:], reply.Value.Bytes())], true
 }
 
-// splitFields splits value at spaces into at most three fields.
-func splitFields(value []byte) ([3][]byte, int) {
-	var fields [3][]byte
+// splitFields splits value at spaces into at most four fields.
+func splitFields(value []byte) ([4][]byte, int) {
+	var fields [4][]byte
 	count := 0
 	for start := 0; start < len(value); {
 		for start < len(value) && value[start] == ' ' {
