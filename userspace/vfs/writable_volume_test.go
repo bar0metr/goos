@@ -3,6 +3,7 @@ package vfsservice
 import (
 	"testing"
 
+	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	"goos/userspace/ext4"
 	"goos/userspace/ext4vol"
@@ -112,5 +113,33 @@ func TestFailedCleanUnmountLeavesTheMountOffline(t *testing.T) {
 	}
 	if status := service.DetachVolume(1); status != vfs.StatusOK {
 		t.Fatalf("second detach: %v", status)
+	}
+}
+
+// A storage sync commits what an ext4 volume holds in memory, so a copy of
+// the disk taken after it recovers the file.
+func TestSyncVolumesCommitsExt4(t *testing.T) {
+	service := startedService(t, testFAT32Device())
+	instance, device := attachWritableExt4(t, service, 1, "/mnt/w")
+	writePersistent(t, service, "/mnt/w/kept", "alpha")
+	if !instance.volume.Pending() {
+		t.Fatal("the write committed before any sync")
+	}
+	if failed := service.SyncVolumes(); failed != 0 {
+		t.Fatalf("%d volumes refused the sync", failed)
+	}
+	if instance.volume.Pending() {
+		t.Fatal("sync left the write in memory")
+	}
+	copied := &writableMemoryDevice{memoryDevice: memoryDevice{data: append([]byte(nil), device.data...)}}
+	var recovered ext4vol.Volume
+	stamp := func() ext4.Timestamp { return ext4.Timestamp{Seconds: 1800000000} }
+	if !recovered.MountWritable(copied, stamp) {
+		t.Fatalf("recovery: %s", recovered.Refusal())
+	}
+	root, _ := recovered.Root()
+	kept, _ := ramfs.MakeName([]byte("kept"))
+	if _, status := recovered.OpenName(root, kept); status != ramfs.StatusOK {
+		t.Fatalf("synced file lost: %v", status)
 	}
 }

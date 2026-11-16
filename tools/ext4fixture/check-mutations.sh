@@ -27,8 +27,8 @@ command -v docker >/dev/null || {
 # A skipped or renamed export test must not pass as a clean check.
 images=$(find "$work" -maxdepth 1 -name '*.img' | wc -l | tr -d ' ')
 cuts=$(find "$work/crash" -name '*.img' 2>/dev/null | wc -l | tr -d ' ')
-[ "$images" -eq 4 ] && [ "$cuts" -eq 6 ] || {
-	echo "check-mutations: expected 4 exported and 6 cut images, found $images and $cuts" >&2
+[ "$images" -eq 5 ] && [ "$cuts" -eq 6 ] || {
+	echo "check-mutations: expected 5 exported and 6 cut images, found $images and $cuts" >&2
 	exit 1
 }
 # The images go in as a tar on standard input, as in make-fixtures.sh.
@@ -102,7 +102,7 @@ for img in crash/*.img; do
 	echo "$name: e2fsck replayed the GoOS journal, tree matches GoOS recovery"
 	replayed=$((replayed + 1))
 done
-[ "$checked" -eq 4 ] && [ "$replayed" -eq 6 ] || status=1
+[ "$checked" -eq 5 ] && [ "$replayed" -eq 6 ] || status=1
 exit $status
 '
 # Journals written by debugfs. Each variant is a list of debugfs journal

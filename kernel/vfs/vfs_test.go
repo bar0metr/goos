@@ -812,3 +812,56 @@ func TestReacquireNeverHandsALostFileAnotherFilesObject(t *testing.T) {
 		t.Fatalf("the reacquired file read %q, status %d", buffer[:count], status)
 	}
 }
+
+// countingBackend counts the names a namespace looks up in it.
+type countingBackend struct {
+	*ramfs.FileSystem
+	opens int
+}
+
+func (backend *countingBackend) OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
+	backend.opens++
+	return backend.FileSystem.OpenName(parent, name)
+}
+
+// A name beside one already resolved costs one lookup: the walk remembers
+// the parent directory. A cache that is full replaces its entries in turn,
+// so names resolved later still find their parent.
+func TestResolveRemembersTheParentDirectory(t *testing.T) {
+	backend := &countingBackend{FileSystem: &ramfs.FileSystem{}}
+	namespace := &Namespace{}
+	if namespace.Mount([]byte("/"), backend, backend.Init()) != StatusOK {
+		t.Fatal("mount failed")
+	}
+	for _, path := range []string{"/a", "/a/b", "/a/b/one", "/a/b/two"} {
+		if namespace.Create([]byte(path), path == "/a" || path == "/a/b") != StatusOK {
+			t.Fatalf("create %s", path)
+		}
+	}
+	for index := 0; index < 3*MaxCache; index++ {
+		if namespace.Create([]byte("/a/b/f"+string(rune('A'+index%26))+string(rune('a'+index/26))), false) != StatusOK {
+			t.Fatalf("create %d", index)
+		}
+	}
+	namespace.invalidate()
+	backend.opens = 0
+	if _, _, status := namespace.Resolve([]byte("/a/b/one")); status != StatusOK || backend.opens != 3 {
+		t.Fatalf("first name: %d after %d lookups", status, backend.opens)
+	}
+	for index := 0; index < 3*MaxCache; index++ {
+		backend.opens = 0
+		path := "/a/b/f" + string(rune('A'+index%26)) + string(rune('a'+index/26))
+		if _, _, status := namespace.Resolve([]byte(path)); status != StatusOK || backend.opens != 1 {
+			t.Fatalf("%s: %d after %d lookups", path, status, backend.opens)
+		}
+	}
+	// A path whose parent is not cached walks from the mount, and a
+	// mount point as the last component still selects its own mount.
+	other := &ramfs.FileSystem{}
+	if namespace.Create([]byte("/a/b/mnt"), true) != StatusOK || namespace.Mount([]byte("/a/b/mnt"), other, other.Init()) != StatusOK {
+		t.Fatal("mount below a cached directory failed")
+	}
+	if mount, _, status := namespace.Resolve([]byte("/a/b/mnt")); status != StatusOK || namespace.mounts[mount].backend != Backend(other) {
+		t.Fatalf("mount point resolved in mount %d: %d", mount, status)
+	}
+}

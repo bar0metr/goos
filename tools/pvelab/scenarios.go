@@ -206,6 +206,7 @@ var scenarios = map[string]Scenario{
 	"linux-network-bench": linuxNetworkBenchScenario{},
 	"linux-network-diag":  linuxNetworkDiagScenario{},
 	"linux-stream-stress": linuxStreamStressScenario{},
+	"ext4-bench":          ext4BenchScenario{},
 }
 
 func scenarioNames() string {

@@ -1,10 +1,15 @@
 package ext4
 
-// Mutations stage every block they change in a transaction held in memory.
-// Reads made while the transaction is open see the staged copies first, so
-// an operation observes its own changes; nothing reaches the device until
-// commit, and an abort only drops the staged copies. Commit goes through
-// the JBD2 journal in ordered-data mode (journalw.go).
+// Mutations stage every block they change in memory. Each operation runs
+// in its own transaction, layered over the pending one that holds the
+// operations finished since the last commit. Reads see the operation's
+// copies first, then the pending ones, then the device. An operation that
+// fails drops only its own layer; one that succeeds folds it into the
+// pending transaction. Nothing reaches the device until the pending
+// transaction commits through the JBD2 journal in ordered-data mode
+// (journalw.go): when the caller syncs or unmounts, when the next step
+// would not fit, when the batch passes half its bounds, or when the
+// service's commit interval runs out (ADR 0227).
 
 const (
 	// maxTxnCredits bounds the metadata blocks one transaction stages. A
@@ -19,7 +24,44 @@ const (
 	// maxStepFrees is the most runs one step frees: an extent, every node
 	// on a path, and the root collapsing level by level.
 	maxStepFrees = 1 + 2*extentMaxDepth
+	// batchMeta, batchData and batchFrees are the pending sizes past which
+	// a finished operation commits the batch at once, so the next
+	// operation rarely has to commit in the middle.
+	batchMeta  = maxTxnCredits / 2
+	batchData  = maxTxnData / 2
+	batchFrees = maxTxnFrees / 2
+	// maxSpare bounds the block buffers kept for reuse: 256 KiB at 4 KiB.
+	maxSpare = 64
 )
+
+// blockBuffer returns a block-sized buffer, reused when one is spare. A
+// zeroed one is cleared; otherwise the caller overwrites all of it.
+func (fs *FS) blockBuffer(zeroed bool) []byte {
+	n := len(fs.spare)
+	if n == 0 {
+		return make([]byte, fs.blockSize)
+	}
+	data := fs.spare[n-1]
+	fs.spare = fs.spare[:n-1]
+	if zeroed {
+		for index := range data {
+			data[index] = 0
+		}
+	}
+	return data
+}
+
+// recycle keeps the buffers of staged copies nothing refers to any more.
+func (fs *FS) recycle(blocks map[uint64]*stagedBlock) {
+	for _, staged := range blocks {
+		if len(fs.spare) >= maxSpare {
+			return
+		}
+		if len(staged.data) == int(fs.blockSize) {
+			fs.spare = append(fs.spare, staged.data)
+		}
+	}
+}
 
 // stagedBlock is one block a transaction will write.
 type stagedBlock struct {
@@ -36,6 +78,9 @@ type freedRun struct {
 	count uint64
 }
 
+// txn is one layer of staged changes. In an operation's layer, meta and
+// data count only the blocks the pending layer does not hold, so the two
+// counts add up to what the commit will write.
 type txn struct {
 	blocks map[uint64]*stagedBlock
 	meta   int
@@ -49,13 +94,28 @@ type txn struct {
 	// than it reserved.
 	stepStart int
 	stepCost  int
-	// orphans is the orphan list as this transaction leaves it, head
-	// first. It replaces FS.orphans at commit.
+	// orphans is the orphan list as this layer leaves it, head first. It
+	// replaces FS.orphans at commit.
 	orphans       []uint32
 	orphansEdited bool
 }
 
-// begin opens a transaction.
+func newTxn(orphans []uint32) *txn {
+	return &txn{blocks: make(map[uint64]*stagedBlock), stepCost: -1, orphans: orphans}
+}
+
+// orphanList is the orphan list as the operations so far leave it.
+func (fs *FS) orphanList() []uint32 {
+	switch {
+	case fs.txn != nil:
+		return fs.txn.orphans
+	case fs.pending != nil && fs.pending.orphansEdited:
+		return fs.pending.orphans
+	}
+	return fs.orphans
+}
+
+// begin opens the running operation's transaction.
 func (fs *FS) begin() error {
 	if !fs.mutable {
 		return fail(KindReadOnly, "volume is not open for mutation")
@@ -63,22 +123,33 @@ func (fs *FS) begin() error {
 	if fs.txn != nil {
 		return fail(KindInternal, "transaction already open")
 	}
-	fs.txn = &txn{blocks: make(map[uint64]*stagedBlock), stepCost: -1, orphans: fs.orphans}
+	fs.txn = newTxn(fs.orphanList())
 	fs.cache.overlay = fs.txn.blocks
 	return nil
 }
 
-// abort drops the open transaction and every inode loaded under it.
+// abort drops the running operation's transaction and every inode loaded
+// under it. The pending transaction stays.
 func (fs *FS) abort() {
+	if fs.txn != nil {
+		fs.recycle(fs.txn.blocks)
+	}
 	fs.txn = nil
 	fs.cache.overlay = nil
 	fs.live = nil
 }
 
-// mutate runs one operation in a transaction, committing on success and
-// aborting on failure. An operation that reserves more than one transaction
-// holds commits the earlier ones as it goes; an abort then drops only the
-// last.
+// discard drops the pending transaction as well, after a failed write.
+func (fs *FS) discard() {
+	fs.abort()
+	fs.pending = nil
+	fs.cache.base = nil
+}
+
+// mutate runs one operation in its own transaction, folding it into the
+// pending one on success and dropping it on failure. An operation that
+// reserves more than one transaction holds commits the earlier ones as it
+// goes; an abort then drops only the last.
 func (fs *FS) mutate(operation func() error) error {
 	if err := fs.begin(); err != nil {
 		return err
@@ -88,22 +159,100 @@ func (fs *FS) mutate(operation func() error) error {
 		fs.abort()
 		return err
 	}
-	err := fs.commit()
+	if err := fs.fold(); err != nil {
+		fs.abort()
+		return err
+	}
 	fs.live = nil
-	return err
+	if p := fs.pending; p != nil && (p.meta > batchMeta || p.data > batchData || len(p.freed) > batchFrees) {
+		return fs.Sync()
+	}
+	return nil
+}
+
+// fold stages the running operation's inodes and superblock counters and
+// moves its layer into the pending transaction.
+func (fs *FS) fold() error {
+	t := fs.txn
+	t.stepCost = -1
+	if err := fs.flushInodes(); err != nil {
+		return err
+	}
+	if err := fs.flushSuperblock(); err != nil {
+		return err
+	}
+	p := fs.pending
+	if p == nil {
+		p = newTxn(fs.orphans)
+		fs.pending = p
+		fs.cache.base = p.blocks
+	}
+	for block, staged := range t.blocks {
+		if old := p.blocks[block]; old != nil {
+			if old.meta != staged.meta {
+				if staged.meta {
+					p.meta, p.data = p.meta+1, p.data-1
+				} else {
+					p.meta, p.data = p.meta-1, p.data+1
+				}
+			}
+			if len(fs.spare) < maxSpare {
+				fs.spare = append(fs.spare, old.data)
+			}
+		}
+		p.blocks[block] = staged
+	}
+	p.meta += t.meta
+	p.data += t.data
+	p.freed = append(p.freed, t.freed...)
+	p.freeBlocks += t.freeBlocks
+	p.freeInodes += t.freeInodes
+	if t.orphansEdited {
+		p.orphans, p.orphansEdited = t.orphans, true
+	}
+	fs.txn = nil
+	fs.cache.overlay = nil
+	return nil
+}
+
+// credits is the metadata the pending and running transactions stage
+// together; staged and freed count their data blocks and freed runs.
+func (fs *FS) credits() (meta int, data int, freed int) {
+	t := fs.txn
+	meta, data, freed = t.meta, t.data, len(t.freed)
+	if p := fs.pending; p != nil {
+		meta, data, freed = meta+p.meta, data+p.data, freed+len(p.freed)
+	}
+	return meta, data, freed
+}
+
+// fits reports whether a step of meta and data blocks fits beside what
+// the transactions hold.
+func (fs *FS) fits(meta int, data int) bool {
+	held, staged, freed := fs.credits()
+	return held+meta <= maxTxnCredits-txnHeadroom && staged+data <= maxTxnData && freed+maxStepFrees <= maxTxnFrees
 }
 
 // reserve starts a step that stages at most meta metadata blocks and data
-// file blocks. When the open transaction lacks room, it is committed first
-// and a new one opened; reserve reports whether that happened.
+// file blocks. When the transactions lack room, the pending one commits
+// first; when the running operation alone still lacks room, it commits
+// too and a new transaction opens. reserve reports whether the running
+// operation committed.
 func (fs *FS) reserve(meta int, data int) (bool, error) {
 	if meta > maxTxnCredits-txnHeadroom || data > maxTxnData {
 		return false, fail(KindInternal, "step larger than a transaction")
 	}
 	committed := false
-	if t := fs.txn; t.meta+meta > maxTxnCredits-txnHeadroom || t.data+data > maxTxnData ||
-		len(t.freed)+maxStepFrees > maxTxnFrees {
-		if err := fs.commit(); err != nil {
+	if !fs.fits(meta, data) && fs.pending != nil {
+		if err := fs.commitPending(); err != nil {
+			return false, err
+		}
+	}
+	if !fs.fits(meta, data) {
+		if err := fs.fold(); err != nil {
+			return false, err
+		}
+		if err := fs.commitPending(); err != nil {
 			return false, err
 		}
 		if err := fs.begin(); err != nil {
@@ -115,16 +264,22 @@ func (fs *FS) reserve(meta int, data int) (bool, error) {
 	return committed, nil
 }
 
-func (t *txn) charge(meta bool) error {
+func (fs *FS) charge(block uint64, meta bool) error {
+	if p := fs.pending; p != nil && p.blocks[block] != nil {
+		// The commit writes the block once; the pending layer paid for it.
+		return nil
+	}
+	t := fs.txn
+	held, staged, _ := fs.credits()
 	if !meta {
 		t.data++
-		if t.data > maxTxnData {
+		if staged+1 > maxTxnData {
 			return fail(KindInternal, "transaction holds too much file data")
 		}
 		return nil
 	}
 	t.meta++
-	if t.meta > maxTxnCredits {
+	if held+1 > maxTxnCredits {
 		return fail(KindInternal, "transaction exceeded its credits")
 	}
 	if t.stepCost >= 0 && t.meta-t.stepStart > t.stepCost {
@@ -140,11 +295,32 @@ func (fs *FS) checkStageable(block uint64) error {
 	return nil
 }
 
+// pendingCopy gives the running operation its own copy of a block the
+// pending transaction holds, so an abort leaves the pending copy intact.
+func (fs *FS) pendingCopy(block uint64) *stagedBlock {
+	p := fs.pending
+	if p == nil {
+		return nil
+	}
+	held := p.blocks[block]
+	if held == nil {
+		return nil
+	}
+	data := fs.blockBuffer(false)
+	copy(data, held.data)
+	staged := &stagedBlock{data: data, meta: held.meta}
+	fs.txn.blocks[block] = staged
+	return staged
+}
+
 // stage returns the transaction's writable copy of a metadata block,
 // reading it on first use.
 func (fs *FS) stage(block uint64) ([]byte, error) {
 	t := fs.txn
 	if staged := t.blocks[block]; staged != nil {
+		return staged.data, nil
+	}
+	if staged := fs.pendingCopy(block); staged != nil {
 		return staged.data, nil
 	}
 	if err := fs.checkStageable(block); err != nil {
@@ -154,10 +330,10 @@ func (fs *FS) stage(block uint64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := t.charge(true); err != nil {
+	if err := fs.charge(block, true); err != nil {
 		return nil, err
 	}
-	data := make([]byte, fs.blockSize)
+	data := fs.blockBuffer(false)
 	copy(data, current)
 	t.blocks[block] = &stagedBlock{data: data, meta: true}
 	return data, nil
@@ -167,20 +343,29 @@ func (fs *FS) stage(block uint64) ([]byte, error) {
 // just allocated; its old contents are never read.
 func (fs *FS) stageZero(block uint64, meta bool) ([]byte, error) {
 	t := fs.txn
-	if staged := t.blocks[block]; staged != nil {
+	staged := t.blocks[block]
+	if staged == nil {
+		staged = fs.pendingCopy(block)
+	}
+	if staged != nil {
 		for index := range staged.data {
 			staged.data[index] = 0
 		}
-		staged.meta = meta
+		if staged.meta != meta {
+			if err := fs.charge(block, meta); err != nil {
+				return nil, err
+			}
+			staged.meta = meta
+		}
 		return staged.data, nil
 	}
 	if err := fs.checkStageable(block); err != nil {
 		return nil, err
 	}
-	if err := t.charge(meta); err != nil {
+	if err := fs.charge(block, meta); err != nil {
 		return nil, err
 	}
-	data := make([]byte, fs.blockSize)
+	data := fs.blockBuffer(true)
 	t.blocks[block] = &stagedBlock{data: data, meta: meta}
 	return data, nil
 }
@@ -192,16 +377,19 @@ func (fs *FS) stageData(block uint64, keep bool) ([]byte, error) {
 	if staged := t.blocks[block]; staged != nil {
 		return staged.data, nil
 	}
+	if staged := fs.pendingCopy(block); staged != nil {
+		return staged.data, nil
+	}
 	if !keep {
 		return fs.stageZero(block, false)
 	}
 	if err := fs.checkStageable(block); err != nil {
 		return nil, err
 	}
-	if err := t.charge(false); err != nil {
+	if err := fs.charge(block, false); err != nil {
 		return nil, err
 	}
-	data := make([]byte, fs.blockSize)
+	data := fs.blockBuffer(false)
 	if !fs.device.ReadAt(block*uint64(fs.blockSize), data) {
 		return nil, errIO
 	}
@@ -209,7 +397,7 @@ func (fs *FS) stageData(block uint64, keep bool) ([]byte, error) {
 	return data, nil
 }
 
-// wasFreed reports whether block was freed by the open transaction.
+// wasFreed reports whether block was freed by this layer.
 func (t *txn) wasFreed(block uint64) bool {
 	for index := range t.freed {
 		run := &t.freed[index]
@@ -218,6 +406,28 @@ func (t *txn) wasFreed(block uint64) bool {
 		}
 	}
 	return false
+}
+
+// freedSinceCommit reports whether block was freed by the running
+// operation or by the pending transaction.
+func (fs *FS) freedSinceCommit(block uint64) bool {
+	if fs.pending != nil && fs.pending.wasFreed(block) {
+		return true
+	}
+	return fs.txn.wasFreed(block)
+}
+
+// freeCounts are the superblock's free block and inode counts as the
+// operations so far leave them.
+func (fs *FS) freeCounts() (int64, int64) {
+	blocks, inodes := int64(fs.sb.FreeBlocks), int64(fs.sb.FreeInodes)
+	if p := fs.pending; p != nil {
+		blocks, inodes = blocks+p.freeBlocks, inodes+p.freeInodes
+	}
+	if t := fs.txn; t != nil {
+		blocks, inodes = blocks+t.freeBlocks, inodes+t.freeInodes
+	}
+	return blocks, inodes
 }
 
 func (t *txn) noteFreed(start uint64, count uint64) error {
@@ -232,19 +442,24 @@ func (t *txn) noteFreed(start uint64, count uint64) error {
 	return nil
 }
 
-// commit writes the open transaction through the journal. A failed write
-// leaves the device in an unknown state, so the volume stops accepting
-// mutations; the next writable mount replays what committed.
-func (fs *FS) commit() error {
-	t := fs.txn
-	t.stepCost = -1
-	if err := fs.flushInodes(); err != nil {
-		fs.abort()
-		return err
+// Pending reports whether finished operations wait for a commit.
+func (fs *FS) Pending() bool { return fs.pending != nil }
+
+func (fs *FS) pendingBlocks() int {
+	if fs.pending == nil {
+		return 0
 	}
-	if err := fs.flushSuperblock(); err != nil {
-		fs.abort()
-		return err
+	return len(fs.pending.blocks)
+}
+
+// commitPending writes the pending transaction through the journal. The
+// operations in it have already answered their callers, so any failure
+// leaves the volume failed: the next writable mount replays what
+// committed before.
+func (fs *FS) commitPending() error {
+	t := fs.pending
+	if t == nil {
+		return nil
 	}
 	var meta, data []uint64
 	for block, staged := range t.blocks {
@@ -262,17 +477,11 @@ func (fs *FS) commit() error {
 	}
 	sortBlocks(meta)
 	sortBlocks(data)
-	if len(meta) == 0 && len(data) == 0 && len(t.freed) == 0 {
-		fs.txn = nil
-		fs.cache.overlay = nil
-		return nil
-	}
-	if err := fs.commitLog(meta, data, fs.revokesFor(t)); err != nil {
-		if KindOf(err) == KindIO {
+	if len(meta) != 0 || len(data) != 0 || len(t.freed) != 0 {
+		if err := fs.commitLog(t, meta, data, fs.revokesFor(t)); err != nil {
 			return fs.failWrite()
 		}
-		fs.abort()
-		return err
+		fs.commits++
 	}
 	for _, block := range meta {
 		fs.cache.update(block, t.blocks[block].data)
@@ -283,14 +492,31 @@ func (fs *FS) commit() error {
 		fs.orphans = t.orphans
 		fs.sb.LastOrphan = fs.orphanHead()
 	}
-	fs.txn = nil
-	fs.cache.overlay = nil
-	fs.commits++
+	fs.pending = nil
+	fs.cache.base = nil
+	if fs.live == nil {
+		// Between operations nothing holds the batch's buffers. In the
+		// middle of one, which keeps its live inodes, the operation may
+		// still read a slice of them.
+		fs.recycle(t.blocks)
+	}
+	if r := fs.txn; r != nil {
+		// The running operation's copies of blocks the batch held now
+		// count against the next transaction.
+		r.meta, r.data = 0, 0
+		for _, staged := range r.blocks {
+			if staged.meta {
+				r.meta++
+			} else {
+				r.data++
+			}
+		}
+	}
 	return nil
 }
 
 func (fs *FS) failWrite() error {
-	fs.abort()
+	fs.discard()
 	fs.cache.invalidate()
 	fs.mutable = false
 	fs.state = StateFailed
@@ -305,6 +531,7 @@ func (fs *FS) flushSuperblock() error {
 	if t.freeBlocks == 0 && t.freeInodes == 0 && !t.orphansEdited {
 		return nil
 	}
+	free, inodes := fs.freeCounts()
 	block := uint64(superblockOffset) / uint64(fs.blockSize)
 	within := superblockOffset % int(fs.blockSize)
 	data, err := fs.stage(block)
@@ -312,8 +539,7 @@ func (fs *FS) flushSuperblock() error {
 		return err
 	}
 	raw := data[within : within+superblockSize]
-	freeBlocks := uint64(int64(fs.sb.FreeBlocks) + t.freeBlocks)
-	freeInodes := uint32(int64(fs.sb.FreeInodes) + t.freeInodes)
+	freeBlocks, freeInodes := uint64(free), uint32(inodes)
 	putLE32(raw[0xC:], uint32(freeBlocks))
 	if fs.sb.Features.Incompat&incompat64Bit != 0 {
 		putLE32(raw[0x158:], uint32(freeBlocks>>32))

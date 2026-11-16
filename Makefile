@@ -216,7 +216,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: stress-linux-stream FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-ext4-unit test-ext4-stress test-ext4-mutations test-volumes test-ext4-rw test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-aslr test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano pve-run test-pvelab test-hardware bench-pve-linux-network bench-pve-linux-network-diag bench-pve-linux-network-hz
+.PHONY: stress-linux-stream FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-ext4-unit test-ext4-stress test-ext4-mutations test-volumes test-ext4-rw test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-aslr test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-network test-linux-7zip test-linux-tty test-linux-interactive test-linux-nano profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-linux-network test-pve-7zip test-pve-nano test-pve-ext4 pve-run test-pvelab test-hardware bench-pve-linux-network bench-pve-linux-network-diag bench-pve-linux-network-hz
 
 all: iso
 
@@ -627,6 +627,7 @@ test-all:
 	$(MAKE) test-incremental
 	$(MAKE) test-crypto-frames
 	$(MAKE) test-ext4-mutations
+	$(MAKE) test-ext4-stress
 	$(MAKE) test-memory
 	$(MAKE) test-boot
 	$(MAKE) test-vfs-serial
@@ -665,6 +666,7 @@ release-check:
 	$(MAKE) test-crypto-frames
 	$(MAKE) test-storage-stress
 	$(MAKE) test-ext4-mutations
+	$(MAKE) test-ext4-stress
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-memory
@@ -739,7 +741,7 @@ test-ext4-mutations:
 	$(BUILD_ENV) tools/ext4fixture/check-mutations.sh
 
 test-ext4-stress:
-	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -timeout 60m -run 'RandomMetadataDamage|PowerCutRecovery' ./userspace/ext4
+	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -timeout 60m -run 'RandomMetadataDamage|PowerCutRecovery|PowerCutBatched' ./userspace/ext4
 
 test-partitions:
 	$(BUILD_ENV) go test -count=1 ./userspace/partition ./userspace/block ./internal/imagefixture
@@ -1370,6 +1372,20 @@ test-pve-nano:
 	@tools/linuxfixture/check-static.sh "$(NANO)" "$(BUSYBOX)"
 	@$(MAKE) --no-print-directory pve-artifacts DIAG=1 LINUX_EXTRA=$(abspath $(BUSYBOX)):$(abspath $(NANO))
 	@$(PVELAB) run --scenario nano --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
+
+# ext4 under KVM on four host cores (ADR 0227): fsbench, five rounds, on a
+# 1 GiB ext4 partition mounted read-write beside the installed system. The
+# Linux reference runs the same fsbench on a volume from the same script.
+test-pve-ext4: iso system-tree
+	@mkdir -p $(PVE_INPUT)
+	@rm -f $(PVE_DISK) $(PVE_INPUT)/system.img $(PVE_INPUT)/bench.img
+	@$(BUILD_ENV) go run ./tools/mkfat32 -new -size auto -tree $(SYSTEM_TREE) $(PVE_INPUT)/system.img >/dev/null
+	@tools/ext4fixture/make-bench-volume.sh $(PVE_INPUT)/bench.img
+	@$(BUILD_ENV) go run ./tools/diskcompose -part goos-system:data:$(PVE_INPUT)/system.img \
+		-part goos-bench:linux:$(PVE_INPUT)/bench.img $(PVE_DISK)
+	@rm -f $(PVE_INPUT)/system.img $(PVE_INPUT)/bench.img
+	@cp $(ISO) $(PVE_ISO)
+	@$(PVELAB) run --scenario ext4-bench --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
 
 # The network benchmark under KVM on four host cores, in one VM: two warm-up
 # and nine measured rounds of netprobe bench (Linux sockets over loopback),

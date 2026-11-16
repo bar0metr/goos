@@ -240,12 +240,17 @@ type cacheEntry struct {
 	// that meets a link earlier stops there and caches nothing.
 	link bool
 	used bool
+	// referenced marks an entry a lookup used since the replacement
+	// clock last passed it; the clock spares it once.
+	referenced bool
 }
 
 type Namespace struct {
 	mounts [MaxMounts]mount
 	files  [MaxOpenFiles]openFile
 	cache  [MaxCache]cacheEntry
+	// cacheNext is the entry a full cache replaces next.
+	cacheNext uint16
 	// nextRead identifies a cursor reservation until its owner finishes it.
 	nextRead uint64
 	// Canonical paths live here because a local [MaxPath]byte escapes into the
@@ -538,7 +543,25 @@ func (namespace *Namespace) resolve(path []byte) (uint8, ramfs.NodeID, bool, Sta
 	mounted := &namespace.mounts[mountIndex]
 	node := mounted.root
 	protected := namespace.guards(mounted, node)
+	// A cached parent directory on the same mount leaves one component to
+	// look up. A parent that is a link, or a path whose last component is
+	// a mount point, takes the full walk.
+	parent := lastComponent(canonical[:size]) - 1
+	walkedParent := false
+	if parent > relative {
+		if parentMount, parentNode, parentProtected, link, found := namespace.cached(canonical[:parent]); found && !link && parentMount == mountIndex {
+			node, protected, relative = parentNode, parentProtected, parent+1
+		} else {
+			walkedParent = true
+		}
+	}
 	for relative < size {
+		if walkedParent && relative > parent {
+			// The walk reached the parent directory: remember it for the
+			// names beside this one.
+			namespace.remember(canonical[:parent], mountIndex, node, protected, false)
+			walkedParent = false
+		}
 		component, rest := nextComponent(canonical[relative:size])
 		name, valid := ramfs.MakeName(component)
 		if !valid {
@@ -1481,6 +1504,7 @@ func (namespace *Namespace) cached(path []byte) (uint8, ramfs.NodeID, bool, bool
 	for index := range namespace.cache {
 		entry := &namespace.cache[index]
 		if entry.used && equal(entry.path[:entry.size], path) {
+			entry.referenced = true
 			return entry.mount, entry.node, entry.protected, entry.link, true
 		}
 	}
@@ -1491,15 +1515,32 @@ func (namespace *Namespace) remember(path []byte, mountIndex uint8, node ramfs.N
 	if len(path) > maxCachedPath {
 		return
 	}
+	target := -1
 	for index := range namespace.cache {
 		entry := &namespace.cache[index]
-		if !entry.used {
-			entry.used, entry.mount, entry.node, entry.size, entry.protected = true, mountIndex, node, uint16(len(path)), protected
-			entry.link = link
-			copy(entry.path[:], path)
+		if entry.used && equal(entry.path[:entry.size], path) {
 			return
 		}
+		if !entry.used && target < 0 {
+			target = index
+		}
 	}
+	for target < 0 {
+		// A full cache replaces its entries in turn, sparing once each
+		// one a lookup used since the last pass, so a directory whose
+		// names are being resolved stays.
+		candidate := &namespace.cache[namespace.cacheNext]
+		if !candidate.referenced {
+			target = int(namespace.cacheNext)
+		}
+		candidate.referenced = false
+		namespace.cacheNext = uint16((int(namespace.cacheNext) + 1) % len(namespace.cache))
+	}
+	entry := &namespace.cache[target]
+	entry.referenced = false
+	entry.used, entry.mount, entry.node, entry.size, entry.protected = true, mountIndex, node, uint16(len(path)), protected
+	entry.link = link
+	copy(entry.path[:], path)
 }
 
 func (namespace *Namespace) invalidate() {

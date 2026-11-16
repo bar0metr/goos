@@ -169,11 +169,25 @@ func TestWritableVolumeCommand(t *testing.T) {
 // A version 4 mount is refused: version 5 gave the command a writable kind.
 func TestVolumeCommandRefusesVersion4(t *testing.T) {
 	message, ok := EncodeVolumeCommand(VolumeCommand{Mount: true, Writable: true, Source: []byte("part:2"), Path: []byte("/mnt/data")}, 3)
-	if !ok || message.Version != 5 {
+	if !ok || message.Version != ControlVersion {
 		t.Fatalf("encoded version %d", message.Version)
 	}
 	message.Version = 4
 	if _, ok := DecodeVolumeCommand(&message); ok {
 		t.Fatal("version 4 mount accepted")
+	}
+}
+
+// A version 5 request is refused: version 6 added the sync operation.
+func TestSyncRefusesVersion5(t *testing.T) {
+	message, ok := EncodeControl(ControlSync, 0, 4)
+	if operation, _, decoded := DecodeControl(message); !ok || !decoded || operation != ControlSync {
+		t.Fatal("sync did not round trip")
+	}
+	if _, _, decoded := DecodeControl(func() ipc.Message { old := message; old.Version = 5; return old }()); decoded {
+		t.Fatal("version 5 sync accepted")
+	}
+	if _, _, decoded := DecodeControl(func() ipc.Message { bad := message; bad.Payload[1] = 1; return bad }()); decoded {
+		t.Fatal("sync with an argument accepted")
 	}
 }

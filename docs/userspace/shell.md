@@ -49,9 +49,9 @@ its prompt. Editing, echo and the control keys belong to the terminal service
 words in it is bounded only by its length (ADR 0109). Runtime allocation
 remains confined to the fixed userspace arena.
 
-The 18 shell built-ins are `help`, `clear`, `cd`, `services`, `handles`,
-`caps`, `config`, `hosts`, `log`, `jobs`, `kill`, `mount`, `umount`, `reboot`,
-`poweroff`, `exit`, `diag`, and `time`. They are a static shell table. `help` prints that table and
+The 19 shell built-ins are `help`, `clear`, `cd`, `services`, `handles`,
+`caps`, `config`, `hosts`, `log`, `jobs`, `kill`, `mount`, `umount`, `sync`,
+`reboot`, `poweroff`, `exit`, `diag`, and `time`. They are a static shell table. `help` prints that table and
 the currently installed command index; `help NAME` first recognizes a builtin
 and otherwise looks up the executable's build-time manifest. `NAME --help`
 prints the same synopsis for either kind. The dynamic executable index is
@@ -60,8 +60,8 @@ tracks the commands that the selected system tree actually contains rather than
 a second handwritten shell list. A command given the wrong number of arguments
 prints `usage: ...` instead of running (ADR 0079).
 
-`services`, `reboot`, and `poweroff` are requests to PID 1 over the control
-protocol on the exec channel, and so are `mount [-t TYPE] SOURCE PATH` and
+`services`, `sync`, `reboot`, and `poweroff` are requests to PID 1 over the
+control protocol on the exec channel, and so are `mount [-t TYPE] SOURCE PATH` and
 `umount PATH`, which mount and unmount an additional volume below `/mnt`
 ([storage](storage.md#additional-volumes)). `mount` with no arguments is not
 the builtin: it runs the `mount` program, which lists the mount table. `handles` and `caps` list the shell's own handle
@@ -163,7 +163,12 @@ shells refuse `exit` and ignore prompt EOF, so their supervisory shell remains
 available. Typing ahead of a command that does not read keeps the text for the
 next prompt (ADR 0082).
 
-For `reboot` or `poweroff`, PID 1 synchronizes storage first. A local request
+`sync` asks PID 1 to have the persistent volume and every mounted
+additional volume make their completed writes durable; an ext4 volume
+commits the operations it holds in memory (ADR 0227). It prints
+`sync: storage did not confirm` when a volume refuses.
+
+For `reboot` or `poweroff`, PID 1 synchronizes storage first, the same way. A local request
 then performs the machine operation normally. For a request from an SSH shell,
 PID 1 returns acceptance, the shell flushes its SSH-bound output and exits, and
 the remote worker drains and closes the SSH transport before the machine action.

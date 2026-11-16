@@ -141,6 +141,11 @@ goos> mount -t ext4 -o rw name:linux-data /mnt/linux
 A mount is read-only unless `-o rw` asks for writing, which ext4 supports
 (ADR 0226). `mount` and `df` show each volume's `ro` or `rw` flag.
 
+An ext4 volume commits writes in batches (ADR 0227): a write that returned
+is durable after `fsync`, the shell's `sync`, `umount`, `reboot` or
+`poweroff`, or within one second on its own. Run `sync` before you pull
+power on purpose.
+
 A source names a partition: `part:N` by number, `guid:GUID` by GPT unique
 GUID, `name:LABEL` by GPT name. The path is `/mnt/` and one name. `mount`
 with no arguments still lists the mount table.

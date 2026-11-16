@@ -3,7 +3,8 @@
 ## Status
 
 Accepted. Extends ADR 0222 (volume instances), ADR 0223 (links and Unix
-metadata) and ADR 0225 (JBD2 journal and writable mounts). It replaces the
+metadata) and ADR 0225 (JBD2 journal and writable mounts). ADR 0227
+replaces its durability rule: operations commit in batches. It replaces the
 rule of ADR 0222 that additional volumes get read-only slices and that PID 1
 never holds a writable slice for one, and the part of ADR 0225 that kept
 the ext4 service read-only.

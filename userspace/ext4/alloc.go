@@ -156,7 +156,7 @@ func (fs *FS) initInodeBitmap(desc *Group) error {
 // availableBlocks is what an unprivileged allocation may still take: the
 // free count less the blocks reserved for the superuser.
 func (fs *FS) availableBlocks() uint64 {
-	free := int64(fs.sb.FreeBlocks) + fs.txn.freeBlocks
+	free, _ := fs.freeCounts()
 	if free <= int64(fs.sb.ReservedBlocks) {
 		return 0
 	}
@@ -205,9 +205,9 @@ func (fs *FS) allocBlocks(goal uint64, want uint64) (uint64, uint64, error) {
 		if err != nil {
 			return 0, 0, err
 		}
-		bit, run := findRun(bitmap, from, count, want, start, t)
+		bit, run := fs.findRun(bitmap, from, count, want, start)
 		if run == 0 && from > 0 {
-			bit, run = findRun(bitmap, 0, count, want, start, t)
+			bit, run = fs.findRun(bitmap, 0, count, want, start)
 		}
 		if run == 0 {
 			continue
@@ -232,9 +232,9 @@ func (fs *FS) allocBlocks(goal uint64, want uint64) (uint64, uint64, error) {
 }
 
 // findRun returns the first free bit at or after from and the length of the
-// free run there, at most want. Blocks the transaction freed count as used.
-func findRun(bitmap []byte, from uint64, count uint64, want uint64, start uint64, t *txn) (uint64, uint64) {
-	free := func(bit uint64) bool { return !testBit(bitmap, bit) && !t.wasFreed(start+bit) }
+// free run there, at most want. Blocks freed since the last commit count as used.
+func (fs *FS) findRun(bitmap []byte, from uint64, count uint64, want uint64, start uint64) (uint64, uint64) {
+	free := func(bit uint64) bool { return !testBit(bitmap, bit) && !fs.freedSinceCommit(start+bit) }
 	for bit := from; bit < count; bit++ {
 		if bitmap[bit/8] == 0xFF && bit%8 == 0 {
 			bit += 7
@@ -308,7 +308,7 @@ func (fs *FS) freeBlocks(start uint64, count uint64) error {
 // directory trees; anything else starts at its parent's group.
 func (fs *FS) allocInode(parent uint32, dir bool) (uint32, error) {
 	t := fs.txn
-	freeInodes := int64(fs.sb.FreeInodes) + t.freeInodes
+	_, freeInodes := fs.freeCounts()
 	if freeInodes <= 0 {
 		return 0, fail(KindNoSpace, "no free inodes")
 	}

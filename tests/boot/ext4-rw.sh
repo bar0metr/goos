@@ -99,6 +99,13 @@ write_marker() {
 	expect "^$2\$" "a write after recovery to $1"
 }
 
+# sync_storage commits what the volumes hold in memory: a write is durable
+# only after a sync, an fsync, a commit interval or an unmount (ADR 0227).
+sync_storage() {
+	run 'sync'
+	refuse '^sync:' 'sync of every mounted volume'
+}
+
 # held_fault FAULT PATH TEXT MARKER holds PATH open in a Linux program,
 # injects FAULT, which must print MARKER, and requires the old descriptor to
 # fail and a new open to read TEXT once the volume is back.
@@ -114,6 +121,7 @@ held_fault() {
 		sleep 0.5
 	done
 	[ -n "$held" ] || fail "a descriptor held on $2 before fault $1"
+	sync_storage
 	run "fault $1"
 	[ "$(grep -c "$4" "$log" || true)" -gt "$injected" ] || fail "fault $1 not injected"
 	await_content "$2" "$3" "$2 after fault $1"
@@ -183,6 +191,7 @@ run 'umount /mnt/k'
 
 # Kill the configured volume's instance. Its replacement gets a new
 # writable grant, replays the journal, and serves what the old one wrote.
+sync_storage
 run 'fault volume'
 grep -q 'VOLUME_FAULT_INJECTED' "$log" || fail 'volume fault not injected'
 run 'cat /mnt/w/moved.txt'
@@ -203,6 +212,16 @@ run 'echo after-fault > /mnt/cfg/second.txt'
 run 'cat /mnt/cfg/second.txt'
 expect '^after-fault$' 'a write to the replacement'
 
+# Without a sync, the service commits a finished write on its own within
+# its commit interval of one second; five seconds leave room for a slow
+# host before the instance is killed.
+run 'echo timed > /mnt/cfg/timed.txt'
+sleep 5
+injected=$(grep -c 'VOLUME_FAULT_INJECTED' "$log" || true)
+run 'fault volume'
+[ "$(grep -c 'VOLUME_FAULT_INJECTED' "$log" || true)" -gt "$injected" ] || fail 'timed volume fault not injected'
+await_content /mnt/cfg/timed.txt timed 'a write the commit interval made durable'
+
 # A Linux program renames onto another link of the same inode, writes a
 # file whose last name went, and syncs files and directories.
 run '/system/linux/abi-probe ext4-rw /mnt/w'
@@ -211,6 +230,7 @@ expect '^ext4 rw ok$' 'a Linux program on a writable volume'
 # A restarted VFS has no volumes; each instance ends with it, and its
 # replacement replays the journal and is attached again at its path.
 write_marker /mnt/cfg/vfs.txt vfs-marker
+sync_storage
 restarts=$(grep -c 'VFS_RESTARTED_OK' "$log" || true)
 run 'fault vfs'
 restarted=
@@ -241,6 +261,7 @@ expect '/mnt/w.*ext4.*rw' 'the shell volume read-write after the restarts'
 # still survives as many crashes of its own as the budget allows.
 for crash in 1 2 3; do
 	injected=$(grep -c 'VOLUME_FAULT_INJECTED' "$log" || true)
+	sync_storage
 	run 'fault volume'
 	[ "$(grep -c 'VOLUME_FAULT_INJECTED' "$log" || true)" -gt "$injected" ] || fail "volume crash $crash not injected"
 	await_content /mnt/cfg/after-driver.txt after-driver "the configured volume after crash $crash past the storage restarts"
@@ -259,7 +280,9 @@ run 'mkdir /mnt/w/x'
 expect 'mkdir:' 'a write after a read-only remount'
 run 'umount /mnt/w'
 
-# Cut the guest off with /mnt/cfg mounted: its journal is live.
+# Cut the guest off with /mnt/cfg mounted: its journal is live, and holds
+# what the sync committed.
+sync_storage
 kill "$pid"
 wait "$pid" 2>/dev/null || true
 pid=

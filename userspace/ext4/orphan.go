@@ -35,11 +35,7 @@ func orphanIndex(list []uint32, number uint32) int {
 
 // isOrphan reports whether inode number is on the committed or open list.
 func (fs *FS) isOrphan(number uint32) bool {
-	list := fs.orphans
-	if fs.txn != nil {
-		list = fs.txn.orphans
-	}
-	return orphanIndex(list, number) >= 0
+	return orphanIndex(fs.orphanList(), number) >= 0
 }
 
 // orphanInode reads an allocated inode whether or not it has links.
@@ -134,8 +130,8 @@ func (fs *FS) loadOrphans() error {
 
 // cleanupOrphans finishes the work of every listed inode, head first.
 func (fs *FS) cleanupOrphans(report *Replay) error {
-	for len(fs.orphans) > 0 {
-		number := fs.orphans[0]
+	for list := fs.orphanList(); len(list) > 0; list = fs.orphanList() {
+		number := list[0]
 		err := fs.mutate(func() error {
 			inode, err := fs.liveInode(number)
 			if err != nil {

@@ -127,8 +127,15 @@ func (fs *FS) leafEnd(dir *Inode, data []byte) (int, error) {
 	if le32(data, tail) != 0 || recLen(data, tail) != dirTailSize || data[tail+6] != 0 || data[tail+7] != dirTailFileType {
 		return 0, corrupt("directory block has no checksum tail")
 	}
+	entry := fs.cache.resident(data)
+	if entry != nil && entry.checked && entry.seed == dir.csumSeed {
+		return tail, nil
+	}
 	if crc32c(dir.csumSeed, data[:tail]) != le32(data, tail+8) {
 		return 0, corrupt("directory block checksum mismatch")
+	}
+	if entry != nil {
+		entry.checked, entry.seed = true, dir.csumSeed
 	}
 	return tail, nil
 }
@@ -230,6 +237,7 @@ func (fs *FS) ReadDir(dir *Inode, cursor uint64, emit func(*DirEntry) bool) (uin
 	indexed := fs.isIndexed(dir)
 	blockSize := uint64(fs.blockSize)
 	var entry DirEntry
+	var leaf []byte
 	for index := cursor / blockSize; index < blocks; index++ {
 		data, err := fs.dirBlock(dir, index)
 		if err != nil {
@@ -262,7 +270,13 @@ func (fs *FS) ReadDir(dir *Inode, cursor uint64, emit func(*DirEntry) bool) (uin
 		if err != nil {
 			return 0, err
 		}
-		reader := direntReader{data: data, end: end, fs: fs}
+		// emit may read inodes, and each read can evict this block from
+		// the cache and reuse its buffer, so the walk reads a copy.
+		if leaf == nil {
+			leaf = make([]byte, blockSize)
+		}
+		copy(leaf, data)
+		reader := direntReader{data: leaf, end: end, fs: fs}
 		base := index * blockSize
 		for {
 			raw, ok, err := reader.next()

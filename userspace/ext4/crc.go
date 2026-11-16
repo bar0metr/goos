@@ -7,14 +7,16 @@ package ext4
 // with the reflected 0x8005 polynomial (0xA001), started from ~0.
 
 // crc32cTable is filled on first use rather than by a package initializer:
-// GoOS services do not run initializers that need the heap.
+// GoOS services do not run initializers that need the heap. Row 0 is the
+// byte-at-a-time table; row k advances a byte that sits k positions
+// further back, so crc32c folds eight bytes per step.
 var (
-	crc32cTable  [256]uint32
+	crc32cTable  [8][256]uint32
 	crc32cFilled bool
 )
 
 func fillCRC32CTable() {
-	for index := range crc32cTable {
+	for index := range crc32cTable[0] {
 		value := uint32(index)
 		for bit := 0; bit < 8; bit++ {
 			if value&1 != 0 {
@@ -23,7 +25,14 @@ func fillCRC32CTable() {
 				value >>= 1
 			}
 		}
-		crc32cTable[index] = value
+		crc32cTable[0][index] = value
+	}
+	for index := range crc32cTable[0] {
+		value := crc32cTable[0][index]
+		for row := 1; row < len(crc32cTable); row++ {
+			value = crc32cTable[0][byte(value)] ^ value>>8
+			crc32cTable[row][index] = value
+		}
 	}
 	crc32cFilled = true
 }
@@ -34,8 +43,14 @@ func crc32c(crc uint32, data []byte) uint32 {
 		fillCRC32CTable()
 	}
 	table := &crc32cTable
+	for len(data) >= 8 {
+		low := crc ^ (uint32(data[0]) | uint32(data[1])<<8 | uint32(data[2])<<16 | uint32(data[3])<<24)
+		crc = table[7][byte(low)] ^ table[6][byte(low>>8)] ^ table[5][byte(low>>16)] ^ table[4][low>>24] ^
+			table[3][data[4]] ^ table[2][data[5]] ^ table[1][data[6]] ^ table[0][data[7]]
+		data = data[8:]
+	}
 	for _, value := range data {
-		crc = table[byte(crc)^value] ^ crc>>8
+		crc = table[0][byte(crc)^value] ^ crc>>8
 	}
 	return crc
 }

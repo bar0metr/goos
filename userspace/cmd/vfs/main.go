@@ -183,7 +183,11 @@ func processControl(message ipc.Message) bool {
 	}
 	if vfs.IsSync(message) {
 		result := vfs.StatusBackendError
-		if service.Sync() {
+		failed := service.SyncVolumes()
+		if failed != 0 {
+			syslog.Warn("volume sync failed", syslog.Uint("volumes", uint64(failed)))
+		}
+		if service.Sync() && failed == 0 {
 			result = vfs.StatusOK
 			syslog.Info("synced")
 		}

@@ -4,9 +4,9 @@ import (
 	"testing"
 )
 
-// damageRun commits a few transactions on a crash device: a file with an
-// extent leaf, its unlink (which revokes the logged leaf), then two
-// creates, and leaves the volume mounted. It returns the device and the
+// damageRun commits a few transactions on a crash device, syncing after
+// each step: a file with an extent leaf, its unlink (which revokes the
+// logged leaf), then two creates, and leaves the volume mounted. It returns the device and the
 // classes of its events.
 func damageRun(t *testing.T) (*crashDevice, []string) {
 	device := newCrashDevice(crashBase(t))
@@ -17,11 +17,20 @@ func damageRun(t *testing.T) (*crashDevice, []string) {
 			t.Fatal(err)
 		}
 	}
+	commit := func() {
+		if err := fs.Sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commit()
 	if err := fs.Unlink(root(t, fs), []byte("leafy")); err != nil {
 		t.Fatal(err)
 	}
+	commit()
 	ok(fs.Create(root(t, fs), []byte("one"), ModeRegular|0o644, 0, 0))
+	commit()
 	ok(fs.Create(root(t, fs), []byte("two"), ModeRegular|0o644, 0, 0))
+	commit()
 	return device, device.classify()
 }
 

@@ -15,6 +15,7 @@ import (
 	"goos/internal/capability"
 	"goos/internal/timekeeping"
 	"goos/internal/validation"
+	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -33,6 +34,10 @@ import (
 // requestWait bounds one wait for the next request; waking without one is not
 // an error.
 const requestWait = 100000
+
+// commitInterval is how long finished mutations may wait in memory before
+// the service commits them on its own (ADR 0227).
+const commitInterval = clock.TicksPerSecond
 
 var (
 	consoleHandle  handle.ID
@@ -209,11 +214,28 @@ func userspaceMain() {
 		syslog.Error("volume refused", syslog.Str("reason", volume.Refusal()))
 		mark("EXT4_VOLUME_REFUSED\n")
 	}
+	commitDue := uint64(0)
 	for {
+		wait := uint64(requestWait)
+		if volume.Pending() {
+			now := ticks()
+			if commitDue == 0 {
+				commitDue = now + commitInterval
+			}
+			if now >= commitDue {
+				commitDue = 0
+				volume.Flush()
+				exitIfFailed()
+				continue
+			}
+			wait = commitDue - now
+		} else {
+			commitDue = 0
+		}
 		var interests [userwait.MaxObjects]userwait.Interest
 		interests[0] = userwait.Interest{Handle: vfsHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 		interests[1] = userwait.Interest{Handle: blockHandle, Events: kcall.WaitPeerClosed}
-		ready, waited := userwait.Any(&interests, 2, requestWait)
+		ready, waited := userwait.Any(&interests, 2, wait)
 		if waited == kcall.StatusTimeout {
 			continue
 		}
@@ -231,6 +253,9 @@ func userspaceMain() {
 			continue
 		}
 		if status == kcall.StatusPeerDied {
+			// The block endpoint still works: commit what the volume
+			// holds before PID 1 replaces this instance.
+			volume.Flush()
 			syslog.Warn("vfs endpoint closed")
 			sys.Exit(exitVFSGone)
 		}
@@ -241,14 +266,29 @@ func userspaceMain() {
 			continue
 		}
 		serve()
-		if volume.Failed() {
-			// The device refused a write or a flush: the driver may have
-			// been replaced under the volume. A new instance replays the
-			// journal; this one could only answer errors.
-			syslog.Error("volume failed", syslog.Str("action", "exit for recovery"))
-			sys.Exit(exitVolumeFailed)
-		}
+		exitIfFailed()
 	}
+}
+
+// exitIfFailed ends the instance after the device refused a write or a
+// flush: the driver may have been replaced under the volume. A new
+// instance replays the journal; this one could only answer errors.
+func exitIfFailed() {
+	if volume.Failed() {
+		syslog.Error("volume failed", syslog.Str("action", "exit for recovery"))
+		sys.Exit(exitVolumeFailed)
+	}
+}
+
+// ticks reads the monotonic clock. A failed read reports the largest
+// time, so the service commits at once instead of waiting on a clock it
+// cannot read.
+func ticks() uint64 {
+	now, status := sys.ClockRead()
+	if status != kcall.StatusOK {
+		return ^uint64(0)
+	}
+	return now
 }
 
 func serve() {

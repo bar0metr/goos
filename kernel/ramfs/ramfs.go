@@ -205,7 +205,7 @@ func (fs *FileSystem) OpenName(parent NodeID, name Name) (NodeID, Status) {
 	if status != StatusOK {
 		return 0, status
 	}
-	if index, found := fs.child(directory, name); found {
+	if index, found := fs.child(directory, &name); found {
 		return fs.id(index), StatusOK
 	}
 	return 0, StatusNotFound
@@ -457,7 +457,7 @@ func (fs *FileSystem) RenameName(id NodeID, parent NodeID, name Name) Status {
 	if status != StatusOK {
 		return status
 	}
-	if _, found := fs.child(directory, name); found {
+	if _, found := fs.child(directory, &name); found {
 		return StatusAlreadyExists
 	}
 	if entry.kind == KindDirectory && fs.descendsFrom(parent, id) {
@@ -495,7 +495,7 @@ func (fs *FileSystem) ReplaceName(id NodeID, parent NodeID, name Name) Status {
 	if status != StatusOK {
 		return status
 	}
-	index, found := fs.child(directory, name)
+	index, found := fs.child(directory, &name)
 	if !found {
 		return fs.RenameName(id, parent, name)
 	}
@@ -533,7 +533,7 @@ func (fs *FileSystem) UnlinkName(parent NodeID, name Name) Status {
 	if status != StatusOK {
 		return status
 	}
-	index, found := fs.child(directory, name)
+	index, found := fs.child(directory, &name)
 	if !found {
 		return StatusNotFound
 	}
@@ -564,7 +564,7 @@ func (fs *FileSystem) createName(parent NodeID, name Name, kind Kind) (NodeID, S
 	if status != StatusOK {
 		return 0, status
 	}
-	if _, found := fs.child(directory, name); found {
+	if _, found := fs.child(directory, &name); found {
 		return 0, StatusAlreadyExists
 	}
 	index, status := fs.allocateNode()
@@ -664,7 +664,7 @@ func (fs *FileSystem) file(id NodeID) (*node, Status) {
 }
 
 // child finds name among the children of directory.
-func (fs *FileSystem) child(directory *node, name Name) (int, bool) {
+func (fs *FileSystem) child(directory *node, name *Name) (int, bool) {
 	for link := directory.firstChild; link != 0; {
 		index := int(link - 1)
 		entry := fs.at(index)
@@ -714,7 +714,7 @@ func (fs *FileSystem) descendsFrom(candidate NodeID, ancestor NodeID) bool {
 	return false
 }
 
-func sameName(entry *node, name Name) bool {
+func sameName(entry *node, name *Name) bool {
 	if entry.nameSize != name.size {
 		return false
 	}
