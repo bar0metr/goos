@@ -62,7 +62,9 @@ main structure and privilege boundary, not a mandatory call sequence:
 |                                                               |
 |   PID 1 / supervision                                         |
 |                                                               |
-|   VFS ----- FAT32 ----- block ----- virtio-blk                |
+|           +--- FAT32 ---+                                     |
+|   VFS ----+             +--- block ----- virtio-blk           |
+|           +--- ext4 ----+   (one per additional volume)       |
 |                                                               |
 |   resolved -------+                                           |
 |   linuxsockd ------+--- netd -------------- virtio-net        |
@@ -91,7 +93,7 @@ native tasks, while the goroutine runtime multiplexes Gs over those tasks.
 Filesystems, terminal services, configuration, logging, networking, remote
 access, and complex device drivers run as isolated userspace services with only
 their granted authority. Storage and networking are composed from supervised
-service chains such as VFS -> FAT32 -> block -> `virtio-blk` and
+service chains such as VFS -> FAT32 or ext4 -> block -> `virtio-blk` and
 `resolved`/`linuxsockd` -> `netd` -> `virtio-net`. Remote access is
 split again: `remoted` owns listener/host-identity authority,
 `remoted-worker` owns one SSH session, and a per-session `sftpd` receives

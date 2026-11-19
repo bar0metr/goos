@@ -35,7 +35,7 @@ mkdir -p "$root/bin" "$root/dev" "$root/proc" "$root/sys" "$root/mnt/bench" "$ro
 cp "$busybox" "$root/bin/busybox"
 cp "$here/../../userspace/linux/prebuilt/fsbench" "$root/system/linux/fsbench"
 tar xf "$modules" -C "$root/modules"
-find "$root/modules" -name '*.ko' -exec mv {} "$root/modules/" \;
+find "$root/modules" -mindepth 2 -name '*.ko' -exec mv {} "$root/modules/" \;
 chmod 755 "$root/bin/busybox" "$root/system/linux/fsbench"
 cat >"$root/init" <<INIT
 #!/bin/busybox sh
