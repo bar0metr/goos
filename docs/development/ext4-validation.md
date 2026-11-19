@@ -25,82 +25,94 @@ lab node.
 
 ## Results
 
-Every result below is for commit `7f2fa2c8` of `feat/ext4-release-hardening`
-unless it names another; that commit changes no guest or ext4 code from
-`537e90fb`, on which `test-ext4-stress` and `test-volumes` ran.
+The KVM and Linux results below are for commit `7afa2f63` of
+`release/0.3.0`, which sets the version to 0.3.0. The release candidate
+differs from it in documentation only; the GitHub release of `v0.3.0`
+names its commit. The host and TCG gates below ran on the
+release-candidate tree.
 
 | Gate | Result |
 |---|---|
 | `make test-ext4-unit` | pass |
-| `make test-partitions` | pass |
-| `make test-ext4-mutations` | pass: 5 images clean in `e2fsck -fn` and equal in `debugfs`, 6 cuts replayed by `e2fsck` to the GoOS tree, 3 `debugfs` journals replayed by GoOS to the blocks `e2fsck` writes |
-| `make test-ext4-stress` (`537e90fb`) | pass, 265 s: 3000 damaged images; a cut at each of the 1535 points of the synced crash workload and the 847 of the batched one |
-| `make test-volumes` (`537e90fb`) | pass |
-| `make test-ext4-rw` | pass; the GoOS reader, GoOS recovery and `e2fsck` agree on both written partitions |
-| `make test-pve-ext4` | pass, run `20261112T211726Z-b2b675fb` |
-| `make release-check` | not run on this branch yet |
-| Linux reference | not recorded yet |
+| `make test-ext4-mutations` | pass |
+| `make test-ext4-stress` | pass |
+| `make test-ext4-rw` | pass |
+| `make pve-doctor` | pass, PVE 7.4-16, node `suptests` |
+| `make test-pve-ext4` | pass, run `20261119T191527Z-11bb3848`, cleanup ok |
+| Linux reference | Linux 6.12.115 (Alpine 3.22 `virt`), five rounds, every round finished |
+
+`make release-check` on the tagged commit is the release gate; its
+result goes in the GitHub release, since writing it here would change the
+commit it ran on.
 
 On the lab run, the system's settled page count after a `sync` and two
-idle seconds was 6263, 6226, 6265, 6234 and 6268 pages over the five
-rounds, with the kernel at 1510 pages each time and the ext4 service at
-380 to 387 pages. The 10000-name round finished, and so did a chain of
-100 directories in every round. `fsbench fill` wrote 922 MiB into the 973
-MiB `df` reported free, got `ENOSPC`, saw a further write refused with
-`ENOSPC` alone, freed the file, wrote 8 MiB again, and left `df` where it
-started.
+idle seconds was 6256, 6264, 6267, 6229 and 6265 pages over the five
+rounds, with the kernel at 1517 pages each time and the ext4 service at
+371 to 382 pages. After the 10000-name round and the fill, the system
+held 6367 pages and the ext4 service 483. The 10000-name round finished:
+creating them took 0.93 ms each and listing them 1.44 s. A chain of 100 directories finished in every
+round in 0.80 to 0.91 s. `fsbench fill` wrote 922 MiB into the 973 MiB
+`df` reported free, got `ENOSPC`, saw a further write refused with
+`ENOSPC` alone, freed the file, wrote 8 MiB again, and left `df` at 50.6
+MiB used, where it started.
 
 ## Performance
 
 `make test-pve-ext4` on the lab node (KVM, `cpu host`, 4 cores, 1 GiB).
 The ext4 column is the median of five rounds on a 1 GiB volume with a 32
-MiB journal at `7f2fa2c8`; "first run" is the median of three rounds at
+MiB journal at `7afa2f63`; "first run" is the median of three rounds at
 `dca58276`, which batched commits (ADR 0227) but had none of the changes
 after it: checksum tables, coalesced writes, the path cache (ADR 0228),
-indexed directories and the larger cache (ADR 0229). RAMFS and FAT32 are
-one round each at `7f2fa2c8`; RAMFS ran with an 8 MiB data file, since
-`/tmp` holds 16 MiB. Times are per operation.
+indexed directories and the larger cache (ADR 0229). The Linux 6.12
+column is the median of five rounds of the same `fsbench` binary on the
+same kind of volume under Linux 6.12.115, run by
+`tools/ext4fixture/linux-ext4-reference.sh` on the same node with the
+same CPU, core count and memory. RAMFS and FAT32 are one round each at
+`7afa2f63`; RAMFS ran with an 8 MiB data file, since `/tmp` holds 16 MiB.
+Times are per operation.
 
-| Workload | ext4 first run | ext4 | ext4, 10000 names | RAMFS | FAT32 |
-|---|---|---|---|---|---|
-| create, 2000 names in one directory | 2.29 ms | 0.94 ms | 0.93 ms | 0.29 ms | 69.8 ms |
-| stat | 1.18 ms | 0.15 ms | 0.17 ms | 0.11 ms | 14.1 ms |
-| readdir of the whole directory | 59.7 ms | 14.1 ms | 1.38 s | 48.8 ms | 38.8 ms |
-| unlink | 1.01 ms | 0.58 ms | 0.59 ms | 0.14 ms | 27.8 ms |
-| 100 nested directories, file, stat, remove | | 0.83 s | 0.83 s | 0.08 s | 3.68 s |
-| sequential write, 64 MiB, then fsync | 18.9 MiB/s | 92.1 MiB/s | | 327 MiB/s (8 MiB) | 38.7 MiB/s |
-| sequential read | 106.8 MiB/s | 110.8 MiB/s | | 420 MiB/s | 106.2 MiB/s |
-| random 4 KiB write, one fsync at the end | 0.61 ms | 0.51 ms | 0.48 ms | 0.15 ms | 28.9 ms |
-| random 4 KiB read | 0.62 ms | 0.52 ms | 0.47 ms | 0.20 ms | 9.9 ms |
-| 4 KiB write and fsync | 1.82 ms | 1.49 ms | 1.49 ms | 0.21 ms | 0.82 ms |
-| write, fsync, rename over a target | 6.55 ms | 3.59 ms | 3.52 ms | 0.56 ms | 6.18 ms |
-| 1 process: create, write 4 KiB, unlink | 258 ops/s | 518 ops/s | 496 ops/s | 2081 ops/s | 179 ops/s |
-| 8 processes at once | 288 ops/s | 524 ops/s | 518 ops/s | 2062 ops/s | 157 ops/s |
+| Workload | ext4 first run | ext4 | ext4, 10000 names | Linux 6.12 | RAMFS | FAT32 |
+|---|---|---|---|---|---|---|
+| create, 2000 names in one directory | 2.29 ms | 0.93 ms | 0.93 ms | 19.8 µs | 0.28 ms | 70.6 ms |
+| stat | 1.18 ms | 0.15 ms | 0.18 ms | 1.7 µs | 0.10 ms | 13.8 ms |
+| readdir of the whole directory | 59.7 ms | 13.8 ms | 1.44 s | 0.50 ms | 49.9 ms | 39.6 ms |
+| unlink | 1.01 ms | 0.56 ms | 0.59 ms | 12.2 µs | 0.15 ms | 28.4 ms |
+| 100 nested directories, file, stat, remove | | 0.83 s | 0.82 s | 4.0 ms | 0.09 s | 3.70 s |
+| sequential write, 64 MiB, then fsync | 18.9 MiB/s | 96.9 MiB/s | | 225 MiB/s | 370 MiB/s (8 MiB) | 38.5 MiB/s |
+| sequential read | 106.8 MiB/s | 109.4 MiB/s | | 6900 MiB/s (page cache) | 482 MiB/s | 106.6 MiB/s |
+| random 4 KiB write, one fsync at the end | 0.61 ms | 0.49 ms | 0.48 ms | 13.6 µs | 0.15 ms | 29.3 ms |
+| random 4 KiB read | 0.62 ms | 0.53 ms | 0.49 ms | 1.0 µs | 0.20 ms | 10.1 ms |
+| 4 KiB write and fsync | 1.82 ms | 1.49 ms | 1.41 ms | 0.29 ms | 0.22 ms | 0.91 ms |
+| write, fsync, rename over a target | 6.55 ms | 3.64 ms | 3.62 ms | 0.49 ms | 0.54 ms | 6.28 ms |
+| 1 process: create, write 4 KiB, unlink | 258 ops/s | 551 ops/s | 542 ops/s | 23300 ops/s | 2175 ops/s | 176 ops/s |
+| 8 processes at once | 288 ops/s | 522 ops/s | 526 ops/s | 85600 ops/s | 2026 ops/s | 157 ops/s |
 
 A sparse write at 5 GiB allocated 8 blocks and read back on every ext4
-round. At `dca58276` RAMFS took 4.57 ms per create and 2.66 ms per `stat`
-in the same scenario; the name lookup change of ADR 0228 removed most of
-that.
+round and every Linux round. At `dca58276` RAMFS took 4.57 ms per create
+and 2.66 ms per `stat` in the same scenario; the name lookup change of
+ADR 0228 removed most of that.
 
 What the numbers show:
 
 - One ext4 service handles one request at a time, so 2, 4 and 8
-  processes reach the throughput of one. That is the design of 0.3.0, not
-  a fault.
+  processes reach the throughput of one. Linux scales from 23300 to 85600
+  operations a second over the same range. 0.3.0 accepts this limit.
 - `fsync` costs two device flushes on ext4, as the JBD2 commit needs, and
-  one on FAT32, which has no journal.
-- An ext4 `stat` costs about 1.4 times one on RAMFS: the request to the
+  one on FAT32, which has no journal. Linux pays 0.29 ms for the same
+  commit and GoOS 1.49 ms; this run does not split the GoOS time between
+  the services a request crosses.
+- An ext4 `stat` costs about 1.5 times one on RAMFS: the request to the
   ext4 service and its lookup. A create costs about three times: every
   namespace change empties the VFS path cache, so each create resolves its
   directory again (ADR 0228), and it stages its inode, bitmaps and
   directory leaf.
+- Linux answers metadata calls from its dentry and inode caches inside
+  the kernel, 45 to 90 times faster than a GoOS request that crosses
+  two process boundaries. Its sequential read after the write comes from
+  the page cache; GoOS keeps no file data cache and reads from the device.
 - Listing 10000 names takes 1.4 s: each listed entry reads its inode,
   and in hash order those reads spread over 10000 inodes, more than the
   1 MiB cache holds.
-
-The same `fsbench` on Linux 6.12 comes from
-`tools/ext4fixture/linux-ext4-reference.sh` on the same node; its column
-belongs in this table once that run is recorded.
 
 ## Resource bounds
 
