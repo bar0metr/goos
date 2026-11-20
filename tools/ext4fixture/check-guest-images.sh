@@ -19,7 +19,12 @@ command -v docker >/dev/null || {
 # shellcheck disable=SC2086
 tar -C "$dir" -cf - clean.img dirty.img | docker run --rm -i ${DOCKER_FLAGS:-} --platform linux/amd64 "$IMAGE" sh -c '
 set -eu
-apk add -q e2fsprogs e2fsprogs-extra >/dev/null 2>&1
+# The package mirror can fail for a moment; retry, and show why it gave up.
+for try in 1 2 3; do
+	apk add -q e2fsprogs e2fsprogs-extra >/tmp/apk.log 2>&1 && break
+	[ "$try" -lt 3 ] || { echo "apk add e2fsprogs e2fsprogs-extra failed 3 times:" >&2; cat /tmp/apk.log >&2; exit 1; }
+	sleep 5
+done
 mke2fs -V 2>&1 | grep -q "^mke2fs 1.47.2 " || { echo "unexpected e2fsprogs: $(mke2fs -V 2>&1 | head -1)" >&2; exit 1; }
 mkdir /w && cd /w && tar xf -
 clean() {

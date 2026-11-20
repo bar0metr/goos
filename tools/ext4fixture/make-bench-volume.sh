@@ -13,7 +13,12 @@ FULL=has_journal,ext_attr,resize_inode,dir_index,filetype,extent,flex_bg,sparse_
 # host, so the image comes back gzipped on standard output.
 docker run --rm -i ${DOCKER_FLAGS:-} --platform linux/amd64 "$IMAGE" sh -s "$size" "$FULL" >"$out.gz" <<'EOF'
 set -eu
-apk add -q e2fsprogs >/dev/null 2>&1
+# The package mirror can fail for a moment; retry, and show why it gave up.
+for try in 1 2 3; do
+	apk add -q e2fsprogs >/tmp/apk.log 2>&1 && break
+	[ "$try" -lt 3 ] || { echo "apk add e2fsprogs failed 3 times:" >&2; cat /tmp/apk.log >&2; exit 1; }
+	sleep 5
+done
 mke2fs -V 2>&1 | head -1 | grep -q '^mke2fs 1.47.2 ' || { echo 'unexpected e2fsprogs' >&2; exit 1; }
 mke2fs -q -F -t ext4 -b 4096 -I 256 -O "none,$2" -L goos-bench -J size=32 \
 	-E lazy_itable_init=0,lazy_journal_init=0,root_owner=0:0 /tmp/bench.img "$1M"

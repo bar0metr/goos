@@ -27,8 +27,9 @@ lab node.
 
 The KVM and Linux results below are for commit `7afa2f63` of
 `release/0.3.0`, which sets the version to 0.3.0. The release candidate
-differs from it in documentation only; the GitHub release of `v0.3.0`
-names its commit. The host and TCG gates below ran on the
+differs from it in documentation and in the host scripts of
+`tools/ext4fixture`, which now retry the e2fsprogs install; guest and
+ext4 code are the same. The GitHub release of `v0.3.0` names its commit. The host and TCG gates below ran on the
 release-candidate tree.
 
 | Gate | Result |

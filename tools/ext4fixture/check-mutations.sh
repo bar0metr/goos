@@ -37,7 +37,12 @@ cuts=$(find "$work/crash" -name '*.img' 2>/dev/null | wc -l | tr -d ' ')
 # shellcheck disable=SC2086
 tar -C "$work" -cf - . | docker run --rm -i ${DOCKER_FLAGS:-} --platform linux/amd64 "$IMAGE" sh -c '
 set -eu
-apk add -q e2fsprogs e2fsprogs-extra >/dev/null 2>&1
+# The package mirror can fail for a moment; retry, and show why it gave up.
+for try in 1 2 3; do
+	apk add -q e2fsprogs e2fsprogs-extra >/tmp/apk.log 2>&1 && break
+	[ "$try" -lt 3 ] || { echo "apk add e2fsprogs e2fsprogs-extra failed 3 times:" >&2; cat /tmp/apk.log >&2; exit 1; }
+	sleep 5
+done
 mke2fs -V 2>&1 | grep -q "^mke2fs 1.47.2 " || { echo "unexpected e2fsprogs: $(mke2fs -V 2>&1 | head -1)" >&2; exit 1; }
 mkdir /w && cd /w && tar xf -
 manifest() {
@@ -112,7 +117,12 @@ mkdir -p "$foreign"
 # shellcheck disable=SC2086
 tar -C "$work" -cf - shapes.img | docker run --rm -i ${DOCKER_FLAGS:-} --platform linux/amd64 "$IMAGE" sh -c '
 set -eu
-apk add -q e2fsprogs e2fsprogs-extra >/dev/null 2>&1
+# The package mirror can fail for a moment; retry, and show why it gave up.
+for try in 1 2 3; do
+	apk add -q e2fsprogs e2fsprogs-extra >/tmp/apk.log 2>&1 && break
+	[ "$try" -lt 3 ] || { echo "apk add e2fsprogs e2fsprogs-extra failed 3 times:" >&2; cat /tmp/apk.log >&2; exit 1; }
+	sleep 5
+done
 mkdir /w /out && cd /w && tar xf -
 range=$(dumpe2fs shapes.img 2>/dev/null | sed -n "s/^  Free blocks: \([0-9]*\)-\([0-9]*\).*/\1 \2/p" | awk "\$2 - \$1 >= 8 { print \$1 }" | tail -1)
 [ -n "$range" ] || { echo "no free run in the base image" >&2; exit 1; }

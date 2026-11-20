@@ -4,7 +4,12 @@
 # e2fsck, and writes a tar of the gzipped images, their dumpe2fs headers,
 # e2fsck reports and content manifests to standard output.
 set -eu
-apk add -q e2fsprogs e2fsprogs-extra >/dev/null 2>&1
+# The package mirror can fail for a moment; retry, and show why it gave up.
+for try in 1 2 3; do
+	apk add -q e2fsprogs e2fsprogs-extra >/tmp/apk.log 2>&1 && break
+	[ "$try" -lt 3 ] || { echo "apk add e2fsprogs e2fsprogs-extra failed 3 times:" >&2; cat /tmp/apk.log >&2; exit 1; }
+	sleep 5
+done
 export E2FSPROGS_FAKE_TIME=1767225600 # 2026-01-01 00:00:00 UTC
 UUID=6f6f7367-6578-7434-0000-000000000001
 SEED=6f6f7367-6578-7434-0000-0000000000aa
