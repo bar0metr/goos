@@ -565,10 +565,6 @@ func (namespace *Namespace) resolve(path []byte) (uint8, ramfs.NodeID, bool, Sta
 	protected := namespace.guards(mounted, node)
 	for relative < size {
 		component, rest := nextComponent(canonical[relative:size])
-		name, valid := ramfs.MakeName(component)
-		if !valid {
-			return 0, 0, false, StatusInvalidArgument
-		}
 		start := relative
 		relative = size - len(rest)
 		final := relative >= size
@@ -586,6 +582,14 @@ func (namespace *Namespace) resolve(path []byte) (uint8, ramfs.NodeID, bool, Sta
 				}
 			}
 			continue
+		}
+		// The cache missed: the backend needs the validated Name. The
+		// canonical path already guarantees a valid name, so hits need no
+		// MakeName at all; building the 1 KiB Name per component would
+		// dominate the hot path.
+		name, valid := ramfs.MakeName(component)
+		if !valid {
+			return 0, 0, false, StatusInvalidArgument
 		}
 		namespace.counters.ComponentMisses++
 		var backendStatus ramfs.Status
@@ -1578,9 +1582,10 @@ func (namespace *Namespace) component(backend Backend, parent ramfs.NodeID, comp
 		return 0, false, false
 	}
 	set := int(componentHash(parent, component) & (cacheSets - 1))
-	for index := range namespace.cache[set] {
+	ways := &namespace.cache[set]
+	for index := 0; index < cacheWays; index++ {
 		namespace.counters.ComponentProbes++
-		entry := &namespace.cache[set][index]
+		entry := &ways[index]
 		if !entry.used || entry.generation != namespace.cacheGeneration || entry.backend != backend || entry.parent != parent ||
 			int(entry.size) != len(component) || !equal(entry.name[:entry.size], component) {
 			continue
