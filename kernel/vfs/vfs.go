@@ -16,12 +16,16 @@ const (
 	// session cannot take the whole table from the others.
 	MaxOpenPerOwner = 64
 	// MaxPath is the native path limit (ADR 0110).
-	MaxPath  = limits.PathMax
-	MaxCache = 32
-	// maxCachedPath bounds the paths the resolution cache remembers. Longer
-	// ones resolve every time; they are rare, and remembering them would
-	// cost the cache a PathMax buffer per entry.
-	maxCachedPath = 256
+	MaxPath = limits.PathMax
+	// MaxCache bounds the component-cache entries one namespace holds. A
+	// component is a resolved (parent node, name) -> child node pair; the
+	// 100-level deep-path workload keeps about that many live entries, so
+	// a cache this size avoids re-walking an unchanged prefix (ADR 0230).
+	MaxCache = 128
+	// maxCachedName bounds the component name the cache remembers. Longer
+	// names resolve every time; they are rare, and remembering them would
+	// cost the cache a NameMax buffer per entry.
+	maxCachedName = 64
 	// mountCursor separates the backend phase of a directory scan from the
 	// mount phase. It is above every cursor a backend can return and below the
 	// uint32 the service protocol carries.
@@ -231,15 +235,23 @@ type openFile struct {
 }
 
 type cacheEntry struct {
-	node      ramfs.NodeID
-	mount     uint8
-	path      [maxCachedPath]byte
-	size      uint16
-	protected bool
-	// link marks a path whose last component is a symbolic link. A walk
-	// that meets a link earlier stops there and caches nothing.
+	parent ramfs.NodeID
+	child  ramfs.NodeID
+	// backend is the filesystem instance the entry belongs to. Two mounts
+	// of one backend share entries, so an aliased name is cached once, and
+	// an entry can never outlive its backend: a mount, service, scope or
+	// root change steps the cache generation and forgets every entry.
+	backend Backend
+	name    [maxCachedName]byte
+	size    uint8
+	// link marks a child that is a symbolic link. Only that it is one is
+	// cached; the link's target is read fresh on every follow.
 	link bool
-	used bool
+	// generation is the cache epoch the entry was written under. A lookup
+	// ignores an entry from an older epoch, so a full flush is one epoch
+	// step and nothing survives a mount, service, scope or root change.
+	generation uint32
+	used       bool
 	// referenced marks an entry a lookup used since the replacement
 	// clock last passed it; the clock spares it once.
 	referenced bool
@@ -249,6 +261,9 @@ type Namespace struct {
 	mounts [MaxMounts]mount
 	files  [MaxOpenFiles]openFile
 	cache  [MaxCache]cacheEntry
+	// cacheGeneration is the epoch a full flush steps. Every entry carries
+	// the epoch it was written under; a lookup ignores a stale one.
+	cacheGeneration uint32
 	// cacheNext is the entry a full cache replaces next.
 	cacheNext uint16
 	// nextRead identifies a cursor reservation until its owner finishes it.
@@ -522,19 +537,16 @@ func (namespace *Namespace) Resolve(path []byte) (uint8, ramfs.NodeID, Status) {
 }
 
 // resolve walks path to its node and reports whether the walk reached the
-// protected directory, so the node is it or lies below it.
+// protected directory, so the node is it or lies below it. Unchanged
+// components are answered from the generation-safe component cache, so a
+// repeated prefix costs no backend exchange (ADR 0230).
 func (namespace *Namespace) resolve(path []byte) (uint8, ramfs.NodeID, bool, Status) {
 	canonical := &namespace.resolved
 	namespace.hit = linkHit{}
+	namespace.counters.PathResolves++
 	size, ok := canonicalPath(canonical, path)
 	if !ok {
 		return 0, 0, false, StatusInvalidArgument
-	}
-	if mountIndex, node, protected, link, found := namespace.cached(canonical[:size]); found {
-		if link {
-			namespace.hit = linkHit{mount: mountIndex, node: node, start: lastComponent(canonical[:size]), end: size, final: true, valid: true}
-		}
-		return mountIndex, node, protected, StatusOK
 	}
 	mountIndex, relative, status := namespace.selectMount(canonical[:size])
 	if status != StatusOK {
@@ -543,45 +555,45 @@ func (namespace *Namespace) resolve(path []byte) (uint8, ramfs.NodeID, bool, Sta
 	mounted := &namespace.mounts[mountIndex]
 	node := mounted.root
 	protected := namespace.guards(mounted, node)
-	// A cached parent directory on the same mount leaves one component to
-	// look up. A parent that is a link, or a path whose last component is
-	// a mount point, takes the full walk.
-	parent := lastComponent(canonical[:size]) - 1
-	walkedParent := false
-	if parent > relative {
-		if parentMount, parentNode, parentProtected, link, found := namespace.cached(canonical[:parent]); found && !link && parentMount == mountIndex {
-			node, protected, relative = parentNode, parentProtected, parent+1
-		} else {
-			walkedParent = true
-		}
-	}
 	for relative < size {
-		if walkedParent && relative > parent {
-			// The walk reached the parent directory: remember it for the
-			// names beside this one.
-			namespace.remember(canonical[:parent], mountIndex, node, protected, false)
-			walkedParent = false
-		}
 		component, rest := nextComponent(canonical[relative:size])
 		name, valid := ramfs.MakeName(component)
 		if !valid {
 			return 0, 0, false, StatusInvalidArgument
 		}
+		start := relative
+		relative = size - len(rest)
+		final := relative >= size
+		parent := node
+		if child, link, found := namespace.component(mounted.backend, parent, component); found {
+			namespace.counters.ComponentHits++
+			protected = protected || namespace.guards(mounted, child)
+			node = child
+			if link {
+				namespace.hit = linkHit{mount: mountIndex, node: child, start: start, end: start + len(component), final: final, valid: true}
+				if !final {
+					// The link is not a directory. A caller that did not
+					// expand the path gets the backend's answer for that.
+					return 0, 0, false, StatusNotDirectory
+				}
+			}
+			continue
+		}
+		namespace.counters.ComponentMisses++
 		var backendStatus ramfs.Status
-		node, backendStatus = mounted.backend.OpenName(node, name)
+		node, backendStatus = mounted.backend.OpenName(parent, name)
 		if backendStatus != ramfs.StatusOK {
 			return 0, 0, false, mapStatus(backendStatus)
 		}
 		protected = protected || namespace.guards(mounted, node)
-		start := relative
-		relative = size - len(rest)
+		link := false
 		if mounted.links {
 			stat, statStatus := mounted.backend.Stat(node)
 			if statStatus != ramfs.StatusOK {
 				return 0, 0, false, mapStatus(statStatus)
 			}
 			if stat.Kind == ramfs.KindSymlink {
-				final := relative >= size
+				link = true
 				namespace.hit = linkHit{mount: mountIndex, node: node, start: start, end: start + len(component), final: final, valid: true}
 				if !final {
 					// The link is not a directory. A caller that did not
@@ -590,8 +602,8 @@ func (namespace *Namespace) resolve(path []byte) (uint8, ramfs.NodeID, bool, Sta
 				}
 			}
 		}
+		namespace.remember(mounted.backend, parent, node, component, link)
 	}
-	namespace.remember(canonical[:size], mountIndex, node, protected, namespace.hit.valid)
 	return mountIndex, node, protected, StatusOK
 }
 
@@ -963,8 +975,11 @@ func (namespace *Namespace) Create(path []byte, directory bool) Status {
 	} else {
 		_, status = mapNodeResult(namespace.mounts[mountIndex].backend.CreateName(parent, name))
 	}
-	// A backend can leave the name behind when its durability step fails.
-	namespace.invalidate()
+	// A backend can leave the name behind when its durability step fails;
+	// the (parent, name) component is dropped either way, so a later
+	// resolution asks the backend again. Other prefixes stay cached.
+	namespace.invalidateName(namespace.mounts[mountIndex].backend, parent, name)
+	namespace.clearScopeState()
 	return status
 }
 
@@ -1230,7 +1245,8 @@ func (namespace *Namespace) Unlink(path []byte) Status {
 		return StatusPermissionDenied
 	}
 	status = mapStatus(namespace.mounts[mountIndex].backend.UnlinkName(parent, name))
-	namespace.invalidate()
+	namespace.invalidateName(namespace.mounts[mountIndex].backend, parent, name)
+	namespace.clearScopeState()
 	return status
 }
 
@@ -1282,7 +1298,13 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 		return StatusCrossDevice
 	}
 	status = mapStatus(namespace.renameBackend(sourceMount, path, node, parent, name, false))
-	namespace.invalidate()
+	// Both names changed, so those two components are dropped; nothing below
+	// them is, because a rename keeps every moved node's identity (ADR 0230).
+	if sourceParentMount, sourceParent, sourceName, _, sourceStatus := namespace.resolveParent(path); sourceStatus == StatusOK {
+		namespace.invalidateName(namespace.mounts[sourceParentMount].backend, sourceParent, sourceName)
+	}
+	namespace.invalidateName(namespace.mounts[targetMount].backend, parent, name)
+	namespace.clearScopeState()
 	if status == StatusOK {
 		namespace.follow(sourceMount, node, target)
 	} else {
@@ -1412,7 +1434,12 @@ func (namespace *Namespace) Replace(path []byte, target []byte) Status {
 		backendStatus = replacer.ReplaceName(node, parent, name)
 	}
 	status = mapStatus(backendStatus)
-	namespace.invalidate()
+	// Both names changed, so those two components are dropped only (ADR 0230).
+	if sourceParentMount, sourceParent, sourceName, _, sourceStatus := namespace.resolveParent(path); sourceStatus == StatusOK {
+		namespace.invalidateName(namespace.mounts[sourceParentMount].backend, sourceParent, sourceName)
+	}
+	namespace.invalidateName(namespace.mounts[targetMount].backend, parent, name)
+	namespace.clearScopeState()
 	if status == StatusOK {
 		namespace.follow(sourceMount, node, target)
 	} else {
@@ -1500,28 +1527,36 @@ func (namespace *Namespace) file(owner Owner, handle Handle, required Rights) (*
 	return entry, StatusOK
 }
 
-func (namespace *Namespace) cached(path []byte) (uint8, ramfs.NodeID, bool, bool, bool) {
+// component returns the child a cached (backend, parent, name) entry names,
+// and whether that child is a symbolic link. A stale-epoch entry is not
+// found. The walk that calls it stays inside one mount, so the backend and
+// the parent node identify the component: two mounts of one backend share
+// entries, and a different backend can never collide with them.
+func (namespace *Namespace) component(backend Backend, parent ramfs.NodeID, component []byte) (ramfs.NodeID, bool, bool) {
 	for index := range namespace.cache {
 		entry := &namespace.cache[index]
-		if entry.used && equal(entry.path[:entry.size], path) {
-			entry.referenced = true
-			return entry.mount, entry.node, entry.protected, entry.link, true
+		if !entry.used || entry.generation != namespace.cacheGeneration || entry.backend != backend || entry.parent != parent ||
+			!equal(entry.name[:entry.size], component) {
+			continue
 		}
+		entry.referenced = true
+		return entry.child, entry.link, true
 	}
-	return 0, 0, false, false, false
+	return 0, false, false
 }
 
-func (namespace *Namespace) remember(path []byte, mountIndex uint8, node ramfs.NodeID, protected bool, link bool) {
-	if len(path) > maxCachedPath {
+func (namespace *Namespace) remember(backend Backend, parent, child ramfs.NodeID, component []byte, link bool) {
+	if len(component) == 0 || len(component) > maxCachedName {
 		return
 	}
 	target := -1
 	for index := range namespace.cache {
 		entry := &namespace.cache[index]
-		if entry.used && equal(entry.path[:entry.size], path) {
+		if entry.used && entry.generation == namespace.cacheGeneration && entry.backend == backend && entry.parent == parent &&
+			equal(entry.name[:entry.size], component) {
 			return
 		}
-		if !entry.used && target < 0 {
+		if (!entry.used || entry.generation != namespace.cacheGeneration) && target < 0 {
 			target = index
 		}
 	}
@@ -1538,24 +1573,57 @@ func (namespace *Namespace) remember(path []byte, mountIndex uint8, node ramfs.N
 	}
 	entry := &namespace.cache[target]
 	entry.referenced = false
-	entry.used, entry.mount, entry.node, entry.size, entry.protected = true, mountIndex, node, uint16(len(path)), protected
+	entry.used, entry.backend, entry.parent, entry.child = true, backend, parent, child
+	entry.generation = namespace.cacheGeneration
 	entry.link = link
-	copy(entry.path[:], path)
+	entry.size = uint8(len(component))
+	copy(entry.name[:], component)
 }
 
-func (namespace *Namespace) invalidate() {
-	for index := range namespace.cache {
-		namespace.cache[index] = cacheEntry{}
+// invalidateName forgets the one cached (parent, name) component after a
+// name change on backend: create, mkdir, unlink, rename, replace, link or
+// symlink. It drops only that entry, so unrelated prefixes stay cached.
+func (namespace *Namespace) invalidateName(backend Backend, parent ramfs.NodeID, name ramfs.Name) {
+	var buffer [maxCachedName]byte
+	count := name.CopyTo(buffer[:])
+	if count == 0 {
+		return
 	}
+	for index := range namespace.cache {
+		entry := &namespace.cache[index]
+		if entry.used && entry.generation == namespace.cacheGeneration && entry.backend == backend && entry.parent == parent &&
+			equal(entry.name[:entry.size], buffer[:count]) {
+			entry.used = false
+		}
+	}
+}
+
+// clearScopeState forgets the scope decisions a name mutation can invalidate:
+// what an exact name resolved to, and the nodes a subtree walk reached. It is
+// cheap and separate from the component cache, which a mutation drops narrowly.
+func (namespace *Namespace) clearScopeState() {
 	for slot := range namespace.scopes {
 		namespace.scopes[slot].exactKnown = false
 		namespace.scopeMembers[slot].known = false
 	}
 }
 
-// Invalidate forgets resolved paths and scope decisions after a backend changed
-// outside this namespace: a filesystem service came or went, or its owner
-// changed the volume directly.
+// invalidate steps the cache generation, forgetting every resolved component
+// at once, and drops the scope decisions that depend on the same namespace
+// state. It runs on a mount/unmount, a protection change, a scope change, a
+// filesystem-service replacement or a restart; those are rare, so a global
+// flush is the safe, simple choice there (ADR 0230).
+func (namespace *Namespace) invalidate() {
+	namespace.cacheGeneration++
+	if namespace.cacheGeneration == 0 {
+		namespace.cacheGeneration = 1
+	}
+	namespace.clearScopeState()
+}
+
+// Invalidate forgets resolved components and scope decisions after a backend
+// changed outside this namespace: a filesystem service came or went, or its
+// owner changed the volume directly.
 func (namespace *Namespace) Invalidate() { namespace.invalidate() }
 
 // canonicalPath writes the canonical form of path into output, which the

@@ -268,8 +268,9 @@ func (namespace *Namespace) permits(owner Owner, mask uint8, rights Rights) bool
 	return !authority.Confined || granted&rights == rights
 }
 
-// AuthorityCounters counts the backend work scope checks cost since the
-// namespace started. A DIAG build reports them after each directory listing.
+// AuthorityCounters counts the backend work scope checks and pathname
+// resolution cost since the namespace started. A DIAG build reports them
+// after each directory listing.
 type AuthorityCounters struct {
 	ReadDirRequests     uint64
 	ScopeChecks         uint64
@@ -280,6 +281,13 @@ type AuthorityCounters struct {
 	// they returned.
 	BatchRequests uint64
 	BatchEntries  uint64
+	// PathResolves counts pathname resolutions. ComponentHits counts cached
+	// components answered without a backend exchange, and ComponentMisses the
+	// components that cost one OpenName; together they show how many backend
+	// exchanges the cache avoided (ADR 0230).
+	PathResolves    uint64
+	ComponentHits   uint64
+	ComponentMisses uint64
 }
 
 func (namespace *Namespace) AuthorityCounters() AuthorityCounters { return namespace.counters }

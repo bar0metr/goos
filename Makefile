@@ -1060,6 +1060,7 @@ docs:
 	@test -f docs/adr/0221-ext4-read-only-volume-adapter.md
 	@test -f docs/adr/0222-filesystem-volume-instances.md
 	@test -f docs/adr/0224-ext4-mutation-engine-and-transaction-staging.md
+	@test -f docs/adr/0230-generation-safe-vfs-component-cache.md
 	@test -f docs/userspace/ext4.md
 	@test -f docs/development/ext4-feature-matrix.md
 	@test -f docs/development/ext4-reference-versions.md

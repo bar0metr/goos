@@ -238,7 +238,7 @@ records.
 | `kernel/vfs.MaxOpenFiles` | 256 | profile (build constant) | namespace | a few dozen bytes each, static | `StatusResourceExhausted` | none |
 | `kernel/vfs.MaxOpenPerOwner` | 64 | policy | VFS session | none | `StatusResourceExhausted`, Linux `ENFILE` | none |
 | `kernel/vfs.MaxMounts` | 8 | profile | namespace | static | `StatusResourceExhausted` | `mount` listing |
-| `kernel/vfs.MaxCache` | 32 | profile | namespace | static | entry evicted | none |
+| `kernel/vfs.MaxCache` | 128 | profile (ADR 0230) | namespace | static | entry evicted | none |
 | `kernel/vfs.MaxScopes`, `kernel/vfs.MaxAuthorities` | 8, 64 | policy | session | static | `StatusResourceExhausted` | none |
 | `kernel/vfs.MaxRootPath` | 64 | protocol | n/a | n/a | refused | n/a |
 | `kernel/vfs.MaxPath` | `limits.PathMax` | protocol (ADR 0110) | n/a | n/a | `StatusInvalidArgument` | n/a |
