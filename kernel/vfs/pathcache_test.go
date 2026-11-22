@@ -215,3 +215,96 @@ func TestResolutionCountersProveFewerBackendExchanges(t *testing.T) {
 		t.Fatalf("backend lookups = %d, want 3", backend.opens)
 	}
 }
+
+// fat32Backend reports a FAT32 filesystem type while delegating node work to
+// RAMFS, so a test can exercise the mutation-invalidation policy without a
+// full FAT32 service. Its OpenName counts lookups like countingBackend does.
+type fat32Backend struct {
+	*ramfs.FileSystem
+	opens int
+}
+
+func (backend *fat32Backend) OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
+	backend.opens++
+	return backend.FileSystem.OpenName(parent, name)
+}
+
+func (fat32Backend) FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status) {
+	return ramfs.FilesystemInfo{Type: ramfs.FilesystemFAT32}, ramfs.StatusOK
+}
+
+// OpenIntent with OpenCreate must use the same mutation policy as Create: on a
+// stable backend an unrelated create keeps the warm prefix cached (ADR 0230).
+func TestOpenIntentCreateKeepsUnrelatedPrefixesWarm(t *testing.T) {
+	backend := &countingBackend{FileSystem: &ramfs.FileSystem{}}
+	namespace := &Namespace{}
+	if namespace.Mount([]byte("/"), backend, backend.Init()) != StatusOK {
+		t.Fatal("mount")
+	}
+	for _, path := range []string{"/a", "/a/b", "/a/b/c"} {
+		if namespace.Create([]byte(path), true) != StatusOK {
+			t.Fatalf("create %s", path)
+		}
+	}
+	if _, _, status := namespace.Resolve([]byte("/a/b/c")); status != StatusOK {
+		t.Fatal(status)
+	}
+	if _, _, status := namespace.OpenIntent(testOwner, []byte("/other"), Read|Write, OpenCreate|OpenExclusive); status != StatusOK {
+		t.Fatalf("open-create: %d", status)
+	}
+	backend.opens = 0
+	if _, _, status := namespace.Resolve([]byte("/a/b/c")); status != StatusOK || backend.opens != 0 {
+		t.Fatalf("prefix after open-create: status %d after %d lookups", status, backend.opens)
+	}
+}
+
+// FAT32 names are case-insensitive and aliased and its NodeIDs are
+// location-based, so any mutation must flush the whole cache: an unrelated
+// create re-walks a previously warm prefix (ADR 0230).
+func TestFAT32MutationFullyInvalidates(t *testing.T) {
+	backend := &fat32Backend{FileSystem: &ramfs.FileSystem{}}
+	namespace := &Namespace{}
+	if namespace.Mount([]byte("/"), backend, backend.Init()) != StatusOK {
+		t.Fatal("mount")
+	}
+	for _, path := range []string{"/a", "/a/b"} {
+		if namespace.Create([]byte(path), true) != StatusOK {
+			t.Fatalf("create %s", path)
+		}
+	}
+	if _, _, status := namespace.Resolve([]byte("/a/b")); status != StatusOK {
+		t.Fatal(status)
+	}
+	if namespace.Create([]byte("/unrelated"), false) != StatusOK {
+		t.Fatal("create unrelated")
+	}
+	backend.opens = 0
+	if _, _, status := namespace.Resolve([]byte("/a/b")); status != StatusOK || backend.opens != 2 {
+		t.Fatalf("prefix after FAT32 mutation: status %d after %d lookups, want 2", status, backend.opens)
+	}
+}
+
+// OpenIntent create on FAT32 must flush the whole cache as well, so a stale
+// case/alias spelling can never survive a mutation.
+func TestOpenIntentCreateFullyInvalidatesOnFAT32(t *testing.T) {
+	backend := &fat32Backend{FileSystem: &ramfs.FileSystem{}}
+	namespace := &Namespace{}
+	if namespace.Mount([]byte("/"), backend, backend.Init()) != StatusOK {
+		t.Fatal("mount")
+	}
+	for _, path := range []string{"/a", "/a/b"} {
+		if namespace.Create([]byte(path), true) != StatusOK {
+			t.Fatalf("create %s", path)
+		}
+	}
+	if _, _, status := namespace.Resolve([]byte("/a/b")); status != StatusOK {
+		t.Fatal(status)
+	}
+	if _, _, status := namespace.OpenIntent(testOwner, []byte("/other"), Read|Write, OpenCreate|OpenExclusive); status != StatusOK {
+		t.Fatalf("open-create: %d", status)
+	}
+	backend.opens = 0
+	if _, _, status := namespace.Resolve([]byte("/a/b")); status != StatusOK || backend.opens != 2 {
+		t.Fatalf("prefix after FAT32 open-create: status %d after %d lookups, want 2", status, backend.opens)
+	}
+}

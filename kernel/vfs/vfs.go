@@ -239,8 +239,9 @@ type cacheEntry struct {
 	child  ramfs.NodeID
 	// backend is the filesystem instance the entry belongs to. Two mounts
 	// of one backend share entries, so an aliased name is cached once, and
-	// an entry can never outlive its backend: a mount, service, scope or
-	// root change steps the cache generation and forgets every entry.
+	// an entry can never outlive its backend: invalidate steps the cache
+	// generation and forgets every entry on a mount, service, protection,
+	// scope or unsafe-backend change.
 	backend Backend
 	name    [maxCachedName]byte
 	size    uint8
@@ -249,7 +250,8 @@ type cacheEntry struct {
 	link bool
 	// generation is the cache epoch the entry was written under. A lookup
 	// ignores an entry from an older epoch, so a full flush is one epoch
-	// step and nothing survives a mount, service, scope or root change.
+	// step. Authority and root changes do not step it: the cache maps a
+	// path to a node, never to an authorization decision.
 	generation uint32
 	used       bool
 	// referenced marks an entry a lookup used since the replacement
@@ -648,7 +650,10 @@ func (namespace *Namespace) OpenIntent(owner Owner, path []byte, rights Rights, 
 		}
 		var backendStatus ramfs.Status
 		node, backendStatus = backend.CreateName(parent, name)
-		namespace.invalidate()
+		// The create may have changed the namespace even when it reports a
+		// failure, so the touched component is dropped either way; stable
+		// backends keep unrelated prefixes warm, FAT32/unknown flush (ADR 0230).
+		namespace.invalidateMutation(mountIndex, parent, name)
 		if backendStatus != ramfs.StatusOK || node == 0 {
 			if backendStatus == ramfs.StatusOK {
 				backendStatus = ramfs.StatusIOError
@@ -976,10 +981,10 @@ func (namespace *Namespace) Create(path []byte, directory bool) Status {
 		_, status = mapNodeResult(namespace.mounts[mountIndex].backend.CreateName(parent, name))
 	}
 	// A backend can leave the name behind when its durability step fails;
-	// the (parent, name) component is dropped either way, so a later
-	// resolution asks the backend again. Other prefixes stay cached.
-	namespace.invalidateName(namespace.mounts[mountIndex].backend, parent, name)
-	namespace.clearScopeState()
+	// the touched component is dropped either way, so a later resolution
+	// asks the backend again. Unrelated prefixes stay cached on a stable
+	// backend, and FAT32/unknown filesystems are flushed (ADR 0230).
+	namespace.invalidateMutation(mountIndex, parent, name)
 	return status
 }
 
@@ -1245,8 +1250,7 @@ func (namespace *Namespace) Unlink(path []byte) Status {
 		return StatusPermissionDenied
 	}
 	status = mapStatus(namespace.mounts[mountIndex].backend.UnlinkName(parent, name))
-	namespace.invalidateName(namespace.mounts[mountIndex].backend, parent, name)
-	namespace.clearScopeState()
+	namespace.invalidateMutation(mountIndex, parent, name)
 	return status
 }
 
@@ -1298,13 +1302,14 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 		return StatusCrossDevice
 	}
 	status = mapStatus(namespace.renameBackend(sourceMount, path, node, parent, name, false))
-	// Both names changed, so those two components are dropped; nothing below
-	// them is, because a rename keeps every moved node's identity (ADR 0230).
-	if sourceParentMount, sourceParent, sourceName, _, sourceStatus := namespace.resolveParent(path); sourceStatus == StatusOK {
-		namespace.invalidateName(namespace.mounts[sourceParentMount].backend, sourceParent, sourceName)
+	// Both names changed. On a stable backend the two components are dropped
+	// and nothing below them is, because a rename keeps every moved node's
+	// identity; FAT32 and unknown filesystems flush the whole cache (ADR 0230).
+	if _, sourceParent, sourceName, _, sourceStatus := namespace.resolveParent(path); sourceStatus == StatusOK {
+		namespace.invalidateRename(sourceMount, sourceParent, sourceName, targetMount, parent, name)
+	} else {
+		namespace.invalidate()
 	}
-	namespace.invalidateName(namespace.mounts[targetMount].backend, parent, name)
-	namespace.clearScopeState()
 	if status == StatusOK {
 		namespace.follow(sourceMount, node, target)
 	} else {
@@ -1434,12 +1439,13 @@ func (namespace *Namespace) Replace(path []byte, target []byte) Status {
 		backendStatus = replacer.ReplaceName(node, parent, name)
 	}
 	status = mapStatus(backendStatus)
-	// Both names changed, so those two components are dropped only (ADR 0230).
+	// Both names changed. On a stable backend the two components are dropped;
+	// FAT32 and unknown filesystems flush the whole cache (ADR 0230).
 	if sourceParentMount, sourceParent, sourceName, _, sourceStatus := namespace.resolveParent(path); sourceStatus == StatusOK {
-		namespace.invalidateName(namespace.mounts[sourceParentMount].backend, sourceParent, sourceName)
+		namespace.invalidateRename(sourceParentMount, sourceParent, sourceName, targetMount, parent, name)
+	} else {
+		namespace.invalidate()
 	}
-	namespace.invalidateName(namespace.mounts[targetMount].backend, parent, name)
-	namespace.clearScopeState()
 	if status == StatusOK {
 		namespace.follow(sourceMount, node, target)
 	} else {
@@ -1580,9 +1586,52 @@ func (namespace *Namespace) remember(backend Backend, parent, child ramfs.NodeID
 	copy(entry.name[:], component)
 }
 
+// narrowInvalidation reports whether the filesystem mounted at index can drop
+// one cached component after a name mutation. RAMFS and ext4 node identities
+// are stable across rename and their names are compared byte-exactly, so they
+// can. FAT32 names are case-insensitive and aliased (long names and 8.3), and
+// its pathname NodeIDs are directory-slot positions, so a stale entry could
+// name a later occupant of the same slot; FAT32 and any unknown filesystem
+// fail safe and flush the whole cache.
+func (namespace *Namespace) narrowInvalidation(mountIndex uint8) bool {
+	switch namespace.mounts[mountIndex].filesystemType {
+	case ramfs.FilesystemRAMFS, ramfs.FilesystemExt4:
+		return true
+	default:
+		return false
+	}
+}
+
+// invalidateMutation applies the backend's mutation-invalidation policy to one
+// changed name. A backend with stable namespace identity drops only the
+// touched component and the scope decisions it invalidates; FAT32 and unknown
+// filesystems flush the whole cache (ADR 0230).
+func (namespace *Namespace) invalidateMutation(mountIndex uint8, parent ramfs.NodeID, name ramfs.Name) {
+	if namespace.narrowInvalidation(mountIndex) {
+		namespace.invalidateName(namespace.mounts[mountIndex].backend, parent, name)
+		namespace.clearScopeState()
+		return
+	}
+	namespace.invalidate()
+}
+
+// invalidateRename applies the same policy to a rename or replace, which
+// changes two names on one backend. On a stable backend the two components are
+// dropped and nothing else; FAT32 and unknown filesystems flush once.
+func (namespace *Namespace) invalidateRename(sourceMount uint8, sourceParent ramfs.NodeID, sourceName ramfs.Name, targetMount uint8, targetParent ramfs.NodeID, targetName ramfs.Name) {
+	if !namespace.narrowInvalidation(sourceMount) {
+		namespace.invalidate()
+		return
+	}
+	namespace.invalidateName(namespace.mounts[sourceMount].backend, sourceParent, sourceName)
+	namespace.invalidateName(namespace.mounts[targetMount].backend, targetParent, targetName)
+	namespace.clearScopeState()
+}
+
 // invalidateName forgets the one cached (parent, name) component after a
-// name change on backend: create, mkdir, unlink, rename, replace, link or
-// symlink. It drops only that entry, so unrelated prefixes stay cached.
+// name change on backend. It is the narrow primitive invalidateMutation and
+// invalidateRename use for stable backends; it drops only that entry, so
+// unrelated prefixes stay cached.
 func (namespace *Namespace) invalidateName(backend Backend, parent ramfs.NodeID, name ramfs.Name) {
 	var buffer [maxCachedName]byte
 	count := name.CopyTo(buffer[:])

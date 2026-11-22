@@ -234,8 +234,7 @@ func (namespace *Namespace) Symlink(path []byte, target []byte) Status {
 		return StatusUnsupported
 	}
 	_, status = mapNodeResult(links.SymlinkName(parent, name, target))
-	namespace.invalidateName(namespace.mounts[mountIndex].backend, parent, name)
-	namespace.clearScopeState()
+	namespace.invalidateMutation(mountIndex, parent, name)
 	return status
 }
 
@@ -279,7 +278,6 @@ func (namespace *Namespace) Link(path []byte, target []byte) Status {
 		return StatusUnsupported
 	}
 	status = mapStatus(links.LinkName(node, parent, name))
-	namespace.invalidateName(namespace.mounts[targetMount].backend, parent, name)
-	namespace.clearScopeState()
+	namespace.invalidateMutation(targetMount, parent, name)
 	return status
 }

@@ -40,12 +40,14 @@ open by a dead process stayed open for the rest of the boot.
 The resolver cache stores resolved components, keyed by the filesystem
 backend, the parent node identity and the component bytes, mapping them to the
 child node identity (ADR 0230). It holds 128 entries and does not cache names
-longer than 64 bytes, which are resolved each time. A namespace mutation drops
-only the touched component and the scope decisions it invalidates; a mount,
-unmount, protection, scope, filesystem-service replacement or restart steps a
-cache generation that forgets every entry, so a rename, unlink or service
-change can never leave a stale name or a stale link target. Cached and uncached
-resolution have separate benchmarks. Path components cross the backend
+longer than 64 bytes, which are resolved each time. On RAMFS and ext4 a
+namespace mutation drops only the touched component and the scope decisions it
+invalidates; FAT32 and unknown filesystems, whose names are case-insensitive or
+whose node identities are location-based, flush the whole cache on a mutation.
+A mount, unmount, protection, scope, filesystem-service replacement or restart
+steps a cache generation that forgets every entry, so a rename, unlink or
+service change can never leave a stale name or a stale link target. Cached and
+uncached resolution have separate benchmarks. Path components cross the backend
 interface as fixed-size values, so canonicalization remains on the caller
 stack and both resolver paths allocate zero bytes per request.
 
