@@ -284,10 +284,13 @@ type AuthorityCounters struct {
 	// PathResolves counts pathname resolutions. ComponentHits counts cached
 	// components answered without a backend exchange, and ComponentMisses the
 	// components that cost one OpenName; together they show how many backend
-	// exchanges the cache avoided (ADR 0230).
+	// exchanges the cache avoided (ADR 0230). ComponentProbes counts the
+	// cache-set ways a component lookup examined; it stays at most cacheWays
+	// per component.
 	PathResolves    uint64
 	ComponentHits   uint64
 	ComponentMisses uint64
+	ComponentProbes uint64
 }
 
 func (namespace *Namespace) AuthorityCounters() AuthorityCounters { return namespace.counters }

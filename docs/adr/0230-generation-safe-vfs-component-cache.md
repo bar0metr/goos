@@ -44,11 +44,21 @@ could make a stale entry name a later occupant. FAT32 and any unknown
 filesystem therefore flush the whole cache on every namespace mutation, and
 unknown filesystems fail safe by default.
 
-**Bounds.** One namespace holds `MaxCache` (128) entries. A component name
-longer than 64 bytes is resolved every time rather than cached; such names are
-rare and caching them would cost a `NameMax` buffer per entry. Replacement
-keeps the clock of ADR 0228, sparing an entry a lookup used since the clock
-last passed it.
+**Cache structure.** One namespace holds a bounded set-associative table of
+`cacheSets` (32) sets × `cacheWays` (4) ways, `MaxCache` (128) entries in
+total. A component lookup hashes the parent NodeID and the component bytes
+with a deterministic FNV-1a style mixer, selects one set, and probes at most
+`cacheWays` entries; the backend identity stays in the exact key comparison
+inside the set. Replacement is a per-set second-chance clock, sparing once an
+entry a lookup used since the clock last passed it. A component name longer
+than 64 bytes is resolved every time rather than cached; such names are rare
+and caching them would cost a `NameMax` buffer per entry.
+
+This set-associative shape replaces the first M1 implementation's
+fully-associative 128-entry linear scan. That scan removed the backend
+re-walks but made every component hit O(128), which surfaced as measurable
+`stat`/`readdir` overhead on ext4 and a severe RAMFS deep-path regression; the
+set-associative lookup makes each component O(`cacheWays`).
 
 **Generation safety.** The namespace keeps a `cacheGeneration` epoch. A full
 flush steps it; every entry carries the epoch it was written under and a
@@ -75,9 +85,10 @@ session's authority or let a cached component bypass a confinement.
 **Symlinks.** Only that a child is a symbolic link is cached; the link's target
 is read fresh on every follow, so a stale target is never reused.
 
-**Counters.** `AuthorityCounters` gains `PathResolves`, `ComponentHits` and
-`ComponentMisses`, reported by a DIAG build with the existing counters, so a
-measurement can show how many backend exchanges the cache avoided.
+**Counters.** `AuthorityCounters` gains `PathResolves`, `ComponentHits`,
+`ComponentMisses` and `ComponentProbes`, reported by a DIAG build with the
+existing counters, so a measurement can show how many backend exchanges the
+cache avoided and how few set-ways each component lookup probed.
 
 ## Evidence
 
@@ -98,13 +109,21 @@ measurement can show how many backend exchanges the cache avoided.
 - `TestMutationsInvalidateResolutionCache`, `TestResolveRemembersTheParentDirectory`
   and `TestResolveDoesNotAllocate` still pass unchanged: a sibling still costs
   one lookup and resolution allocates nothing.
+- `TestComponentCacheSetAssociativity`, `TestComponentCacheSecondChance`,
+  `TestComponentCacheOtherSetUnaffected`, `TestComponentCacheKeyMismatchNoFalseHit`,
+  `TestComponentCacheLongNameUncached` and `TestComponentCacheProbeBound`
+  exercise the set-associative structure: four colliding keys coexist in one
+  set, a fifth evicts exactly one victim, the second-chance clock spares a
+  referenced way, another set is untouched, mismatched keys never false-hit,
+  long names stay uncached, and a lookup probes at most `cacheWays` entries.
 
 ## Consequences
 
 The deep-path workload resolves each new level with one component exchange
 instead of a full re-walk, turning the `mkdir` and `rmdir` phases from
 quadratic to linear in depth. A directory with many names still costs one
-lookup per name. The cache is a fixed table of 128 entries of a few dozen bytes
-each, about ten kilobytes per namespace. FAT32 pays for its conservative
-policy with a full flush on each mutation, which is the price of its
-case-insensitive, location-based namespace identity.
+lookup per name. The cache is a fixed 32×4 set-associative table of 128
+entries of a few dozen bytes each, about ten kilobytes per namespace, and a
+lookup probes at most four ways. FAT32 pays for its conservative policy with a
+full flush on each mutation, which is the price of its case-insensitive,
+location-based namespace identity.

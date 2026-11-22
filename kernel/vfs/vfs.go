@@ -17,11 +17,13 @@ const (
 	MaxOpenPerOwner = 64
 	// MaxPath is the native path limit (ADR 0110).
 	MaxPath = limits.PathMax
-	// MaxCache bounds the component-cache entries one namespace holds. A
-	// component is a resolved (parent node, name) -> child node pair; the
-	// 100-level deep-path workload keeps about that many live entries, so
-	// a cache this size avoids re-walking an unchanged prefix (ADR 0230).
-	MaxCache = 128
+	// The component cache is set-associative: cacheSets sets of cacheWays
+	// entries each, for MaxCache entries total. A lookup hashes (parent
+	// node, name) to one set and probes at most cacheWays entries, so a
+	// path component is O(cacheWays), not O(MaxCache) (ADR 0230, FIX3).
+	cacheSets = 32
+	cacheWays = 4
+	MaxCache  = cacheSets * cacheWays
 	// maxCachedName bounds the component name the cache remembers. Longer
 	// names resolve every time; they are rare, and remembering them would
 	// cost the cache a NameMax buffer per entry.
@@ -262,12 +264,13 @@ type cacheEntry struct {
 type Namespace struct {
 	mounts [MaxMounts]mount
 	files  [MaxOpenFiles]openFile
-	cache  [MaxCache]cacheEntry
+	cache  [cacheSets][cacheWays]cacheEntry
 	// cacheGeneration is the epoch a full flush steps. Every entry carries
 	// the epoch it was written under; a lookup ignores a stale one.
 	cacheGeneration uint32
-	// cacheNext is the entry a full cache replaces next.
-	cacheNext uint16
+	// cacheNext is the entry each set replaces next under its second-chance
+	// clock.
+	cacheNext [cacheSets]uint8
 	// nextRead identifies a cursor reservation until its owner finishes it.
 	nextRead uint64
 	// Canonical paths live here because a local [MaxPath]byte escapes into the
@@ -1533,16 +1536,41 @@ func (namespace *Namespace) file(owner Owner, handle Handle, required Rights) (*
 	return entry, StatusOK
 }
 
+// componentHash is the FNV-1a style set-selection hash of a component's key
+// (parent node and name bytes). It is deterministic, allocation-free and
+// local to the VFS; the backend identity is not hashed, only compared exactly
+// inside the selected set.
+func componentHash(parent ramfs.NodeID, name []byte) uint64 {
+	hash := uint64(1469598103934665603) // FNV-1a 64-bit offset basis
+	value := uint64(parent)
+	for index := 0; index < 8; index++ {
+		hash ^= uint64(byte(value))
+		hash *= 1099511628211 // FNV-1a 64-bit prime
+		value >>= 8
+	}
+	for _, b := range name {
+		hash ^= uint64(b)
+		hash *= 1099511628211
+	}
+	return hash
+}
+
 // component returns the child a cached (backend, parent, name) entry names,
-// and whether that child is a symbolic link. A stale-epoch entry is not
-// found. The walk that calls it stays inside one mount, so the backend and
-// the parent node identify the component: two mounts of one backend share
-// entries, and a different backend can never collide with them.
+// and whether that child is a symbolic link. It hashes (parent, name) to one
+// set and probes at most cacheWays entries; a stale-epoch entry is not found.
+// The walk that calls it stays inside one mount, so the backend and the parent
+// node identify the component: two mounts of one backend share entries, and a
+// different backend can never collide with them.
 func (namespace *Namespace) component(backend Backend, parent ramfs.NodeID, component []byte) (ramfs.NodeID, bool, bool) {
-	for index := range namespace.cache {
-		entry := &namespace.cache[index]
+	if len(component) == 0 || len(component) > maxCachedName {
+		return 0, false, false
+	}
+	set := int(componentHash(parent, component) & (cacheSets - 1))
+	for index := range namespace.cache[set] {
+		namespace.counters.ComponentProbes++
+		entry := &namespace.cache[set][index]
 		if !entry.used || entry.generation != namespace.cacheGeneration || entry.backend != backend || entry.parent != parent ||
-			!equal(entry.name[:entry.size], component) {
+			int(entry.size) != len(component) || !equal(entry.name[:entry.size], component) {
 			continue
 		}
 		entry.referenced = true
@@ -1555,9 +1583,11 @@ func (namespace *Namespace) remember(backend Backend, parent, child ramfs.NodeID
 	if len(component) == 0 || len(component) > maxCachedName {
 		return
 	}
+	set := int(componentHash(parent, component) & (cacheSets - 1))
+	ways := &namespace.cache[set]
 	target := -1
-	for index := range namespace.cache {
-		entry := &namespace.cache[index]
+	for index := range ways {
+		entry := &ways[index]
 		if entry.used && entry.generation == namespace.cacheGeneration && entry.backend == backend && entry.parent == parent &&
 			equal(entry.name[:entry.size], component) {
 			return
@@ -1567,17 +1597,18 @@ func (namespace *Namespace) remember(backend Backend, parent, child ramfs.NodeID
 		}
 	}
 	for target < 0 {
-		// A full cache replaces its entries in turn, sparing once each
-		// one a lookup used since the last pass, so a directory whose
-		// names are being resolved stays.
-		candidate := &namespace.cache[namespace.cacheNext]
+		// A full set replaces its ways in turn, sparing once each one a
+		// lookup used since the last pass, so a directory whose names are
+		// being resolved stays. The clock is per set, so at most cacheWays
+		// probes are needed.
+		candidate := &ways[namespace.cacheNext[set]]
 		if !candidate.referenced {
-			target = int(namespace.cacheNext)
+			target = int(namespace.cacheNext[set])
 		}
 		candidate.referenced = false
-		namespace.cacheNext = uint16((int(namespace.cacheNext) + 1) % len(namespace.cache))
+		namespace.cacheNext[set] = uint8((int(namespace.cacheNext[set]) + 1) % cacheWays)
 	}
-	entry := &namespace.cache[target]
+	entry := &ways[target]
 	entry.referenced = false
 	entry.used, entry.backend, entry.parent, entry.child = true, backend, parent, child
 	entry.generation = namespace.cacheGeneration
@@ -1638,8 +1669,9 @@ func (namespace *Namespace) invalidateName(backend Backend, parent ramfs.NodeID,
 	if count == 0 {
 		return
 	}
-	for index := range namespace.cache {
-		entry := &namespace.cache[index]
+	set := int(componentHash(parent, buffer[:count]) & (cacheSets - 1))
+	for index := range namespace.cache[set] {
+		entry := &namespace.cache[set][index]
 		if entry.used && entry.generation == namespace.cacheGeneration && entry.backend == backend && entry.parent == parent &&
 			equal(entry.name[:entry.size], buffer[:count]) {
 			entry.used = false
