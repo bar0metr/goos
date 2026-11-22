@@ -18,10 +18,10 @@ plus one `Stat` exchange with the filesystem service, so the workload is
 quadratic in depth (about 0.83 s under KVM, against Linux's 4.0 ms).
 
 The release requires this cost removed before account, metadata and xattr work
-widens the request surface (§17.1). The cache must not, for the speed, reuse a
-result across an incompatible VFS authority, a root confinement, an old mount
-or filesystem-service generation, a renamed or replaced parent, a stale
-symlink target, or a different session root.
+widens the request surface (§17.1). The cache must never let a cached
+component bypass an incompatible VFS authority, a rooted confinement, a mount
+or filesystem-service generation, a rename or replacement, symlink semantics
+or any other namespace validity rule.
 
 ## Decision
 
@@ -65,11 +65,12 @@ plus the scope decisions those name changes can invalidate (what an exact name
 resolved to, and the nodes a subtree walk reached). Rename and replace drop
 the source and target names; everything else stays cached.
 
-**Authority.** The cache resolves a path to a node, never to an authorization
-decision, so authority and root changes do not step the cache generation.
-Rooted confinement (`insideRoot`) and scope checks (`nodeScopes`, `permits`)
-run around every resolution, so a warm cache cannot widen a session's
-authority, and no result crosses session or root boundaries.
+**Authority.** The component cache is namespace-wide, not session-private: it
+stores a path-to-node mapping, never an authorization decision, so authority
+and root changes do not step the cache generation. Rooted confinement
+(`insideRoot`) and scope checks (`nodeScopes`, `permits`) are evaluated
+independently around every resolution, so a warm cache cannot widen a
+session's authority or let a cached component bypass a confinement.
 
 **Symlinks.** Only that a child is a symbolic link is cached; the link's target
 is read fresh on every follow, so a stale target is never reused.
@@ -85,10 +86,11 @@ measurement can show how many backend exchanges the cache avoided.
   `TestResolutionCountersProveFewerBackendExchanges` exercise narrow
   invalidation on a stable backend and the counters.
 - `TestFAT32MutationFullyInvalidates`, `TestOpenIntentCreateFullyInvalidatesOnFAT32`,
-  `TestFATCaseFoldedMutationDropsStaleSpelling` and
-  `TestFATRecreateAfterUnlinkResolvesFresh` prove FAT32 mutations flush the
-  whole cache, so a case-folded spelling or a reused slot cannot revive a
-  stale entry.
+  `TestFATCaseFoldedUnlinkThenSlotReuse`, `TestFATDeletedSlotReuseCannotReviveStaleName`
+  and `TestFATRecreateAfterUnlinkResolvesFresh` prove FAT32 mutations flush the
+  whole cache, so a case-folded spelling or a reused directory slot cannot
+  revive a stale entry. The two slot-reuse tests assert the location-based
+  NodeID of the deleted and recreated names is equal.
 - `TestFullInvalidateForgetsAllComponents` and
   `TestMountGenerationForgetsComponents` exercise full-flush and mount
   generation fencing, and `TestCacheDoesNotWidenRootedAuthority` proves the

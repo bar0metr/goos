@@ -1441,8 +1441,8 @@ func (namespace *Namespace) Replace(path []byte, target []byte) Status {
 	status = mapStatus(backendStatus)
 	// Both names changed. On a stable backend the two components are dropped;
 	// FAT32 and unknown filesystems flush the whole cache (ADR 0230).
-	if sourceParentMount, sourceParent, sourceName, _, sourceStatus := namespace.resolveParent(path); sourceStatus == StatusOK {
-		namespace.invalidateRename(sourceParentMount, sourceParent, sourceName, targetMount, parent, name)
+	if _, sourceParent, sourceName, _, sourceStatus := namespace.resolveParent(path); sourceStatus == StatusOK {
+		namespace.invalidateRename(sourceMount, sourceParent, sourceName, targetMount, parent, name)
 	} else {
 		namespace.invalidate()
 	}
