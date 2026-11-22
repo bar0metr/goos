@@ -21,8 +21,11 @@ const (
 	// entries each, for MaxCache entries total. A lookup hashes (parent
 	// node, name) to one set and probes at most cacheWays entries, so a
 	// path component is O(cacheWays), not O(MaxCache) (ADR 0230, FIX3).
-	cacheSets = 32
-	cacheWays = 4
+	// The deep-path working set is ~102 live components; 64 sets x 8 ways
+	// keeps its per-set occupancy under 8 for the ext4 inode layout, so
+	// nothing is evicted mid-path (ADR 0230, FIX3 measurement).
+	cacheSets = 64
+	cacheWays = 8
 	MaxCache  = cacheSets * cacheWays
 	// maxCachedName bounds the component name the cache remembers. Longer
 	// names resolve every time; they are rare, and remembering them would
@@ -1537,9 +1540,12 @@ func (namespace *Namespace) file(owner Owner, handle Handle, required Rights) (*
 }
 
 // componentHash is the FNV-1a style set-selection hash of a component's key
-// (parent node and name bytes). It is deterministic, allocation-free and
-// local to the VFS; the backend identity is not hashed, only compared exactly
-// inside the selected set.
+// (parent node and name bytes), finished with an fmix64 avalanche. It is
+// deterministic, allocation-free and local to the VFS; the backend identity is
+// not hashed, only compared exactly inside the selected set. The avalanche
+// matters: FNV-1a's low bits keep the structure of the last input bytes, and
+// ext4 inode numbers (group*InodesPerGroup+index) vary little in those bytes,
+// which without the final mix collapses many (parent, name) keys into one set.
 func componentHash(parent ramfs.NodeID, name []byte) uint64 {
 	hash := uint64(1469598103934665603) // FNV-1a 64-bit offset basis
 	value := uint64(parent)
@@ -1552,6 +1558,12 @@ func componentHash(parent ramfs.NodeID, name []byte) uint64 {
 		hash ^= uint64(b)
 		hash *= 1099511628211
 	}
+	// fmix64 spreads every input bit across the whole result (MurmurHash3).
+	hash ^= hash >> 33
+	hash *= 0xff51afd7ed558ccd
+	hash ^= hash >> 33
+	hash *= 0xc4ceb9fe1a85ec53
+	hash ^= hash >> 33
 	return hash
 }
 

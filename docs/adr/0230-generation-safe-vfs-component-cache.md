@@ -45,20 +45,30 @@ filesystem therefore flush the whole cache on every namespace mutation, and
 unknown filesystems fail safe by default.
 
 **Cache structure.** One namespace holds a bounded set-associative table of
-`cacheSets` (32) sets × `cacheWays` (4) ways, `MaxCache` (128) entries in
+`cacheSets` (64) sets × `cacheWays` (8) ways, `MaxCache` (512) entries in
 total. A component lookup hashes the parent NodeID and the component bytes
-with a deterministic FNV-1a style mixer, selects one set, and probes at most
-`cacheWays` entries; the backend identity stays in the exact key comparison
-inside the set. Replacement is a per-set second-chance clock, sparing once an
-entry a lookup used since the clock last passed it. A component name longer
-than 64 bytes is resolved every time rather than cached; such names are rare
-and caching them would cost a `NameMax` buffer per entry.
+with a deterministic FNV-1a mixer finished by an fmix64 avalanche, selects one
+set, and probes at most `cacheWays` entries; the backend identity stays in the
+exact key comparison inside the set. Replacement is a per-set second-chance
+clock, sparing once an entry a lookup used since the clock last passed it. A
+component name longer than 64 bytes is resolved every time rather than cached;
+such names are rare and caching them would cost a `NameMax` buffer per entry.
 
 This set-associative shape replaces the first M1 implementation's
 fully-associative 128-entry linear scan. That scan removed the backend
 re-walks but made every component hit O(128), which surfaced as measurable
 `stat`/`readdir` overhead on ext4 and a severe RAMFS deep-path regression; the
 set-associative lookup makes each component O(`cacheWays`).
+
+The first set-associative geometry, 32 sets × 4 ways (128 entries), failed
+the KVM gate: the deep path's ~102 live components overfill a 4-way set
+whenever more than four hash together, and ext4 inode numbers
+(`group*InodesPerGroup+index`) vary little in the low bytes, so the raw
+FNV-1a low bits collapsed many of the deep path's same-named components into
+one set and the resulting eviction re-walked the prefix through filesystem
+IPC (deep rose from 324.7 ms to about 9 s). The fmix64 avalanche and the
+64 × 8 geometry keep the deep working set inside the ways, so nothing is
+evicted mid-path; both were justified by the measured KVM deep-path results.
 
 **Generation safety.** The namespace keeps a `cacheGeneration` epoch. A full
 flush steps it; every entry carries the epoch it was written under and a
@@ -122,8 +132,8 @@ cache avoided and how few set-ways each component lookup probed.
 The deep-path workload resolves each new level with one component exchange
 instead of a full re-walk, turning the `mkdir` and `rmdir` phases from
 quadratic to linear in depth. A directory with many names still costs one
-lookup per name. The cache is a fixed 32×4 set-associative table of 128
-entries of a few dozen bytes each, about ten kilobytes per namespace, and a
-lookup probes at most four ways. FAT32 pays for its conservative policy with a
-full flush on each mutation, which is the price of its case-insensitive,
+lookup per name. The cache is a fixed 64×8 set-associative table of 512
+entries of a few dozen bytes each, about fifty kilobytes per namespace, and a
+lookup probes at most eight ways. FAT32 pays for its conservative policy with
+a full flush on each mutation, which is the price of its case-insensitive,
 location-based namespace identity.

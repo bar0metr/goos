@@ -39,9 +39,9 @@ open by a dead process stayed open for the rest of the boot.
 
 The resolver cache stores resolved components, keyed by the filesystem
 backend, the parent node identity and the component bytes, mapping them to the
-child node identity (ADR 0230). It is a fixed 32-set × 4-way set-associative
-table of 128 entries; a lookup hashes the parent node and component bytes to
-one set and probes at most four ways. Names longer than 64 bytes are not
+child node identity (ADR 0230). It is a fixed 64-set × 8-way set-associative
+table of 512 entries; a lookup hashes the parent node and component bytes to
+one set and probes at most eight ways. Names longer than 64 bytes are not
 cached and are resolved each time. On RAMFS and ext4 a namespace mutation drops
 only the touched component and the scope decisions it invalidates; FAT32 and
 unknown filesystems, whose names are case-insensitive or whose node identities

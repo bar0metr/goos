@@ -17,7 +17,7 @@ type cacheKey struct {
 func collidingKeys(set, n int) []cacheKey {
 	keys := make([]cacheKey, 0, n)
 	name := []byte("x")
-	for parent := uint64(1); len(keys) < n && parent < 1<<20; parent++ {
+	for parent := uint64(1); len(keys) < n && parent < 1<<22; parent++ {
 		id := ramfs.NodeID(parent)
 		if int(componentHash(id, name)&(cacheSets-1)) == set {
 			keys = append(keys, cacheKey{parent: id, name: name})
@@ -26,35 +26,35 @@ func collidingKeys(set, n int) []cacheKey {
 	return keys
 }
 
-// Four keys that hash to one set coexist, and a fifth evicts exactly one
-// victim, leaving four of the five present (ADR 0230, FIX3 §11).
+// cacheWays keys that hash to one set coexist, and one more evicts exactly one
+// victim, leaving cacheWays of the cacheWays+1 present (ADR 0230, FIX3 §11).
 func TestComponentCacheSetAssociativity(t *testing.T) {
 	namespace := &Namespace{}
 	backend := &ramfs.FileSystem{}
-	keys := collidingKeys(0, 5)
-	if len(keys) != 5 {
+	keys := collidingKeys(0, cacheWays+1)
+	if len(keys) != cacheWays+1 {
 		t.Fatalf("only %d colliding keys found", len(keys))
 	}
-	for index := 0; index < 4; index++ {
+	for index := 0; index < cacheWays; index++ {
 		namespace.remember(backend, keys[index].parent, ramfs.NodeID(index+1), keys[index].name, false)
 	}
-	for index := 0; index < 4; index++ {
+	for index := 0; index < cacheWays; index++ {
 		if child, _, found := namespace.component(backend, keys[index].parent, keys[index].name); !found || child != ramfs.NodeID(index+1) {
 			t.Fatalf("key %d not found after insert", index)
 		}
 	}
-	namespace.remember(backend, keys[4].parent, 5, keys[4].name, false)
+	namespace.remember(backend, keys[cacheWays].parent, ramfs.NodeID(cacheWays+1), keys[cacheWays].name, false)
 	present := 0
-	for index := 0; index < 5; index++ {
+	for index := 0; index < cacheWays+1; index++ {
 		if _, _, found := namespace.component(backend, keys[index].parent, keys[index].name); found {
 			present++
 		}
 	}
-	if present != 4 {
-		t.Fatalf("%d of 5 keys present, want 4", present)
+	if present != cacheWays {
+		t.Fatalf("%d of %d keys present, want %d", present, cacheWays+1, cacheWays)
 	}
-	if _, _, found := namespace.component(backend, keys[4].parent, keys[4].name); !found {
-		t.Fatal("fifth key evicted itself")
+	if _, _, found := namespace.component(backend, keys[cacheWays].parent, keys[cacheWays].name); !found {
+		t.Fatal("newest key evicted itself")
 	}
 }
 
@@ -63,17 +63,17 @@ func TestComponentCacheSetAssociativity(t *testing.T) {
 func TestComponentCacheSecondChance(t *testing.T) {
 	namespace := &Namespace{}
 	backend := &ramfs.FileSystem{}
-	keys := collidingKeys(0, 5)
-	if len(keys) != 5 {
+	keys := collidingKeys(0, cacheWays+1)
+	if len(keys) != cacheWays+1 {
 		t.Fatalf("only %d colliding keys found", len(keys))
 	}
-	for index := 0; index < 4; index++ {
+	for index := 0; index < cacheWays; index++ {
 		namespace.remember(backend, keys[index].parent, ramfs.NodeID(index+1), keys[index].name, false)
 	}
 	if _, _, found := namespace.component(backend, keys[0].parent, keys[0].name); !found {
 		t.Fatal("key 0 missing")
 	}
-	namespace.remember(backend, keys[4].parent, 5, keys[4].name, false)
+	namespace.remember(backend, keys[cacheWays].parent, ramfs.NodeID(cacheWays+1), keys[cacheWays].name, false)
 	if _, _, found := namespace.component(backend, keys[0].parent, keys[0].name); !found {
 		t.Fatal("referenced key was not spared")
 	}
@@ -86,11 +86,11 @@ func TestComponentCacheSecondChance(t *testing.T) {
 func TestComponentCacheOtherSetUnaffected(t *testing.T) {
 	namespace := &Namespace{}
 	backend := &ramfs.FileSystem{}
-	keys := collidingKeys(0, 5)
-	if len(keys) != 5 {
+	keys := collidingKeys(0, cacheWays+1)
+	if len(keys) != cacheWays+1 {
 		t.Fatalf("only %d colliding keys found", len(keys))
 	}
-	for index := 0; index < 4; index++ {
+	for index := 0; index < cacheWays; index++ {
 		namespace.remember(backend, keys[index].parent, ramfs.NodeID(index+1), keys[index].name, false)
 	}
 	other := collidingKeys(1, 1)
@@ -98,7 +98,7 @@ func TestComponentCacheOtherSetUnaffected(t *testing.T) {
 		t.Fatal("no key found for the other set")
 	}
 	namespace.remember(backend, other[0].parent, 99, other[0].name, false)
-	namespace.remember(backend, keys[4].parent, 5, keys[4].name, false)
+	namespace.remember(backend, keys[cacheWays].parent, ramfs.NodeID(cacheWays+1), keys[cacheWays].name, false)
 	if child, _, found := namespace.component(backend, other[0].parent, other[0].name); !found || child != 99 {
 		t.Fatalf("other-set key lost: found=%v child=%d", found, child)
 	}
@@ -150,19 +150,19 @@ func TestComponentCacheLongNameUncached(t *testing.T) {
 func TestComponentCacheProbeBound(t *testing.T) {
 	namespace := &Namespace{}
 	backend := &ramfs.FileSystem{}
-	keys := collidingKeys(0, 5)
-	if len(keys) != 5 {
+	keys := collidingKeys(0, cacheWays+1)
+	if len(keys) != cacheWays+1 {
 		t.Fatalf("only %d colliding keys found", len(keys))
 	}
-	for index := 0; index < 5; index++ {
+	for index := 0; index < cacheWays+1; index++ {
 		namespace.remember(backend, keys[index].parent, ramfs.NodeID(index+1), keys[index].name, false)
 	}
 	before := namespace.AuthorityCounters()
-	for index := 0; index < 5; index++ {
+	for index := 0; index < cacheWays+1; index++ {
 		namespace.component(backend, keys[index].parent, keys[index].name)
 	}
 	after := namespace.AuthorityCounters()
-	if probes := after.ComponentProbes - before.ComponentProbes; probes > uint64(cacheWays*5) {
-		t.Fatalf("probes = %d, want <= %d", probes, cacheWays*5)
+	if probes := after.ComponentProbes - before.ComponentProbes; probes > uint64(cacheWays*(cacheWays+1)) {
+		t.Fatalf("probes = %d, want <= %d", probes, cacheWays*(cacheWays+1))
 	}
 }
