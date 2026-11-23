@@ -27,26 +27,28 @@ type readJob struct {
 }
 
 // readPool runs the read-only requests on bounded worker goroutines. All its
-// methods except Wake and the worker loop belong to the owner goroutine.
+// methods except the worker loop belong to the owner goroutine.
 type readPool struct {
-	workers  int
-	jobs     chan readJob
-	results  chan readJob
-	wake     chan struct{}
-	joined   sync.WaitGroup
-	inFlight int
+	workers    int
+	jobs       chan readJob
+	results    chan readJob
+	wakeWriter handle.ID
+	wakeToken  [1]byte
+	joined     sync.WaitGroup
+	inFlight   int
 }
 
-func newReadPool(workers int) (*readPool, bool) {
+func newReadPool(workers int, wakeWriter handle.ID) (*readPool, bool) {
 	if workers < 1 || workers > maxReadWorkers {
 		return nil, false
 	}
 	pool := &readPool{
-		workers: workers,
-		jobs:    make(chan readJob, workers),
-		results: make(chan readJob, workers),
-		wake:    make(chan struct{}, 1),
+		workers:    workers,
+		jobs:       make(chan readJob, workers),
+		results:    make(chan readJob, workers),
+		wakeWriter: wakeWriter,
 	}
+	pool.wakeToken[0] = 1
 	pool.joined.Add(workers)
 	for index := 0; index < workers; index++ {
 		go pool.worker()
@@ -61,15 +63,11 @@ func (pool *readPool) worker() {
 		job.request.Name = job.name[:copy(job.name[:], job.request.Name)]
 		job.reply = answer(job.request, &name)
 		pool.results <- job
-		select {
-		case pool.wake <- struct{}{}:
-		default:
-		}
+		// Wake the owner straight from the worker, with one stream write;
+		// a full stream is already readable, so a dropped wake is fine.
+		sys.StreamWrite(pool.wakeWriter, pool.wakeToken[:])
 	}
 }
-
-// Wake is a coalesced hint to poll the results, not one signal per result.
-func (pool *readPool) Wake() <-chan struct{} { return pool.wake }
 
 // admit queues a read for a worker; the caller has already ensured a slot is
 // free, so the buffered send cannot block.
@@ -110,33 +108,19 @@ func readOnly(operation fsproto.Operation) bool {
 	return false
 }
 
-// bridgeReadCompletions converts the pool's coalesced Go-channel wake into
-// native readiness for the owner's wait.
-func bridgeReadCompletions(wake <-chan struct{}, writer handle.ID) {
-	var token = [1]byte{1}
-	for range wake {
-		count, status := sys.StreamWrite(writer, token[:])
-		if !completionWakeWritten(count, status) {
-			sys.ConsoleWriteString(consoleHandle, "EXT4_COMPLETION_WAKE_FAILED\n")
-			sys.Exit(exitFailed)
-		}
-	}
-}
-
-func completionWakeWritten(count int, status kcall.Status) bool {
-	return status == kcall.StatusOK || status == kcall.StatusResourceExhausted && count == 0
-}
+// bridgeReadCompletions is no longer used: workers write the wake stream
+// directly, so there is no extra goroutine hop between a finished read and
+// the owner's wait.
 
 func runService() {
-	pool, ok := newReadPool(maxReadWorkers)
-	if !ok {
-		fatal("EXT4_READ_POOL_FAILED\n")
-	}
 	reader, writer, status := sys.StreamCreate()
 	if status != kcall.StatusOK {
 		fatal("EXT4_COMPLETION_STREAM_FAILED\n")
 	}
-	go bridgeReadCompletions(pool.Wake(), writer)
+	pool, ok := newReadPool(maxReadWorkers, writer)
+	if !ok {
+		fatal("EXT4_READ_POOL_FAILED\n")
+	}
 	runOwner(pool, reader)
 }
 
@@ -223,6 +207,15 @@ func runOwner(pool *readPool, completionRead handle.ID) {
 				volume.Flush()
 				exitIfFailed()
 			}
+			// Serve inline when nothing else is queued or in flight: the
+			// pool's hand-off costs more than the request for a lone client,
+			// and a serial read is already correct.
+			if pool.inFlight == 0 && !requestPending() {
+				reply = answer(request, &listedName)
+				sendReply(reply, requestMessage.Correlation)
+				exitIfFailed()
+				continue
+			}
 			pool.admit(request, requestMessage.Correlation)
 			continue
 		default:
@@ -232,6 +225,15 @@ func runOwner(pool *readPool, completionRead handle.ID) {
 		sendReply(reply, requestMessage.Correlation)
 		exitIfFailed()
 	}
+}
+
+// requestPending reports whether another request is already queued on the VFS
+// endpoint, without waiting.
+func requestPending() bool {
+	var interests [userwait.MaxObjects]userwait.Interest
+	interests[0] = userwait.Interest{Handle: vfsHandle, Events: kcall.WaitReadable}
+	ready, status := userwait.Any(&interests, 1, 0)
+	return status == kcall.StatusOK && ready.ReadyMask&1 != 0
 }
 
 func drainWake(completionRead handle.ID) {
