@@ -1,6 +1,36 @@
 package ext4
 
-import "sort"
+// sortOrder sorts order by less with a small in-place quicksort, so the
+// batch's sort needs no reflection: TinyGo's sort.Slice costs a reflective
+// swap per comparison, which shows up in the listing path. The Lomuto
+// partition always advances, so duplicates and all-equal runs terminate.
+func sortOrder(order []int, less func(a, b int) bool) {
+	for len(order) > 12 {
+		mid := len(order) / 2
+		order[mid], order[len(order)-1] = order[len(order)-1], order[mid]
+		pivot := order[len(order)-1]
+		store := 0
+		for index := 0; index < len(order)-1; index++ {
+			if less(order[index], pivot) {
+				order[index], order[store] = order[store], order[index]
+				store++
+			}
+		}
+		order[store], order[len(order)-1] = order[len(order)-1], order[store]
+		if store < len(order)-1-store {
+			sortOrder(order[:store], less)
+			order = order[store+1:]
+		} else {
+			sortOrder(order[store+1:], less)
+			order = order[:store]
+		}
+	}
+	for index := 1; index < len(order); index++ {
+		for at := index; at > 0 && less(order[at], order[at-1]); at-- {
+			order[at], order[at-1] = order[at-1], order[at]
+		}
+	}
+}
 
 // The listing prefetch removes the inode-at-a-time scattered reads of a
 // large hash-ordered directory. A listing batch collects its entries first,
@@ -150,7 +180,7 @@ func (fs *FS) PrefetchDir(prefetch *ListPrefetch, dir *Inode, cursor uint64, ent
 		prefetch.order[index] = index
 	}
 	order := prefetch.order[:count]
-	sort.Slice(order, func(a, b int) bool {
+	sortOrder(order, func(a, b int) bool {
 		if locations[order[a]].block != locations[order[b]].block {
 			return locations[order[a]].block < locations[order[b]].block
 		}
