@@ -214,3 +214,10 @@ inode table already fits the metadata cache, and the 10000-name win dwarfs
 that cost. The read-count regression proof is `TestPrefetchListingReads`
 (6331 interleaved reads against 675 prefetch reads on the 10000-name
 fixture).
+
+The coherence fixes (staged blocks override the prefetch, a generation-bound
+decoded batch, and no raw alias on listing-only inodes) changed neither
+bound nor the guest numbers. Post-FIX run `20261123T113227Z-9fe47d6c`
+(commit `0edf9260`, same node and shape): 10k readdir 184 ms, 2k readdir
+median 39.8 ms, 1256 prefetch reads and 24664 fetches. The 10k win holds
+well above the 2x target.
