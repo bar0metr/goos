@@ -221,3 +221,10 @@ bound nor the guest numbers. Post-FIX run `20261123T113227Z-9fe47d6c`
 (commit `0edf9260`, same node and shape): 10k readdir 184 ms, 2k readdir
 median 39.8 ms, 1256 prefetch reads and 24664 fetches. The 10k win holds
 well above the 2x target.
+
+The second review fixed two further defects without moving the numbers: a
+reused `Inode` destination is reset before `decodeInodeInto`, and the
+mutation epoch now advances on every successful `fold()` so a partial
+multi-transaction write that later fails still invalidates decoded batches.
+Run `20261123T123647Z-ba28f0c7` (commit `36f9ed78`): 10k readdir 193 ms, 2k
+readdir median 36.0 ms, 1256 prefetch reads and 24652 fetches.
