@@ -99,22 +99,25 @@ func (fs *FS) mapExtent(inode *Inode, logical uint32) (Mapping, error) {
 		if err != nil {
 			return Mapping{}, err
 		}
-		defer unlock()
+		// Own the block before descending: the next level's get may hash to
+		// the same cache set, and the borrow cannot be held across it.
+		owned := append([]byte(nil), data...)
+		unlock()
 
-		next, err := parseExtentNode(data, int(header.depth)-1)
+		next, err := parseExtentNode(owned, int(header.depth)-1)
 		if err != nil {
 			return Mapping{}, err
 		}
 		if fs.sb.HasMetadataCsum() {
 			tail := 12 + 12*int(next.max)
-			if tail+4 > len(data) {
+			if tail+4 > len(owned) {
 				return Mapping{}, corrupt("extent block has no room for its checksum")
 			}
-			if crc32c(inode.csumSeed, data[:tail]) != le32(data, tail) {
+			if crc32c(inode.csumSeed, owned[:tail]) != le32(owned, tail) {
 				return Mapping{}, corrupt("extent block checksum mismatch")
 			}
 		}
-		node, header = data, next
+		node, header = owned, next
 	}
 	var end uint64
 	for index := 0; index < int(header.entries); index++ {
@@ -201,9 +204,10 @@ func (fs *FS) mapIndirect(inode *Inode, logical uint32) (Mapping, error) {
 		if err != nil {
 			return Mapping{}, err
 		}
-		defer unlock()
-
+		// Read the single next pointer and release before the next level's
+		// get, which may hash to the same cache set (ADR 0232).
 		block = pointer(data, path[level])
+		unlock()
 	}
 	if block == 0 {
 		return Mapping{Logical: uint64(logical), Length: 1, Hole: true}, nil

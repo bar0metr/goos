@@ -54,3 +54,32 @@ func TestConcurrentCacheAccess(t *testing.T) {
 	}
 	group.Wait()
 }
+
+// TestCacheBorrowScoped verifies that sequential borrows of two blocks in the
+// same cache set never self-deadlock: the borrow contract (ADR 0232) releases
+// the set lock before any caller may acquire the same set again. Extent and
+// indirect traversal relied on this after the nested-borrow fix.
+func TestCacheBorrowScoped(t *testing.T) {
+	device := &raceDevice{data: fixture(t, "many").data}
+	fs := mount(t, device)
+	set := uint64(0)
+	first, second := set, set+uint64(cacheSets)
+	for round := 0; round < 256; round++ {
+		if err := fs.cache.withBlock(first, func(data []byte) error {
+			if len(data) != int(fs.blockSize) {
+				return corrupt("short block")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := fs.cache.withBlock(second, func(data []byte) error {
+			if len(data) != int(fs.blockSize) {
+				return corrupt("short block")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

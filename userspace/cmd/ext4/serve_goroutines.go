@@ -60,7 +60,6 @@ func (pool *readPool) worker() {
 	defer pool.joined.Done()
 	var name [ramfs.MaxName]byte
 	for job := range pool.jobs {
-		job.request.Name = job.name[:copy(job.name[:], job.request.Name)]
 		job.reply = answer(job.request, &name)
 		pool.results <- job
 		// Wake the owner straight from the worker, with one stream write;
@@ -72,8 +71,14 @@ func (pool *readPool) worker() {
 // admit queues a read for a worker; the caller has already ensured a slot is
 // free, so the buffered send cannot block.
 func (pool *readPool) admit(request fsproto.Request, correlation uint64) {
+	job := readJob{request: request, correlation: correlation}
+	// Own the name before handoff: request.Name aliases owner-owned decode
+	// storage that the next receive overwrites. The worker must not depend on
+	// the owner's buffers after this point (ADR 0232).
+	n := copy(job.name[:], request.Name)
+	job.request.Name = job.name[:n]
 	pool.inFlight++
-	pool.jobs <- readJob{request: request, correlation: correlation}
+	pool.jobs <- job
 }
 
 // collect replies to every finished read without blocking.

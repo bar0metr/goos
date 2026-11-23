@@ -173,33 +173,31 @@ func (fs *FS) validateGroups() error {
 func (fs *FS) verifyBitmaps(group uint32, desc *Group) error {
 	wide := fs.sb.DescriptorSize >= 64
 	if desc.Flags&groupBlockUninit == 0 {
-		data, unlock, err := fs.cache.get(desc.BlockBitmap)
-		if err != nil {
+		if err := fs.cache.withBlock(desc.BlockBitmap, func(data []byte) error {
+			crc := crc32c(fs.seed, data[:fs.sb.ClustersPerGroup/8])
+			if !wide {
+				crc &= 0xFFFF
+			}
+			if crc != desc.BlockBitmapCsum {
+				return corrupt("block bitmap checksum mismatch")
+			}
+			return nil
+		}); err != nil {
 			return err
-		}
-		defer unlock()
-
-		crc := crc32c(fs.seed, data[:fs.sb.ClustersPerGroup/8])
-		if !wide {
-			crc &= 0xFFFF
-		}
-		if crc != desc.BlockBitmapCsum {
-			return corrupt("block bitmap checksum mismatch")
 		}
 	}
 	if desc.Flags&groupInodeUninit == 0 {
-		data, unlock, err := fs.cache.get(desc.InodeBitmap)
-		if err != nil {
+		if err := fs.cache.withBlock(desc.InodeBitmap, func(data []byte) error {
+			crc := crc32c(fs.seed, data[:fs.sb.InodesPerGroup/8])
+			if !wide {
+				crc &= 0xFFFF
+			}
+			if crc != desc.InodeBitmapCsum {
+				return corrupt("inode bitmap checksum mismatch")
+			}
+			return nil
+		}); err != nil {
 			return err
-		}
-		defer unlock()
-
-		crc := crc32c(fs.seed, data[:fs.sb.InodesPerGroup/8])
-		if !wide {
-			crc &= 0xFFFF
-		}
-		if crc != desc.InodeBitmapCsum {
-			return corrupt("inode bitmap checksum mismatch")
 		}
 	}
 	return nil
