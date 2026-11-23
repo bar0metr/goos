@@ -155,11 +155,15 @@ func (fs *FS) decodeInode(number uint32, raw []byte) (*Inode, error) {
 }
 
 // decodeInodeInto fills inode from raw, the on-disk bytes of inode number,
-// verifying its checksum. keepRaw records whether the caller keeps raw
-// stable for the inode's lifetime: the owned-inode path does, so it sets the
-// alias for extended-attribute access; the listing prefetch does not, because
-// its raw bytes alias a cache slot a later block can overwrite (ADR 0231).
+// verifying its checksum. It resets the destination first, so a reused slot
+// cannot leak optional or internal state (raw, HasCreate, Create, ExtraIsize,
+// blockArea, csumSeed, dirty) from an earlier inode. keepRaw records whether
+// the caller keeps raw stable for the inode's lifetime: the owned-inode path
+// does, so it sets the alias for extended-attribute access; the listing
+// prefetch does not, because its raw bytes alias a cache slot a later block
+// can overwrite (ADR 0231).
 func (fs *FS) decodeInodeInto(inode *Inode, number uint32, raw []byte, keepRaw bool) error {
+	*inode = Inode{}
 	inode.Number = number
 	inode.Mode = le16(raw, 0x0)
 	inode.UID = uint32(le16(raw, 0x2)) | uint32(le16(raw, 0x78))<<16

@@ -38,7 +38,10 @@ bitmap allocation check happens in cursor order before any decode, so a stale
 entry stops the listing exactly as before; the inode checksum, the
 mode/links live check and the hostile-layout check (`checkInode`) run per
 decoded inode. Hard-link identity, special-file device numbers and inode
-generations ride in the decoded inode as before. A listing-only inode carries
+generations ride in the decoded inode as before. `decodeInodeInto` resets its
+destination before decoding, so a reused prefetch slot cannot leak optional
+or internal state (`raw`, `HasCreate`, `Create`, `ExtraIsize`, `blockArea`,
+`csumSeed`, `dirty`) from an earlier inode. A listing-only inode carries
 every scalar field `stat` needs and no raw alias: the raw bytes belong to a
 cache slot the batch may overwrite, so `PrefetchDir` decodes with `keepRaw`
 false. Operations that need in-inode xattrs resolve the inode through the
@@ -50,10 +53,13 @@ prefetch, so the prefetch cannot hide newer metadata the running or pending
 transaction holds. A committed transaction may rewrite inode-table or bitmap
 blocks the prefetch copied, so `commitPending` invalidates the prefetch as a
 defensive boundary beside the metadata-cache update. The decoded `ReadDirBatch`
-is generation-bound: `FS.mutationEpoch` advances when a mutation folds into
-the pending transaction, before journal commit, and the adapter drops its
-decoded batch when the epoch moves. Listing requests never run concurrently
-with a transaction: the service serves one request at a time.
+is generation-bound: `FS.mutationEpoch` advances whenever a running
+transaction is successfully folded into the pending transaction, before
+journal commit, and the adapter drops its decoded batch when the epoch moves.
+A high-level operation may advance it more than once when it spans multiple
+transactions; an operation that later fails may therefore still have advanced
+the epoch when an earlier prefix became visible. Listing requests never run
+concurrently with a transaction: the service serves one request at a time.
 
 **Bounds.** `MaxReaddirPrefetchEntries = 256` and
 `MaxReaddirPrefetchBlocks = 1024` are package constants, classified in the
@@ -82,8 +88,16 @@ directory refills the batch more often and evicts prefetch blocks by LRU.
   fixes: a pending truncate and a pending create must win over a resident
   prefetch copy, and a prefetched inode must keep no raw alias after a set
   eviction. `TestReadDirBatchInvalidatedByUnlink`,
-  `TestReadDirBatchInvalidatedByMetadataMutation` and
-  `TestReadDirBatchInvalidatedByCreate` cover the generation-bound adapter.
+  `TestReadDirBatchInvalidatedByMetadataMutation`,
+  `TestReadDirBatchInvalidatedByCreate` and
+  `TestReadDirBatchInvalidatedByPartialWrite` cover the generation-bound
+  adapter. `TestDecodeInodeIntoResetsDestination`,
+  `TestMutationEpochAdvancesOnOrdinaryMutation`,
+  `TestMutationEpochUnchangedOnPreFoldFailure` and
+  `TestMutationEpochAdvancesOnPartialWrite` cover the destination reset and
+  the fold-bound epoch: a reused slot cannot leak optional state, and a
+  partial multi-transaction write advances the epoch despite returning an
+  error.
 - The KVM `fsbench` run `20261123T095006Z-ad12b999` (commit `ea788082`)
   lists 10000 names in 193 ms against the 0.3.0 baseline of about 1.44 s,
   7.5x faster. The guest logged 1256 prefetch device reads for the whole

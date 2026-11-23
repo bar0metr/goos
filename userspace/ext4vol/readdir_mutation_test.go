@@ -146,3 +146,48 @@ func TestReadDirBatchInvalidatedByCreate(t *testing.T) {
 		t.Fatal("zzz-new not listed after create")
 	}
 }
+
+// TestReadDirBatchInvalidatedByPartialWrite fills a not-yet-returned file
+// until the volume is full, so the last write commits a prefix and the next
+// fails with no space. The continuation must refill and report the new size,
+// not the stale decoded one (ADR 0231).
+func TestReadDirBatchInvalidatedByPartialWrite(t *testing.T) {
+	reference := bigReference(t)
+	volume, _ := writable(t)
+	root, _ := volume.Root()
+	big, _ := volume.OpenName(root, name(t, "big"))
+
+	target := make([]byte, 200)
+	batch, status := volume.ReadDirBatch(big, 0, target)
+	must(t, status)
+	if batch.End || batch.Count == 0 || batch.Count >= len(reference) {
+		t.Fatal("expected a partial batch")
+	}
+	nextName := reference[batch.Count]
+	file, status := volume.OpenName(big, name(t, nextName))
+	must(t, status)
+
+	chunk := make([]byte, 4<<20)
+	var size uint64
+	for {
+		n, status := volume.Write(file, size, chunk)
+		if status == ramfs.StatusNoSpace {
+			break
+		}
+		must(t, status)
+		size += uint64(n)
+	}
+
+	found := false
+	for _, entry := range collectEntries(t, volume, big, ramfs.MaxDirBatch, batch.Next) {
+		if entry.name == nextName {
+			found = true
+			if entry.size != size {
+				t.Fatalf("%q listed with size %d, want %d", nextName, entry.size, size)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("%q not listed after partial write", nextName)
+	}
+}

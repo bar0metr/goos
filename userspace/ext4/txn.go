@@ -163,10 +163,6 @@ func (fs *FS) mutate(operation func() error) error {
 		fs.abort()
 		return err
 	}
-	// The mutation is visible through the transaction overlay and base the
-	// moment it folds; bump the generation so listing snapshots taken
-	// before it cannot be reused (ADR 0231).
-	fs.mutationEpoch++
 	fs.live = nil
 	if p := fs.pending; p != nil && (p.meta > batchMeta || p.data > batchData || len(p.freed) > batchFrees) {
 		return fs.Sync()
@@ -216,6 +212,13 @@ func (fs *FS) fold() error {
 	}
 	fs.txn = nil
 	fs.cache.overlay = nil
+	// The folded state is visible through the pending transaction the
+	// moment the running layer moved into it; bump the generation so
+	// listing snapshots taken before cannot be reused (ADR 0231). A
+	// high-level operation that spans several transactions advances it once
+	// per fold, so a later failure still leaves the earlier prefix visible
+	// and the epoch advanced.
+	fs.mutationEpoch++
 	return nil
 }
 
