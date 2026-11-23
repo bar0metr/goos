@@ -122,10 +122,11 @@ cache avoided and how few set-ways each component lookup probed.
 - `TestComponentCacheSetAssociativity`, `TestComponentCacheSecondChance`,
   `TestComponentCacheOtherSetUnaffected`, `TestComponentCacheKeyMismatchNoFalseHit`,
   `TestComponentCacheLongNameUncached` and `TestComponentCacheProbeBound`
-  exercise the set-associative structure: four colliding keys coexist in one
-  set, a fifth evicts exactly one victim, the second-chance clock spares a
-  referenced way, another set is untouched, mismatched keys never false-hit,
-  long names stay uncached, and a lookup probes at most `cacheWays` entries.
+  exercise the set-associative structure: `cacheWays` colliding keys coexist
+  in one set, the `cacheWays`+1 key evicts exactly one victim, the
+  second-chance clock spares a referenced way, another set is untouched,
+  mismatched keys never false-hit, long names stay uncached, and a lookup
+  probes at most `cacheWays` entries.
 
 ## Consequences
 

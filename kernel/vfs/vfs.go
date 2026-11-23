@@ -1551,7 +1551,7 @@ func (namespace *Namespace) file(owner Owner, handle Handle, required Rights) (*
 // ext4 inode numbers (group*InodesPerGroup+index) vary little in those bytes,
 // which without the final mix collapses many (parent, name) keys into one set.
 func componentHash(parent ramfs.NodeID, name []byte) uint64 {
-	hash := uint64(1469598103934665603) // FNV-1a 64-bit offset basis
+	hash := uint64(1469598103934665603) // fixed FNV-1a-style seed
 	value := uint64(parent)
 	for index := 0; index < 8; index++ {
 		hash ^= uint64(byte(value))
@@ -1616,8 +1616,9 @@ func (namespace *Namespace) remember(backend Backend, parent, child ramfs.NodeID
 	for target < 0 {
 		// A full set replaces its ways in turn, sparing once each one a
 		// lookup used since the last pass, so a directory whose names are
-		// being resolved stays. The clock is per set, so at most cacheWays
-		// probes are needed.
+		// being resolved stays. The replacement walk is bounded: one pass
+		// clears second chances, and the next examined way is available for
+		// eviction.
 		candidate := &ways[namespace.cacheNext[set]]
 		if !candidate.referenced {
 			target = int(namespace.cacheNext[set])
