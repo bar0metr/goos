@@ -19,17 +19,17 @@ about 0.63 per entry, against the ~626 blocks that actually hold the inodes.
 ## Decision
 
 **Bounded listing prefetch.** `userspace/ext4` gains a per-mount
-`ListPrefetch` of `MaxReaddirPrefetchBlocks` (1024) 4 KiB buffers, 4 MiB, plus
-a per-batch order array. `PrefetchDir` collects up to
-`MaxReaddirPrefetchEntries` (256) directory entries in cursor order, checks
-each named inode is allocated, orders the batch by inode-table block, reads
-each distinct block once through the prefetch (a per-buffer LRU evicts when
-full), and decodes each inode while its block is resident. The entries and
-their decoded, checksum-verified inodes come back in cursor order, so the
-listing order and cursor semantics are unchanged. The prefetch persists
-across `ReadDirBatch` calls: the volume adapter keeps the decoded batch and
-continues consuming it when the next call echoes the expected cursor, and
-refills otherwise.
+`ListPrefetch` of `MaxReaddirPrefetchBlocks` (1024) 4 KiB buffers, 4 MiB, in
+256 sets of 4 ways like the metadata cache, plus a per-batch order array.
+`PrefetchDir` collects up to `MaxReaddirPrefetchEntries` (256) directory
+entries in cursor order, checks each named inode is allocated, orders the
+batch by inode-table block, reads each distinct block once through the
+prefetch (a per-set LRU evicts when full), and decodes each inode while its
+block is resident. The entries and their decoded, checksum-verified inodes
+come back in cursor order, so the listing order and cursor semantics are
+unchanged. The prefetch persists across `ReadDirBatch` calls: the volume
+adapter keeps the decoded batch and continues consuming it when the next call
+echoes the expected cursor, and refills otherwise.
 
 **Validation.** Every check the per-entry path runs still runs: the inode
 bitmap allocation check happens in cursor order before any decode, so a stale

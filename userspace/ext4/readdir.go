@@ -12,10 +12,14 @@ const (
 	// MaxReaddirPrefetchEntries bounds the entries one listing batch
 	// collects and decodes.
 	MaxReaddirPrefetchEntries = 256
+	// The prefetch is set-associative, 256 sets of 4 ways like the
+	// metadata cache, so a lookup probes at most four slots.
+	prefetchSets = 256
+	prefetchWays = 4
 	// MaxReaddirPrefetchBlocks bounds the inode-table blocks the listing
 	// prefetch keeps resident. 4 MiB at 4 KiB blocks, which covers the
 	// inode table of the fsbench 10000-name workload.
-	MaxReaddirPrefetchBlocks = 1024
+	MaxReaddirPrefetchBlocks = prefetchSets * prefetchWays
 )
 
 // listBlock is one resident block of the listing prefetch.
@@ -62,29 +66,29 @@ func (fs *FS) prefetchBlock(prefetch *ListPrefetch, block uint64) ([]byte, error
 		return nil, corrupt("block number beyond the volume")
 	}
 	prefetch.clock++
-	target := -1
-	for index := range prefetch.blocks {
-		entry := &prefetch.blocks[index]
+	first := int(block%prefetchSets) * prefetchWays
+	victim := &prefetch.blocks[first]
+	for index := 0; index < prefetchWays; index++ {
+		entry := &prefetch.blocks[first+index]
 		if entry.valid && entry.block == block {
 			entry.stamp = prefetch.clock
 			return entry.data, nil
 		}
-		if !entry.valid {
-			target = index
-			break
+		if !victim.valid {
+			continue
 		}
-		if target < 0 || entry.stamp < prefetch.blocks[target].stamp {
-			target = index
+		if !entry.valid || entry.stamp < victim.stamp {
+			victim = entry
 		}
 	}
-	entry := &prefetch.blocks[target]
+	victim.valid = false
 	if staged := fs.cache.staged(block); staged != nil {
-		copy(entry.data, staged.data)
-	} else if !fs.cache.device.ReadAt(block*fs.cache.size, entry.data) {
+		copy(victim.data, staged.data)
+	} else if !fs.cache.device.ReadAt(block*fs.cache.size, victim.data) {
 		return nil, errIO
 	}
-	entry.block, entry.valid, entry.stamp = block, true, prefetch.clock
-	return entry.data, nil
+	victim.block, victim.stamp, victim.valid = block, prefetch.clock, true
+	return victim.data, nil
 }
 
 // PrefetchDir collects up to MaxReaddirPrefetchEntries entries of dir from
