@@ -244,8 +244,14 @@ func userspaceMain() {
 		}
 		if ready.ReadyMask&2 != 0 {
 			// The block service restarted, or PID 1 unmounted the volume
-			// and closed the slot: either way this instance is done.
-			syslog.Warn("block endpoint closed")
+			// and closed the slot: either way this instance is done. The
+			// cache counters in the log let a benchmark attribute readdir
+			// time to device reads (ADR 0231).
+			if status, ok := volume.Status(); ok {
+				syslog.Warn("block endpoint closed", syslog.Uint("cache-reads", status.CacheReads), syslog.Uint("cache-hits", status.CacheHits))
+			} else {
+				syslog.Warn("block endpoint closed")
+			}
 			sys.Exit(exitBlockGone)
 		}
 		status := sys.IPCReceive(vfsHandle, wire[:])

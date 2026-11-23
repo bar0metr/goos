@@ -61,6 +61,7 @@ type FS struct {
 	sb          *Superblock
 	device      Device
 	cache       blockCache
+	list        ListPrefetch
 	blockSize   uint32
 	groups      uint64
 	seed        uint32
@@ -172,6 +173,7 @@ func probe(device Device, checksum bool) (*FS, error) {
 // superblock.
 func (fs *FS) open() error {
 	fs.cache.init(fs.device, fs.blockSize, fs.sb.BlocksCount)
+	fs.list.init(fs.blockSize)
 	fs.scratch = make([]byte, fs.blockSize)
 	if err := fs.validateGroups(); err != nil {
 		return err
@@ -221,6 +223,7 @@ func (fs *FS) mountWritable(options Options) (*FS, error) {
 	fs.now = options.Clock
 	fs.state = StateRecovering
 	fs.cache.init(fs.device, fs.blockSize, fs.sb.BlocksCount)
+	fs.list.init(fs.blockSize)
 	fs.scratch = make([]byte, fs.blockSize)
 	fs.beforeReplay = true
 	inode, err := fs.journalInode()

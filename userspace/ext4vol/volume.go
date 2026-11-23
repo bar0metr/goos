@@ -27,10 +27,27 @@ type Volume struct {
 	reason   string
 	entry    ext4.DirEntry
 	writable bool
+	// prefetch is the bounded listing state ReadDirBatch reuses across
+	// calls: a decoded batch of entries and the cursor the caller echoes
+	// back to continue it (ADR 0231).
+	prefetch dirPrefetch
 	// source and target hold copies of names and link targets that arrive
 	// in the shared file cache.
 	source [ext4.MaxNameLength]byte
 	target [ramfs.MaxLinkTarget]byte
+}
+
+// dirPrefetch holds the batch ReadDirBatch decodes: entries in cursor order
+// with their validated inodes, and resume, the cursor a continuing call
+// passes. A call that names another parent or cursor refills it.
+type dirPrefetch struct {
+	parent  ramfs.NodeID
+	resume  int
+	count   int
+	at      int
+	end     bool
+	entries [ext4.MaxReaddirPrefetchEntries]ext4.DirEntry
+	inodes  [ext4.MaxReaddirPrefetchEntries]ext4.Inode
 }
 
 // Mount checks the volume on device read-only and remembers the outcome.
@@ -351,28 +368,56 @@ func (volume *Volume) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int
 }
 
 func (volume *Volume) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byte) (ramfs.DirBatch, ramfs.Status) {
+	if volume.fs == nil {
+		return ramfs.DirBatch{}, ramfs.StatusIOError
+	}
+	if cursor < 0 {
+		return ramfs.DirBatch{}, ramfs.StatusInvalidArgument
+	}
 	batch := ramfs.DirBatch{Next: cursor}
-	end, status := volume.listing(parent, cursor, func(inode *ext4.Inode, name []byte, after int) bool {
-		if batch.Count == ramfs.MaxDirBatch {
-			return false
+	state := &volume.prefetch
+	// A continuing call consumes the decoded batch; anything else refills
+	// it from the cursor, fetching the batch's inode-table blocks in
+	// grouped order through the listing prefetch (ADR 0231).
+	if state.parent != parent || state.at >= state.count || state.resume != cursor {
+		dir, status := volume.inode(parent)
+		if status != ramfs.StatusOK {
+			return batch, status
 		}
+		if !dir.IsDir() {
+			return batch, ramfs.StatusNotDirectory
+		}
+		if dir.Size > 0xFFFFFFFF {
+			return batch, ramfs.StatusUnsupported
+		}
+		count, _, end, err := volume.fs.PrefetchDir(volume.fs.List(), dir, uint64(cursor), &state.entries, &state.inodes)
+		if err != nil {
+			if ext4.KindOf(err) == ext4.KindStale {
+				return batch, ramfs.StatusCorrupt
+			}
+			return batch, statusOf(err)
+		}
+		state.parent, state.count, state.at, state.end = parent, count, 0, end
+		state.resume = cursor
+	}
+	for state.at < state.count {
+		entry := &state.entries[state.at]
+		inode := &state.inodes[state.at]
+		after := int(entry.Offset) + 1
 		entryStat := stat(inode)
-		written := ramfs.AppendDirRecord(target[batch.Used:], &entryStat, after, name)
+		written := ramfs.AppendDirRecord(target[batch.Used:], &entryStat, after, entry.Name())
 		if written == 0 {
-			return false
+			break
 		}
 		batch.Used += written
 		batch.Count++
 		batch.Next = after
-		return true
-	})
-	if status != ramfs.StatusOK {
-		if batch.Count != 0 {
-			return batch, ramfs.StatusOK
-		}
-		return batch, status
+		state.at++
+		state.resume = after
 	}
-	batch.End = end
+	if state.at == state.count && state.end {
+		batch.End = true
+	}
 	return batch, ramfs.StatusOK
 }
 

@@ -147,30 +147,39 @@ func (fs *FS) readInode(number uint32) (*Inode, error) {
 }
 
 func (fs *FS) decodeInode(number uint32, raw []byte) (*Inode, error) {
-	inode := &Inode{
-		Number:     number,
-		Mode:       le16(raw, 0x0),
-		UID:        uint32(le16(raw, 0x2)) | uint32(le16(raw, 0x78))<<16,
-		Size:       join64(le32(raw, 0x4), le32(raw, 0x6C)),
-		GID:        uint32(le16(raw, 0x18)) | uint32(le16(raw, 0x7A))<<16,
-		Links:      le16(raw, 0x1A),
-		Blocks512:  join64(le32(raw, 0x1C), uint32(le16(raw, 0x74))),
-		Flags:      le32(raw, 0x20),
-		Generation: le32(raw, 0x64),
-		FileACL:    join64(le32(raw, 0x68), uint32(le16(raw, 0x76))),
-		raw:        raw,
+	inode := &Inode{}
+	if err := fs.decodeInodeInto(inode, number, raw); err != nil {
+		return nil, err
 	}
+	return inode, nil
+}
+
+// decodeInodeInto fills inode from raw, the on-disk bytes of inode number,
+// verifying its checksum. raw must stay readable for as long as the decoded
+// inode keeps its raw alias.
+func (fs *FS) decodeInodeInto(inode *Inode, number uint32, raw []byte) error {
+	inode.Number = number
+	inode.Mode = le16(raw, 0x0)
+	inode.UID = uint32(le16(raw, 0x2)) | uint32(le16(raw, 0x78))<<16
+	inode.Size = join64(le32(raw, 0x4), le32(raw, 0x6C))
+	inode.GID = uint32(le16(raw, 0x18)) | uint32(le16(raw, 0x7A))<<16
+	inode.Links = le16(raw, 0x1A)
+	inode.Blocks512 = join64(le32(raw, 0x1C), uint32(le16(raw, 0x74)))
+	inode.Flags = le32(raw, 0x20)
+	inode.Generation = le32(raw, 0x64)
+	inode.FileACL = join64(le32(raw, 0x68), uint32(le16(raw, 0x76)))
+	inode.raw = raw
 	copy(inode.blockArea[:], raw[inodeBlockArea:inodeBlockArea+inodeBlockSize])
 	if len(raw) > goodOldIsize {
 		inode.ExtraIsize = le16(raw, 0x80)
 		if uint32(goodOldIsize)+uint32(inode.ExtraIsize) > uint32(len(raw)) || inode.ExtraIsize&3 != 0 {
-			return nil, corrupt("inode extra size larger than the inode")
+			return corrupt("inode extra size larger than the inode")
 		}
 	}
 	if fs.sb.HasMetadataCsum() {
 		inode.csumSeed = crc32cLE32(crc32cLE32(fs.seed, number), inode.Generation)
 		if err := fs.verifyInodeChecksum(inode, raw); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	extra := func(field int) bool { return goodOldIsize+int(inode.ExtraIsize) >= field+4 }
@@ -187,7 +196,7 @@ func (fs *FS) decodeInode(number uint32, raw []byte) (*Inode, error) {
 	} else if inode.Flags&inodeFlagHugeFile != 0 {
 		inode.Blocks512 *= uint64(fs.blockSize / 512)
 	}
-	return inode, nil
+	return nil
 }
 
 // decodeTime applies the extra field: two epoch bits extend the signed

@@ -356,6 +356,7 @@ fields from `OpStatus` and the TCP fields from `OpTCPStatus`.
 | `userspace/init.MaxRestarts` | 3 | policy | service | none | service stays failed | `services` |
 | `userspace/init.MaxName`, `userspace/init.MaxExecutable`, `userspace/init.MaxProcessName`, `userspace/init.MaxBootText` | 31, 127, 16, 64 | protocol | n/a | n/a | refused | n/a |
 | `userspace/ext4.MaxNameLength` | 255 | protocol (ext4 on-disk format) | n/a | n/a | lookup `KindNameTooLong`; longer stored names are corrupt | n/a |
+| `userspace/ext4.MaxReaddirPrefetchEntries`, `userspace/ext4.MaxReaddirPrefetchBlocks` | 256, 1024 | profile (ADR 0231) | ext4 service | 256 entries, 4 MiB of block buffers at 4 KiB blocks, static per mount | batch truncated, blocks evicted by LRU | none |
 | `kernel/vfs.MaxVolumes`, `kernel/vfs.MaxVolumePath` | 4, 64 | profile (ADR 0222) | system | VFS volume slots, block slots, PID 1 slots: static | mount refused, no slot | `mount` listing, `services` |
 | `userspace/exec.MaxVolumeArgument` | 120 | protocol | n/a | n/a | mount request refused | n/a |
 | `userspace/fsdetect.MaxIdentity`, `userspace/fsdetect.MaxLabel` | 16, 16 | protocol (on-disk identity sizes) | n/a | n/a | n/a | n/a |

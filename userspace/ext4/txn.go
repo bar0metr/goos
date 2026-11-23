@@ -486,6 +486,9 @@ func (fs *FS) commitPending() error {
 	for _, block := range meta {
 		fs.cache.update(block, t.blocks[block].data)
 	}
+	// A commit may have rewritten inode-table or bitmap blocks the listing
+	// prefetch copied; drop them so the next listing reads fresh data.
+	fs.list.invalidate()
 	fs.sb.FreeBlocks = uint64(int64(fs.sb.FreeBlocks) + t.freeBlocks)
 	fs.sb.FreeInodes = uint32(int64(fs.sb.FreeInodes) + t.freeInodes)
 	if t.orphansEdited {
