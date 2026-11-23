@@ -96,6 +96,25 @@ measured before the cache work is assumed sufficient; if pipelining proves
 impossible within bounds, the profiling evidence and the remaining serial
 boundary are recorded instead of faking concurrency.
 
+The pipeline spans two processes:
+
+- The block service adopts the goroutine runtime and dispatches inline
+  read/write requests to a bounded worker set, each holding its own request
+  wire and correlation counter, so several driver exchanges are in flight at
+  once. Bulk transfers stay on the owner: they move 128 KiB through the
+  driver's single bulk area and are throughput-bound, not latency-bound.
+- The virtio-blk driver keeps several inline requests in flight: the DMA data
+  area is partitioned into one slot per worker, each with its own descriptor
+  chain and status byte. `transfer` submits one chain without waiting, and a
+  completion loop polls the used ring and answers each finished request by
+  correlation. Writes still read-modify-write inside their own slot, and the
+  bulk area remains a single region the owner uses serially.
+
+The KVM measurement for the current (ext4-only) state, run
+`20261123T155827Z-52b02f0b` (commit `6bdc5916`), is 882 ops/s at one client
+and 1225 ops/s at four (1.39x), so the block pipeline is the remaining
+serialized boundary; the ext4 read pool alone does not reach 2x.
+
 ### Bounds
 
 `ext4.MaxReadWorkers = 4`, classified in the resource-policy inventory. The
