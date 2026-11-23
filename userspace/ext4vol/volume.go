@@ -35,6 +35,11 @@ type Volume struct {
 	// service can log them after the volume is gone.
 	lastStatus   ext4.Status
 	lastStatusOK bool
+	// ListingCalls and ListingRefills count the batched listing calls and
+	// the prefetch refills they ran; the run log uses them to check the
+	// cross-call batch reuse (ADR 0231).
+	ListingCalls   uint64
+	ListingRefills uint64
 	// source and target hold copies of names and link targets that arrive
 	// in the shared file cache.
 	source [ext4.MaxNameLength]byte
@@ -380,10 +385,12 @@ func (volume *Volume) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byt
 	}
 	batch := ramfs.DirBatch{Next: cursor}
 	state := &volume.prefetch
+	volume.ListingCalls++
 	// A continuing call consumes the decoded batch; anything else refills
 	// it from the cursor, fetching the batch's inode-table blocks in
 	// grouped order through the listing prefetch (ADR 0231).
 	if state.parent != parent || state.at >= state.count || state.resume != cursor {
+		volume.ListingRefills++
 		dir, status := volume.inode(parent)
 		if status != ramfs.StatusOK {
 			return batch, status
