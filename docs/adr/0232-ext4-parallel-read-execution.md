@@ -115,6 +115,18 @@ The KVM measurement for the current (ext4-only) state, run
 and 1225 ops/s at four (1.39x), so the block pipeline is the remaining
 serialized boundary; the ext4 read pool alone does not reach 2x.
 
+The pipeline was implemented and measured, then reverted. The block service
+gained a bounded read-worker pool (commit `0b1a16c3`) and the driver a four-slot
+non-blocking submit path with a collector goroutine (commit `30154b16`); both
+ran on the goroutine runtime. KVM run `20261123T173540Z-362fc2f7` booted and
+passed, but throughput fell to 725 ops/s at one client and 1083 at four, and
+readdir-10k rose 221 ms to 300 ms. The goroutine runtime's park/awake and
+channel hand-off cost more per block request than the virtio-blk round-trip it
+overlaps, so the pipeline is a net loss, not a 2x win. The serial block
+service and driver stay: the virtio-blk round-trip is the measured serial
+boundary, and overlapping it needs a lower-latency mechanism (native threads,
+ADR 0203) than the goroutine runtime provides here.
+
 ### Bounds
 
 `ext4.MaxReadWorkers = 4`, classified in the resource-policy inventory. The
