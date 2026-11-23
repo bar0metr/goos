@@ -1,0 +1,248 @@
+//go:build goos_userspace && goos_goroutines
+
+package main
+
+import (
+	"sync"
+
+	"goos/kernel/handle"
+	"goos/kernel/ipc"
+	"goos/kernel/kcall"
+	"goos/kernel/ramfs"
+	"goos/userspace/fsproto"
+	syslog "goos/userspace/log"
+	"goos/userspace/runtime/sys"
+	userwait "goos/userspace/wait"
+)
+
+// maxReadWorkers bounds the read pool (ADR 0232).
+const maxReadWorkers = 4
+
+// readJob is one read-only request a worker executes and returns.
+type readJob struct {
+	request     fsproto.Request
+	correlation uint64
+	reply       fsproto.Reply
+	name        [ramfs.MaxName]byte
+}
+
+// readPool runs the read-only requests on bounded worker goroutines. All its
+// methods except Wake and the worker loop belong to the owner goroutine.
+type readPool struct {
+	workers  int
+	jobs     chan readJob
+	results  chan readJob
+	wake     chan struct{}
+	joined   sync.WaitGroup
+	inFlight int
+}
+
+func newReadPool(workers int) (*readPool, bool) {
+	if workers < 1 || workers > maxReadWorkers {
+		return nil, false
+	}
+	pool := &readPool{
+		workers: workers,
+		jobs:    make(chan readJob, workers),
+		results: make(chan readJob, workers),
+		wake:    make(chan struct{}, 1),
+	}
+	pool.joined.Add(workers)
+	for index := 0; index < workers; index++ {
+		go pool.worker()
+	}
+	return pool, true
+}
+
+func (pool *readPool) worker() {
+	defer pool.joined.Done()
+	var name [ramfs.MaxName]byte
+	for job := range pool.jobs {
+		job.request.Name = job.name[:copy(job.name[:], job.request.Name)]
+		job.reply = answer(job.request, &name)
+		pool.results <- job
+		select {
+		case pool.wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// Wake is a coalesced hint to poll the results, not one signal per result.
+func (pool *readPool) Wake() <-chan struct{} { return pool.wake }
+
+// admit queues a read for a worker; the caller has already ensured a slot is
+// free, so the buffered send cannot block.
+func (pool *readPool) admit(request fsproto.Request, correlation uint64) {
+	pool.inFlight++
+	pool.jobs <- readJob{request: request, correlation: correlation}
+}
+
+// collect replies to every finished read without blocking.
+func (pool *readPool) collect() {
+	for {
+		select {
+		case job := <-pool.results:
+			pool.inFlight--
+			sendReply(job.reply, job.correlation)
+		default:
+			return
+		}
+	}
+}
+
+// drainAndReply waits for every in-flight read to finish and replies to it,
+// so a mutation or a commit runs after all readers have retired.
+func (pool *readPool) drainAndReply() {
+	for pool.inFlight > 0 {
+		job := <-pool.results
+		pool.inFlight--
+		sendReply(job.reply, job.correlation)
+	}
+}
+
+// readOnly reports whether the operation may run on a worker.
+func readOnly(operation fsproto.Operation) bool {
+	switch operation {
+	case fsproto.OperationStat, fsproto.OperationOpen, fsproto.OperationRead, fsproto.OperationFilesystemInfo:
+		return true
+	}
+	return false
+}
+
+// bridgeReadCompletions converts the pool's coalesced Go-channel wake into
+// native readiness for the owner's wait.
+func bridgeReadCompletions(wake <-chan struct{}, writer handle.ID) {
+	var token = [1]byte{1}
+	for range wake {
+		count, status := sys.StreamWrite(writer, token[:])
+		if !completionWakeWritten(count, status) {
+			sys.ConsoleWriteString(consoleHandle, "EXT4_COMPLETION_WAKE_FAILED\n")
+			sys.Exit(exitFailed)
+		}
+	}
+}
+
+func completionWakeWritten(count int, status kcall.Status) bool {
+	return status == kcall.StatusOK || status == kcall.StatusResourceExhausted && count == 0
+}
+
+func runService() {
+	pool, ok := newReadPool(maxReadWorkers)
+	if !ok {
+		fatal("EXT4_READ_POOL_FAILED\n")
+	}
+	reader, writer, status := sys.StreamCreate()
+	if status != kcall.StatusOK {
+		fatal("EXT4_COMPLETION_STREAM_FAILED\n")
+	}
+	go bridgeReadCompletions(pool.Wake(), writer)
+	runOwner(pool, reader)
+}
+
+// runOwner receives requests, admits read-only work to the pool, and runs
+// mutations (and the owner-serialized reads) inline after draining readers.
+func runOwner(pool *readPool, completionRead handle.ID) {
+	commitDue := uint64(0)
+	for {
+		pool.collect()
+		wait := uint64(requestWait)
+		if volume.Pending() {
+			now := ticks()
+			if commitDue == 0 {
+				commitDue = now + commitInterval
+			}
+			if now >= commitDue {
+				commitDue = 0
+				pool.drainAndReply()
+				volume.Flush()
+				exitIfFailed()
+				continue
+			}
+			wait = commitDue - now
+		} else {
+			commitDue = 0
+		}
+		var interests [userwait.MaxObjects]userwait.Interest
+		interests[0] = userwait.Interest{Handle: completionRead, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		interests[1] = userwait.Interest{Handle: blockHandle, Events: kcall.WaitPeerClosed}
+		count := 2
+		// Stop receiving when the pool is full, so an admitted request is
+		// never dropped; a completion wakes the loop and frees a slot.
+		if pool.inFlight < pool.workers {
+			interests[count] = userwait.Interest{Handle: vfsHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+			count++
+		}
+		ready, waited := userwait.Any(&interests, count, wait)
+		if waited == kcall.StatusTimeout {
+			continue
+		}
+		if waited != kcall.StatusOK {
+			fatal("EXT4_WAIT_FAILED\n")
+		}
+		if ready.ReadyMask&1 != 0 {
+			drainWake(completionRead)
+			continue
+		}
+		if ready.ReadyMask&2 != 0 {
+			pool.drainAndReply()
+			logCounters()
+			sys.Exit(exitBlockGone)
+		}
+		status := sys.IPCReceive(vfsHandle, wire[:])
+		if status == kcall.StatusNotFound {
+			continue
+		}
+		if status == kcall.StatusPeerDied {
+			pool.drainAndReply()
+			volume.Flush()
+			syslog.Warn("vfs endpoint closed")
+			logCounters()
+			sys.Exit(exitVFSGone)
+		}
+		if status != kcall.StatusOK {
+			fatal("EXT4_RECEIVE_FAILED\n")
+		}
+		if !ipc.DecodeInto(wire[:wireSize(wire[:])], &requestMessage) {
+			continue
+		}
+		request, valid := fsproto.DecodeRequest(&requestMessage, cache, &requestedName)
+		var reply fsproto.Reply
+		switch {
+		case !valid:
+			operation := fsproto.Operation(requestMessage.Payload[0])
+			if requestMessage.Correlation == 0 || operation < fsproto.OperationMount || operation > fsproto.OperationUnmount {
+				continue
+			}
+			reply = fsproto.Reply{Operation: operation, Status: ramfs.StatusInvalidArgument}
+		case readOnly(request.Operation):
+			// Commit pending mutations before a reader sees them, so a
+			// read-after-write observes the write (ADR 0232).
+			if volume.Pending() {
+				pool.drainAndReply()
+				volume.Flush()
+				exitIfFailed()
+			}
+			pool.admit(request, requestMessage.Correlation)
+			continue
+		default:
+			pool.drainAndReply()
+			reply = answer(request, &listedName)
+		}
+		sendReply(reply, requestMessage.Correlation)
+		exitIfFailed()
+	}
+}
+
+func drainWake(completionRead handle.ID) {
+	var data [64]byte
+	for {
+		count, status := sys.StreamRead(completionRead, data[:])
+		if status == kcall.StatusResourceExhausted && count == 0 {
+			return
+		}
+		if status != kcall.StatusOK || count == 0 {
+			fatal("EXT4_COMPLETION_STREAM_FAILED\n")
+		}
+	}
+}

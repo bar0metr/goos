@@ -26,7 +26,6 @@ import (
 	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
-	userwait "goos/userspace/wait"
 )
 
 // requestWait bounds one wait for the next request; waking without one is not
@@ -50,9 +49,9 @@ var (
 	// creates it for this launch only (ADR 0222).
 	cache  []byte
 	volume ext4vol.Volume
-	// owner is the block client the mutation owner uses; each read worker
-	// has its own (ADR 0232).
-	owner *blockClient
+	// device pools block clients so concurrent readers overlap block IPC
+	// (ADR 0232).
+	device *pooledDevice
 )
 
 // realtime stamps inode times with UTC Unix time; a clock that cannot be
@@ -93,81 +92,25 @@ func userspaceMain() {
 		fatal("EXT4_CACHE_UNMAPPED\n")
 	}
 	cache = sys.Window(base, size)
-	owner = newBlockClient()
-	owner.Capacity()
+	device = newPooledDevice(maxReadWorkers)
+	device.Capacity()
 	mounted, mode := false, "read-only"
-	if owner.writable {
-		mounted, mode = volume.MountWritable(owner, realtime), "read-write"
+	if device.writable {
+		mounted, mode = volume.MountWritable(device, realtime), "read-write"
 	} else {
-		mounted = volume.Mount(owner)
+		mounted = volume.Mount(device)
 	}
 	if mounted {
 		mark("EXT4_SERVICE_OK\n")
 		status, _ := volume.Status()
-		syslog.Info("volume mounted", syslog.Uint("capacity-mib", owner.capacity>>20), syslog.Str("mode", mode),
+		syslog.Info("volume mounted", syslog.Uint("capacity-mib", device.capacity>>20), syslog.Str("mode", mode),
 			syslog.Uint("replayed", uint64(status.Recovery.Transactions)), syslog.Uint("orphans", uint64(status.Recovery.Orphans)))
 		logCounters()
 	} else {
 		syslog.Error("volume refused", syslog.Str("reason", volume.Refusal()))
 		mark("EXT4_VOLUME_REFUSED\n")
 	}
-	commitDue := uint64(0)
-	for {
-		wait := uint64(requestWait)
-		if volume.Pending() {
-			now := ticks()
-			if commitDue == 0 {
-				commitDue = now + commitInterval
-			}
-			if now >= commitDue {
-				commitDue = 0
-				volume.Flush()
-				exitIfFailed()
-				continue
-			}
-			wait = commitDue - now
-		} else {
-			commitDue = 0
-		}
-		var interests [userwait.MaxObjects]userwait.Interest
-		interests[0] = userwait.Interest{Handle: vfsHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-		interests[1] = userwait.Interest{Handle: blockHandle, Events: kcall.WaitPeerClosed}
-		ready, waited := userwait.Any(&interests, 2, wait)
-		if waited == kcall.StatusTimeout {
-			continue
-		}
-		if waited != kcall.StatusOK {
-			fatal("EXT4_WAIT_FAILED\n")
-		}
-		if ready.ReadyMask&2 != 0 {
-			// The block service restarted, or PID 1 unmounted the volume
-			// and closed the slot: either way this instance is done. The
-			// cache counters in the log let a benchmark attribute readdir
-			// time to device reads (ADR 0231).
-			logCounters()
-			sys.Exit(exitBlockGone)
-		}
-		status := sys.IPCReceive(vfsHandle, wire[:])
-		if status == kcall.StatusNotFound {
-			continue
-		}
-		if status == kcall.StatusPeerDied {
-			// The block endpoint still works: commit what the volume
-			// holds before PID 1 replaces this instance.
-			volume.Flush()
-			syslog.Warn("vfs endpoint closed")
-			logCounters()
-			sys.Exit(exitVFSGone)
-		}
-		if status != kcall.StatusOK {
-			fatal("EXT4_RECEIVE_FAILED\n")
-		}
-		if !ipc.DecodeInto(wire[:wireSize(wire[:])], &requestMessage) {
-			continue
-		}
-		serve()
-		exitIfFailed()
-	}
+	runService()
 }
 
 // exitIfFailed ends the instance after the device refused a write or a
@@ -201,24 +144,23 @@ func ticks() uint64 {
 	return now
 }
 
-func serve() {
-	request, valid := fsproto.DecodeRequest(&requestMessage, cache, &requestedName)
-	var reply fsproto.Reply
-	if valid && request.Operation == fsproto.OperationUnmount {
+// answer executes one decoded request against the volume and returns its
+// reply. It runs on the owner for mutations and on read workers for the
+// read-only operations; the file cache slots are request-named, so concurrent
+// readers of different slots do not collide.
+func answer(request fsproto.Request, name *[ramfs.MaxName]byte) fsproto.Reply {
+	if request.Operation == fsproto.OperationUnmount {
 		// The counters come before the unmount clears the volume, so the
 		// run log keeps the listing's device-read attribution (ADR 0231).
 		logCounters()
 	}
-	if !valid {
-		operation := fsproto.Operation(requestMessage.Payload[0])
-		if requestMessage.Correlation == 0 || operation < fsproto.OperationMount || operation > fsproto.OperationUnmount {
-			return
-		}
-		reply = fsproto.Reply{Operation: operation, Status: ramfs.StatusInvalidArgument}
-	} else {
-		reply = fsproto.Serve(&volume, request, cache, &listedName)
-	}
-	if !fsproto.EncodeReply(reply, requestMessage.Correlation, &replyMessage, cache) {
+	return fsproto.Serve(&volume, request, cache, name)
+}
+
+// sendReply encodes and sends one reply over the VFS endpoint. It runs only
+// on the owner.
+func sendReply(reply fsproto.Reply, correlation uint64) {
+	if !fsproto.EncodeReply(reply, correlation, &replyMessage, cache) {
 		fatal("EXT4_REPLY_FAILED\n")
 	}
 	size, ok := ipc.EncodeFrom(&replyMessage, wire[:])

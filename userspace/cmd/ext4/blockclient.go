@@ -128,6 +128,58 @@ func (client *blockClient) Capacity() uint64 {
 	return client.capacity
 }
 
+// pooledDevice dispatches device operations across a bounded pool of block
+// clients, so concurrent callers overlap block IPC (ADR 0232). Each operation
+// checks out one client for its whole duration; the pool size bounds the
+// in-flight block requests.
+type pooledDevice struct {
+	clients  chan *blockClient
+	capacity uint64
+	writable bool
+	asked    bool
+}
+
+func newPooledDevice(count int) *pooledDevice {
+	pool := &pooledDevice{clients: make(chan *blockClient, count)}
+	for index := 0; index < count; index++ {
+		pool.clients <- newBlockClient()
+	}
+	return pool
+}
+
+func (pool *pooledDevice) ReadAt(offset uint64, target []byte) bool {
+	client := <-pool.clients
+	ok := client.ReadAt(offset, target)
+	pool.clients <- client
+	return ok
+}
+
+func (pool *pooledDevice) WriteAt(offset uint64, data []byte) bool {
+	client := <-pool.clients
+	ok := client.WriteAt(offset, data)
+	pool.clients <- client
+	return ok
+}
+
+func (pool *pooledDevice) Flush() bool {
+	client := <-pool.clients
+	ok := client.Flush()
+	pool.clients <- client
+	return ok
+}
+
+func (pool *pooledDevice) Capacity() uint64 {
+	if pool.asked {
+		return pool.capacity
+	}
+	client := <-pool.clients
+	pool.capacity = client.Capacity()
+	pool.writable = client.writable
+	pool.clients <- client
+	pool.asked = true
+	return pool.capacity
+}
+
 // exchange sends one request to the block service and waits for its reply,
 // matched by this client's correlation counter.
 func (client *blockClient) exchange(request blockproto.Request) (blockproto.Reply, bool) {
