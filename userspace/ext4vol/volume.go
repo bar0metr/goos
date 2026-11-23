@@ -402,12 +402,9 @@ func (volume *Volume) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byt
 			volume.RefillDrained++
 		} else {
 			volume.RefillCursor++
-			if volume.RefillCursor <= 3 {
-				// A small sample of the mismatched cursors, so the run
-				// log shows how the caller's cursor relates to the one
-				// the batch continued from.
-				log.Warn("refill-mismatch", log.Uint("resume", uint64(state.resume)), log.Uint("cursor", uint64(cursor)), log.Uint("at", uint64(state.at)))
-			}
+		}
+		if volume.ListingCalls <= 30 {
+			log.Warn("trace", log.Uint("call", volume.ListingCalls), log.Uint("cursor", uint64(cursor)), log.Uint("resume", uint64(state.resume)), log.Uint("at", uint64(state.at)))
 		}
 		dir, status := volume.inode(parent)
 		if status != ramfs.StatusOK {
