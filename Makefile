@@ -383,9 +383,9 @@ $(FAT32_IMAGE): $(FAT32_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kern
 	@$(STACKFRAMES) $(FAT32_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(FAT32_ELF) $@
 
-$(EXT4_ELF): $(call go_deps,./userspace/cmd/ext4) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(EXT4_ELF): $(call go_deps,./userspace/cmd/ext4,goos_goroutines) $(GOROUTINE_ROOT_STAMP) $(GOROUTINE_TARGET) userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
-	$(BUILD_ENV) tools/tinygo.sh build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/ext4
+	$(GOROUTINE_BUILD) -o $@ ./userspace/cmd/ext4
 
 $(EXT4_IMAGE): $(EXT4_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(EXT4_ELF)
