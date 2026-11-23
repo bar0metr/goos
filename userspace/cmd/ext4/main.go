@@ -12,7 +12,6 @@
 package main
 
 import (
-	"goos/internal/capability"
 	"goos/internal/timekeeping"
 	"goos/internal/validation"
 	"goos/kernel/clock"
@@ -20,7 +19,6 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/ramfs"
-	blockproto "goos/userspace/block"
 	"goos/userspace/ext4"
 	"goos/userspace/ext4vol"
 	"goos/userspace/fsproto"
@@ -44,119 +42,18 @@ var (
 	vfsHandle      handle.ID
 	blockHandle    handle.ID
 	wire           [ipc.WireMaxSize]byte
-	blockWire      [ipc.WireMaxSize]byte
 	requestMessage ipc.Message
 	replyMessage   ipc.Message
 	listedName     [ramfs.MaxName]byte
 	requestedName  [ramfs.MaxName]byte
 	// cache is the file cache this instance shares with the VFS. PID 1
 	// creates it for this launch only (ADR 0222).
-	cache         []byte
-	volume        ext4vol.Volume
-	correlation   uint64
-	blockCapacity uint64
-	sliceWritable bool
-	bulkObject    handle.ID
-	bulkMemory    []byte
+	cache  []byte
+	volume ext4vol.Volume
+	// owner is the block client the mutation owner uses; each read worker
+	// has its own (ADR 0232).
+	owner *blockClient
 )
-
-const bulkPages = 32
-
-type blockDevice struct{}
-
-func setUpBulk() {
-	object, status := sys.MemoryCreate(bulkPages)
-	if status != kcall.StatusOK {
-		syslog.Warn("bulk buffer unavailable", syslog.Uint("status", uint64(status)))
-		return
-	}
-	base, size, status := sys.MemoryMapAnywhere(object, true)
-	if status != kcall.StatusOK {
-		sys.HandleClose(object)
-		return
-	}
-	bulkObject, bulkMemory = object, sys.Window(base, size)
-}
-
-// bulkTransfer moves count bytes between the bulk buffer and the slice.
-func bulkTransfer(operation blockproto.Operation, offset uint64, count int) bool {
-	duplicate, status := sys.HandleDuplicate(bulkObject, capability.Read|capability.Write|capability.Transfer)
-	if status != kcall.StatusOK {
-		return false
-	}
-	reply, ok := blockExchange(blockproto.Request{Operation: operation, Offset: offset, Length: uint32(count), Object: duplicate})
-	return ok && reply.Status == blockproto.StatusOK
-}
-
-// ReadAt reads through the bulk buffer in large pieces and through messages
-// for the rest. The block service checks every range against the slice.
-func (blockDevice) ReadAt(offset uint64, target []byte) bool {
-	for len(target) > blockproto.MaxData && bulkMemory != nil {
-		chunk := min(len(target), len(bulkMemory))
-		if !bulkTransfer(blockproto.OperationReadBulk, offset, chunk) {
-			return false
-		}
-		copy(target[:chunk], bulkMemory[:chunk])
-		target = target[chunk:]
-		offset += uint64(chunk)
-	}
-	for len(target) != 0 {
-		chunk := min(len(target), blockproto.MaxData)
-		reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationRead, Offset: offset, Length: uint32(chunk)})
-		if !ok || reply.Status != blockproto.StatusOK || len(reply.Data) != chunk {
-			return false
-		}
-		copy(target[:chunk], reply.Data)
-		target = target[chunk:]
-		offset += uint64(chunk)
-	}
-	return true
-}
-
-// WriteAt returns once the block service accepted the bytes; Flush makes
-// them durable. A read-only slice refuses every write.
-func (blockDevice) WriteAt(offset uint64, data []byte) bool {
-	for len(data) > blockproto.MaxData && bulkMemory != nil {
-		chunk := min(len(data), len(bulkMemory))
-		copy(bulkMemory[:chunk], data[:chunk])
-		if !bulkTransfer(blockproto.OperationWriteBulk, offset, chunk) {
-			return false
-		}
-		data = data[chunk:]
-		offset += uint64(chunk)
-	}
-	for len(data) != 0 {
-		chunk := min(len(data), blockproto.MaxData)
-		reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationWrite, Offset: offset, Length: uint32(chunk), Data: data[:chunk]})
-		if !ok || reply.Status != blockproto.StatusOK {
-			return false
-		}
-		data = data[chunk:]
-		offset += uint64(chunk)
-	}
-	return true
-}
-
-// Flush returns once every accepted write is durable, or false when the
-// device refused the flush (ADR 0225).
-func (blockDevice) Flush() bool {
-	reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationFlush})
-	return ok && reply.Status == blockproto.StatusOK
-}
-
-// Capacity is asked once; the same reply says whether the slice is
-// writable.
-func (blockDevice) Capacity() uint64 {
-	if blockCapacity != 0 {
-		return blockCapacity
-	}
-	reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationInfo})
-	if !ok || reply.Status != blockproto.StatusOK {
-		return 0
-	}
-	blockCapacity, sliceWritable = reply.Capacity, reply.Writable
-	return blockCapacity
-}
 
 // realtime stamps inode times with UTC Unix time; a clock that cannot be
 // read stamps zero.
@@ -196,19 +93,18 @@ func userspaceMain() {
 		fatal("EXT4_CACHE_UNMAPPED\n")
 	}
 	cache = sys.Window(base, size)
-	setUpBulk()
-	device := blockDevice{}
-	device.Capacity()
+	owner = newBlockClient()
+	owner.Capacity()
 	mounted, mode := false, "read-only"
-	if sliceWritable {
-		mounted, mode = volume.MountWritable(device, realtime), "read-write"
+	if owner.writable {
+		mounted, mode = volume.MountWritable(owner, realtime), "read-write"
 	} else {
-		mounted = volume.Mount(device)
+		mounted = volume.Mount(owner)
 	}
 	if mounted {
 		mark("EXT4_SERVICE_OK\n")
 		status, _ := volume.Status()
-		syslog.Info("volume mounted", syslog.Uint("capacity-mib", blockCapacity>>20), syslog.Str("mode", mode),
+		syslog.Info("volume mounted", syslog.Uint("capacity-mib", owner.capacity>>20), syslog.Str("mode", mode),
 			syslog.Uint("replayed", uint64(status.Recovery.Transactions)), syslog.Uint("orphans", uint64(status.Recovery.Orphans)))
 		logCounters()
 	} else {
@@ -332,27 +228,6 @@ func serve() {
 	if sys.IPCSend(vfsHandle, wire[:size]) != kcall.StatusOK {
 		syslog.Warn("reply undeliverable")
 	}
-}
-
-func blockExchange(request blockproto.Request) (blockproto.Reply, bool) {
-	correlation++
-	message, ok := blockproto.EncodeRequest(request, correlation)
-	var size int
-	if ok {
-		size, ok = ipc.Encode(message, blockWire[:])
-	}
-	if !ok || sys.IPCSend(blockHandle, blockWire[:size]) != kcall.StatusOK {
-		if request.Operation.Bulk() {
-			sys.HandleClose(request.Object)
-		}
-		return blockproto.Reply{}, false
-	}
-	if sys.IPCWaitReceive(blockHandle, blockWire[:], blockproto.RequestDeadline) != kcall.StatusOK {
-		return blockproto.Reply{}, false
-	}
-	received, valid := ipc.Decode(blockWire[:wireSize(blockWire[:])])
-	reply, validReply := blockproto.DecodeReply(received)
-	return reply, valid && validReply && received.Correlation == correlation
 }
 
 func wireSize(data []byte) int {
