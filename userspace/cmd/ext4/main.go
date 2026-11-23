@@ -284,11 +284,12 @@ func exitIfFailed() {
 }
 
 // logCounters reports the volume's cache and listing-prefetch counters so a
-// benchmark run can attribute readdir time to device reads (ADR 0231).
+// benchmark run can attribute readdir time to device reads (ADR 0231). The
+// wire record caps fields at 96 bytes, so the counters travel in two lines.
 func logCounters() {
 	if status, ok := volume.Status(); ok {
-		syslog.Warn("counters", syslog.Uint("cache-reads", status.CacheReads), syslog.Uint("cache-hits", status.CacheHits),
-			syslog.Uint("prefetch-reads", status.PrefetchReads), syslog.Uint("prefetch-fetches", status.PrefetchFetches))
+		syslog.Warn("counters", syslog.Uint("cache-reads", status.CacheReads), syslog.Uint("cache-hits", status.CacheHits))
+		syslog.Warn("prefetch", syslog.Uint("reads", status.PrefetchReads), syslog.Uint("fetches", status.PrefetchFetches))
 	}
 }
 
