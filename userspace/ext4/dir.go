@@ -114,7 +114,12 @@ func (fs *FS) dirBlock(dir *Inode, index uint64) ([]byte, error) {
 	if mapping.Unwritten {
 		return nil, corrupt("unwritten extent in a directory")
 	}
-	return fs.cache.get(mapping.Physical)
+	data, unlock, err := fs.cache.get(mapping.Physical)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return append([]byte(nil), data...), nil
 }
 
 // leafEnd verifies the checksum tail of a leaf block and returns where its
@@ -127,15 +132,8 @@ func (fs *FS) leafEnd(dir *Inode, data []byte) (int, error) {
 	if le32(data, tail) != 0 || recLen(data, tail) != dirTailSize || data[tail+6] != 0 || data[tail+7] != dirTailFileType {
 		return 0, corrupt("directory block has no checksum tail")
 	}
-	entry := fs.cache.resident(data)
-	if entry != nil && entry.checked && entry.seed == dir.csumSeed {
-		return tail, nil
-	}
 	if crc32c(dir.csumSeed, data[:tail]) != le32(data, tail+8) {
 		return 0, corrupt("directory block checksum mismatch")
-	}
-	if entry != nil {
-		entry.checked, entry.seed = true, dir.csumSeed
 	}
 	return tail, nil
 }

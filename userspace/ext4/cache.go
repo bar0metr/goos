@@ -1,5 +1,10 @@
 package ext4
 
+import (
+	"sync"
+	"sync/atomic"
+)
+
 // Device is the bounded block slice a volume lives on. Offsets are relative
 // to the start of the slice; the block service enforces the slice bounds a
 // second time.
@@ -25,24 +30,26 @@ type cachedBlock struct {
 	stamp uint64
 	valid bool
 	data  []byte
-	// checked records that the block passed a directory checksum under
-	// seed since it was read, so later lookups need not compute it again.
-	checked bool
-	seed    uint32
 }
 
-// blockCache keeps recently used metadata blocks. File data bypasses it.
+// blockCache keeps recently used metadata blocks. File data bypasses it. Each
+// set has its own lock, so concurrent readers of different blocks proceed in
+// parallel; clock, reads and hits are atomic. get returns an owned copy, so a
+// caller never parses shared backing that another reader could evict.
 type blockCache struct {
 	device  Device
 	size    uint64
 	limit   uint64
-	clock   uint64
 	entries [cacheBlocks]cachedBlock
+	locks   [cacheSets]sync.Mutex
+	clock   uint64
 	reads   uint64
 	hits    uint64
 	// overlay holds the blocks the running operation has staged and base
 	// those of the pending transaction. Reads see overlay, then base, so
-	// operations observe changes before they reach the device.
+	// operations observe changes before they reach the device. They are
+	// written only by the single mutation owner behind a barrier, so staged
+	// reads need no lock here.
 	overlay map[uint64]*stagedBlock
 	base    map[uint64]*stagedBlock
 }
@@ -63,26 +70,47 @@ func (cache *blockCache) init(device Device, blockSize uint32, blocks uint64) {
 	}
 }
 
-// get returns the contents of block. The slice stays valid until the next
-// get; callers copy what they keep.
-func (cache *blockCache) get(block uint64) ([]byte, error) {
+// get returns the contents of block and an unlock the caller must run once it
+// is done with the slice. The slice is borrowed: it aliases the cache's
+// backing (or a staged copy), so the caller must not keep it past unlock and
+// must not call get again on the same set before unlock. A staged copy wins;
+// otherwise a miss reads the device into an owned buffer and fills the cache
+// without holding the set lock across the device read.
+func (cache *blockCache) get(block uint64) ([]byte, func(), error) {
 	if block >= cache.limit {
-		return nil, corrupt("block number beyond the volume")
+		return nil, nil, corrupt("block number beyond the volume")
 	}
 	if staged := cache.staged(block); staged != nil {
-		return staged.data, nil
+		return staged.data, func() {}, nil
 	}
-	cache.clock++
-	cache.reads++
-	first := int(block%cacheSets) * cacheWays
-	set := cache.entries[first : first+cacheWays]
-	victim := &set[0]
-	for index := range set {
-		entry := &set[index]
+	set := int(block % cacheSets)
+	lock := &cache.locks[set]
+	first := set * cacheWays
+
+	lock.Lock()
+	for index := 0; index < cacheWays; index++ {
+		entry := &cache.entries[first+index]
 		if entry.valid && entry.block == block {
-			entry.stamp = cache.clock
-			cache.hits++
-			return entry.data, nil
+			entry.stamp = atomic.AddUint64(&cache.clock, 1)
+			atomic.AddUint64(&cache.hits, 1)
+			return entry.data, lock.Unlock, nil
+		}
+	}
+	lock.Unlock()
+
+	data := make([]byte, cache.size)
+	atomic.AddUint64(&cache.reads, 1)
+	if !cache.device.ReadAt(block*cache.size, data) {
+		return nil, nil, errIO
+	}
+	lock.Lock()
+	// Another miss may have filled the block while the device was read; its
+	// copy is equivalent, so keep the fresh data and drop the duplicate.
+	victim := &cache.entries[first]
+	for index := 0; index < cacheWays; index++ {
+		entry := &cache.entries[first+index]
+		if entry.valid && entry.block == block {
+			return entry.data, lock.Unlock, nil
 		}
 		if !victim.valid {
 			continue
@@ -91,12 +119,24 @@ func (cache *blockCache) get(block uint64) ([]byte, error) {
 			victim = entry
 		}
 	}
-	victim.valid, victim.checked = false, false
-	if !cache.device.ReadAt(block*cache.size, victim.data) {
-		return nil, errIO
+	victim.valid = false
+	copy(victim.data, data)
+	victim.block = block
+	victim.stamp = atomic.AddUint64(&cache.clock, 1)
+	victim.valid = true
+	return victim.data, lock.Unlock, nil
+}
+
+// withBlock runs fn with the borrowed contents of block and releases the
+// borrow when fn returns. It keeps the borrow scoped where a caller needs the
+// block only inside a closure, such as a validation loop.
+func (cache *blockCache) withBlock(block uint64, fn func([]byte) error) error {
+	data, unlock, err := cache.get(block)
+	if err != nil {
+		return err
 	}
-	victim.block, victim.stamp, victim.valid = block, cache.clock, true
-	return victim.data, nil
+	defer unlock()
+	return fn(data)
 }
 
 // readBlocks reads count whole blocks starting at block straight from the
@@ -134,35 +174,25 @@ func (cache *blockCache) readStaged(block uint64, count uint64, target []byte) e
 // update replaces the cached copy of block, if one is resident, after a
 // transaction wrote it.
 func (cache *blockCache) update(block uint64, data []byte) {
+	lock := &cache.locks[int(block%cacheSets)]
+	lock.Lock()
+	defer lock.Unlock()
 	first := int(block%cacheSets) * cacheWays
 	for index := first; index < first+cacheWays; index++ {
 		entry := &cache.entries[index]
 		if entry.valid && entry.block == block {
 			copy(entry.data, data)
-			entry.checked = false
 		}
 	}
 }
 
 // invalidate drops every resident block.
 func (cache *blockCache) invalidate() {
-	for index := range cache.entries {
-		cache.entries[index].valid = false
-		cache.entries[index].checked = false
-	}
-}
-
-// resident returns the cache entry whose buffer data is, or nil for a
-// staged copy or any other buffer.
-func (cache *blockCache) resident(data []byte) *cachedBlock {
-	if len(data) == 0 {
-		return nil
-	}
-	for index := range cache.entries {
-		entry := &cache.entries[index]
-		if entry.valid && len(entry.data) == len(data) && &entry.data[0] == &data[0] {
-			return entry
+	for set := 0; set < cacheSets; set++ {
+		cache.locks[set].Lock()
+		for index := 0; index < cacheWays; index++ {
+			cache.entries[set*cacheWays+index].valid = false
 		}
+		cache.locks[set].Unlock()
 	}
-	return nil
 }

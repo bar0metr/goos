@@ -82,10 +82,12 @@ func (fs *FS) readJournalSuper(inode *Inode) error {
 	if mapping.Hole || mapping.Unwritten {
 		return corrupt("journal superblock not allocated")
 	}
-	data, err := fs.cache.get(mapping.Physical)
+	data, unlock, err := fs.cache.get(mapping.Physical)
 	if err != nil {
 		return err
 	}
+	defer unlock()
+
 	if be32(data, 0) != jbd2Magic {
 		return corrupt("bad journal magic")
 	}

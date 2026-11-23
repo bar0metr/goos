@@ -42,18 +42,20 @@ func (fs *FS) sealGroup(group uint32, desc *Group) error {
 	wide := fs.sb.DescriptorSize >= 64
 	if fs.sb.HasMetadataCsum() {
 		if desc.Flags&groupBlockUninit == 0 {
-			data, err := fs.cache.get(desc.BlockBitmap)
-			if err != nil {
+			if err := fs.cache.withBlock(desc.BlockBitmap, func(data []byte) error {
+				desc.BlockBitmapCsum = crc32c(fs.seed, data[:fs.sb.ClustersPerGroup/8])
+				return nil
+			}); err != nil {
 				return err
 			}
-			desc.BlockBitmapCsum = crc32c(fs.seed, data[:fs.sb.ClustersPerGroup/8])
 		}
 		if desc.Flags&groupInodeUninit == 0 {
-			data, err := fs.cache.get(desc.InodeBitmap)
-			if err != nil {
+			if err := fs.cache.withBlock(desc.InodeBitmap, func(data []byte) error {
+				desc.InodeBitmapCsum = crc32c(fs.seed, data[:fs.sb.InodesPerGroup/8])
+				return nil
+			}); err != nil {
 				return err
 			}
-			desc.InodeBitmapCsum = crc32c(fs.seed, data[:fs.sb.InodesPerGroup/8])
 		}
 		if !wide {
 			desc.BlockBitmapCsum &= 0xFFFF
@@ -194,13 +196,15 @@ func (fs *FS) allocBlocks(goal uint64, want uint64) (uint64, uint64, error) {
 			from = goal - start
 		}
 		var bitmap []byte
+		var unlock func()
 		if desc.Flags&groupBlockUninit != 0 {
 			if err := fs.initBlockBitmap(group, &desc); err != nil {
 				return 0, 0, err
 			}
 			bitmap, err = fs.stage(desc.BlockBitmap)
+			unlock = func() {}
 		} else {
-			bitmap, err = fs.cache.get(desc.BlockBitmap)
+			bitmap, unlock, err = fs.cache.get(desc.BlockBitmap)
 		}
 		if err != nil {
 			return 0, 0, err
@@ -209,6 +213,7 @@ func (fs *FS) allocBlocks(goal uint64, want uint64) (uint64, uint64, error) {
 		if run == 0 && from > 0 {
 			bit, run = fs.findRun(bitmap, 0, count, want, start)
 		}
+		unlock()
 		if run == 0 {
 			continue
 		}
@@ -429,33 +434,35 @@ func (fs *FS) verifyGroupCounts() error {
 			return err
 		}
 		if desc.Flags&groupBlockUninit == 0 {
-			bitmap, err := fs.cache.get(desc.BlockBitmap)
-			if err != nil {
+			if err := fs.cache.withBlock(desc.BlockBitmap, func(bitmap []byte) error {
+				count := fs.groupBlocks(group)
+				if free := clearBits(bitmap, 0, count); free != uint64(desc.FreeBlocks) {
+					return corrupt("group free block count disagrees with its bitmap")
+				}
+				if clearBits(bitmap, count, uint64(fs.blockSize)*8) != 0 {
+					return corrupt("block bitmap padding bits clear")
+				}
+				return nil
+			}); err != nil {
 				return err
-			}
-			count := fs.groupBlocks(group)
-			if free := clearBits(bitmap, 0, count); free != uint64(desc.FreeBlocks) {
-				return corrupt("group free block count disagrees with its bitmap")
-			}
-			if clearBits(bitmap, count, uint64(fs.blockSize)*8) != 0 {
-				return corrupt("block bitmap padding bits clear")
 			}
 		}
 		if desc.Flags&groupInodeUninit == 0 {
-			bitmap, err := fs.cache.get(desc.InodeBitmap)
-			if err != nil {
+			if err := fs.cache.withBlock(desc.InodeBitmap, func(bitmap []byte) error {
+				inodes := uint64(fs.sb.InodesPerGroup)
+				if free := clearBits(bitmap, 0, inodes); free != uint64(desc.FreeInodes) {
+					return corrupt("group free inode count disagrees with its bitmap")
+				}
+				if clearBits(bitmap, inodes, uint64(fs.blockSize)*8) != 0 {
+					return corrupt("inode bitmap padding bits clear")
+				}
+				used := inodes - uint64(desc.ItableUnused)
+				if clearBits(bitmap, used, inodes) != inodes-used {
+					return corrupt("inode in use inside the unused table tail")
+				}
+				return nil
+			}); err != nil {
 				return err
-			}
-			inodes := uint64(fs.sb.InodesPerGroup)
-			if free := clearBits(bitmap, 0, inodes); free != uint64(desc.FreeInodes) {
-				return corrupt("group free inode count disagrees with its bitmap")
-			}
-			if clearBits(bitmap, inodes, uint64(fs.blockSize)*8) != 0 {
-				return corrupt("inode bitmap padding bits clear")
-			}
-			used := inodes - uint64(desc.ItableUnused)
-			if clearBits(bitmap, used, inodes) != inodes-used {
-				return corrupt("inode in use inside the unused table tail")
 			}
 		} else if desc.FreeInodes != fs.sb.InodesPerGroup || desc.UsedDirs != 0 {
 			return corrupt("uninitialized inode group with inodes in use")

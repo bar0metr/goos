@@ -333,10 +333,12 @@ func (fs *FS) stage(block uint64) ([]byte, error) {
 	if err := fs.checkStageable(block); err != nil {
 		return nil, err
 	}
-	current, err := fs.cache.get(block)
+	current, unlock, err := fs.cache.get(block)
 	if err != nil {
 		return nil, err
 	}
+	defer unlock()
+
 	if err := fs.charge(block, true); err != nil {
 		return nil, err
 	}

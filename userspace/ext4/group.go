@@ -38,10 +38,12 @@ func (fs *FS) group(group uint32) (Group, error) {
 		return Group{}, corrupt("group number out of range")
 	}
 	block, offset := fs.descriptorLocation(group)
-	data, err := fs.cache.get(block)
+	data, unlock, err := fs.cache.get(block)
 	if err != nil {
 		return Group{}, err
 	}
+	defer unlock()
+
 	size := int(fs.sb.DescriptorSize)
 	raw := data[offset : offset+size]
 	desc := Group{
@@ -171,10 +173,12 @@ func (fs *FS) validateGroups() error {
 func (fs *FS) verifyBitmaps(group uint32, desc *Group) error {
 	wide := fs.sb.DescriptorSize >= 64
 	if desc.Flags&groupBlockUninit == 0 {
-		data, err := fs.cache.get(desc.BlockBitmap)
+		data, unlock, err := fs.cache.get(desc.BlockBitmap)
 		if err != nil {
 			return err
 		}
+		defer unlock()
+
 		crc := crc32c(fs.seed, data[:fs.sb.ClustersPerGroup/8])
 		if !wide {
 			crc &= 0xFFFF
@@ -184,10 +188,12 @@ func (fs *FS) verifyBitmaps(group uint32, desc *Group) error {
 		}
 	}
 	if desc.Flags&groupInodeUninit == 0 {
-		data, err := fs.cache.get(desc.InodeBitmap)
+		data, unlock, err := fs.cache.get(desc.InodeBitmap)
 		if err != nil {
 			return err
 		}
+		defer unlock()
+
 		crc := crc32c(fs.seed, data[:fs.sb.InodesPerGroup/8])
 		if !wide {
 			crc &= 0xFFFF

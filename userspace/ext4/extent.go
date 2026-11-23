@@ -95,10 +95,12 @@ func (fs *FS) mapExtent(inode *Inode, logical uint32) (Mapping, error) {
 		if child < uint64(fs.sb.FirstDataBlock)+1 || child >= fs.sb.BlocksCount {
 			return Mapping{}, corrupt("extent index points outside the volume")
 		}
-		data, err := fs.cache.get(child)
+		data, unlock, err := fs.cache.get(child)
 		if err != nil {
 			return Mapping{}, err
 		}
+		defer unlock()
+
 		next, err := parseExtentNode(data, int(header.depth)-1)
 		if err != nil {
 			return Mapping{}, err
@@ -195,10 +197,12 @@ func (fs *FS) mapIndirect(inode *Inode, logical uint32) (Mapping, error) {
 		if block >= fs.sb.BlocksCount {
 			return Mapping{}, corrupt("indirect block outside the volume")
 		}
-		data, err := fs.cache.get(block)
+		data, unlock, err := fs.cache.get(block)
 		if err != nil {
 			return Mapping{}, err
 		}
+		defer unlock()
+
 		block = pointer(data, path[level])
 	}
 	if block == 0 {

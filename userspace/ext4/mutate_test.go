@@ -916,7 +916,11 @@ func TestReadDirSurvivesEviction(t *testing.T) {
 	listed := 0
 	if _, err := fs.ReadDir(big, 0, func(*DirEntry) bool {
 		for block := uint64(0); block < 2*cacheBlocks; block++ {
-			ok(fs.cache.get(block))
+			_, unlock, err := fs.cache.get(block)
+			if err != nil {
+				t.Fatal(err)
+			}
+			unlock()
 		}
 		listed++
 		return true
