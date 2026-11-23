@@ -37,9 +37,13 @@ type Volume struct {
 	lastStatusOK bool
 	// ListingCalls and ListingRefills count the batched listing calls and
 	// the prefetch refills they ran; the run log uses them to check the
-	// cross-call batch reuse (ADR 0231).
+	// cross-call batch reuse (ADR 0231). RefillParent, RefillDrained and
+	// RefillCursor say why the refill ran.
 	ListingCalls   uint64
 	ListingRefills uint64
+	RefillParent   uint64
+	RefillDrained  uint64
+	RefillCursor   uint64
 	// source and target hold copies of names and link targets that arrive
 	// in the shared file cache.
 	source [ext4.MaxNameLength]byte
@@ -391,6 +395,13 @@ func (volume *Volume) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byt
 	// grouped order through the listing prefetch (ADR 0231).
 	if state.parent != parent || state.at >= state.count || state.resume != cursor {
 		volume.ListingRefills++
+		if state.parent != parent {
+			volume.RefillParent++
+		} else if state.at >= state.count {
+			volume.RefillDrained++
+		} else {
+			volume.RefillCursor++
+		}
 		dir, status := volume.inode(parent)
 		if status != ramfs.StatusOK {
 			return batch, status
