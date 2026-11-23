@@ -172,14 +172,6 @@ func sendReply(reply fsproto.Reply, correlation uint64) {
 	}
 }
 
-func wireSize(data []byte) int {
-	size := ipc.WireHeaderSize + (int(data[24]) | int(data[25])<<8) + int(data[26])*8
-	if size > len(data) {
-		return len(data)
-	}
-	return size
-}
-
 func mark(message string) {
 	if validation.Enabled {
 		sys.ConsoleWriteString(consoleHandle, message)
