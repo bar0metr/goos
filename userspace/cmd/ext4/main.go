@@ -291,8 +291,6 @@ func logCounters() {
 	if status, ok := volume.Status(); ok {
 		syslog.Warn("counters", syslog.Uint("cache-reads", status.CacheReads), syslog.Uint("cache-hits", status.CacheHits))
 		syslog.Warn("prefetch", syslog.Uint("reads", status.PrefetchReads), syslog.Uint("fetches", status.PrefetchFetches))
-		syslog.Warn("listing", syslog.Uint("calls", volume.ListingCalls), syslog.Uint("refills", volume.ListingRefills))
-		syslog.Warn("refill-why", syslog.Uint("parent", volume.RefillParent), syslog.Uint("drained", volume.RefillDrained), syslog.Uint("cursor", volume.RefillCursor))
 	}
 }
 

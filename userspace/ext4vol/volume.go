@@ -8,7 +8,6 @@ package ext4vol
 import (
 	"goos/kernel/ramfs"
 	"goos/userspace/ext4"
-	"goos/userspace/log"
 )
 
 // A node ID carries the inode number in its low 32 bits and the inode
@@ -36,15 +35,6 @@ type Volume struct {
 	// service can log them after the volume is gone.
 	lastStatus   ext4.Status
 	lastStatusOK bool
-	// ListingCalls and ListingRefills count the batched listing calls and
-	// the prefetch refills they ran; the run log uses them to check the
-	// cross-call batch reuse (ADR 0231). RefillParent, RefillDrained and
-	// RefillCursor say why the refill ran.
-	ListingCalls   uint64
-	ListingRefills uint64
-	RefillParent   uint64
-	RefillDrained  uint64
-	RefillCursor   uint64
 	// source and target hold copies of names and link targets that arrive
 	// in the shared file cache.
 	source [ext4.MaxNameLength]byte
@@ -52,11 +42,11 @@ type Volume struct {
 }
 
 // dirPrefetch holds the batch ReadDirBatch decodes: entries in cursor order
-// with their validated inodes, and resume, the cursor a continuing call
-// passes. A call that names another parent or cursor refills it.
+// with their validated inodes. A call that names another parent, or names a
+// cursor the batch does not cover, refills it; otherwise the call seeks the
+// batch to the cursor, which may stop mid-batch (ADR 0208).
 type dirPrefetch struct {
 	parent  ramfs.NodeID
-	resume  int
 	count   int
 	at      int
 	end     bool
@@ -390,22 +380,13 @@ func (volume *Volume) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byt
 	}
 	batch := ramfs.DirBatch{Next: cursor}
 	state := &volume.prefetch
-	volume.ListingCalls++
-	// A continuing call consumes the decoded batch; anything else refills
-	// it from the cursor, fetching the batch's inode-table blocks in
-	// grouped order through the listing prefetch (ADR 0231).
-	if state.parent != parent || state.at >= state.count || state.resume != cursor {
-		volume.ListingRefills++
-		if state.parent != parent {
-			volume.RefillParent++
-		} else if state.at >= state.count {
-			volume.RefillDrained++
-		} else {
-			volume.RefillCursor++
-		}
-		if volume.ListingCalls <= 30 {
-			log.Warn("trace", log.Uint("call", volume.ListingCalls), log.Uint("cursor", uint64(cursor)), log.Uint("resume", uint64(state.resume)), log.Uint("at", uint64(state.at)))
-		}
+	// A continuing call seeks the decoded batch to the cursor; the caller
+	// may stop mid-batch (ADR 0208), so the cursor can name an entry
+	// inside the batch, behind the last one this call emitted. Any other
+	// parent or a cursor outside the batch refills it, fetching the
+	// batch's inode-table blocks in grouped order (ADR 0231).
+	at := state.seek(cursor)
+	if state.parent != parent || at < 0 || at >= state.count {
 		dir, status := volume.inode(parent)
 		if status != ramfs.StatusOK {
 			return batch, status
@@ -424,7 +405,8 @@ func (volume *Volume) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byt
 			return batch, statusOf(err)
 		}
 		state.parent, state.count, state.at, state.end = parent, count, 0, end
-		state.resume = cursor
+	} else {
+		state.at = at
 	}
 	for state.at < state.count {
 		entry := &state.entries[state.at]
@@ -439,12 +421,31 @@ func (volume *Volume) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byt
 		batch.Count++
 		batch.Next = after
 		state.at++
-		state.resume = after
 	}
 	if state.at == state.count && state.end {
 		batch.End = true
 	}
 	return batch, ramfs.StatusOK
+}
+
+// seek returns the index of the first entry whose cursor is after cursor, or
+// -1 when the batch does not cover cursor: it is empty, or cursor names a
+// position before the batch's first entry. The entries are in cursor order,
+// so a binary search finds the resume point.
+func (state *dirPrefetch) seek(cursor int) int {
+	if state.count == 0 || cursor < int(state.entries[0].Offset) {
+		return -1
+	}
+	low, high := 0, state.count
+	for low < high {
+		middle := (low + high) / 2
+		if int(state.entries[middle].Offset)+1 <= cursor {
+			low = middle + 1
+		} else {
+			high = middle
+		}
+	}
+	return low
 }
 
 // AcquireObject and ReleaseObject confirm the object is still the one the
