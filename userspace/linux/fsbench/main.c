@@ -669,8 +669,9 @@ int main(int argc, char **argv)
 	char *end;
 	long scale = 1, data = 0;
 	int filling = argc == 3 && strcmp(argv[2], "fill") == 0;
+	int readonly = argc == 3 && strcmp(argv[2], "readonly") == 0;
 
-	if (argc >= 3 && !filling) {
+	if (argc >= 3 && !filling && !readonly) {
 		scale = strtol(argv[2], &end, 10);
 		if (*end != 0)
 			scale = 0;
@@ -681,7 +682,7 @@ int main(int argc, char **argv)
 			scale = 0;
 	}
 	if (argc < 2 || argc > 4 || scale < 1 || scale > 16) {
-		fputs("usage: fsbench DIR [SCALE [DATA_MIB]] | fsbench DIR fill  (SCALE 1 to 16, DATA_MIB 1 to 1024)\n", stderr);
+		fputs("usage: fsbench DIR [SCALE [DATA_MIB]] | fsbench DIR fill | fsbench DIR readonly  (SCALE 1 to 16, DATA_MIB 1 to 1024)\n", stderr);
 		return 2;
 	}
 	if (data == 0)
@@ -705,6 +706,14 @@ int main(int argc, char **argv)
 		puts("bench ok");
 		return 0;
 	}
+	if (readonly) {
+		printf("bench start dir=%s readonly scale=%ld\n", base, scale);
+		bench_readonly((int)scale);
+		if (rmdir(base) != 0)
+			die("rmdir");
+		puts("bench ok");
+		return 0;
+	}
 	printf("bench start dir=%s scale=%ld data_mib=%ld\n", base, scale, data);
 
 	bench_files(2000 * (int)scale);
@@ -713,7 +722,6 @@ int main(int argc, char **argv)
 	bench_sync();
 	bench_replace();
 	bench_sparse();
-	bench_readonly((int)scale);
 	for (int procs = 1; procs <= 8; procs *= 2)
 		bench_parallel(procs, 200 * (int)scale);
 

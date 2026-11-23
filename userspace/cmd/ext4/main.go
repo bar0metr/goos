@@ -170,7 +170,7 @@ func realtime() ext4.Timestamp {
 
 //export userspaceMain
 func userspaceMain() {
-	arena.InitService()
+	initRuntime()
 	arena.OnExhausted(func() { fatal("EXT4_OUT_OF_MEMORY\n") })
 	data, ok := startup.Read()
 	if !ok {
