@@ -148,7 +148,6 @@ func newPooledDevice(count int) *pooledDevice {
 	transport.recv = func(wire []byte, timeout uint64) kcall.Status {
 		return sys.IPCWaitReceive(blockHandle, wire, timeout)
 	}
-	transport.start()
 	pool := &pooledDevice{
 		transport: transport,
 		clients:   make(chan *blockClient, count),

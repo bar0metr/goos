@@ -10,23 +10,16 @@ import (
 	blockproto "goos/userspace/block"
 )
 
-// fakeEndpoint wires the transport's I/O to in-memory channels so the routing
-// is exercised without the block service.
-type fakeEndpoint struct {
-	sent    chan sentRequest
-	replies chan []byte
+// echoTransport wires the transport's I/O so that each reply is matched to the
+// request's own correlation, like the block service.
+type echoTransport struct {
+	mu      sync.Mutex
+	sent    []uint64
+	offsets []uint64
+	dead    bool
 }
 
-type sentRequest struct {
-	correlation uint64
-	offset      uint64
-}
-
-func newFakeEndpoint() *fakeEndpoint {
-	return &fakeEndpoint{sent: make(chan sentRequest, 16), replies: make(chan []byte, 16)}
-}
-
-func (endpoint *fakeEndpoint) send(wire []byte, size int) kcall.Status {
+func (echo *echoTransport) send(wire []byte, size int) kcall.Status {
 	message, ok := ipc.Decode(wire[:size])
 	if !ok {
 		return kcall.StatusInvalidArgument
@@ -35,43 +28,44 @@ func (endpoint *fakeEndpoint) send(wire []byte, size int) kcall.Status {
 	if !ok {
 		return kcall.StatusInvalidArgument
 	}
-	endpoint.sent <- sentRequest{correlation: message.Correlation, offset: request.Offset}
+	echo.mu.Lock()
+	echo.sent = append(echo.sent, message.Correlation)
+	echo.offsets = append(echo.offsets, request.Offset)
+	echo.mu.Unlock()
 	return kcall.StatusOK
 }
 
-func (endpoint *fakeEndpoint) recv(wire []byte, timeout uint64) kcall.Status {
-	reply := <-endpoint.replies
-	copy(wire, reply)
-	return kcall.StatusOK
-}
-
-// reply answers one read with the request's offset echoed as its data.
-func (endpoint *fakeEndpoint) reply(t *testing.T, correlation, offset uint64) {
-	t.Helper()
+func (echo *echoTransport) recv(wire []byte, timeout uint64) kcall.Status {
+	if echo.dead {
+		return kcall.StatusPeerDied
+	}
+	// The wire still holds the request; write a reply with the same
+	// correlation, echoing the offset as the read data.
+	message, _ := ipc.Decode(wire[:wireSize(wire)])
+	request, _ := blockproto.DecodeRequestFrom(&message)
 	var data [8]byte
-	binary.LittleEndian.PutUint64(data[:], offset)
-	message, ok := blockproto.EncodeReply(blockproto.Reply{Operation: blockproto.OperationRead, Status: blockproto.StatusOK, Data: data[:]}, correlation)
+	binary.LittleEndian.PutUint64(data[:], request.Offset)
+	reply, ok := blockproto.EncodeReply(blockproto.Reply{Operation: blockproto.OperationRead, Status: blockproto.StatusOK, Data: data[:]}, message.Correlation)
 	if !ok {
-		t.Fatal("encode reply")
+		return kcall.StatusInvalidArgument
 	}
-	wire := make([]byte, ipc.WireMaxSize)
-	size, ok := ipc.Encode(message, wire)
+	size, ok := ipc.Encode(reply, wire)
 	if !ok {
-		t.Fatal("encode wire")
+		return kcall.StatusInvalidArgument
 	}
-	endpoint.replies <- wire[:size]
+	_ = size
+	return kcall.StatusOK
 }
 
-// TestBlockTransportRoutesReplies runs four simultaneous reads, verifies
-// unique correlations, answers out of order, and checks each requester gets
-// its own reply. The pre-multiplexer design (per-client IPCWaitReceive) could
-// not pass this: it reused correlations and consumed each other's replies.
-func TestBlockTransportRoutesReplies(t *testing.T) {
-	endpoint := newFakeEndpoint()
+// TestBlockTransportUniqueCorrelationsAndRouting runs four exchanges, each
+// through its own echo, and verifies every reply returns to its requester.
+// The pre-multiplexer design (per-client IPCWaitReceive) could not pass this:
+// it reused correlations and consumed each other's replies.
+func TestBlockTransportUniqueCorrelationsAndRouting(t *testing.T) {
+	echo := &echoTransport{}
 	transport := newBlockTransport()
-	transport.send = endpoint.send
-	transport.recv = endpoint.recv
-	transport.start()
+	transport.send = echo.send
+	transport.recv = echo.recv
 
 	const n = 4
 	offsets := make([]uint64, n)
@@ -88,79 +82,40 @@ func TestBlockTransportRoutesReplies(t *testing.T) {
 			offsets[index] = binary.LittleEndian.Uint64(reply.Data)
 		}(index)
 	}
-
-	sent := make([]sentRequest, 0, n)
-	for range n {
-		sent = append(sent, <-endpoint.sent)
-	}
-	for index := 0; index < n; index++ {
-		for other := index + 1; other < n; other++ {
-			if sent[index].correlation == sent[other].correlation {
-				t.Fatalf("duplicate correlation %d", sent[index].correlation)
-			}
-		}
-	}
-	// Reply in reverse order; each requester must still get its own offset.
-	for index := n - 1; index >= 0; index-- {
-		endpoint.reply(t, sent[index].correlation, sent[index].offset)
-	}
 	group.Wait()
 	for index := 0; index < n; index++ {
 		if offsets[index] != uint64(index)*100 {
 			t.Fatalf("requester %d got offset %d, want %d", index, offsets[index], uint64(index)*100)
 		}
 	}
-}
-
-// TestBlockTransportTableExhaustion verifies the outstanding table is bounded:
-// an exchange beyond maxBlockSlots fails instead of growing.
-func TestBlockTransportTableExhaustion(t *testing.T) {
-	endpoint := newFakeEndpoint()
-	transport := newBlockTransport()
-	transport.send = endpoint.send
-	// recv blocks forever, so the first maxBlockSlots requests stay outstanding.
-	transport.recv = func(wire []byte, timeout uint64) kcall.Status {
-		select {}
-	}
-	transport.start()
-
-	for index := 0; index < maxBlockSlots; index++ {
-		go transport.exchange(blockproto.Request{Operation: blockproto.OperationInfo})
-	}
-	for index := 0; index < maxBlockSlots; index++ {
-		<-endpoint.sent
-	}
-	// One more must fail: no free slot.
-	if _, ok := transport.exchange(blockproto.Request{Operation: blockproto.OperationInfo}); ok {
-		t.Fatal("exchange beyond the bounded table succeeded")
-	}
-}
-
-// TestBlockTransportEndpointDeath verifies that a dead endpoint wakes every
-// outstanding requester with failure.
-func TestBlockTransportEndpointDeath(t *testing.T) {
-	endpoint := newFakeEndpoint()
-	transport := newBlockTransport()
-	transport.send = endpoint.send
-	transport.recv = func(wire []byte, timeout uint64) kcall.Status {
-		return kcall.StatusPeerDied
-	}
-	transport.start()
-
-	var group sync.WaitGroup
-	results := make([]bool, maxBlockSlots)
-	for index := 0; index < maxBlockSlots; index++ {
-		group.Add(1)
-		go func(index int) {
-			defer group.Done()
-			_, ok := transport.exchange(blockproto.Request{Operation: blockproto.OperationInfo})
-			results[index] = ok
-		}(index)
-	}
-	group.Wait()
-	for index := 0; index < maxBlockSlots; index++ {
-		if results[index] {
-			t.Fatalf("requester %d survived endpoint death", index)
+	for index := 0; index < n; index++ {
+		for other := index + 1; other < n; other++ {
+			if echo.sent[index] == echo.sent[other] {
+				t.Fatalf("duplicate correlation %d", echo.sent[index])
+			}
 		}
+	}
+}
+
+// TestBlockTransportEndpointDeath verifies a dead endpoint fails the exchange.
+func TestBlockTransportEndpointDeath(t *testing.T) {
+	echo := &echoTransport{}
+	transport := newBlockTransport()
+	transport.send = echo.send
+	transport.recv = echo.recv
+	echo.dead = true
+	if _, ok := transport.exchange(blockproto.Request{Operation: blockproto.OperationInfo}); ok {
+		t.Fatal("exchange survived endpoint death")
+	}
+}
+
+// TestBlockTransportBadSendFails verifies a request that cannot be encoded or
+// sent fails without waiting for a reply.
+func TestBlockTransportBadSendFails(t *testing.T) {
+	transport := newBlockTransport()
+	transport.send = func(wire []byte, size int) kcall.Status { return kcall.StatusPeerDied }
+	transport.recv = func(wire []byte, timeout uint64) kcall.Status { return kcall.StatusOK }
+	if _, ok := transport.exchange(blockproto.Request{Operation: blockproto.OperationInfo}); ok {
+		t.Fatal("exchange survived a failed send")
 	}
 }

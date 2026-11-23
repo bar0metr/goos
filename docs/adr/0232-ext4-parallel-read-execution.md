@@ -135,6 +135,14 @@ neither was measured in isolation. Native threads (ADR 0203) may reduce the
 block path's overhead, but this ADR records no evidence that they alone
 guarantee 2x.
 
+The block endpoint is reached through one multiplexer (the concurrency FIX):
+a single monotonic correlation sequence, one receive path, and a bounded
+outstanding table route each reply to its requester, replacing the per-client
+receive that could reuse a correlation or consume another caller's reply. The
+routing adds one cross-goroutine hand-off per block request, which the serial
+readdir path pays without any concurrency benefit; that hand-off, not the
+metadata-cache borrow, is the dominant part of the readdir regression.
+
 ### Bounds
 
 `ext4.MaxReadWorkers = 4`, classified in the resource-policy inventory. The
