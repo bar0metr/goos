@@ -430,6 +430,18 @@ owner-only. Fixture state is process-wide, not independent per Service.
 Goprobe workers use request-local records through `utility.Write`, not the
 main goroutine's `Print` or `Path` scratch.
 
+The ext4 service (ADR 0232) runs one mutation/JBD2 owner and a bounded pool of
+four read workers. `volume` and the fsproto `cache` are shared; the metadata
+cache borrows per-set locks, the fsproto name page and file cache are
+request-owned. `wire`, `requestMessage`, `replyMessage`, `requestedName` and
+`listedName` belong to the owner; the owner copies the request name into the
+job at admission, and workers answer from that owned name. `blockHandle` is
+written once at startup. `device` pools per-worker block clients over one
+multiplexed transport (`blockTransport`), whose monotonic correlation sequence
+and bounded outstanding table are mutex-protected and whose single receive path
+routes each reply to its requester; bulk buffers are per-client and owned
+across one ReadAt/WriteAt loop.
+
 A program that adds workers must review both its globals and the objects its
 workers borrow, as threadprobe does:
 

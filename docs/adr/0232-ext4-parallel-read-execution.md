@@ -121,11 +121,19 @@ non-blocking submit path with a collector goroutine (commit `30154b16`); both
 ran on the goroutine runtime. KVM run `20261123T173540Z-362fc2f7` booted and
 passed, but throughput fell to 725 ops/s at one client and 1083 at four, and
 readdir-10k rose 221 ms to 300 ms. The goroutine runtime's park/awake and
-channel hand-off cost more per block request than the virtio-blk round-trip it
-overlaps, so the pipeline is a net loss, not a 2x win. The serial block
-service and driver stay: the virtio-blk round-trip is the measured serial
-boundary, and overlapping it needs a lower-latency mechanism (native threads,
-ADR 0203) than the goroutine runtime provides here.
+channel hand-off cost more per block request than the round-trip it overlaps,
+so the pipeline is a net loss. The serial block service and driver stay.
+
+The missed 2x is attributed to more than one serialization point, not the
+virtio-blk round-trip alone. The benchmark issues an open, a 4 KiB read, an
+fstat and a close each iteration, and the VFS read pool schedules the
+additional-volume `Remote` backend as `ReadLanePersistent`, which permits only
+one persistent-lane read at a time; concurrent file-data reads can therefore
+serialize in VFS before they reach ext4. Both the VFS persistent read lane and
+the serial block-service/driver request path remain serial boundaries, and
+neither was measured in isolation. Native threads (ADR 0203) may reduce the
+block path's overhead, but this ADR records no evidence that they alone
+guarantee 2x.
 
 ### Bounds
 
