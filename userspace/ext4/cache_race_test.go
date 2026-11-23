@@ -83,3 +83,35 @@ func TestCacheBorrowScoped(t *testing.T) {
 		}
 	}
 }
+
+// TestConcurrentRealisticReads runs lookup, stat and read operations from
+// several goroutines against the same filesystem, so the shared metadata cache
+// and the extent/directory traversal are exercised under -race, not only the
+// direct cache accesses of TestConcurrentCacheAccess.
+func TestConcurrentRealisticReads(t *testing.T) {
+	fs := mount(t, fixture(t, "many"))
+	root, err := fs.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var group sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for round := 0; round < 10; round++ {
+				if _, err := fs.ReadDir(root, 0, func(entry *DirEntry) bool {
+					if _, err := fs.Inode(entry.Inode); err != nil {
+						t.Error(err)
+						return false
+					}
+					return true
+				}); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	group.Wait()
+}
