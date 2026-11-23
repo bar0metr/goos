@@ -15,9 +15,6 @@ import (
 	userwait "goos/userspace/wait"
 )
 
-// maxReadWorkers bounds the read pool (ADR 0232).
-const maxReadWorkers = 4
-
 // readJob is one read-only request a worker executes and returns.
 type readJob struct {
 	request     fsproto.Request
