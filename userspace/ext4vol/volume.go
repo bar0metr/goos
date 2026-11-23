@@ -8,6 +8,7 @@ package ext4vol
 import (
 	"goos/kernel/ramfs"
 	"goos/userspace/ext4"
+	"goos/userspace/log"
 )
 
 // A node ID carries the inode number in its low 32 bits and the inode
@@ -401,6 +402,12 @@ func (volume *Volume) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byt
 			volume.RefillDrained++
 		} else {
 			volume.RefillCursor++
+			if volume.RefillCursor <= 3 {
+				// A small sample of the mismatched cursors, so the run
+				// log shows how the caller's cursor relates to the one
+				// the batch continued from.
+				log.Warn("refill-mismatch", log.Uint("resume", uint64(state.resume)), log.Uint("cursor", uint64(cursor)), log.Uint("at", uint64(state.at)))
+			}
 		}
 		dir, status := volume.inode(parent)
 		if status != ramfs.StatusOK {
