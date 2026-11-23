@@ -64,9 +64,11 @@ type listBlock struct {
 // ReadDirBatch calls. Its block buffers live in one allocation made at
 // mount; nothing here grows with the directory.
 type ListPrefetch struct {
-	blocks [MaxReaddirPrefetchBlocks]listBlock
-	order  [MaxReaddirPrefetchEntries]int
-	clock  uint64
+	blocks  [MaxReaddirPrefetchBlocks]listBlock
+	order   [MaxReaddirPrefetchEntries]int
+	clock   uint64
+	reads   uint64
+	fetches uint64
 }
 
 // List returns the mounted volume's listing prefetch.
@@ -96,6 +98,7 @@ func (fs *FS) prefetchBlock(prefetch *ListPrefetch, block uint64) ([]byte, error
 		return nil, corrupt("block number beyond the volume")
 	}
 	prefetch.clock++
+	prefetch.fetches++
 	first := int(block%prefetchSets) * prefetchWays
 	victim := &prefetch.blocks[first]
 	for index := 0; index < prefetchWays; index++ {
@@ -114,8 +117,11 @@ func (fs *FS) prefetchBlock(prefetch *ListPrefetch, block uint64) ([]byte, error
 	victim.valid = false
 	if staged := fs.cache.staged(block); staged != nil {
 		copy(victim.data, staged.data)
-	} else if !fs.cache.device.ReadAt(block*fs.cache.size, victim.data) {
-		return nil, errIO
+	} else {
+		prefetch.reads++
+		if !fs.cache.device.ReadAt(block*fs.cache.size, victim.data) {
+			return nil, errIO
+		}
 	}
 	victim.block, victim.stamp, victim.valid = block, prefetch.clock, true
 	return victim.data, nil
@@ -133,52 +139,55 @@ func (fs *FS) PrefetchDir(prefetch *ListPrefetch, dir *Inode, cursor uint64, ent
 	if !dir.IsDir() {
 		return 0, 0, false, fail(KindNotDirectory, "")
 	}
+	// Collect the batch in cursor order, computing each entry's inode-table
+	// block and running the allocation check in the same pass, so a stale
+	// entry stops the listing exactly as the per-entry path does.
+	isize := uint64(fs.sb.InodeSize)
+	var locations [MaxReaddirPrefetchEntries]struct {
+		block  uint64
+		within int
+	}
+	var failure error
 	count = 0
 	next, err = fs.ReadDir(dir, cursor, func(entry *DirEntry) bool {
 		if count == MaxReaddirPrefetchEntries {
 			return false
 		}
+		if allocated, checkErr := fs.inodeAllocated(entry.Inode); checkErr != nil {
+			failure = checkErr
+			return false
+		} else if !allocated {
+			failure = fail(KindStale, "inode not allocated")
+			return false
+		}
+		group, ino, locErr := fs.inodeLocation(entry.Inode)
+		if locErr != nil {
+			failure = locErr
+			return false
+		}
+		desc, descErr := fs.group(group)
+		if descErr != nil {
+			failure = descErr
+			return false
+		}
+		byteOffset := uint64(ino) * isize
+		locations[count] = struct {
+			block  uint64
+			within int
+		}{desc.InodeTable + byteOffset/uint64(fs.blockSize), int(byteOffset % uint64(fs.blockSize))}
 		entries[count] = *entry
+		prefetch.order[count] = count
 		count++
 		return true
 	})
 	if err != nil {
 		return 0, 0, false, err
 	}
-	// Allocated checks run in cursor order, so a stale entry stops the
-	// listing exactly as the per-entry path does.
-	for index := 0; index < count; index++ {
-		allocated, err := fs.inodeAllocated(entries[index].Inode)
-		if err != nil {
-			return 0, 0, false, err
-		}
-		if !allocated {
-			return 0, 0, false, fail(KindStale, "inode not allocated")
-		}
+	if failure != nil {
+		return 0, 0, false, failure
 	}
 	// Order the batch by inode-table block, then inode number, so each
 	// block is fetched once and decoded while resident.
-	isize := uint64(fs.sb.InodeSize)
-	var locations [MaxReaddirPrefetchEntries]struct {
-		block  uint64
-		within int
-	}
-	for index := 0; index < count; index++ {
-		group, ino, err := fs.inodeLocation(entries[index].Inode)
-		if err != nil {
-			return 0, 0, false, err
-		}
-		desc, err := fs.group(group)
-		if err != nil {
-			return 0, 0, false, err
-		}
-		byteOffset := uint64(ino) * isize
-		locations[index] = struct {
-			block  uint64
-			within int
-		}{desc.InodeTable + byteOffset/uint64(fs.blockSize), int(byteOffset % uint64(fs.blockSize))}
-		prefetch.order[index] = index
-	}
 	order := prefetch.order[:count]
 	sortOrder(order, func(a, b int) bool {
 		if locations[order[a]].block != locations[order[b]].block {

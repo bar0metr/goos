@@ -247,11 +247,7 @@ func userspaceMain() {
 			// and closed the slot: either way this instance is done. The
 			// cache counters in the log let a benchmark attribute readdir
 			// time to device reads (ADR 0231).
-			if status, ok := volume.Status(); ok {
-				syslog.Warn("block endpoint closed", syslog.Uint("cache-reads", status.CacheReads), syslog.Uint("cache-hits", status.CacheHits))
-			} else {
-				syslog.Warn("block endpoint closed")
-			}
+			logCounters()
 			sys.Exit(exitBlockGone)
 		}
 		status := sys.IPCReceive(vfsHandle, wire[:])
@@ -263,6 +259,7 @@ func userspaceMain() {
 			// holds before PID 1 replaces this instance.
 			volume.Flush()
 			syslog.Warn("vfs endpoint closed")
+			logCounters()
 			sys.Exit(exitVFSGone)
 		}
 		if status != kcall.StatusOK {
@@ -283,6 +280,15 @@ func exitIfFailed() {
 	if volume.Failed() {
 		syslog.Error("volume failed", syslog.Str("action", "exit for recovery"))
 		sys.Exit(exitVolumeFailed)
+	}
+}
+
+// logCounters reports the volume's cache and listing-prefetch counters so a
+// benchmark run can attribute readdir time to device reads (ADR 0231).
+func logCounters() {
+	if status, ok := volume.Status(); ok {
+		syslog.Warn("counters", syslog.Uint("cache-reads", status.CacheReads), syslog.Uint("cache-hits", status.CacheHits),
+			syslog.Uint("prefetch-reads", status.PrefetchReads), syslog.Uint("prefetch-fetches", status.PrefetchFetches))
 	}
 }
 

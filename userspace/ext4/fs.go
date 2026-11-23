@@ -611,6 +611,10 @@ type Status struct {
 	Journal     Journal
 	CacheReads  uint64
 	CacheHits   uint64
+	// PrefetchReads counts the device reads the listing prefetch issued;
+	// PrefetchFetches the distinct blocks it read or hit.
+	PrefetchReads   uint64
+	PrefetchFetches uint64
 	// Commits counts the transactions this mount committed; Recovery is
 	// what a writable mount replayed and cleaned up before it.
 	Commits  uint64
@@ -623,17 +627,19 @@ type Status struct {
 // Status reports the volume's mount state and counters.
 func (fs *FS) Status() Status {
 	return Status{
-		State:         fs.state,
-		Negotiation:   fs.negotiation,
-		Features:      fs.sb.Features,
-		SBState:       fs.sb.State,
-		ErrorCount:    fs.sb.ErrorCount,
-		LastOrphan:    fs.sb.LastOrphan,
-		Journal:       fs.journal,
-		CacheReads:    fs.cache.reads,
-		CacheHits:     fs.cache.hits,
-		Commits:       fs.commits,
-		PendingBlocks: fs.pendingBlocks(),
-		Recovery:      fs.recovery,
+		State:           fs.state,
+		Negotiation:     fs.negotiation,
+		Features:        fs.sb.Features,
+		SBState:         fs.sb.State,
+		ErrorCount:      fs.sb.ErrorCount,
+		LastOrphan:      fs.sb.LastOrphan,
+		Journal:         fs.journal,
+		CacheReads:      fs.cache.reads,
+		CacheHits:       fs.cache.hits,
+		PrefetchReads:   fs.list.reads,
+		PrefetchFetches: fs.list.fetches,
+		Commits:         fs.commits,
+		PendingBlocks:   fs.pendingBlocks(),
+		Recovery:        fs.recovery,
 	}
 }
