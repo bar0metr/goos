@@ -41,7 +41,7 @@ func sortOrder(order []int, less func(a, b int) bool) {
 const (
 	// MaxReaddirPrefetchEntries bounds the entries one listing batch
 	// collects and decodes.
-	MaxReaddirPrefetchEntries = 256
+	MaxReaddirPrefetchEntries = 512
 	// The prefetch is set-associative, 256 sets of 4 ways like the
 	// metadata cache, so a lookup probes at most four slots.
 	prefetchSets = 256

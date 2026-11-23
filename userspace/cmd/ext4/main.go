@@ -210,6 +210,7 @@ func userspaceMain() {
 		status, _ := volume.Status()
 		syslog.Info("volume mounted", syslog.Uint("capacity-mib", blockCapacity>>20), syslog.Str("mode", mode),
 			syslog.Uint("replayed", uint64(status.Recovery.Transactions)), syslog.Uint("orphans", uint64(status.Recovery.Orphans)))
+		logCounters()
 	} else {
 		syslog.Error("volume refused", syslog.Str("reason", volume.Refusal()))
 		mark("EXT4_VOLUME_REFUSED\n")
@@ -307,6 +308,11 @@ func ticks() uint64 {
 func serve() {
 	request, valid := fsproto.DecodeRequest(&requestMessage, cache, &requestedName)
 	var reply fsproto.Reply
+	if valid && request.Operation == fsproto.OperationUnmount {
+		// The counters come before the unmount clears the volume, so the
+		// run log keeps the listing's device-read attribution (ADR 0231).
+		logCounters()
+	}
 	if !valid {
 		operation := fsproto.Operation(requestMessage.Payload[0])
 		if requestMessage.Correlation == 0 || operation < fsproto.OperationMount || operation > fsproto.OperationUnmount {
