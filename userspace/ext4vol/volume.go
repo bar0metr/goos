@@ -31,6 +31,10 @@ type Volume struct {
 	// calls: a decoded batch of entries and the cursor the caller echoes
 	// back to continue it (ADR 0231).
 	prefetch dirPrefetch
+	// lastStatus keeps the counters an unmount leaves behind, so the
+	// service can log them after the volume is gone.
+	lastStatus   ext4.Status
+	lastStatusOK bool
 	// source and target hold copies of names and link targets that arrive
 	// in the shared file cache.
 	source [ext4.MaxNameLength]byte
@@ -815,6 +819,7 @@ func (volume *Volume) Unmount() ramfs.Status {
 	if volume.fs == nil {
 		return ramfs.StatusIOError
 	}
+	volume.lastStatus, volume.lastStatusOK = volume.fs.Status(), true
 	err := volume.fs.Unmount()
 	volume.fs, volume.writable = nil, false
 	if err != nil {
@@ -824,11 +829,12 @@ func (volume *Volume) Unmount() ramfs.Status {
 	return ramfs.StatusOK
 }
 
-// Status reports the engine's mount state and counters, or false when no
-// volume is mounted.
+// Status reports the engine's mount state and counters. After an unmount it
+// reports the counters the unmount left, and false only when nothing ever
+// mounted.
 func (volume *Volume) Status() (ext4.Status, bool) {
-	if volume.fs == nil {
-		return ext4.Status{}, false
+	if volume.fs != nil {
+		return volume.fs.Status(), true
 	}
-	return volume.fs.Status(), true
+	return volume.lastStatus, volume.lastStatusOK
 }
