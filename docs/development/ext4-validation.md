@@ -191,3 +191,40 @@ and two hot-path fixes (no 896-byte set-array copy per lookup, and the
 1 KiB `ramfs.Name` built only on a cache miss) close the target:
 deep 92.7 ms is ~9x the 0.3.0 baseline, and RAMFS deep 29.3 ms is
 faster than 0.3.0's 90 ms.
+
+## M2 readdir-prefetch results
+
+The M2 inode prefetch (ADR 0231) replaces the inode-at-a-time walk of a
+large directory listing with a block-grouped batch. KVM numbers below are
+five-round `fsbench` medians from run `20261123T095006Z-ad12b999` (commit
+`ea788082`, node `suptests`, `cpu=host`, 4 cores, 1024 MiB),
+`build/pve/runs/20261123T095006Z-ad12b999/serial.log`.
+
+| Metric | 0.3.0 | M2 |
+|---|---:|---:|
+| ext4 readdir 10k | 1.44 s | 193 ms |
+| ext4 readdir 2k | 13.8 ms | 40.1 ms |
+
+The 10000-name listing is 7.5x faster, above the 2x target. The guest
+logged 1256 prefetch device reads over the whole benchmark: the win comes
+from reading each inode-table block once instead of once per entry, not
+from noise. The 2000-name listing regressed from 13.8 ms to 40.1 ms: the
+batch machinery costs more per entry on the guest than it saves when the
+inode table already fits the metadata cache, and the 10000-name win dwarfs
+that cost. The read-count regression proof is `TestPrefetchListingReads`
+(6331 interleaved reads against 675 prefetch reads on the 10000-name
+fixture).
+
+The coherence fixes (staged blocks override the prefetch, a generation-bound
+decoded batch, and no raw alias on listing-only inodes) changed neither
+bound nor the guest numbers. Post-FIX run `20261123T113227Z-9fe47d6c`
+(commit `0edf9260`, same node and shape): 10k readdir 184 ms, 2k readdir
+median 39.8 ms, 1256 prefetch reads and 24664 fetches. The 10k win holds
+well above the 2x target.
+
+The second review fixed two further defects without moving the numbers: a
+reused `Inode` destination is reset before `decodeInodeInto`, and the
+mutation epoch now advances on every successful `fold()` so a partial
+multi-transaction write that later fails still invalidates decoded batches.
+Run `20261123T123647Z-ba28f0c7` (commit `36f9ed78`): 10k readdir 193 ms, 2k
+readdir median 36.0 ms, 1256 prefetch reads and 24652 fetches.

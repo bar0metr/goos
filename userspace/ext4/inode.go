@@ -147,30 +147,47 @@ func (fs *FS) readInode(number uint32) (*Inode, error) {
 }
 
 func (fs *FS) decodeInode(number uint32, raw []byte) (*Inode, error) {
-	inode := &Inode{
-		Number:     number,
-		Mode:       le16(raw, 0x0),
-		UID:        uint32(le16(raw, 0x2)) | uint32(le16(raw, 0x78))<<16,
-		Size:       join64(le32(raw, 0x4), le32(raw, 0x6C)),
-		GID:        uint32(le16(raw, 0x18)) | uint32(le16(raw, 0x7A))<<16,
-		Links:      le16(raw, 0x1A),
-		Blocks512:  join64(le32(raw, 0x1C), uint32(le16(raw, 0x74))),
-		Flags:      le32(raw, 0x20),
-		Generation: le32(raw, 0x64),
-		FileACL:    join64(le32(raw, 0x68), uint32(le16(raw, 0x76))),
-		raw:        raw,
+	inode := &Inode{}
+	if err := fs.decodeInodeInto(inode, number, raw, true); err != nil {
+		return nil, err
+	}
+	return inode, nil
+}
+
+// decodeInodeInto fills inode from raw, the on-disk bytes of inode number,
+// verifying its checksum. It resets the destination first, so a reused slot
+// cannot leak optional or internal state (raw, HasCreate, Create, ExtraIsize,
+// blockArea, csumSeed, dirty) from an earlier inode. keepRaw records whether
+// the caller keeps raw stable for the inode's lifetime: the owned-inode path
+// does, so it sets the alias for extended-attribute access; the listing
+// prefetch does not, because its raw bytes alias a cache slot a later block
+// can overwrite (ADR 0231).
+func (fs *FS) decodeInodeInto(inode *Inode, number uint32, raw []byte, keepRaw bool) error {
+	*inode = Inode{}
+	inode.Number = number
+	inode.Mode = le16(raw, 0x0)
+	inode.UID = uint32(le16(raw, 0x2)) | uint32(le16(raw, 0x78))<<16
+	inode.Size = join64(le32(raw, 0x4), le32(raw, 0x6C))
+	inode.GID = uint32(le16(raw, 0x18)) | uint32(le16(raw, 0x7A))<<16
+	inode.Links = le16(raw, 0x1A)
+	inode.Blocks512 = join64(le32(raw, 0x1C), uint32(le16(raw, 0x74)))
+	inode.Flags = le32(raw, 0x20)
+	inode.Generation = le32(raw, 0x64)
+	inode.FileACL = join64(le32(raw, 0x68), uint32(le16(raw, 0x76)))
+	if keepRaw {
+		inode.raw = raw
 	}
 	copy(inode.blockArea[:], raw[inodeBlockArea:inodeBlockArea+inodeBlockSize])
 	if len(raw) > goodOldIsize {
 		inode.ExtraIsize = le16(raw, 0x80)
 		if uint32(goodOldIsize)+uint32(inode.ExtraIsize) > uint32(len(raw)) || inode.ExtraIsize&3 != 0 {
-			return nil, corrupt("inode extra size larger than the inode")
+			return corrupt("inode extra size larger than the inode")
 		}
 	}
 	if fs.sb.HasMetadataCsum() {
 		inode.csumSeed = crc32cLE32(crc32cLE32(fs.seed, number), inode.Generation)
 		if err := fs.verifyInodeChecksum(inode, raw); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	extra := func(field int) bool { return goodOldIsize+int(inode.ExtraIsize) >= field+4 }
@@ -187,7 +204,7 @@ func (fs *FS) decodeInode(number uint32, raw []byte) (*Inode, error) {
 	} else if inode.Flags&inodeFlagHugeFile != 0 {
 		inode.Blocks512 *= uint64(fs.blockSize / 512)
 	}
-	return inode, nil
+	return nil
 }
 
 // decodeTime applies the extra field: two epoch bits extend the signed

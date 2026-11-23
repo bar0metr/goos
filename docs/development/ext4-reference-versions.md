@@ -44,4 +44,5 @@ committed bytes of the others alone.
 | `canonical` | writable profile, 4 KiB blocks, `metadata_csum`, `64bit` | files, a 2000-entry indexed directory, hard and symbolic links, a sparse file past 5 GiB, a 400-extent file, extended attributes, an unwritten extent, a non-UTF-8 name |
 | `legacy` | `uninit_bg` instead of `metadata_csum`, 32-byte descriptors | the canonical tree |
 | `hash-tea`, `hash-legacy` | writable profile, directory hash changed with `tune2fs -E hash_alg` | 1200 names, half with bytes above 0x7f |
+| `many` | writable profile, 4 KiB blocks, `metadata_csum`, `64bit` | one indexed directory of 10000 files with 16384 inodes, for the readdir prefetch regressions (ADR 0231) |
 | `blockmap-1k` | ext3-style: no extents, no `flex_bg`, 1 KiB blocks | a file reaching triple-indirect blocks, a 300-entry indexed directory |

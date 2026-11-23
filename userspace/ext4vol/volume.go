@@ -27,10 +27,32 @@ type Volume struct {
 	reason   string
 	entry    ext4.DirEntry
 	writable bool
+	// prefetch is the bounded listing state ReadDirBatch reuses across
+	// calls: a decoded batch of entries and the cursor the caller echoes
+	// back to continue it (ADR 0231).
+	prefetch dirPrefetch
+	// lastStatus keeps the counters an unmount leaves behind, so the
+	// service can log them after the volume is gone.
+	lastStatus   ext4.Status
+	lastStatusOK bool
 	// source and target hold copies of names and link targets that arrive
 	// in the shared file cache.
 	source [ext4.MaxNameLength]byte
 	target [ramfs.MaxLinkTarget]byte
+}
+
+// dirPrefetch holds the batch ReadDirBatch decodes: entries in cursor order
+// with their validated inodes, and the mutation epoch they came from. A call
+// that names another parent, a cursor the batch does not cover, or a volume
+// that mutated since the batch was decoded refills it (ADR 0208, ADR 0231).
+type dirPrefetch struct {
+	parent  ramfs.NodeID
+	epoch   uint64
+	count   int
+	at      int
+	end     bool
+	entries [ext4.MaxReaddirPrefetchEntries]ext4.DirEntry
+	inodes  [ext4.MaxReaddirPrefetchEntries]ext4.Inode
 }
 
 // Mount checks the volume on device read-only and remembers the outcome.
@@ -351,29 +373,82 @@ func (volume *Volume) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int
 }
 
 func (volume *Volume) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byte) (ramfs.DirBatch, ramfs.Status) {
+	if volume.fs == nil {
+		return ramfs.DirBatch{}, ramfs.StatusIOError
+	}
+	if cursor < 0 {
+		return ramfs.DirBatch{}, ramfs.StatusInvalidArgument
+	}
 	batch := ramfs.DirBatch{Next: cursor}
-	end, status := volume.listing(parent, cursor, func(inode *ext4.Inode, name []byte, after int) bool {
-		if batch.Count == ramfs.MaxDirBatch {
-			return false
+	state := &volume.prefetch
+	// A continuing call seeks the decoded batch to the cursor; the caller
+	// may stop mid-batch (ADR 0208), so the cursor can name an entry
+	// inside the batch, behind the last one this call emitted. Any other
+	// parent, a cursor outside the batch, or a mutation since the batch
+	// was decoded refills it, fetching the batch's inode-table blocks in
+	// grouped order (ADR 0231).
+	at := state.seek(cursor)
+	epoch := volume.fs.MutationEpoch()
+	if state.parent != parent || state.epoch != epoch || at < 0 || at >= state.count {
+		dir, status := volume.inode(parent)
+		if status != ramfs.StatusOK {
+			return batch, status
 		}
+		if !dir.IsDir() {
+			return batch, ramfs.StatusNotDirectory
+		}
+		if dir.Size > 0xFFFFFFFF {
+			return batch, ramfs.StatusUnsupported
+		}
+		count, _, end, err := volume.fs.PrefetchDir(volume.fs.List(), dir, uint64(cursor), &state.entries, &state.inodes)
+		if err != nil {
+			if ext4.KindOf(err) == ext4.KindStale {
+				return batch, ramfs.StatusCorrupt
+			}
+			return batch, statusOf(err)
+		}
+		state.parent, state.epoch, state.count, state.at, state.end = parent, epoch, count, 0, end
+	} else {
+		state.at = at
+	}
+	for state.at < state.count {
+		entry := &state.entries[state.at]
+		inode := &state.inodes[state.at]
+		after := int(entry.Offset) + 1
 		entryStat := stat(inode)
-		written := ramfs.AppendDirRecord(target[batch.Used:], &entryStat, after, name)
+		written := ramfs.AppendDirRecord(target[batch.Used:], &entryStat, after, entry.Name())
 		if written == 0 {
-			return false
+			break
 		}
 		batch.Used += written
 		batch.Count++
 		batch.Next = after
-		return true
-	})
-	if status != ramfs.StatusOK {
-		if batch.Count != 0 {
-			return batch, ramfs.StatusOK
-		}
-		return batch, status
+		state.at++
 	}
-	batch.End = end
+	if state.at == state.count && state.end {
+		batch.End = true
+	}
 	return batch, ramfs.StatusOK
+}
+
+// seek returns the index of the first entry whose cursor is after cursor, or
+// -1 when the batch does not cover cursor: it is empty, or cursor names a
+// position before the batch's first entry. The entries are in cursor order,
+// so a binary search finds the resume point.
+func (state *dirPrefetch) seek(cursor int) int {
+	if state.count == 0 || cursor < int(state.entries[0].Offset) {
+		return -1
+	}
+	low, high := 0, state.count
+	for low < high {
+		middle := (low + high) / 2
+		if int(state.entries[middle].Offset)+1 <= cursor {
+			low = middle + 1
+		} else {
+			high = middle
+		}
+	}
+	return low
 }
 
 // AcquireObject and ReleaseObject confirm the object is still the one the
@@ -770,6 +845,7 @@ func (volume *Volume) Unmount() ramfs.Status {
 	if volume.fs == nil {
 		return ramfs.StatusIOError
 	}
+	volume.lastStatus, volume.lastStatusOK = volume.fs.Status(), true
 	err := volume.fs.Unmount()
 	volume.fs, volume.writable = nil, false
 	if err != nil {
@@ -779,11 +855,12 @@ func (volume *Volume) Unmount() ramfs.Status {
 	return ramfs.StatusOK
 }
 
-// Status reports the engine's mount state and counters, or false when no
-// volume is mounted.
+// Status reports the engine's mount state and counters. After an unmount it
+// reports the counters the unmount left, and false only when nothing ever
+// mounted.
 func (volume *Volume) Status() (ext4.Status, bool) {
-	if volume.fs == nil {
-		return ext4.Status{}, false
+	if volume.fs != nil {
+		return volume.fs.Status(), true
 	}
-	return volume.fs.Status(), true
+	return volume.lastStatus, volume.lastStatusOK
 }

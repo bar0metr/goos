@@ -61,6 +61,7 @@ type FS struct {
 	sb          *Superblock
 	device      Device
 	cache       blockCache
+	list        ListPrefetch
 	blockSize   uint32
 	groups      uint64
 	seed        uint32
@@ -84,6 +85,11 @@ type FS struct {
 	now     func() Timestamp
 	commits uint64
 	log     *journalLog
+	// mutationEpoch counts the mutations that folded into the pending
+	// transaction. Listing state that decoded a snapshot before the last
+	// one is stale (ADR 0231). It is in-memory coherence only, not volume
+	// state.
+	mutationEpoch uint64
 	// orphans is the committed orphan list, head first; pins counts the
 	// callers holding each inode open.
 	orphans []uint32
@@ -172,6 +178,7 @@ func probe(device Device, checksum bool) (*FS, error) {
 // superblock.
 func (fs *FS) open() error {
 	fs.cache.init(fs.device, fs.blockSize, fs.sb.BlocksCount)
+	fs.list.init(fs.blockSize)
 	fs.scratch = make([]byte, fs.blockSize)
 	if err := fs.validateGroups(); err != nil {
 		return err
@@ -221,6 +228,7 @@ func (fs *FS) mountWritable(options Options) (*FS, error) {
 	fs.now = options.Clock
 	fs.state = StateRecovering
 	fs.cache.init(fs.device, fs.blockSize, fs.sb.BlocksCount)
+	fs.list.init(fs.blockSize)
 	fs.scratch = make([]byte, fs.blockSize)
 	fs.beforeReplay = true
 	inode, err := fs.journalInode()
@@ -461,6 +469,10 @@ func (fs *FS) Superblock() *Superblock { return fs.sb }
 // State reports where the volume stands.
 func (fs *FS) State() State { return fs.state }
 
+// MutationEpoch reports the in-memory mutation generation, so a caller that
+// cached decoded state can drop it after the volume changed.
+func (fs *FS) MutationEpoch() uint64 { return fs.mutationEpoch }
+
 // Root returns the root directory inode.
 func (fs *FS) Root() (*Inode, error) { return fs.Inode(RootInode) }
 
@@ -608,6 +620,10 @@ type Status struct {
 	Journal     Journal
 	CacheReads  uint64
 	CacheHits   uint64
+	// PrefetchReads counts the device reads the listing prefetch issued;
+	// PrefetchFetches the distinct blocks it read or hit.
+	PrefetchReads   uint64
+	PrefetchFetches uint64
 	// Commits counts the transactions this mount committed; Recovery is
 	// what a writable mount replayed and cleaned up before it.
 	Commits  uint64
@@ -620,17 +636,19 @@ type Status struct {
 // Status reports the volume's mount state and counters.
 func (fs *FS) Status() Status {
 	return Status{
-		State:         fs.state,
-		Negotiation:   fs.negotiation,
-		Features:      fs.sb.Features,
-		SBState:       fs.sb.State,
-		ErrorCount:    fs.sb.ErrorCount,
-		LastOrphan:    fs.sb.LastOrphan,
-		Journal:       fs.journal,
-		CacheReads:    fs.cache.reads,
-		CacheHits:     fs.cache.hits,
-		Commits:       fs.commits,
-		PendingBlocks: fs.pendingBlocks(),
-		Recovery:      fs.recovery,
+		State:           fs.state,
+		Negotiation:     fs.negotiation,
+		Features:        fs.sb.Features,
+		SBState:         fs.sb.State,
+		ErrorCount:      fs.sb.ErrorCount,
+		LastOrphan:      fs.sb.LastOrphan,
+		Journal:         fs.journal,
+		CacheReads:      fs.cache.reads,
+		CacheHits:       fs.cache.hits,
+		PrefetchReads:   fs.list.reads,
+		PrefetchFetches: fs.list.fetches,
+		Commits:         fs.commits,
+		PendingBlocks:   fs.pendingBlocks(),
+		Recovery:        fs.recovery,
 	}
 }

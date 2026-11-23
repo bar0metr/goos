@@ -173,6 +173,7 @@ var fixtureManifests = []struct{ image, manifest string }{
 	{"hash-legacy", "hash.manifest.tsv"},
 	{"blockmap-1k", "blockmap.manifest.tsv"},
 	{"links", "links.manifest.tsv"},
+	{"many", "many.manifest.tsv"},
 }
 
 // TestFixturesMatchManifest compares every name, type, size, content hash

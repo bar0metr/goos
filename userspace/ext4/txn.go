@@ -212,6 +212,13 @@ func (fs *FS) fold() error {
 	}
 	fs.txn = nil
 	fs.cache.overlay = nil
+	// The folded state is visible through the pending transaction the
+	// moment the running layer moved into it; bump the generation so
+	// listing snapshots taken before cannot be reused (ADR 0231). A
+	// high-level operation that spans several transactions advances it once
+	// per fold, so a later failure still leaves the earlier prefix visible
+	// and the epoch advanced.
+	fs.mutationEpoch++
 	return nil
 }
 
@@ -486,6 +493,9 @@ func (fs *FS) commitPending() error {
 	for _, block := range meta {
 		fs.cache.update(block, t.blocks[block].data)
 	}
+	// A commit may have rewritten inode-table or bitmap blocks the listing
+	// prefetch copied; drop them so the next listing reads fresh data.
+	fs.list.invalidate()
 	fs.sb.FreeBlocks = uint64(int64(fs.sb.FreeBlocks) + t.freeBlocks)
 	fs.sb.FreeInodes = uint32(int64(fs.sb.FreeInodes) + t.freeInodes)
 	if t.orphansEdited {

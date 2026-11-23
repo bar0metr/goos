@@ -210,6 +210,7 @@ func userspaceMain() {
 		status, _ := volume.Status()
 		syslog.Info("volume mounted", syslog.Uint("capacity-mib", blockCapacity>>20), syslog.Str("mode", mode),
 			syslog.Uint("replayed", uint64(status.Recovery.Transactions)), syslog.Uint("orphans", uint64(status.Recovery.Orphans)))
+		logCounters()
 	} else {
 		syslog.Error("volume refused", syslog.Str("reason", volume.Refusal()))
 		mark("EXT4_VOLUME_REFUSED\n")
@@ -244,8 +245,10 @@ func userspaceMain() {
 		}
 		if ready.ReadyMask&2 != 0 {
 			// The block service restarted, or PID 1 unmounted the volume
-			// and closed the slot: either way this instance is done.
-			syslog.Warn("block endpoint closed")
+			// and closed the slot: either way this instance is done. The
+			// cache counters in the log let a benchmark attribute readdir
+			// time to device reads (ADR 0231).
+			logCounters()
 			sys.Exit(exitBlockGone)
 		}
 		status := sys.IPCReceive(vfsHandle, wire[:])
@@ -257,6 +260,7 @@ func userspaceMain() {
 			// holds before PID 1 replaces this instance.
 			volume.Flush()
 			syslog.Warn("vfs endpoint closed")
+			logCounters()
 			sys.Exit(exitVFSGone)
 		}
 		if status != kcall.StatusOK {
@@ -280,6 +284,16 @@ func exitIfFailed() {
 	}
 }
 
+// logCounters reports the volume's cache and listing-prefetch counters so a
+// benchmark run can attribute readdir time to device reads (ADR 0231). The
+// wire record caps fields at 96 bytes, so the counters travel in two lines.
+func logCounters() {
+	if status, ok := volume.Status(); ok {
+		syslog.Warn("counters", syslog.Uint("cache-reads", status.CacheReads), syslog.Uint("cache-hits", status.CacheHits))
+		syslog.Warn("prefetch", syslog.Uint("reads", status.PrefetchReads), syslog.Uint("fetches", status.PrefetchFetches))
+	}
+}
+
 // ticks reads the monotonic clock. A failed read reports the largest
 // time, so the service commits at once instead of waiting on a clock it
 // cannot read.
@@ -294,6 +308,11 @@ func ticks() uint64 {
 func serve() {
 	request, valid := fsproto.DecodeRequest(&requestMessage, cache, &requestedName)
 	var reply fsproto.Reply
+	if valid && request.Operation == fsproto.OperationUnmount {
+		// The counters come before the unmount clears the volume, so the
+		// run log keeps the listing's device-read attribution (ADR 0231).
+		logCounters()
+	}
 	if !valid {
 		operation := fsproto.Operation(requestMessage.Payload[0])
 		if requestMessage.Correlation == 0 || operation < fsproto.OperationMount || operation > fsproto.OperationUnmount {
