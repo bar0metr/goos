@@ -42,11 +42,12 @@ type Volume struct {
 }
 
 // dirPrefetch holds the batch ReadDirBatch decodes: entries in cursor order
-// with their validated inodes. A call that names another parent, or names a
-// cursor the batch does not cover, refills it; otherwise the call seeks the
-// batch to the cursor, which may stop mid-batch (ADR 0208).
+// with their validated inodes, and the mutation epoch they came from. A call
+// that names another parent, a cursor the batch does not cover, or a volume
+// that mutated since the batch was decoded refills it (ADR 0208, ADR 0231).
 type dirPrefetch struct {
 	parent  ramfs.NodeID
+	epoch   uint64
 	count   int
 	at      int
 	end     bool
@@ -383,10 +384,12 @@ func (volume *Volume) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byt
 	// A continuing call seeks the decoded batch to the cursor; the caller
 	// may stop mid-batch (ADR 0208), so the cursor can name an entry
 	// inside the batch, behind the last one this call emitted. Any other
-	// parent or a cursor outside the batch refills it, fetching the
-	// batch's inode-table blocks in grouped order (ADR 0231).
+	// parent, a cursor outside the batch, or a mutation since the batch
+	// was decoded refills it, fetching the batch's inode-table blocks in
+	// grouped order (ADR 0231).
 	at := state.seek(cursor)
-	if state.parent != parent || at < 0 || at >= state.count {
+	epoch := volume.fs.MutationEpoch()
+	if state.parent != parent || state.epoch != epoch || at < 0 || at >= state.count {
 		dir, status := volume.inode(parent)
 		if status != ramfs.StatusOK {
 			return batch, status
@@ -404,7 +407,7 @@ func (volume *Volume) ReadDirBatch(parent ramfs.NodeID, cursor int, target []byt
 			}
 			return batch, statusOf(err)
 		}
-		state.parent, state.count, state.at, state.end = parent, count, 0, end
+		state.parent, state.epoch, state.count, state.at, state.end = parent, epoch, count, 0, end
 	} else {
 		state.at = at
 	}

@@ -148,16 +148,18 @@ func (fs *FS) readInode(number uint32) (*Inode, error) {
 
 func (fs *FS) decodeInode(number uint32, raw []byte) (*Inode, error) {
 	inode := &Inode{}
-	if err := fs.decodeInodeInto(inode, number, raw); err != nil {
+	if err := fs.decodeInodeInto(inode, number, raw, true); err != nil {
 		return nil, err
 	}
 	return inode, nil
 }
 
 // decodeInodeInto fills inode from raw, the on-disk bytes of inode number,
-// verifying its checksum. raw must stay readable for as long as the decoded
-// inode keeps its raw alias.
-func (fs *FS) decodeInodeInto(inode *Inode, number uint32, raw []byte) error {
+// verifying its checksum. keepRaw records whether the caller keeps raw
+// stable for the inode's lifetime: the owned-inode path does, so it sets the
+// alias for extended-attribute access; the listing prefetch does not, because
+// its raw bytes alias a cache slot a later block can overwrite (ADR 0231).
+func (fs *FS) decodeInodeInto(inode *Inode, number uint32, raw []byte, keepRaw bool) error {
 	inode.Number = number
 	inode.Mode = le16(raw, 0x0)
 	inode.UID = uint32(le16(raw, 0x2)) | uint32(le16(raw, 0x78))<<16
@@ -168,7 +170,9 @@ func (fs *FS) decodeInodeInto(inode *Inode, number uint32, raw []byte) error {
 	inode.Flags = le32(raw, 0x20)
 	inode.Generation = le32(raw, 0x64)
 	inode.FileACL = join64(le32(raw, 0x68), uint32(le16(raw, 0x76)))
-	inode.raw = raw
+	if keepRaw {
+		inode.raw = raw
+	}
 	copy(inode.blockArea[:], raw[inodeBlockArea:inodeBlockArea+inodeBlockSize])
 	if len(raw) > goodOldIsize {
 		inode.ExtraIsize = le16(raw, 0x80)

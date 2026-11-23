@@ -85,6 +85,11 @@ type FS struct {
 	now     func() Timestamp
 	commits uint64
 	log     *journalLog
+	// mutationEpoch counts the mutations that folded into the pending
+	// transaction. Listing state that decoded a snapshot before the last
+	// one is stale (ADR 0231). It is in-memory coherence only, not volume
+	// state.
+	mutationEpoch uint64
 	// orphans is the committed orphan list, head first; pins counts the
 	// callers holding each inode open.
 	orphans []uint32
@@ -463,6 +468,10 @@ func (fs *FS) Superblock() *Superblock { return fs.sb }
 
 // State reports where the volume stands.
 func (fs *FS) State() State { return fs.state }
+
+// MutationEpoch reports the in-memory mutation generation, so a caller that
+// cached decoded state can drop it after the volume changed.
+func (fs *FS) MutationEpoch() uint64 { return fs.mutationEpoch }
 
 // Root returns the root directory inode.
 func (fs *FS) Root() (*Inode, error) { return fs.Inode(RootInode) }

@@ -91,11 +91,16 @@ func (prefetch *ListPrefetch) invalidate() {
 }
 
 // fetch returns block's contents, reading it once from the device into the
-// prefetch. The returned slice stays valid until a later fetch evicts the
-// slot; the batch decodes everything it needs before its next fetch.
+// prefetch. A transaction-staged copy wins over any resident prefetch copy:
+// the running or pending transaction holds newer metadata, and the prefetch
+// must never hide it (ADR 0231). The returned slice stays valid for the
+// duration of the PrefetchDir call that fetched it.
 func (fs *FS) prefetchBlock(prefetch *ListPrefetch, block uint64) ([]byte, error) {
 	if block >= fs.cache.limit {
 		return nil, corrupt("block number beyond the volume")
+	}
+	if staged := fs.cache.staged(block); staged != nil {
+		return staged.data, nil
 	}
 	prefetch.clock++
 	prefetch.fetches++
@@ -115,13 +120,9 @@ func (fs *FS) prefetchBlock(prefetch *ListPrefetch, block uint64) ([]byte, error
 		}
 	}
 	victim.valid = false
-	if staged := fs.cache.staged(block); staged != nil {
-		copy(victim.data, staged.data)
-	} else {
-		prefetch.reads++
-		if !fs.cache.device.ReadAt(block*fs.cache.size, victim.data) {
-			return nil, errIO
-		}
+	prefetch.reads++
+	if !fs.cache.device.ReadAt(block*fs.cache.size, victim.data) {
+		return nil, errIO
 	}
 	victim.block, victim.stamp, victim.valid = block, prefetch.clock, true
 	return victim.data, nil
@@ -132,9 +133,9 @@ func (fs *FS) prefetchBlock(prefetch *ListPrefetch, block uint64) ([]byte, error
 // inode-table block, fetches each block once through prefetch and decodes
 // the inodes while the block is resident. It returns the entries and their
 // decoded, checksum-verified inodes in cursor order, the cursor to continue
-// from, and whether the walk reached the directory end. The caller walks
-// the returned range in order; the inode's raw bytes alias the prefetch
-// blocks and stay valid until the next PrefetchDir call.
+// from, and whether the walk reached the directory end. The decoded inodes
+// carry every scalar field stat needs but no raw-block alias: the raw bytes
+// belong to a cache slot the batch may overwrite (ADR 0231).
 func (fs *FS) PrefetchDir(prefetch *ListPrefetch, dir *Inode, cursor uint64, entries *[MaxReaddirPrefetchEntries]DirEntry, inodes *[MaxReaddirPrefetchEntries]Inode) (count int, next uint64, end bool, err error) {
 	if !dir.IsDir() {
 		return 0, 0, false, fail(KindNotDirectory, "")
@@ -204,7 +205,7 @@ func (fs *FS) PrefetchDir(prefetch *ListPrefetch, dir *Inode, cursor uint64, ent
 		for at < count && locations[order[at]].block == block {
 			index := order[at]
 			raw := data[locations[index].within : locations[index].within+int(isize)]
-			if err := fs.decodeInodeInto(&inodes[index], entries[index].Inode, raw); err != nil {
+			if err := fs.decodeInodeInto(&inodes[index], entries[index].Inode, raw, false); err != nil {
 				return 0, 0, false, err
 			}
 			at++
