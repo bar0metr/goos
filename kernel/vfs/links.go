@@ -37,15 +37,6 @@ func holdsLinks(backend Backend, filesystem ramfs.FilesystemType) bool {
 	return filesystem != ramfs.FilesystemFAT32 && filesystem != ramfs.FilesystemSystemImage
 }
 
-// lastComponent returns where the last component of a canonical path starts.
-func lastComponent(path []byte) int {
-	index := len(path)
-	for index > 0 && path[index-1] != '/' {
-		index--
-	}
-	return index
-}
-
 func (namespace *Namespace) anyLinks() bool {
 	for index := range namespace.mounts {
 		if entry := &namespace.mounts[index]; entry.used && entry.links {
@@ -243,7 +234,7 @@ func (namespace *Namespace) Symlink(path []byte, target []byte) Status {
 		return StatusUnsupported
 	}
 	_, status = mapNodeResult(links.SymlinkName(parent, name, target))
-	namespace.invalidate()
+	namespace.invalidateMutation(mountIndex, parent, name)
 	return status
 }
 
@@ -287,6 +278,6 @@ func (namespace *Namespace) Link(path []byte, target []byte) Status {
 		return StatusUnsupported
 	}
 	status = mapStatus(links.LinkName(node, parent, name))
-	namespace.invalidate()
+	namespace.invalidateMutation(targetMount, parent, name)
 	return status
 }

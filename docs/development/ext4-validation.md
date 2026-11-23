@@ -157,3 +157,37 @@ otherwise. Metadata from the disk cannot raise them.
   identity, decides what the volume holds (ADR 0222, ADR 0226).
 - A mounted partition must not be open in Linux or another GoOS instance
   at the same time.
+
+## M1 pathname-cache results
+
+The M1 component cache (ADR 0230) replaced the resolved-path cache. Its
+KVM results below are five-round `fsbench` medians extracted from the
+run's `serial.log` (the guest's own output), not from a report summary.
+
+| Metric | 0.3.0 | pre-FIX3 M1 | FIX3 |
+|---|---:|---:|---:|
+| ext4 deep 100 | ~830 ms | 324.747 ms | 92.7 ms |
+| ext4 stat | ~150 µs | 196.0 µs | 163.7 µs |
+| ext4 readdir 2k | 13.8 ms | 16.406 ms | 14.5 ms |
+| ext4 create | 930 µs | 887.7 µs | 807.2 µs |
+| ext4 1 proc | 551 ops/s | 608.5 ops/s | 680.4 ops/s |
+| RAMFS deep 100 | ~90 ms | 268.770 ms | 29.3 ms |
+| RAMFS stat | ~100 µs | 142.8 µs | 95.7 µs |
+| RAMFS 1 proc | ~2175 ops/s | 1655.7 ops/s | 2424.0 ops/s |
+
+Numbers above: 0.3.0 from the table above this section; pre-FIX3 M1 from
+`make test-pve-ext4` run `20261122T194609Z-acfb74b5` (commit `8eccc53f`,
+node `suptests`, `cpu=host`, 4 cores, 1024 MiB); FIX3 from run
+`20261122T214955Z-e59b9c3c` (commit `8a3edcc6`, same node and shape),
+`build/pve/runs/20261122T214955Z-e59b9c3c/serial.log`.
+
+The first set-associative geometry, 32 sets × 4 ways with a raw FNV-1a
+low-bit hash, failed the deep target: ext4 inode numbers
+(`group*InodesPerGroup+index`) vary little in the low bytes, so the
+deep path's same-named components collapsed into 13 sets of exactly 8
+keys, overfilling the 4 ways and re-walking the prefix through
+filesystem IPC (deep ~9 s). The fmix64 avalanche, the 64 × 8 geometry,
+and two hot-path fixes (no 896-byte set-array copy per lookup, and the
+1 KiB `ramfs.Name` built only on a cache miss) close the target:
+deep 92.7 ms is ~9x the 0.3.0 baseline, and RAMFS deep 29.3 ms is
+faster than 0.3.0's 90 ms.
