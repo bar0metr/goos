@@ -27,9 +27,11 @@ batch by inode-table block, reads each distinct block once through the
 prefetch (a per-set LRU evicts when full), and decodes each inode while its
 block is resident. The entries and their decoded, checksum-verified inodes
 come back in cursor order, so the listing order and cursor semantics are
-unchanged. The prefetch persists across `ReadDirBatch` calls: the volume
-adapter keeps the decoded batch and continues consuming it when the next call
-echoes the expected cursor, and refills otherwise.
+unchanged. The volume adapter keeps the decoded batch across `ReadDirBatch`
+calls and seeks it to the cursor the caller echoes. The caller may stop
+mid-batch (ADR 0208), so the cursor can name an entry inside the batch; the
+adapter resumes there instead of refilling. A cursor the batch does not
+cover refills it.
 
 **Validation.** Every check the per-entry path runs still runs: the inode
 bitmap allocation check happens in cursor order before any decode, so a stale
@@ -57,15 +59,21 @@ directory refills the batch more often and evicts prefetch blocks by LRU.
   6331 for the interleaved walk against 675 for the prefetch, an
   9.4x reduction; the assertion requires at least 4x.
 - `TestPrefetchPreservesHardLinksAndSpecialFiles` and the adapter tests
-  `TestReadDirBatchManyDirectory`, `TestReadDirBatchInterleavedStreams` and
-  `TestReadDirBatchMatchesSingleEntry` cover order, continuation across byte
-  budgets, interleaved listing streams, hard-link identity and special-file
+  `TestReadDirBatchManyDirectory`, `TestReadDirBatchInterleavedStreams`,
+  `TestReadDirBatchLaggingCursor` and `TestReadDirBatchMatchesSingleEntry`
+  cover order, continuation across byte budgets, a client that stops
+  mid-batch, interleaved listing streams, hard-link identity and special-file
   metadata.
 - `TestFixturesMatchManifest` covers the new `many` fixture (10000 files in
   one indexed directory, 16384 inodes, built by the pinned mke2fs 1.47.2 and
   checked with `e2fsck -fn`).
-- The KVM `fsbench` 10000-name readdir measurement is recorded in
-  docs/development/ext4-validation.md.
+- The KVM `fsbench` run `20261123T095006Z-ad12b999` (commit `ea788082`)
+  lists 10000 names in 193 ms against the 0.3.0 baseline of about 1.44 s,
+  7.5x faster. The guest logged 1256 prefetch device reads for the whole
+  benchmark, so the win comes from fewer inode-table reads, not from noise.
+  The 2000-name listing measured 40 ms against a 14.5 ms baseline: the batch
+  machinery adds per-entry work on the guest that the 10000-name win
+  dominates. The numbers are recorded in docs/development/ext4-validation.md.
 
 ## Consequences
 
