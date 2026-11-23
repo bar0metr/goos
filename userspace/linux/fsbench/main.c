@@ -55,6 +55,8 @@
 #define REPLACE_OPS 200
 #define SPARSE_OFFSET (5LL << 30)
 #define DEEP_LEVELS 100
+#define READONLY_FILES 2000
+#define READONLY_ROUNDS 4000
 
 struct listed {
 	unsigned long long inode;
@@ -494,6 +496,116 @@ static void worker(const char *dir, int rounds)
 	}
 }
 
+/* readonly_worker does one read-only lookup/stat/read round: open a file by
+ * name, read one 4 KiB block, fstat it, and close it. */
+static void readonly_worker(const char *dir, int files, int rounds)
+{
+	char path[512];
+	struct stat st;
+	unsigned char block[BLOCK];
+	int fd;
+
+	for (int i = 0; i < rounds; i++) {
+		numbered(path, dir, i % files);
+		fd = open(path, O_RDONLY);
+		if (fd < 0)
+			die("read-only open");
+		if (read(fd, block, BLOCK) != BLOCK)
+			die("read-only read");
+		if (syscall(SYS_fstat, fd, &st) != 0)
+			die("read-only fstat");
+		if (close(fd) != 0)
+			die("read-only close");
+	}
+}
+
+/* bench_readonly runs 1, 2, 4 and 8 concurrent processes, each looping over
+ * open/read/fstat/close of a shared set of 4 KiB files, and reports the
+ * aggregate lookup/stat/read rate per client count. */
+static void bench_readonly(int scale)
+{
+	char group[512], dirs[8][512], name[16], path[512];
+	pid_t children[8];
+	long long start, elapsed, ops;
+	int files = READONLY_FILES * scale;
+	int rounds = READONLY_ROUNDS * scale;
+	int started = 0, status, refused = 0;
+	char per[32], rate[32];
+
+	snprintf(name, sizeof name, "readonly");
+	join(group, base, name);
+	make_dir(group);
+	for (int i = 0; i < files; i++) {
+		numbered(path, group, i);
+		int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+
+		if (fd < 0)
+			die("read-only create");
+		write_full(fd, buffer, BLOCK, "read-only create");
+		if (close(fd) != 0)
+			die("read-only create close");
+	}
+	sync_dir(group, "read-only fsync");
+	for (int procs = 1; procs <= 8; procs *= 2) {
+		snprintf(name, sizeof name, "p%d", procs);
+		join(dirs[0], group, name);
+		make_dir(dirs[0]);
+		for (int i = 1; i < procs; i++) {
+			snprintf(name, sizeof name, "w%d", i);
+			join(dirs[i], group, name);
+			make_dir(dirs[i]);
+		}
+		fflush(stdout);
+		start = now_us();
+		for (; started < procs; started++) {
+			children[started] = fork();
+			if (children[started] < 0) {
+				refused = errno;
+				break;
+			}
+			if (children[started] == 0) {
+				readonly_worker(group, files, rounds);
+				_exit(0);
+			}
+		}
+		for (int i = 0; i < started; i++) {
+			if (waitpid(children[i], &status, 0) != children[i])
+				die("read-only wait");
+			if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+				errno = ECHILD;
+				die("read-only worker");
+			}
+		}
+		elapsed = now_us() - start;
+		started = 0;
+		for (int i = 0; i < procs; i++)
+			if (rmdir(dirs[i]) != 0)
+				die("read-only rmdir");
+		if (refused == ENOSYS || refused == EAGAIN) {
+			printf("bench read-only procs=%d skipped=%s\n", procs, refused == ENOSYS ? "ENOSYS" : "EAGAIN");
+			refused = 0;
+			continue;
+		}
+		if (refused) {
+			errno = refused;
+			die("read-only fork");
+		}
+		ops = (long long)procs * rounds;
+		tenths(per, elapsed, ops);
+		tenths(rate, ops * 1000000LL, elapsed);
+		printf("bench read-only procs=%d ops=%lld us=%lld us_per_op=%s ops_s=%s\n", procs, ops, elapsed, per,
+		       rate);
+	}
+	for (int i = 0; i < files; i++) {
+		numbered(path, group, i);
+		if (unlink(path) != 0)
+			die("read-only unlink");
+	}
+	sync_dir(group, "read-only unlink fsync");
+	if (rmdir(group) != 0)
+		die("read-only rmdir");
+}
+
 static void bench_parallel(int procs, int rounds)
 {
 	char group[512], dirs[8][512], name[16];
@@ -601,6 +713,7 @@ int main(int argc, char **argv)
 	bench_sync();
 	bench_replace();
 	bench_sparse();
+	bench_readonly((int)scale);
 	for (int procs = 1; procs <= 8; procs *= 2)
 		bench_parallel(procs, 200 * (int)scale);
 

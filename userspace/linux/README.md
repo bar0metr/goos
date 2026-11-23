@@ -155,7 +155,7 @@ Linker flags:
 | `prebuilt/tty-probe` | `5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957` |
 | `prebuilt/netprobe` | `dca2339b9c61ea9f190613aa58b6289e6166a58463e1a4441bfd8ba661d742cb` |
 | `prebuilt/pie-probe` | `4e1822fc5fd6c174726c8751cabb0c298e67adfa46e7a82c9b425732b00c7144` |
-| `prebuilt/fsbench` | `5b6ec1f4dc8f2fa205579a2c11065da0bf6ca22ca71d40f4817dd4aa8664d083` |
+| `prebuilt/fsbench` | `bf9bb8944c88721848e9a88e9e2603bb7b6d69082fb6342b628cea9e563ddf80` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF
@@ -368,6 +368,7 @@ the `fsync` that ends a workload.
 | `replace` | 200 rounds of `open(O_CREAT\|O_TRUNC)`, 4 KiB write, `fsync`, `close`, and `rename` over a fixed name |
 | `sparse` | one byte at 5 GiB in a new file, `fstat`, and a `pread` of that byte |
 | `parallel` | for 1, 2, 4 and 8 forked processes, each in its own directory, `200*SCALE` rounds of create, 4 KiB write, close and unlink; `us_per_op` and `ops_s` cover all processes |
+| `read-only` | for 1, 2, 4 and 8 forked processes, each looping `READONLY_ROUNDS*SCALE` rounds of `open`, a 4 KiB `read`, `fstat` and `close` over `READONLY_FILES*SCALE` files; `ops_s` is the aggregate lookup/stat/read rate |
 
 `fsbench DIR fill` fills the file system instead: it writes 1 MiB pieces
 into one file until a write fails with `ENOSPC`, prints `bench fill
