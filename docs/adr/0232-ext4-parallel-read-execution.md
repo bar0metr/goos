@@ -74,6 +74,12 @@ directory bytes it needs while it holds the set lock, so the returned slice is
 owned, not borrowed; the shared block is never parsed after the lock drops.
 `overlay` and `base` are only mutated by the owner under the mutation barrier.
 
+The read workers share the owner's `FS`: a per-worker read-only mount is
+rejected here, because a read-only mount refuses a volume the owner holds
+read-write (the writable mount sets `incompatRecover`, so a second read-only
+mount answers `KindNeedsRecovery`). Shared decode state with a synchronized
+cache is the only path that sees the owner's committed and pending state.
+
 The readdir prefetch (`ListPrefetch`) and the decoded `dirPrefetch` batch stay
 on the owner for this milestone: directory listing already runs in bounded
 batches (ADR 0231), and parallelizing it does not gate the 1/2/4/8-client
