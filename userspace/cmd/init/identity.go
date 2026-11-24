@@ -25,9 +25,6 @@ const (
 	// identityDirectory is the one path identityd may touch: its snapshot
 	// file and any safesave temp file live under it (ADR 0233).
 	identityDirectory = "/state/identity"
-	// identityScopeSlot is the single scope slot identityd's VFS session
-	// grants. Scope slots are never recycled within a namespace.
-	identityScopeSlot = 0
 	// identityControlDeadline bounds the wait for identityd's control reply.
 	identityControlDeadline = 2 * clock.TicksPerSecond
 )
@@ -37,10 +34,6 @@ var (
 	identityControl handle.ID
 	// identityProcess is kept so recovery can stop the service.
 	identityProcess handle.ID
-	// identityScopeInstalled says the /state/identity subtree scope is bound
-	// in the current namespace. A VFS restart clears it, as it does the
-	// remoted scopes.
-	identityScopeInstalled bool
 )
 
 // startIdentity registers and starts identityd. It runs only in normal mode,
@@ -102,39 +95,24 @@ func abortIdentityGrants(spec *supervisor.LaunchSpec) {
 	identityControl = 0
 }
 
-// openIdentityVFS installs the /state/identity scope if the namespace does not
-// have it yet, then opens the confined session identityd runs against.
+// openIdentityVFS creates /state/identity and opens identityd's VFS session
+// rooted there. The root confines the session to /state/identity and below;
+// it does not use a scope slot, because remoted's host-key protection owns the
+// shared slots and a bound slot cannot be replaced.
 func openIdentityVFS() (handle.ID, string) {
-	if !ensureIdentityScope() {
-		return 0, "IDENTITY_SCOPE_INSTALL_FAILED"
-	}
-	authority := vfs.Authority{Confined: true}
-	authority.Grants[identityScopeSlot] = vfs.Read | vfs.Write
-	return openIdentityAuthoritySession(authority)
-}
-
-// ensureIdentityScope creates /state/identity and binds scope slot
-// identityScopeSlot to it as a subtree denied Read|Write, once per namespace.
-func ensureIdentityScope() bool {
-	if identityScopeInstalled {
-		return true
-	}
 	files, reason := openVFSSession()
 	if reason != "" {
-		return false
+		return 0, reason
 	}
 	defer closeOpen(files)
 	if !ensureIdentityDirectory(files) {
-		return false
+		return 0, "IDENTITY_DIRECTORY_FAILED"
 	}
-	correlation++
-	request, ok := vfs.InstallScopeRequest(identityScopeSlot, []byte(identityDirectory), true, vfs.Read|vfs.Write, 0, correlation)
-	if !ok {
-		return false
+	authority, valid := vfs.RootedAuthority([]byte(identityDirectory))
+	if !valid {
+		return 0, "IDENTITY_ROOT_INVALID"
 	}
-	result, status, _ := filesystemRequests.Control(handle.ID(vfsControlHandle), &request, vfsSessionDeadline)
-	identityScopeInstalled = status == ipc.StatusOK && result == vfs.StatusOK
-	return identityScopeInstalled
+	return openIdentityAuthoritySession(authority)
 }
 
 // ensureIdentityDirectory creates /state and /state/identity when they are

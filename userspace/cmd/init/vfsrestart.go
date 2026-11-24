@@ -88,7 +88,6 @@ func vfsRestarted() {
 	for index := range remoteScopes {
 		remoteScopes[index].installed = false
 	}
-	identityScopeInstalled = false
 	vfsClientsPending = true
 	syslog.Info("vfs restarted")
 	mark("VFS_RESTARTED_OK\n")
