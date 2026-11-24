@@ -6,6 +6,40 @@ import (
 	"goos/userspace/remotepolicy"
 )
 
+// PID 1's shared scope-slot allocation contract. The VFS fixes MaxScopes at
+// eight, and scope slots cannot be replaced while a namespace lives, so the
+// two owners of a slot — remoted's host-key scopes and identityd's database
+// subtree — must never overlap (ADR 0233).
+const (
+	// identityScopeSlot is the slot reserved for the identity database
+	// subtree. It is the last slot, so remoted keeps its existing prefix of
+	// the slots before it.
+	identityScopeSlot = vfs.MaxScopes - 1
+	// remoteScopeMax bounds remoted's prefix of scope slots to the slots
+	// before identityScopeSlot. rememberRemoteScope and installRemoteScope
+	// refuse to cross it, so the identity slot is never stolen.
+	remoteScopeMax = identityScopeSlot
+)
+
+// remoteScopeAtLimit reports whether count has filled remoted's prefix of
+// scope slots and another slot must be refused. The identity slot is the
+// first slot past the bound.
+func remoteScopeAtLimit(count int) bool { return count >= remoteScopeMax }
+
+// identityAuthority is identityd's authority: confined to root and granted
+// Read|Write only on the reserved identity scope slot. Root confinement alone
+// leaves the subtree scope denying every ungranted session, and a grant alone
+// would let identityd escape its directory, so both are required.
+func identityAuthority(root []byte) (vfs.Authority, bool) {
+	authority, ok := vfs.RootedAuthority(root)
+	if !ok {
+		return authority, false
+	}
+	authority.Confined = true
+	authority.Grants[identityScopeSlot] = vfs.Read | vfs.Write
+	return authority, true
+}
+
 // A Begin correlation is its lease token, so an uncertain Begin can always
 // be cancelled without first receiving the successful grant reply.
 type remoteKeyLease struct {

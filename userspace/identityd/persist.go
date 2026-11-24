@@ -3,7 +3,6 @@ package identityd
 import (
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"goos/userspace/identity"
@@ -11,50 +10,79 @@ import (
 
 // Sentinel errors the persistence layer reports. ErrNotFound means the
 // snapshot is absent (Unprovisioned); ErrCorrupt means the snapshot failed
-// decode/validation (Unavailable); ErrUncertain means a replacement may have
-// committed, so the caller must reconcile from storage, never assume.
+// decode/validation (Unavailable); ErrUncertain means a replacement or final
+// durability barrier may have committed or failed, so the caller must
+// reconcile from storage on a fresh lifetime, never assume.
 var (
 	ErrNotFound  = errors.New("identityd: snapshot not found")
 	ErrCorrupt   = errors.New("identityd: snapshot corrupt")
 	ErrUncertain = errors.New("identityd: snapshot durability uncertain")
+	// ErrExists reports an exclusive-create collision on the reserved
+	// temporary name.
+	ErrExists = errors.New("identityd: already exists")
 )
 
-// tempSuffix mirrors safesave.Suffix: the deterministic temporary-file marker
-// written beside the target (ADR 0129, ADR 0233 §3).
+// tempSuffix is the deterministic temporary-file marker. identityd uses a
+// single reserved temporary name — dir + "." + name + tempSuffix, no counter —
+// created exclusively. A file under that exact name left by a prior writer is
+// recognized by name and reconciled explicitly (ADR 0233 §4).
 const tempSuffix = ".~save"
 
-// tempSequence names successive temporary files. identityd is single-owner, so
-// no atomicity is needed; the value only has to avoid reusing a name within a
-// run. Stale files from a previous run are never opened or changed.
-var tempSequence uint64
+// maxDirEntries bounds the startup directory reconciliation (§4.3). The
+// snapshot directory holds only the db file plus, transiently, the reserved
+// temporary name; a larger count is an unexpected kind and fails closed.
+const maxDirEntries = 8
 
 // Handle is an opaque open-file handle from Files.OpenWrite.
 type Handle uint64
 
-// Files is the minimal filesystem surface the persistence layer needs. It is
-// safesave's surface (exclusive create, write, close, replace, unlink) plus a
-// whole-file read, expressed with string paths and error returns so this layer
-// stays host-testable and free of kernel/VFS types. The service adapts the
-// calls to its VFS session; its Replace maps VFS errors to ErrUncertain when a
-// rename may have committed.
+// Files is the durable filesystem surface the coordinator needs. It is
+// expressed with string paths and error returns so this layer stays
+// host-testable and free of kernel/VFS types. The native service adapts these
+// calls to its confined VFS session; a replaced/rename operation that may have
+// committed maps to ErrUncertain.
+//
+// Read must return an error — never a partial success — on timeout, malformed
+// reply, failed read/status, or a short or invalid length, and must enforce
+// identity.MaxSnapshotBytes before appending. Create must be an exclusive
+// create: an existing path reports ErrExists and leaves it unchanged. Close is
+// not fsync. A required unsupported or failed Sync/SyncDir is not success.
 type Files interface {
+	// Read reads the whole file at path.
 	Read(path string) ([]byte, error)
+	// Create atomically creates path only if it is absent.
 	Create(path string) error
+	// Unlink removes path. NotFound may be idempotent for the caller's own
+	// temporary file.
 	Unlink(path string) error
+	// OpenWrite opens path for whole-file write and returns a handle.
 	OpenWrite(path string) (Handle, error)
+	// Write writes data to file, returning the bytes written (all or error).
 	Write(file Handle, data []byte) (int, error)
+	// Sync flushes file's data to stable storage (fsync on the open handle).
+	Sync(file Handle) error
+	// Close closes file.
 	Close(file Handle) error
+	// Replace atomically renames source onto target. A failure here may still
+	// have committed; ambiguous statuses map to ErrUncertain.
 	Replace(source, target string) error
+	// SyncDir establishes the durability barrier for the directory containing
+	// path (the barrier that persists a rename of path).
+	SyncDir(path string) error
+	// ListNames returns up to max base names of the entries in the directory
+	// containing path, without following links. It fails rather than return a
+	// partial list when the directory holds more than max entries.
+	ListNames(path string, max int) ([]string, error)
 }
 
 // Faults lets host tests cut a save at each durability boundary. A nil hook is
 // a no-op. A non-nil error aborts the save: before the replacement the old
-// snapshot is intact, after it the caller must reconcile.
+// snapshot is intact, at or after it the caller must reconcile.
 type Faults struct {
 	// BeforeTempWrite runs after the temporary file is created and before its
 	// contents are written.
 	BeforeTempWrite func() error
-	// AfterTempWrite runs after the temporary file is fully written and
+	// AfterTempWrite runs after the temporary file is fully written, synced and
 	// closed, before it is renamed into place.
 	AfterTempWrite func() error
 	// BeforeReplace runs immediately before the atomic rename.
@@ -64,6 +92,12 @@ type Faults struct {
 	// ReplaceErr, when non-nil, replaces the rename's real result. A test sets
 	// it to ErrUncertain to model a rename whose outcome is unknown.
 	ReplaceErr func() error
+	// SyncErr, when non-nil, replaces the temporary-handle Sync result. A
+	// failure here is a definite pre-replace failure.
+	SyncErr func() error
+	// SyncDirErr, when non-nil, replaces the final directory Sync result. A
+	// failure here follows a committed rename and is uncertain.
+	SyncDirErr func() error
 }
 
 // Persist loads and saves one versioned snapshot atomically. It is not safe
@@ -79,28 +113,51 @@ func NewPersist(files Files, path string) *Persist {
 	return &Persist{Files: files, Path: path}
 }
 
-// Load reads and decodes the snapshot. It returns ErrNotFound when the file is
-// absent, ErrCorrupt (wrapping the identity error) when the bytes fail
-// validation, and the validated store on success.
-func (p *Persist) Load() (*identity.Store, error) {
-	data, err := p.Files.Read(p.Path)
+// Open reconciles any stale temporary file (§4.3) and loads the durable
+// snapshot. Returns:
+//
+//	(store, nil)        valid committed snapshot (Available)
+//	(nil, ErrNotFound)  no db and no temp (Unprovisioned)
+//	(nil, ErrCorrupt)   db present but invalid (Unavailable)
+//	(nil, other)        interrupted provisioning (db absent + stale save) or a
+//	                    failed listing/cleanup → fail closed (Unavailable)
+//
+// Open never promotes a temporary snapshot, never follows links, never scans
+// an unlimited directory, and never regenerates a database.
+func (p *Persist) Open() (*identity.Store, error) {
+	temp := p.tempPath()
+	names, err := p.Files.ListNames(p.Path, maxDirEntries)
 	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return nil, ErrNotFound
+		// Failed listing fails closed.
+		return nil, fmt.Errorf("identityd: snapshot directory listing failed: %w", err)
+	}
+	if hasName(names, baseOf(temp)) {
+		// A reserved temp name is present. identityd is single-owner, so a
+		// prior writer's lifetime is fenced by process death once this process
+		// is running; the temp is therefore stale and not authoritative.
+		if !hasName(names, baseOf(p.Path)) {
+			// DB absent + stale save = interrupted/ambiguous provisioning.
+			return nil, fmt.Errorf("identityd: interrupted provisioning: stale save %s: %w", temp, ErrUncertain)
 		}
-		return nil, err
+		// DB present: the temp is not authoritative. Remove it (bounded and
+		// verified) so it cannot block a future save, then load the db.
+		if err := p.removeTemp(temp); err != nil {
+			return nil, err
+		}
 	}
-	store, err := identity.Decode(data)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCorrupt, err)
-	}
-	return store, nil
+	return p.loadDB()
 }
 
-// Save atomically replaces the snapshot with data. It returns nil when the
-// replacement committed, ErrUncertain when the outcome is unknown (the caller
-// must reconcile from storage), and another error when the save failed before
-// the replacement, leaving the old snapshot intact.
+// Save atomically replaces the snapshot with data, following the required
+// ordering:
+//
+//	exclusive temp create -> full write -> Sync(temp handle) -> checked Close
+//	-> Replace(temp, db) -> Sync(containing directory)
+//
+// It returns nil when the replacement committed and the final barrier
+// succeeded, ErrUncertain when the outcome is unknown (the caller must
+// reconcile from storage, never by guessing), and another error when the save
+// failed before the replacement, leaving the old snapshot intact.
 func (p *Persist) Save(data []byte) error {
 	return p.saveBytes(data)
 }
@@ -109,18 +166,20 @@ func (p *Persist) Save(data []byte) error {
 // atomically replaces the target. Failures before the replacement never touch
 // the target; a failure at or after it is ErrUncertain.
 func (p *Persist) saveBytes(data []byte) error {
-	faults := &p.Faults
 	temp := p.tempPath()
-	if err := p.Files.Create(temp); err != nil {
+	if err := p.createTemp(temp); err != nil {
 		return err
 	}
 	replaced := false
 	defer func() {
 		if !replaced {
+			// Clean only this save's own temp; a confirmed rename has already
+			// moved it, so path-only cleanup is safe for the reserved name.
 			_ = p.Files.Unlink(temp)
 		}
 	}()
-	if err := runHook(faults.BeforeTempWrite); err != nil {
+
+	if err := runHook(p.Faults.BeforeTempWrite); err != nil {
 		return err
 	}
 	file, err := p.Files.OpenWrite(temp)
@@ -128,22 +187,30 @@ func (p *Persist) saveBytes(data []byte) error {
 		return err
 	}
 	writeErr := p.writeAll(file, data)
+	var syncErr error
+	if writeErr == nil {
+		syncErr = p.syncFile(file)
+	}
 	closeErr := p.Files.Close(file)
 	if writeErr != nil {
 		return writeErr
 	}
+	if syncErr != nil {
+		return syncErr
+	}
 	if closeErr != nil {
 		return closeErr
 	}
-	if err := runHook(faults.AfterTempWrite); err != nil {
+	if err := runHook(p.Faults.AfterTempWrite); err != nil {
 		return err
 	}
-	if err := runHook(faults.BeforeReplace); err != nil {
+	if err := runHook(p.Faults.BeforeReplace); err != nil {
 		return err
 	}
+
 	replaceErr := error(nil)
-	if faults.ReplaceErr != nil {
-		replaceErr = faults.ReplaceErr()
+	if p.Faults.ReplaceErr != nil {
+		replaceErr = p.Faults.ReplaceErr()
 	} else {
 		replaceErr = p.Files.Replace(temp, p.Path)
 	}
@@ -154,12 +221,70 @@ func (p *Persist) saveBytes(data []byte) error {
 		return replaceErr
 	}
 	replaced = true
-	if err := runHook(faults.AfterReplace); err != nil {
+	if err := runHook(p.Faults.AfterReplace); err != nil {
 		// The rename committed; the caller must reconcile forward, never
 		// assume the old snapshot survived.
 		return fmt.Errorf("%w: %v", ErrUncertain, err)
 	}
+	if err := p.syncDir(); err != nil {
+		// The rename committed but the final barrier did not: fail closed.
+		return fmt.Errorf("%w: final directory sync failed: %v", ErrUncertain, err)
+	}
 	return nil
+}
+
+// createTemp exclusively creates the reserved temporary name. identityd is
+// single-owner, so an existing file under that exact name is a stale remnant
+// of a prior writer whose lifetime is fenced; it is removed once (bounded) and
+// the create retried, so a stale file never permanently blocks a legitimate
+// save or recovery.
+func (p *Persist) createTemp(temp string) error {
+	if err := p.Files.Create(temp); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrExists) {
+		return err
+	}
+	if err := p.removeTemp(temp); err != nil {
+		return err
+	}
+	return p.Files.Create(temp)
+}
+
+// removeTemp removes the reserved temporary name and verifies the removal by a
+// bounded re-listing. It fails closed if the temp is still present after a
+// successful unlink, so a stale file can never be silently left to block saves.
+func (p *Persist) removeTemp(temp string) error {
+	if err := p.Files.Unlink(temp); err != nil && !errors.Is(err, ErrNotFound) {
+		return fmt.Errorf("identityd: stale temp cleanup failed: %w", err)
+	}
+	names, err := p.Files.ListNames(p.Path, maxDirEntries)
+	if err != nil {
+		return fmt.Errorf("identityd: stale temp cleanup verification failed: %w", err)
+	}
+	if hasName(names, baseOf(temp)) {
+		return fmt.Errorf("identityd: stale temp cleanup unverified: %s still present", temp)
+	}
+	return nil
+}
+
+// loadDB reads and decodes the snapshot, enforcing the size bound before
+// decode and never returning a partial success.
+func (p *Persist) loadDB() (*identity.Store, error) {
+	data, err := p.Files.Read(p.Path)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if len(data) > identity.MaxSnapshotBytes {
+		return nil, fmt.Errorf("%w: snapshot exceeds %d bytes", ErrCorrupt, identity.MaxSnapshotBytes)
+	}
+	store, err := identity.Decode(data)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCorrupt, err)
+	}
+	return store, nil
 }
 
 // writeAll writes data in whole pieces, rejecting a short write.
@@ -177,23 +302,47 @@ func (p *Persist) writeAll(file Handle, data []byte) error {
 	return nil
 }
 
-// tempPath returns the deterministic temporary-file name beside the target:
-// dir + "." + name + tempSuffix + "." + counter.
-func (p *Persist) tempPath() string {
-	tempSequence++
-	slash := strings.LastIndexByte(p.Path, '/')
-	if slash < 0 {
-		slash = -1
+func (p *Persist) syncFile(file Handle) error {
+	if p.Faults.SyncErr != nil {
+		return p.Faults.SyncErr()
 	}
-	dir, name := p.Path[:slash+1], p.Path[slash+1:]
-	buf := make([]byte, 0, len(dir)+1+len(name)+len(tempSuffix)+1+16)
-	buf = append(buf, dir...)
-	buf = append(buf, '.')
-	buf = append(buf, name...)
-	buf = append(buf, tempSuffix...)
-	buf = append(buf, '.')
-	buf = strconv.AppendUint(buf, tempSequence, 16)
-	return string(buf)
+	return p.Files.Sync(file)
+}
+
+func (p *Persist) syncDir() error {
+	if p.Faults.SyncDirErr != nil {
+		return p.Faults.SyncDirErr()
+	}
+	return p.Files.SyncDir(p.Path)
+}
+
+// tempPath returns the single reserved deterministic temporary-file name
+// beside the target: dir + "." + name + tempSuffix.
+func (p *Persist) tempPath() string {
+	return dirOf(p.Path) + "." + baseOf(p.Path) + tempSuffix
+}
+
+func dirOf(path string) string {
+	if slash := strings.LastIndexByte(path, '/'); slash >= 0 {
+		return path[:slash+1]
+	}
+	return ""
+}
+
+func baseOf(path string) string {
+	if slash := strings.LastIndexByte(path, '/'); slash >= 0 {
+		return path[slash+1:]
+	}
+	return path
+}
+
+func hasName(names []string, name string) bool {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 // runHook invokes hook when set, returning its error.

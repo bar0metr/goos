@@ -151,7 +151,12 @@ func startServices(ticks uint64) {
 		startLogService(ticks)
 		// identityd stores its one snapshot under /state, which the
 		// persistent volume mounts at boot; it needs nothing else and
-		// nothing depends on it yet (ADR 0233).
+		// nothing depends on it yet (ADR 0233). Protect the subtree before
+		// identityd launches or any ordinary session is published, so an
+		// unconfined session can no longer reach the database.
+		if !protectIdentityStorage() {
+			fatal("INIT_IDENTITY_STORAGE_PROTECTION_FAILED\n")
+		}
 		startIdentity(ticks)
 		// The network reads its settings, so it starts after the
 		// configuration service; nothing before the shell waits for it.

@@ -8,14 +8,33 @@ import (
 
 // Canonical snapshot layout (all multi-byte fields little-endian):
 //
-//	magic   "GOOS-IDENTITY-V1\n" (17 bytes)
-//	version uint16 = 1
+//	magic   "GOOS-IDENTITY-V2\n" (17 bytes)
+//	version uint16 = 2
 //	sequence uint64 (monotonic, increments each committed mutation)
-//	payload canonical encoding of accounts, groups, nextAccountID, nextGroupID
+//	payload canonical encoding of epoch, counters, high-water marks, accounts, groups
 //	digest  sha256(magic || version || sequence || payload) (32 bytes)
+//
+// Payload layout:
+//
+//	epoch         [16]byte  (nonzero 128-bit database identity)
+//	nextAccountID uint64
+//	nextGroupID   uint64
+//	nextUID       uint64  (UID high-water: next value to allocate)
+//	nextGID       uint64  (GID high-water: next value to allocate)
+//	accountCount  uint32
+//	groupCount    uint32
+//	accounts      accountCount x account record
+//	groups        groupCount x group record
+//
+// The persistent format version (snapshotVersion) is independent of the IPC
+// protocol version. The pre-release V1 format (magic "GOOS-IDENTITY-V1\n",
+// version 1) is refused with ErrOldFormat; M4 does not silently upgrade it.
 const (
-	snapshotMagic    = "GOOS-IDENTITY-V1\n"
-	snapshotVersion  = uint16(1)
+	snapshotMagic    = "GOOS-IDENTITY-V2\n"
+	snapshotVersion  = uint16(2)
+	legacyMagic      = "GOOS-IDENTITY-V1\n"
+	legacyVersion    = uint16(1)
+	epochSize        = 16
 	magicSize        = len(snapshotMagic) // 17
 	versionSize      = 2
 	sequenceSize     = 8
@@ -70,10 +89,13 @@ func encodePayload(s *Store) ([]byte, error) {
 		return nil, ErrInvalid
 	}
 	var out []byte
-	out = appendU32(out, uint32(len(s.accounts)))
-	out = appendU32(out, uint32(len(s.groups)))
+	out = append(out, s.epoch[:]...)
 	out = appendU64(out, s.nextAccountID)
 	out = appendU64(out, s.nextGroupID)
+	out = appendU64(out, s.nextUID)
+	out = appendU64(out, s.nextGID)
+	out = appendU32(out, uint32(len(s.accounts)))
+	out = appendU32(out, uint32(len(s.groups)))
 	for i := range s.accounts {
 		out = encodeAccount(out, &s.accounts[i])
 	}
@@ -124,9 +146,16 @@ func Decode(data []byte) (*Store, error) {
 		return nil, ErrInvalid
 	}
 	if !bytes.Equal(data[:magicSize], []byte(snapshotMagic)) {
+		if bytes.Equal(data[:magicSize], []byte(legacyMagic)) {
+			return nil, ErrOldFormat
+		}
 		return nil, ErrInvalid
 	}
-	if binary.LittleEndian.Uint16(data[magicSize:magicSize+versionSize]) != snapshotVersion {
+	version := binary.LittleEndian.Uint16(data[magicSize : magicSize+versionSize])
+	if version == legacyVersion {
+		return nil, ErrOldFormat
+	}
+	if version != snapshotVersion {
 		return nil, ErrInvalid
 	}
 	sequence := binary.LittleEndian.Uint64(data[magicSize+versionSize : snapshotHeaderSz])
@@ -138,8 +167,9 @@ func Decode(data []byte) (*Store, error) {
 	return decodePayload(body[snapshotHeaderSz:], sequence)
 }
 
-// Validate verifies magic, version, digest, then payload bounds, duplicates,
-// and dangling references, without returning a store.
+// Validate verifies magic, version, digest, then payload bounds, epoch,
+// counters, duplicates, high-water marks, and dangling references, without
+// returning a store.
 func Validate(data []byte) error {
 	_, err := Decode(data)
 	return err
@@ -147,13 +177,12 @@ func Validate(data []byte) error {
 
 func decodePayload(payload []byte, sequence uint64) (*Store, error) {
 	d := decoder{b: payload}
-	accountCount, err := d.u32()
+	epoch, err := d.epoch()
 	if err != nil {
 		return nil, err
 	}
-	groupCount, err := d.u32()
-	if err != nil {
-		return nil, err
+	if epoch == ([16]byte{}) {
+		return nil, errInvalid("zero epoch")
 	}
 	nextAccountID, err := d.u64()
 	if err != nil {
@@ -163,10 +192,33 @@ func decodePayload(payload []byte, sequence uint64) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	nextUID, err := d.u64()
+	if err != nil {
+		return nil, err
+	}
+	nextGID, err := d.u64()
+	if err != nil {
+		return nil, err
+	}
+	accountCount, err := d.u32()
+	if err != nil {
+		return nil, err
+	}
+	groupCount, err := d.u32()
+	if err != nil {
+		return nil, err
+	}
 	if accountCount > MaxAccounts || groupCount > MaxGroups {
 		return nil, ErrInvalid
 	}
-	s := &Store{nextAccountID: nextAccountID, nextGroupID: nextGroupID, sequence: sequence}
+	s := &Store{
+		epoch:         epoch,
+		nextAccountID: nextAccountID,
+		nextGroupID:   nextGroupID,
+		nextUID:       nextUID,
+		nextGID:       nextGID,
+		sequence:      sequence,
+	}
 	s.accounts = make([]Account, 0, int(accountCount))
 	s.groups = make([]Group, 0, int(groupCount))
 	for i := uint32(0); i < accountCount; i++ {
@@ -280,6 +332,16 @@ func (d *decoder) take(n int) ([]byte, error) {
 	s := d.b[d.off : d.off+n]
 	d.off += n
 	return s, nil
+}
+
+func (d *decoder) epoch() ([16]byte, error) {
+	var e [16]byte
+	b, err := d.take(epochSize)
+	if err != nil {
+		return e, err
+	}
+	copy(e[:], b)
+	return e, nil
 }
 
 func (d *decoder) u8() (byte, error) {

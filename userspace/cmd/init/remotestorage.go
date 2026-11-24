@@ -20,7 +20,7 @@ const (
 )
 
 var (
-	remoteScopes          [vfs.MaxScopes]remoteScope
+	remoteScopes          [remoteScopeMax]remoteScope
 	remoteScopeCount      int
 	remoteScopesInstalled bool
 	remotePolicyScratch   remoteapi.WorkerPolicy
@@ -198,7 +198,7 @@ func rememberRemoteScope(path string, subtree bool, denied vfs.Rights) bool {
 			return true
 		}
 	}
-	if remoteScopeCount == len(remoteScopes) || len(path) > len(remoteScopes[0].path) {
+	if remoteScopeAtLimit(remoteScopeCount) || len(path) > len(remoteScopes[0].path) {
 		return false
 	}
 	scope := &remoteScopes[remoteScopeCount]
@@ -209,6 +209,9 @@ func rememberRemoteScope(path string, subtree bool, denied vfs.Rights) bool {
 }
 
 func installRemoteScope(index int) bool {
+	if remoteScopeAtLimit(index) {
+		return false
+	}
 	scope := &remoteScopes[index]
 	if scope.installed {
 		return true
@@ -260,7 +263,7 @@ func ensureRemotePolicyScopes(host, keys string) bool {
 			missing++
 		}
 	}
-	if missing > needed || remoteScopeCount+missing > len(remoteScopes) {
+	if missing > needed || remoteScopeCount+missing > remoteScopeMax {
 		return false
 	}
 	if !insideDefault {
@@ -371,7 +374,7 @@ func protectConfiguredRemoteHost(files handle.ID, host string) bool {
 			missing++
 		}
 	}
-	if remoteScopeCount+missing > len(remoteScopes) || !ensureRemoteParents(files, host) {
+	if remoteScopeCount+missing > remoteScopeMax || !ensureRemoteParents(files, host) {
 		return false
 	}
 	for _, path := range paths {

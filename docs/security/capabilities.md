@@ -500,20 +500,36 @@ file again by path. Scopes inside the root still apply. The worker receives the 
 
 ## Identity service
 
+PID 1 reserves the last VFS scope slot for the identity database
+(`identityScopeSlot = vfs.MaxScopes - 1`, slot 7). remoted keeps its host-key
+scopes on the prefix 0..6. PID 1 creates and validates `/state/identity`
+through its trusted setup session, then installs the subtree scope denying
+Read and Write to every session without the identity grant, before ordinary
+sessions can be published.
+
 PID 1 starts `identityd` in normal mode with three grants:
 
 | Grant | Rights |
 |---|---|
 | `control` channel | Read, Write, Wait, consumed; PID 1 keeps the client end |
-| `vfs` session confined to `/state/identity` | Read, Write, Wait on the channel; the session authority grants Read, Write on the `/state/identity` scope slot |
+| `vfs` session | Read, Write, Wait on the channel; the session authority carries canonical root confinement to `/state/identity` plus Read, Write on the reserved slot |
 | `log` device | Write |
 
-`identityd` holds no other channel, device, IRQ, DMA or launch authority. The
-VFS confinement follows the remoted `/state/security/ssh` pattern: PID 1
-installs the `/state/identity` subtree denied Read, Write, then opens a confined
-session whose scope slot carries Read, Write. Every path the session names stays
-under `/state/identity`. A restarted identityd receives fresh consumed
-endpoints, so it never keeps the previous instance's channel or session.
+`identityd` holds no other channel, device, IRQ, DMA or launch authority. Its
+VFS session carries both the root confinement and the reserved slot's grant:
+`vfs.RootedAuthority` with `Confined: true` and
+`Grants[identityScopeSlot] = Read|Write`. Root confinement alone leaves
+ordinary sessions able to reach the subtree, and a grant alone would let
+identityd escape its directory. Ordinary sessions without the grant cannot
+read, write, create, truncate, unlink, rename, or move the protected subtree,
+including through `/persist/state/identity` or an alias. A restarted identityd
+receives fresh consumed endpoints, so it never keeps the previous instance's
+channel or session.
+
+When the VFS restarts, PID 1 clears the installed markers, re-installs the
+remote and identity scopes before ordinary sessions return, and reissues
+identityd's control and VFS endpoints. A failed install or an ambiguous
+identity root fails closed.
 
 `user` and `group` declare `commands.GrantIdentityAdmin` (`0x8000`, command index
 format 11). PID 1 maps the grant to one administration session over identityd's

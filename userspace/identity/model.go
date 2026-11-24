@@ -47,20 +47,67 @@ type Group struct {
 // NameString returns the group name.
 func (g *Group) NameString() string { return string(g.Name[:g.NameLen]) }
 
-// Store owns the accounts, groups, and monotonic allocation state. It is a
-// single mutation owner: every write goes through a Store method.
+// Store owns the accounts, groups, epoch, and monotonic allocation state. It
+// is a single mutation owner: every write goes through a Store method.
 type Store struct {
 	accounts      []Account
 	groups        []Group
-	nextAccountID uint64
-	nextGroupID   uint64
-	sequence      uint64
+	epoch         [16]byte // 128-bit database identity; zero only for in-memory tests
+	nextAccountID uint64   // monotonic; never reused
+	nextGroupID   uint64   // monotonic; never reused
+	nextUID       uint64   // UID high-water: next value to allocate
+	nextGID       uint64   // GID high-water: next value to allocate
+	sequence      uint64   // committed mutation sequence
 }
 
-// NewStore returns an empty store ready for its first mutation. The first
-// allocated AccountID and GroupID are 1; 0 is never a valid internal ID.
+// NewStore returns an empty store ready for its first mutation with a zero
+// epoch. The first allocated AccountID and GroupID are 1; 0 is never a valid
+// internal ID. A zero-epoch store is for in-memory tests only: it cannot be
+// encoded into a snapshot that Decode accepts. Use NewStoreWithEpoch for any
+// persistent store.
 func NewStore() *Store {
-	return &Store{nextAccountID: 1, nextGroupID: 1}
+	return &Store{
+		nextAccountID: 1,
+		nextGroupID:   1,
+		nextUID:       uint64(AllocBase),
+		nextGID:       uint64(AllocBase),
+	}
+}
+
+// NewStoreWithEpoch returns an empty store carrying the given 128-bit database
+// epoch, ready for persistence. The epoch is supplied by the trusted
+// provisioning/recovery path; the library stores it verbatim and Decode
+// refuses a zero epoch.
+func NewStoreWithEpoch(epoch [16]byte) *Store {
+	return &Store{
+		epoch:         epoch,
+		nextAccountID: 1,
+		nextGroupID:   1,
+		nextUID:       uint64(AllocBase),
+		nextGID:       uint64(AllocBase),
+	}
+}
+
+// Epoch returns the store's 128-bit database epoch. The canonical identity
+// reference for an account or group is (epoch, ID).
+func (s *Store) Epoch() [16]byte {
+	if s == nil {
+		return [16]byte{}
+	}
+	return s.epoch
+}
+
+// Clone returns a deep copy of the store that shares no mutable slices or
+// arrays with the receiver. It is used to build candidate state before a
+// mutation is validated, encoded, and durably committed.
+func (s *Store) Clone() *Store {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	c.accounts = append([]Account(nil), s.accounts...)
+	c.groups = append([]Group(nil), s.groups...)
+	return &c
 }
 
 // Sequence returns the committed mutation sequence.

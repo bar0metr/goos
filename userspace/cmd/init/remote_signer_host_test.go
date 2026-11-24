@@ -65,3 +65,12 @@ func TestRemoteShellCannotReceiveHostSigner(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteScopeSlotReservationEnforced(t *testing.T) {
+	if source := remoteFunctionSource(t, "remotestorage.go", "rememberRemoteScope"); !strings.Contains(source, "remoteScopeAtLimit") {
+		t.Fatal("rememberRemoteScope does not enforce the reserved-slot bound")
+	}
+	if source := remoteFunctionSource(t, "remotestorage.go", "installRemoteScope"); !strings.Contains(source, "remoteScopeAtLimit") {
+		t.Fatal("installRemoteScope does not refuse the identity slot")
+	}
+}

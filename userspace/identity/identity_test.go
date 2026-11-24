@@ -2,6 +2,8 @@ package identity
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"testing"
 )
@@ -12,6 +14,12 @@ func keyFromByte(b byte) Key {
 		k[i] = b + byte(i)
 	}
 	return k
+}
+
+func epochFromByte(b byte) [16]byte {
+	var e [16]byte
+	e[0] = b
+	return e
 }
 
 func testAccount(id uint64, uid uint32, name string, primary uint64) Account {
@@ -41,7 +49,7 @@ func mustAccount(t *testing.T, s *Store, name string) *Account {
 // and a home set, exercising the whole surface.
 func buildStore(t *testing.T) *Store {
 	t.Helper()
-	s := NewStore()
+	s := NewStoreWithEpoch(epochFromByte(0x01))
 	mustAccount(t, s, "alice")
 	mustAccount(t, s, "bob")
 	if err := s.SetHome("alice", "/home/alice"); err != nil {
@@ -92,10 +100,13 @@ func TestSnapshotRoundTripByteIdentical(t *testing.T) {
 	if decoded.Sequence() != s.Sequence() {
 		t.Fatalf("sequence %d != %d", decoded.Sequence(), s.Sequence())
 	}
+	if decoded.Epoch() != s.Epoch() {
+		t.Fatalf("epoch %x != %x", decoded.Epoch(), s.Epoch())
+	}
 }
 
 func TestEmptySnapshotRoundTrip(t *testing.T) {
-	s := NewStore()
+	s := NewStoreWithEpoch(epochFromByte(0x02))
 	data, err := Encode(s)
 	if err != nil {
 		t.Fatalf("Encode empty: %v", err)
@@ -139,6 +150,8 @@ func TestDecodeRejectsFlippedFields(t *testing.T) {
 		{"sequence[7]", 26},
 		{"digest[0]", len(data) - 32},
 		{"digest[31]", len(data) - 1},
+		{"epoch[0]", snapshotHeaderSz},
+		{"epoch[15]", snapshotHeaderSz + 15},
 		{"payload", snapshotHeaderSz + 3},
 	}
 	for _, c := range cases {
@@ -171,61 +184,103 @@ func hostilePayload(t *testing.T, s *Store) []byte {
 	return data
 }
 
+// hostileStore returns a structurally valid store carrying a non-zero epoch and
+// high-water marks far above any fixture UID/GID, so Decode reaches the specific
+// invariant under test instead of failing on the epoch/high-water check.
+func hostileStore(accounts []Account, groups []Group, nextAccountID, nextGroupID uint64) *Store {
+	return &Store{
+		epoch:         epochFromByte(0x01),
+		accounts:      accounts,
+		groups:        groups,
+		nextAccountID: nextAccountID,
+		nextGroupID:   nextGroupID,
+		nextUID:       0xFFFFFFFF,
+		nextGID:       0xFFFFFFFF,
+	}
+}
+
 func TestDecodeRejectsDuplicateAccountNames(t *testing.T) {
-	s := &Store{accounts: []Account{testAccount(1, 1000, "dup", 1), testAccount(2, 1001, "dup", 2)},
-		groups:        []Group{testGroup(1, 1000, "dup"), testGroup(2, 1001, "dup2")},
-		nextAccountID: 3, nextGroupID: 3}
+	s := hostileStore(
+		[]Account{testAccount(1, 1000, "dup", 1), testAccount(2, 1001, "dup", 2)},
+		[]Group{testGroup(1, 1000, "dup"), testGroup(2, 1001, "dup2")},
+		3, 3)
 	if _, err := Decode(hostilePayload(t, s)); err == nil {
 		t.Fatal("duplicate account names decoded")
 	}
 }
 
 func TestDecodeRejectsDuplicateGroupNames(t *testing.T) {
-	s := &Store{accounts: []Account{testAccount(1, 1000, "a", 1)},
-		groups:        []Group{testGroup(1, 1000, "dup"), testGroup(2, 1001, "dup")},
-		nextAccountID: 2, nextGroupID: 3}
+	s := hostileStore(
+		[]Account{testAccount(1, 1000, "a", 1)},
+		[]Group{testGroup(1, 1000, "dup"), testGroup(2, 1001, "dup")},
+		2, 3)
 	if _, err := Decode(hostilePayload(t, s)); err == nil {
 		t.Fatal("duplicate group names decoded")
 	}
 }
 
-func TestDecodeRejectsDuplicateIDs(t *testing.T) {
-	s := &Store{accounts: []Account{testAccount(1, 1000, "a", 1), testAccount(1, 1001, "b", 2)},
-		groups:        []Group{testGroup(1, 1000, "a"), testGroup(2, 1001, "b")},
-		nextAccountID: 2, nextGroupID: 3}
+func TestDecodeRejectsDuplicateAccountIDs(t *testing.T) {
+	s := hostileStore(
+		[]Account{testAccount(1, 1000, "a", 1), testAccount(1, 1001, "b", 2)},
+		[]Group{testGroup(1, 1000, "a"), testGroup(2, 1001, "b")},
+		2, 3)
 	if _, err := Decode(hostilePayload(t, s)); err == nil {
 		t.Fatal("duplicate account IDs decoded")
 	}
 }
 
+func TestDecodeRejectsDuplicateGroupIDs(t *testing.T) {
+	s := hostileStore(
+		[]Account{testAccount(1, 1000, "a", 1)},
+		[]Group{testGroup(1, 1000, "g1"), testGroup(1, 1001, "g2")},
+		2, 2)
+	if _, err := Decode(hostilePayload(t, s)); err == nil {
+		t.Fatal("duplicate group IDs decoded")
+	}
+}
+
 func TestDecodeRejectsDuplicateUIDs(t *testing.T) {
-	s := &Store{accounts: []Account{testAccount(1, 1000, "a", 1), testAccount(2, 1000, "b", 2)},
-		groups:        []Group{testGroup(1, 1000, "a"), testGroup(2, 1001, "b")},
-		nextAccountID: 3, nextGroupID: 3}
+	s := hostileStore(
+		[]Account{testAccount(1, 1000, "a", 1), testAccount(2, 1000, "b", 2)},
+		[]Group{testGroup(1, 1000, "a"), testGroup(2, 1001, "b")},
+		3, 3)
 	if _, err := Decode(hostilePayload(t, s)); err == nil {
 		t.Fatal("duplicate UIDs decoded")
 	}
 }
 
+func TestDecodeRejectsDuplicateGIDs(t *testing.T) {
+	s := hostileStore(
+		[]Account{testAccount(1, 1000, "a", 1)},
+		[]Group{testGroup(1, 1000, "g1"), testGroup(2, 1000, "g2")},
+		2, 3)
+	if _, err := Decode(hostilePayload(t, s)); err == nil {
+		t.Fatal("duplicate GIDs decoded")
+	}
+}
+
 func TestDecodeRejectsDanglingGroupRef(t *testing.T) {
-	s := &Store{accounts: []Account{testAccount(1, 1000, "a", 999)},
-		groups:        []Group{testGroup(1, 1000, "a")},
-		nextAccountID: 2, nextGroupID: 2}
+	s := hostileStore(
+		[]Account{testAccount(1, 1000, "a", 999)},
+		[]Group{testGroup(1, 1000, "a")},
+		2, 2)
 	if _, err := Decode(hostilePayload(t, s)); err == nil {
 		t.Fatal("dangling primary group decoded")
 	}
 }
 
 func TestDecodeRejectsOutOfRangeUIDGID(t *testing.T) {
-	s := &Store{accounts: []Account{testAccount(1, 0, "a", 1)},
-		groups:        []Group{testGroup(1, 1000, "a")},
-		nextAccountID: 2, nextGroupID: 2}
+	s := hostileStore(
+		[]Account{testAccount(1, 0, "a", 1)},
+		[]Group{testGroup(1, 1000, "a")},
+		2, 2)
 	if _, err := Decode(hostilePayload(t, s)); err == nil {
 		t.Fatal("reserved UID decoded")
 	}
-	s = &Store{accounts: []Account{testAccount(1, 1000, "a", 1)},
-		groups:        []Group{testGroup(1, 0xFFFFFFFF, "a")},
-		nextAccountID: 2, nextGroupID: 2}
+	s = hostileStore(
+		[]Account{testAccount(1, 1000, "a", 1)},
+		[]Group{testGroup(1, 0xFFFFFFFF, "a")},
+		2, 2)
 	if _, err := Decode(hostilePayload(t, s)); err == nil {
 		t.Fatal("reserved GID decoded")
 	}
@@ -236,8 +291,7 @@ func TestDecodeRejectsDuplicateKey(t *testing.T) {
 	a.Keys[0] = keyFromByte(9)
 	a.Keys[1] = keyFromByte(9)
 	a.KeyCount = 2
-	s := &Store{accounts: []Account{a}, groups: []Group{testGroup(1, 1000, "a")},
-		nextAccountID: 2, nextGroupID: 2}
+	s := hostileStore([]Account{a}, []Group{testGroup(1, 1000, "a")}, 2, 2)
 	if _, err := Decode(hostilePayload(t, s)); err == nil {
 		t.Fatal("duplicate key decoded")
 	}
@@ -322,22 +376,142 @@ func TestGenerationSafety(t *testing.T) {
 	}
 }
 
-func TestUIDGIDReuseAllowed(t *testing.T) {
-	s := NewStore()
+func TestUIDGIDNoAutoReuse(t *testing.T) {
+	s := NewStoreWithEpoch(epochFromByte(0x01))
 	a1 := mustAccount(t, s, "alice")
 	uid1, gid1 := a1.UID, s.Groups()[0].GID
 	if err := s.DeleteAccount("alice"); err != nil {
 		t.Fatal(err)
 	}
 	a2 := mustAccount(t, s, "alice")
-	if a2.UID != uid1 {
-		t.Fatalf("UID not reused: %d != %d", a2.UID, uid1)
+	if a2.UID == uid1 {
+		t.Fatalf("UID auto-reused: %d", uid1)
 	}
-	if s.Groups()[0].GID != gid1 {
-		t.Fatalf("GID not reused: %d != %d", s.Groups()[0].GID, gid1)
+	if a2.UID <= uid1 {
+		t.Fatalf("UID did not increase: %d <= %d", a2.UID, uid1)
+	}
+	if g := s.Groups()[0].GID; g == gid1 {
+		t.Fatalf("GID auto-reused: %d", gid1)
+	} else if g <= gid1 {
+		t.Fatalf("GID did not increase: %d <= %d", g, gid1)
 	}
 	if a2.ID == a1.ID {
-		t.Fatal("internal ID aliased across UID reuse")
+		t.Fatal("internal AccountID reused")
+	}
+}
+
+func TestExplicitUIDReuseAfterDelete(t *testing.T) {
+	s := NewStoreWithEpoch(epochFromByte(0x01))
+	a1 := mustAccount(t, s, "alice")
+	uid1 := a1.UID
+	if err := s.DeleteAccount("alice"); err != nil {
+		t.Fatal(err)
+	}
+	a2 := mustAccount(t, s, "alice")
+	if a2.UID == uid1 {
+		t.Fatalf("UID auto-reused before explicit reassignment: %d", uid1)
+	}
+	// The old UID is free and non-reserved: explicit assignment may reuse it.
+	if err := s.SetUID("alice", uid1); err != nil {
+		t.Fatalf("explicit reuse of free UID %d: %v", uid1, err)
+	}
+	if got, _ := s.AccountByName("alice"); got.UID != uid1 {
+		t.Fatalf("explicit UID = %d, want %d", got.UID, uid1)
+	}
+	// Automatic allocation continues above the reused UID.
+	a3 := mustAccount(t, s, "bob")
+	if a3.UID == uid1 {
+		t.Fatalf("automatic allocation collided with explicitly reused UID %d", uid1)
+	}
+}
+
+func TestExplicitAssignmentAdvancesHighWater(t *testing.T) {
+	s := NewStoreWithEpoch(epochFromByte(0x01))
+	mustAccount(t, s, "alice") // UID 1000
+	if err := s.SetUID("alice", 5000); err != nil {
+		t.Fatal(err)
+	}
+	a2 := mustAccount(t, s, "bob")
+	if a2.UID <= 5000 {
+		t.Fatalf("auto UID %d did not exceed explicit high-water 5000", a2.UID)
+	}
+	// A lower explicit reassignment must not lower the high-water mark.
+	if err := s.SetUID("bob", 4000); err != nil {
+		t.Fatal(err)
+	}
+	a3 := mustAccount(t, s, "carol")
+	if a3.UID <= 5000 {
+		t.Fatalf("auto UID %d fell below explicit high-water 5000", a3.UID)
+	}
+}
+
+func TestHighWaterPersistsAcrossSaveReload(t *testing.T) {
+	s := NewStoreWithEpoch(epochFromByte(0x01))
+	a1 := mustAccount(t, s, "alice")
+	uid1, gid1 := a1.UID, s.Groups()[0].GID
+	if err := s.DeleteAccount("alice"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := Encode(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2 := mustAccount(t, restarted, "alice")
+	if a2.UID == uid1 {
+		t.Fatalf("UID reused after save/reload: %d", uid1)
+	}
+	if g := restarted.Groups()[0].GID; g == gid1 {
+		t.Fatalf("GID reused after save/reload: %d", gid1)
+	}
+	if a2.ID == a1.ID {
+		t.Fatal("AccountID reused after save/reload")
+	}
+}
+
+func TestAllocationStartsAtAllocBaseAndSkipsReserved(t *testing.T) {
+	s := NewStoreWithEpoch(epochFromByte(0x01))
+	a := mustAccount(t, s, "alice")
+	if a.UID != AllocBase {
+		t.Fatalf("first UID = %d, want AllocBase %d", a.UID, AllocBase)
+	}
+	g := s.Groups()[0]
+	if g.GID != AllocBase {
+		t.Fatalf("first GID = %d, want AllocBase %d", g.GID, AllocBase)
+	}
+	if reservedUnix(a.UID) || reservedUnix(g.GID) {
+		t.Fatal("allocated a reserved UID/GID")
+	}
+}
+
+func TestUIDGIDNearExhaustion(t *testing.T) {
+	s := NewStoreWithEpoch(epochFromByte(0x01))
+	s.nextUID = uint64(maxAllocatableUnix)
+	a := mustAccount(t, s, "alice")
+	if a.UID != maxAllocatableUnix {
+		t.Fatalf("UID = %d, want %d", a.UID, maxAllocatableUnix)
+	}
+	if _, err := s.CreateAccount("bob"); !errors.Is(err, ErrExhausted) {
+		t.Fatalf("UID exhaustion = %v, want ErrExhausted", err)
+	}
+	if len(s.Accounts()) != 1 {
+		t.Fatalf("accounts after failed allocation = %d, want 1", len(s.Accounts()))
+	}
+}
+
+func TestUIDGIDNoWrap(t *testing.T) {
+	s := NewStoreWithEpoch(epochFromByte(0x01))
+	s.nextUID = maxUint64
+	if _, err := s.CreateAccount("a"); !errors.Is(err, ErrExhausted) {
+		t.Fatalf("UID wrap = %v, want ErrExhausted", err)
+	}
+	s = NewStoreWithEpoch(epochFromByte(0x01))
+	s.nextGID = maxUint64
+	if _, err := s.CreateAccount("a"); !errors.Is(err, ErrExhausted) {
+		t.Fatalf("GID wrap = %v, want ErrExhausted", err)
 	}
 }
 
@@ -669,5 +843,145 @@ func TestSetGroupsDangling(t *testing.T) {
 	}
 	if err := s.SetMembers("alice", []uint32{9999}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("dangling member UID = %v, want ErrNotFound", err)
+	}
+}
+
+// reDigest recomputes and rewrites the trailing SHA-256 digest so a mutated
+// snapshot still has a valid digest.
+func reDigest(data []byte) []byte {
+	body := data[:len(data)-digestSize]
+	sum := sha256.Sum256(body)
+	copy(data[len(data)-digestSize:], sum[:])
+	return data
+}
+
+func TestEpochPersistsAcrossDecodeEncode(t *testing.T) {
+	epoch := epochFromByte(0xAB)
+	s := NewStoreWithEpoch(epoch)
+	mustAccount(t, s, "alice")
+	data, err := Encode(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Epoch() != epoch {
+		t.Fatalf("epoch after decode = %x, want %x", decoded.Epoch(), epoch)
+	}
+	again, err := Encode(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, again) {
+		t.Fatal("epoch changed across decode/encode")
+	}
+}
+
+func TestDecodeRejectsZeroEpoch(t *testing.T) {
+	s := NewStore() // zero epoch: in-memory only
+	data, err := Encode(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(data); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("zero-epoch decode = %v, want ErrInvalid", err)
+	}
+	if err := Validate(data); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("zero-epoch validate = %v, want ErrInvalid", err)
+	}
+}
+
+func TestOldV1FormatRefused(t *testing.T) {
+	s := NewStoreWithEpoch(epochFromByte(0x01))
+	data, err := Encode(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// V1 magic: the magic check fires before the version is read, so only the
+	// magic needs to be swapped and re-digested.
+	legacy := append(append([]byte(nil), legacyMagic...), data[magicSize:]...)
+	legacy = reDigest(legacy)
+	if _, err := Decode(legacy); !errors.Is(err, ErrOldFormat) {
+		t.Fatalf("V1 magic = %v, want ErrOldFormat", err)
+	} else if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("V1 magic = %v, want ErrInvalid wrapping", err)
+	}
+
+	// V2 magic with V1 version must also be refused as old format.
+	v1version := append([]byte(nil), data...)
+	binary.LittleEndian.PutUint16(v1version[magicSize:magicSize+versionSize], legacyVersion)
+	v1version = reDigest(v1version)
+	if _, err := Decode(v1version); !errors.Is(err, ErrOldFormat) {
+		t.Fatalf("V1 version = %v, want ErrOldFormat", err)
+	}
+}
+
+func TestDecodeRejectsBadCounters(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*Store)
+	}{
+		{"nextAccountID zero", func(s *Store) { s.nextAccountID = 0 }},
+		{"nextGroupID zero", func(s *Store) { s.nextGroupID = 0 }},
+		{"nextUID below base", func(s *Store) { s.nextUID = 0 }},
+		{"nextGID below base", func(s *Store) { s.nextGID = 0 }},
+		{"nextUID past domain", func(s *Store) { s.nextUID = 0x100000000 }},
+		{"nextGID past domain", func(s *Store) { s.nextGID = 0x100000000 }},
+		{"nextUID not above issued", func(s *Store) { s.nextUID = 1000 }},
+		{"nextGID not above issued", func(s *Store) { s.nextGID = 1000 }},
+	}
+	for _, c := range cases {
+		s := NewStoreWithEpoch(epochFromByte(0x01))
+		mustAccount(t, s, "alice") // issues UID 1000, GID 1000
+		c.mut(s)
+		if _, err := Decode(hostilePayload(t, s)); err == nil {
+			t.Fatalf("%s decoded", c.name)
+		}
+	}
+}
+
+func TestCloneIndependence(t *testing.T) {
+	s := NewStoreWithEpoch(epochFromByte(0x01))
+	mustAccount(t, s, "alice")
+	if err := s.SetHome("alice", "/home/alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddKey("alice", keyFromByte(1)); err != nil {
+		t.Fatal(err)
+	}
+	c := s.Clone()
+
+	// Mutating the clone must not affect the original.
+	mustAccount(t, c, "bob")
+	if err := c.SetHome("alice", "/changed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddKey("alice", keyFromByte(9)); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := s.AccountByName("alice")
+	if orig.HomePath() != "/home/alice" {
+		t.Fatalf("clone mutated original home: %q", orig.HomePath())
+	}
+	if orig.KeyCount != 1 {
+		t.Fatalf("clone mutated original key count: %d", orig.KeyCount)
+	}
+	if _, err := s.AccountByName("bob"); !errors.Is(err, ErrNotFound) {
+		t.Fatal("clone mutation leaked into original accounts")
+	}
+
+	// Mutating the original must not affect the clone.
+	if err := s.AddKey("alice", keyFromByte(2)); err != nil {
+		t.Fatal(err)
+	}
+	ca, _ := c.AccountByName("alice")
+	if ca.KeyCount != 2 {
+		t.Fatalf("original mutation leaked into clone key count: %d", ca.KeyCount)
+	}
+	if c.Epoch() != s.Epoch() {
+		t.Fatal("clone epoch differs from original")
 	}
 }

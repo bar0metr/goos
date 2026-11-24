@@ -9,13 +9,14 @@
 package main
 
 import (
-	"bytes"
 	"errors"
+	"strings"
 
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
+	"goos/userspace/cryptosys"
 	"goos/userspace/identity"
 	"goos/userspace/identityd"
 	"goos/userspace/identityproto"
@@ -35,16 +36,16 @@ const (
 	vfsReplyAttempts = 5
 	// maxSessions bounds the admin and lookup sessions served at once.
 	maxSessions = 16
-	// identityReplyHeader and identityRecordFixed are the version-1 identity
-	// codec layout sizes (identityproto protocol.go), kept here for list
-	// chunking against ipc.MaxPayload.
+	// identityReplyHeader and identityRecordFixed track the version-2 identity
+	// codec layout (identityproto replyHeader and recordFixed) so list replies
+	// can be chunked against ipc.MaxPayload. identityproto owns the codec;
+	// these sizes are used only for chunking, never to encode records by hand.
 	identityReplyHeader = 40
-	identityRecordFixed = 32
+	identityRecordFixed = 56
 )
 
 var (
-	service identityd.Service
-	persist *identityd.Persist
+	service *identityd.Service
 
 	controlHandle handle.ID
 	vfsHandle     handle.ID
@@ -138,27 +139,47 @@ func userspaceMain() {
 	}
 }
 
-// load reads the snapshot through the VFS session and sets the availability
-// state. A missing snapshot is Unprovisioned, corruption is Unavailable, and a
-// valid snapshot is Available; the service never silently creates a database.
+// secureEpoch obtains a fresh 128-bit database epoch from the kernel's trusted
+// random source, as the provisioning/recovery path requires. It fails closed
+// when generation fails or the read is short, never returning a weak epoch.
+func secureEpoch() ([16]byte, error) {
+	var epoch [16]byte
+	n, err := (cryptosys.Reader{}).Read(epoch[:])
+	if err != nil {
+		return [16]byte{}, err
+	}
+	if n != len(epoch) {
+		return [16]byte{}, errors.New("identityd: short epoch read")
+	}
+	return epoch, nil
+}
+
+// load opens the durable snapshot through the confined VFS session, setting the
+// service availability state: missing → Unprovisioned, valid → Available,
+// corrupt or ambiguous → Unavailable. An open failure never stops the service:
+// the control and admin endpoints stay alive so provisioning and recovery can
+// proceed. The service never silently creates or regenerates a database.
 func load() {
-	persist = identityd.NewPersist(vfsFiles{}, dbPath)
-	store, err := persist.Load()
-	switch {
-	case errors.Is(err, identityd.ErrNotFound):
-		service.Adopt(nil, identityproto.StateUnprovisioned)
-		syslog.Info("identity unprovisioned")
-	case err != nil:
-		service.Adopt(nil, identityproto.StateUnavailable)
-		syslog.Warn("identity snapshot unavailable", syslog.Str("reason", err.Error()))
-	default:
-		service.Adopt(store, identityproto.StateAvailable)
+	service = identityd.New(vfsFiles{}, dbPath, secureEpoch)
+	err := service.Open()
+	switch service.State() {
+	case identityproto.StateAvailable:
 		syslog.Info("identity snapshot loaded")
+	case identityproto.StateUnprovisioned:
+		syslog.Info("identity unprovisioned")
+	default:
+		reason := "unknown"
+		if err != nil {
+			reason = err.Error()
+		}
+		syslog.Warn("identity snapshot unavailable", syslog.Str("reason", reason))
 	}
 }
 
 // addSession records the session handle PID 1 attached to a control request.
-// A control-channel peer death is fatal: PID 1 restarts the service.
+// OpAddAdmin and OpAddLookup both install the attached endpoint into the next
+// free slot; the opcode decides whether the session dispatches admin or lookup
+// operations. A control-channel peer death is fatal: PID 1 restarts the service.
 func addSession() {
 	status := sys.IPCReceive(controlHandle, wire[:])
 	if status == ipc.StatusPeerDied {
@@ -170,17 +191,24 @@ func addSession() {
 	op, endpoint, correlation, valid := identityproto.DecodeControlRequest(&controlMsg)
 	result := identityproto.ResultInvalid
 	if valid {
-		if install(endpoint, op == identityproto.OpAddAdmin) {
+		admin := op == identityproto.OpAddAdmin
+		if install(endpoint, admin) {
 			result = identityproto.ResultOK
 		} else {
 			sys.HandleClose(endpoint)
 			result = identityproto.ResultExhausted
 		}
-	} else if controlMsg.HandleCount > 0 && controlMsg.Handles[0] != 0 {
-		sys.HandleClose(controlMsg.Handles[0])
-		op = identityproto.Opcode(controlMsg.Payload[0])
-		if op != identityproto.OpAddAdmin && op != identityproto.OpAddLookup {
-			return
+	} else {
+		// A malformed control request must not strand its attached handles:
+		// close every one, then attribute the opcode if it is known so the
+		// caller is answered rather than left waiting.
+		for index := 0; index < int(controlMsg.HandleCount); index++ {
+			if controlMsg.Handles[index] != 0 {
+				sys.HandleClose(controlMsg.Handles[index])
+			}
+		}
+		if controlMsg.PayloadSize > 0 {
+			op = identityproto.Opcode(controlMsg.Payload[0])
 		}
 		correlation = controlMsg.Correlation
 	}
@@ -220,12 +248,12 @@ func serve(current *session) {
 		// Attribute a malformed request if it names a known data opcode, and
 		// answer it so the caller is never stranded.
 		if op, corr, attributed := identityproto.RequestOpcode(&requestMsg); attributed {
-			sendReply(current.endpoint, identityproto.Reply{Opcode: op, Result: identityproto.ResultInvalid, State: identityproto.StateAvailable}, corr)
+			sendReply(current.endpoint, identityproto.Reply{Opcode: op, Result: identityproto.ResultInvalid, State: service.State()}, corr)
 		}
 		return
 	}
 	if !sessionAllows(current, req.Opcode) {
-		sendReply(current.endpoint, identityproto.Reply{Opcode: req.Opcode, Result: identityproto.ResultDenied, State: identityproto.StateAvailable}, correlation)
+		sendReply(current.endpoint, identityproto.Reply{Opcode: req.Opcode, Result: identityproto.ResultDenied, State: service.State()}, correlation)
 		return
 	}
 	if isListOpcode(req.Opcode) {
@@ -234,15 +262,12 @@ func serve(current *session) {
 		return
 	}
 	reply := service.HandleRequest(&req)
-	if mutates(req.Opcode) && reply.Result == identityproto.ResultOK && !persistService() {
-		reply.Result = identityproto.ResultUnavailable
-		reply.Records = nil
-	}
 	sendReply(current.endpoint, reply, correlation)
 }
 
 // sessionAllows enforces the endpoint kind PID 1 granted: lookup operations run
 // only on lookup sessions, administration operations only on admin sessions.
+// A lookup session therefore cannot provision, reset or otherwise mutate.
 func sessionAllows(current *session, op identityproto.Opcode) bool {
 	if op == identityproto.LookupAuthorizeKey || op == identityproto.LookupGetAccount {
 		return !current.admin
@@ -253,47 +278,6 @@ func sessionAllows(current *session, op identityproto.Opcode) bool {
 // isListOpcode reports whether op answers with a multipart list reply.
 func isListOpcode(op identityproto.Opcode) bool {
 	return op == identityproto.AdminListAccounts || op == identityproto.AdminListGroups
-}
-
-// mutates reports whether a successful op changes the store and must persist.
-func mutates(op identityproto.Opcode) bool {
-	switch op {
-	case identityproto.AdminProvision, identityproto.AdminReset,
-		identityproto.AdminAddAccount, identityproto.AdminDeleteAccount,
-		identityproto.AdminSetEnabled, identityproto.AdminSetUID,
-		identityproto.AdminSetGID, identityproto.AdminSetHome,
-		identityproto.AdminSetGroups, identityproto.AdminAddKey,
-		identityproto.AdminRemoveKey, identityproto.AdminAddGroup,
-		identityproto.AdminDeleteGroup, identityproto.AdminSetMembers:
-		return true
-	}
-	return false
-}
-
-// persistService writes the current snapshot and reconciles from storage on
-// failure. It reports whether the mutation became durable.
-func persistService() bool {
-	data, err := service.Snapshot()
-	if err != nil {
-		service.Adopt(nil, identityproto.StateUnavailable)
-		return false
-	}
-	if err := persist.Save(data); err == nil {
-		return true
-	}
-	// A failed save may follow a committed rename (ADR 0233 §3): reconcile by
-	// re-reading and re-validating, never by assuming the old snapshot survived.
-	if errors.Is(err, identityd.ErrUncertain) {
-		if store, loadErr := persist.Load(); loadErr == nil {
-			if current, encErr := identity.Encode(store); encErr == nil && bytes.Equal(current, data) {
-				service.Adopt(store, identityproto.StateAvailable)
-				return true
-			}
-		}
-	}
-	service.Adopt(nil, identityproto.StateUnavailable)
-	syslog.Error("identity persistence failed; service unavailable")
-	return false
 }
 
 // sendReply encodes and sends one non-list reply.
@@ -344,15 +328,30 @@ func sendList(endpoint handle.ID, op identityproto.Opcode, result identityproto.
 	}
 }
 
-// recordSize is the encoded size of one identity record.
+// recordSize is the encoded size of one identity record: the version-2 fixed
+// header plus the variable name, home and supplementary-group fields. It
+// mirrors identityproto's codec sizing only so list chunks fit ipc.MaxPayload;
+// records themselves are encoded by identityproto.
 func recordSize(record identityproto.Record) int {
-	return identityRecordFixed + len(record.Name) + len(record.Home)
+	return identityRecordFixed + len(record.Name) + len(record.Home) + 4*len(record.Groups)
 }
 
 // dropSession closes a client endpoint and frees its slot.
 func dropSession(current *session) {
 	sys.HandleClose(current.endpoint)
 	*current = session{}
+}
+
+// dirOf returns the directory containing path, the confined session's own
+// directory for the snapshot and its temporary file.
+func dirOf(path string) string {
+	if slash := strings.LastIndexByte(path, '/'); slash >= 0 {
+		if slash == 0 {
+			return "/"
+		}
+		return path[:slash]
+	}
+	return ""
 }
 
 // vfsFiles adapts the persistence layer's Files interface to the confined VFS
@@ -374,30 +373,50 @@ func (vfsFiles) Read(path string) ([]byte, error) {
 	}
 	defer callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
 	var data []byte
-	for len(data) <= identity.MaxSnapshotBytes {
+	for {
 		reply, ok := callVFS(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: vfs.MaxReplyData})
-		if !ok || reply.Status != vfs.StatusOK || len(reply.Data) == 0 {
-			break
+		if !ok || reply.Status != vfs.StatusOK {
+			return nil, errors.New("identityd: snapshot read failed")
+		}
+		if len(reply.Data) == 0 {
+			// End of file only after a successful zero-byte read.
+			return data, nil
+		}
+		if len(data)+len(reply.Data) > identity.MaxSnapshotBytes {
+			return nil, errors.New("identityd: snapshot exceeds size bound")
 		}
 		data = append(data, reply.Data...)
 	}
-	return data, nil
 }
 
 func (vfsFiles) Create(path string) error {
 	reply, ok := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: sys.Bytes(path)})
-	if !ok || reply.Status != vfs.StatusOK && reply.Status != vfs.StatusAlreadyExists {
+	if !ok {
 		return errors.New("identityd: temporary create failed")
 	}
-	if reply.Status == vfs.StatusAlreadyExists {
-		return errors.New("identityd: temporary file exists")
+	switch reply.Status {
+	case vfs.StatusOK:
+		return nil
+	case vfs.StatusAlreadyExists:
+		return identityd.ErrExists
+	default:
+		return errors.New("identityd: temporary create failed")
 	}
-	return nil
 }
 
 func (vfsFiles) Unlink(path string) error {
-	_, _ = callVFS(vfs.Request{Operation: vfs.OperationUnlink, Path: sys.Bytes(path)})
-	return nil
+	reply, ok := callVFS(vfs.Request{Operation: vfs.OperationUnlink, Path: sys.Bytes(path)})
+	if !ok {
+		return errors.New("identityd: unlink failed")
+	}
+	switch reply.Status {
+	case vfs.StatusOK:
+		return nil
+	case vfs.StatusNotFound:
+		return identityd.ErrNotFound
+	default:
+		return errors.New("identityd: unlink failed")
+	}
 }
 
 func (vfsFiles) OpenWrite(path string) (identityd.Handle, error) {
@@ -424,6 +443,15 @@ func (vfsFiles) Write(file identityd.Handle, data []byte) (int, error) {
 	return written, nil
 }
 
+func (vfsFiles) Sync(file identityd.Handle) error {
+	reply, ok := callVFS(vfs.Request{Operation: vfs.OperationSync, Handle: vfs.Handle(file)})
+	if !ok || reply.Status != vfs.StatusOK {
+		// A required unsupported or failed sync is not success.
+		return errors.New("identityd: temporary sync failed")
+	}
+	return nil
+}
+
 func (vfsFiles) Close(file identityd.Handle) error {
 	reply, ok := callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: vfs.Handle(file)})
 	if !ok || reply.Status != vfs.StatusOK {
@@ -440,10 +468,50 @@ func (vfsFiles) Replace(source, target string) error {
 	switch reply.Status {
 	case vfs.StatusOK:
 		return nil
-	case vfs.StatusBackendError, vfs.StatusTimeout, vfs.StatusPeerDied, vfs.StatusCorrupt, vfs.StatusNoSpace:
+	case vfs.StatusTimeout, vfs.StatusPeerDied, vfs.StatusBackendError, vfs.StatusCorrupt, vfs.StatusNoSpace:
 		return identityd.ErrUncertain
 	default:
 		return errors.New("identityd: replace failed")
+	}
+}
+
+func (vfsFiles) SyncDir(path string) error {
+	reply, ok := callVFS(vfs.Request{Operation: vfs.OperationSync, Path: sys.Bytes(dirOf(path))})
+	if !ok || reply.Status != vfs.StatusOK {
+		// The final directory barrier is required: unsupported or failed sync
+		// is not success.
+		return errors.New("identityd: directory sync failed")
+	}
+	return nil
+}
+
+func (vfsFiles) ListNames(path string, max int) ([]string, error) {
+	dir := dirOf(path)
+	if dir == "" {
+		return nil, errors.New("identityd: invalid snapshot directory")
+	}
+	var names []string
+	var cursor uint64
+	for {
+		reply, ok := callVFS(vfs.Request{Operation: vfs.OperationReadDir, Path: sys.Bytes(dir), Offset: cursor})
+		if !ok {
+			return nil, errors.New("identityd: directory listing failed")
+		}
+		switch reply.Status {
+		case vfs.StatusOK:
+			if len(names) >= max {
+				return nil, errors.New("identityd: directory holds too many entries")
+			}
+			if len(reply.Name) == 0 {
+				return nil, errors.New("identityd: empty directory entry")
+			}
+			names = append(names, string(reply.Name))
+			cursor = uint64(reply.Cursor)
+		case vfs.StatusNotFound:
+			return names, nil
+		default:
+			return nil, errors.New("identityd: directory listing failed")
+		}
 	}
 }
 

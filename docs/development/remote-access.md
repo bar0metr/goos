@@ -195,9 +195,10 @@ and run `remote reload` to recover without restarting the service. A rejected
 replacement after a valid commit keeps the previous listener and policy.
 
 GCF1 scoped revisions bracket candidate reads, including concurrent changes that
-restore a previous value. Path changes also need free VFS scope capacity. Eight
-scope slots retain old private-path protection during the VFS lifetime; reload
-rejects scope exhaustion rather than exposing a previous host key.
+restore a previous value. Path changes also need free VFS scope capacity. Seven
+scope slots retain old private-path protection during the VFS lifetime; the
+eighth slot holds the identity database, and reload rejects scope exhaustion
+rather than exposing a previous host key.
 
 ## Host identity
 

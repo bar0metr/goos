@@ -49,14 +49,18 @@ enabled flag, and up to 8 Ed25519 public keys. A group holds a stable
 `GroupID uint64`, a name, and a `uint32` GID.
 
 Internal IDs are distinct from Unix numbers. `AccountID` and `GroupID` are
-persisted monotonic counters. The store refuses to allocate at `math.MaxUint64`.
-Deletion never reuses an internal ID. The UID/GID are separate `uint32`
-numbers that an administrator may reuse explicitly, but an old internal ID
-never aliases a new account or group.
+persisted monotonic counters that start at 1 and never wrap or get reused.
+The store refuses to allocate at `math.MaxUint64`. The UID/GID are separate
+`uint32` numbers that an administrator may reuse explicitly, but an old
+internal ID never aliases a new account or group.
 
 Reserved Unix numbers are `0` and `0xFFFFFFFF`; allocation and explicit
-assignment reject both. Deterministic allocation picks the lowest unused value
-at or above `1000`, for UID and GID independently.
+assignment reject both. Allocation uses persistent `nextUID` and `nextGID`
+high-water marks: each starts at `AllocBase` (1000) and only increases, so an
+automatically issued number is never reused. A mark is a `uint64` bounded by
+the uint32 domain; `0xFFFFFFFF` is the exhausted sentinel. Explicit assignment
+of a free non-reserved number raises the mark when it crosses it. Deletion and
+reassignment never lower a mark.
 
 ### 2. Store operations
 
@@ -96,27 +100,61 @@ supplementary fails with a conflict; the administrator reassigns first.
 One versioned snapshot file, `/state/identity/db`. No per-account or per-group
 files. Public keys are not a second authority source.
 
-Encoding is explicit fixed-endian, deterministic, and re-encodes byte-for-byte.
-The file is:
+Encoding is explicit fixed little-endian, deterministic, and re-encodes
+byte-for-byte. The file is:
 
-```
-magic  "GOOS-IDENTITY-V1\n" (17 bytes)
-version uint16 = 1
+```text
+magic   "GOOS-IDENTITY-V2\n" (17 bytes)
+version uint16 = 2
 sequence uint64 (monotonic, increments each committed mutation)
-payload canonical encoding of all accounts, groups, nextAccountID, nextGroupID
+payload epoch [16]byte, nextAccountID, nextGroupID, nextUID, nextGID, accounts, groups
 digest  sha256(magic || version || sequence || payload) (32 bytes)
 ```
 
-`sequence` is the durability/linearization marker, not a session token.
+The payload leads with the 128-bit database epoch, then the four counters
+`nextAccountID`, `nextGroupID`, `nextUID`, `nextGID`, then the account and
+group records. The snapshot format version (2) is independent of the IPC
+protocol version. The pre-release V1 format (`GOOS-IDENTITY-V1\n`, version 1)
+is refused with `ErrOldFormat`; M4 never silently upgrades it or invents
+high-water history. Recover a V1 file by backup and re-provision, or by an
+explicit tested migration.
 
-Writes go through `safesave.Save` (write `.<name>.~save` beside the target,
-close, `Replace`). On FAT32 `Replace` is the durability barrier. A `Replace`
-that fails late may have committed: identityd reconciles with a forward retry
-from storage, never by assuming the old snapshot survived. The store never
-truncates a snapshot in place and never rewrites a committed generation.
+The canonical identity reference for an account is `(DB epoch, AccountID)`,
+and for a group `(DB epoch, GroupID)`. After corrupt recovery mints a fresh
+epoch, stale internal references stay distinguishable even when the new
+numeric IDs restart at 1.
+
+`sequence` marks durability and linearization, not a session token.
+
+A mutation is a real commit boundary. The single-owner coordinator clones the
+committed store, applies the change, validates and encodes the candidate, then
+persists it before publishing:
+
+```text
+clone committed store -> apply -> validate -> encode
+  -> exclusive temp create -> full write -> Sync(temp handle) -> checked Close
+  -> Replace(temp, db) -> Sync(containing directory)
+  -> publish candidate
+```
+
+`Close` is not fsync. A required unsupported or failed `Sync`/`SyncDir` is not
+success. On FAT32 `Replace` is a sector-level old-or-new switch, not ext4
+journal crash atomicity, so a torn operation can leave the target
+indeterminate; identityd treats that as Unavailable and never assumes the old
+snapshot survived. A definite failure before the rename leaves the old
+committed store in place. An ambiguous rename or a failed final directory sync
+fails closed into Unavailable and reconciles only after a fresh lifetime and a
+verified durability barrier.
+
+The temporary file uses one reserved name, `.<name>.~save` beside the target,
+created exclusively, with no counter. A stale temp left by a prior writer is
+reconciled at startup against a bounded directory listing: with the db present
+the temp is removed and its removal verified; with the db absent the state is
+Unavailable (interrupted provisioning), never silently promoted.
 
 Load validates magic, version, lengths, counts, digest, then the payload
-(bounds, duplicates, dangling references). Any failure is corruption.
+(epoch nonzero, bounds, high-water marks, duplicates, dangling references).
+Any failure is corruption.
 
 ### 4. Availability and recovery
 
@@ -124,26 +162,37 @@ identityd reports one of three states:
 
 - `Available`: loaded and valid.
 - `Unprovisioned`: the directory has no snapshot and no stale temp file.
-  identityd serves the admin endpoint; lookup and data operations deny.
+  The admin endpoint serves; lookup and data operations deny.
 - `Unavailable`: the snapshot is corrupt, or a write ended with uncertain
-  durability and reconciliation did not produce a validated snapshot. Lookup
-  denies; data operations return unavailable.
+  durability and reconciliation produced no validated snapshot. Lookup denies;
+  data operations return unavailable.
 
-Provisioning is explicit: `AdminProvision`, or the first successful account or
-group creation from `Unprovisioned`, writes an empty valid snapshot. identityd
-never initializes a database on its own at boot. Corrupt data is never
-regenerated over; recovery is `AdminReset` (destructive, requires an explicit
-administrator action) after which `AdminProvision` applies. Local console
-administration and this recovery path do not depend on UID 0, on the account
-database being valid, or on remote login.
+Provisioning and reset are explicit and enforce their preconditions inside
+identityd, not only in the CLI:
+
+| Operation | Unprovisioned | Available | Unavailable |
+| --- | --- | --- | --- |
+| Status | report state | report state and counts | report state |
+| Provision | commit empty DB with a fresh epoch | Conflict, unchanged | denied, unchanged |
+| Reset | Conflict; use provision | commit empty DB, preserve epoch and high-water marks, advance revision | commit empty DB with a fresh epoch and fresh counters |
+| Data mutation | denied | validated durable update | denied |
+| Key authorization / lookup | denied | current committed data only | denied |
+
+A valid store is never reset by provisioning, and corrupt data is never
+regenerated over. Reset destroys identity records, not home directories or
+disk ownership metadata. Local console administration and recovery do not
+depend on UID 0, on a valid account database, or on remote login.
 
 ### 5. IPC
 
 `userspace/identityproto` is the versioned codec, one shared package imported by
 identityd, the administration commands, and PID 1. `ProtocolID =
-0x4749444e545931` ("GIDNTY1"), `Version = 1`. Payloads fit the 256-byte inline
-IPC limit; list replies are multipart with a sequence index and a `More` flag,
-mirroring the remoted admin multipart pattern.
+0x4749444e545931` ("GIDNTY1"), `Version = 2`. Version 2 adds the database
+epoch, the committed revision, and the account's supplementary group Unix GIDs
+to each record so a lookup reply is one coherent committed principal view.
+Payloads fit the 256-byte inline IPC limit; list replies are multipart with a
+sequence index and a `More` flag, mirroring the remoted admin multipart
+pattern.
 
 The control channel carries two operations, each with one attached session
 handle, sent by PID 1 only:
@@ -158,6 +207,12 @@ Administration operations: `AdminStatus`, `AdminProvision`, `AdminReset`,
 `AdminRemoveKey`, `AdminAddGroup`, `AdminDeleteGroup`, `AdminSetMembers`.
 
 Lookup operations: `LookupAuthorizeKey`, `LookupGetAccount`.
+
+Each get and list record carries the stable internal ID, the Unix UID and GID,
+name, home, enabled flag, key count, the 128-bit database epoch, the committed
+revision, and, for accounts, the supplementary group Unix GIDs sorted
+ascending. The epoch and revision name one committed view for key
+authorization and M5 admission.
 
 Result codes distinguish `ResultOK`, `ResultInvalid`, `ResultNotFound`,
 `ResultExists`, `ResultExhausted`, `ResultUnavailable`, `ResultUnprovisioned`,
@@ -176,12 +231,27 @@ mounts, with dependency `vfs` and `RestartOnFailure`. It runs in normal mode
 and is stopped in recovery. Its image joins `sessionServices` so boot validates
 it.
 
+PID 1 reserves one of the eight VFS scope slots for the identity database:
+`identityScopeSlot = vfs.MaxScopes - 1` (slot 7). remoted keeps its existing
+host-key scopes on the prefix 0..6, and its install and reload paths refuse to
+cross into slot 7. PID 1 creates and validates `/state/identity` through its
+trusted setup session before installing the subtree scope that denies
+`Read|Write` to every session without the grant, and it installs that scope
+before ordinary sessions can be published.
+
 PID 1 grants identityd exactly: a `control` channel (PID 1 keeps the client
-end), a `vfs` session confined to `/state/identity`, and the `log` device.
-The VFS confinement follows the remoted `/state/security/ssh` pattern:
-`vfs.InstallScope` on `/state/identity` (subtree, denied `Read|Write`) plus
-`vfs.AddSessionWithAuthorityRequest` with `Confined: true` and that slot
-granted `Read|Write`.
+end), a `vfs` session, and the `log` device. The VFS session carries both
+canonical root confinement to `/state/identity` and the reserved slot's
+`Read|Write` grant: `vfs.RootedAuthority` with `Confined: true` and
+`Grants[identityScopeSlot] = Read|Write`. Root confinement alone leaves
+ordinary sessions able to reach the subtree, and a grant alone would let
+identityd escape its directory, so both are required.
+
+The identity and remote protections are tracked per VFS lifetime. When the VFS
+restarts, PID 1 clears the installed markers and re-installs both scopes before
+handing ordinary sessions back, then reissues identityd's control and VFS
+endpoints. A failed install or an ambiguous identity root fails closed: no
+unprotected publication of identity state.
 
 identityd is single-owner: one event loop, no mutation goroutines. Every
 outbound VFS request uses a bounded deadline.
@@ -212,15 +282,25 @@ multi-account admission is deferred to M5.
 `userspace/bin/user` and `userspace/bin/group` expose the §21 surface:
 
 ```text
+user status | provision | reset --confirm
 user list | show NAME | add NAME | disable NAME | enable NAME | delete NAME
 user uid NAME UID | gid NAME GID | home NAME PATH | groups NAME ...
 user key add NAME KEY | remove NAME FINGERPRINT
 group list | add NAME | delete NAME | members NAME ...
 ```
 
-Both declare a new command grant, `commands.GrantIdentityAdmin` (next free
-bit), bumping `IndexFormat` to 11 and adding the corresponding case in
-`tools/commands`. PID 1 maps the grant to an identity administration session
+`user status` prints `available accounts=N groups=N keys=N`, `unprovisioned`,
+or `unavailable`. `user provision` commits an empty database from
+Unprovisioned and never provisions implicitly on `user add`. `user reset
+--confirm` is the explicitly destructive recovery operation: it requires
+exactly `--confirm`, rejects any other argument, and destroys identity
+records, not home directories or disk ownership metadata. The lifecycle
+preconditions are enforced inside identityd; the CLI flag is not the
+authorization boundary.
+
+Both declare a new command grant, `commands.GrantIdentityAdmin` (`0x8000`,
+next free bit), bumping `IndexFormat` to 11 and adding the corresponding case
+in `tools/commands`. PID 1 maps the grant to an identity administration session
 over identityd's control channel, mirroring `openRemoteAdmin`. A command
 without the grant has no identity session and fails closed. Enforcement stays
 at PID 1, never in identityd.
@@ -248,6 +328,10 @@ M5 switches production SSH admission to account-aware logins and installs a
 trusted principal into VFS sessions. Before M5 activates, this card must have
 proven: the key-authorization API and adapter, key isolation, disabled and
 missing accounts, key removal and policy changes, and the durable corruption
-and availability policy. M5 must also bind the verified account identity to a
-supervisor-controlled session record; M4 deliberately does not mint account
-sessions.
+and availability policy. The lookup endpoint returns a bounded coherent
+principal view: the stable `AccountID`, the 128-bit database epoch, the
+committed revision, the current UID, the primary GID, supplementary groups,
+home, and enabled state, all from one committed snapshot. M5 admission must
+revalidate against that same committed view. M5 must also bind the verified
+account identity to a supervisor-controlled session record; M4 deliberately
+does not mint account sessions.

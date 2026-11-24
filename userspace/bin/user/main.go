@@ -21,9 +21,9 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "user list|show NAME|add NAME|disable NAME|enable NAME|delete NAME|uid|gid|home|groups|key",
+	Usage:   "user status|provision|reset|list|show|add|disable|enable|delete|uid|gid|home|groups|key",
 	Summary: "manage identity accounts",
-	Options: "list; show NAME; add NAME; disable NAME; enable NAME; delete NAME; uid NAME UID; gid NAME GID; home NAME PATH; groups NAME [GID...]; key add NAME KEY; key remove NAME FINGERPRINT",
+	Options: "status; provision; reset --confirm (destroys identity records, not home directories or disk ownership metadata); list; show NAME; add NAME; disable NAME; enable NAME; delete NAME; uid NAME UID; gid NAME GID; home NAME PATH; groups NAME [GID...]; key add NAME KEY; key remove NAME FINGERPRINT",
 	MinArgs: 1,
 	MaxArgs: commands.Unbounded,
 	Grants:  commands.GrantIdentityAdmin,
@@ -48,6 +48,12 @@ func run(data startup.Data) {
 	}
 	argument, _ := data.Arg(1)
 	switch {
+	case utility.Equal(argument, "status") && data.ArgCount() == 1:
+		status(channel)
+	case utility.Equal(argument, "provision") && data.ArgCount() == 1:
+		provision(channel)
+	case utility.Equal(argument, "reset"):
+		reset(data, channel)
 	case utility.Equal(argument, "list") && data.ArgCount() == 1:
 		list(channel, identityproto.AdminListAccounts)
 	case utility.Equal(argument, "show") && data.ArgCount() == 2:
@@ -72,6 +78,72 @@ func run(data startup.Data) {
 		key(data, channel)
 	default:
 		utility.Usage()
+	}
+}
+
+// status reports identityd's availability state, and the account, group and
+// key counts when the store is Available. It reads the state from the reply,
+// so a missing, corrupt, or I/O-uncertain store is reported exactly as the
+// service reports it rather than assumed Available.
+func status(channel handle.ID) {
+	reply := exchange(channel, identityproto.Request{Opcode: identityproto.AdminStatus})
+	switch reply.State {
+	case identityproto.StateAvailable:
+		utility.PrintText("available accounts=")
+		utility.PrintUint(uint64(reply.Accounts))
+		utility.PrintText(" groups=")
+		utility.PrintUint(uint64(reply.Groups))
+		utility.PrintText(" keys=")
+		utility.PrintUint(uint64(reply.Keys))
+		utility.EndLine()
+	case identityproto.StateUnprovisioned:
+		utility.PrintText("unprovisioned")
+		utility.EndLine()
+	case identityproto.StateUnavailable:
+		utility.PrintText("unavailable")
+		utility.EndLine()
+	default:
+		utility.Fail(nil, "invalid identity state")
+	}
+}
+
+// provision commits an empty database, reporting the lifecycle result. It never
+// overwrites a valid or corrupt store: those report Conflict or Unavailable, and
+// the command never provisions implicitly on behalf of add.
+func provision(channel handle.ID) {
+	reply := exchange(channel, identityproto.Request{Opcode: identityproto.AdminProvision})
+	switch reply.Result {
+	case identityproto.ResultOK:
+	case identityproto.ResultConflict:
+		utility.Fail(nil, "already provisioned")
+	case identityproto.ResultUnavailable:
+		utility.Fail(nil, "identity store unavailable")
+	case identityproto.ResultDenied:
+		utility.Fail(nil, "denied")
+	default:
+		failResult(reply.Result)
+	}
+}
+
+// reset runs the explicitly destructive recovery operation, requiring exactly
+// "--confirm". It destroys identity records, not home directories or disk
+// ownership metadata.
+func reset(data startup.Data, channel handle.ID) {
+	confirm, found := data.Arg(2)
+	if data.ArgCount() != 2 || !found || !utility.Equal(confirm, "--confirm") {
+		utility.Usage()
+	}
+	reply := exchange(channel, identityproto.Request{Opcode: identityproto.AdminReset})
+	switch reply.Result {
+	case identityproto.ResultOK:
+	case identityproto.ResultConflict:
+		utility.Fail(nil, "identity store unprovisioned; run 'user provision' first")
+	case identityproto.ResultUnavailable:
+		utility.Fail(nil, "identity store unavailable")
+	case identityproto.ResultDenied:
+		utility.Fail(nil, "denied")
+	default:
+		failResult(reply.Result)
 	}
 }
 
@@ -260,9 +332,9 @@ func failResult(result identityproto.Result) {
 	case identityproto.ResultExhausted:
 		utility.Fail(nil, "limit reached")
 	case identityproto.ResultUnavailable:
-		utility.Fail(nil, "unavailable")
+		utility.Fail(nil, "identity store unavailable")
 	case identityproto.ResultUnprovisioned:
-		utility.Fail(nil, "unprovisioned")
+		utility.Fail(nil, "identity store unprovisioned; run 'user provision' first")
 	case identityproto.ResultDenied:
 		utility.Fail(nil, "denied")
 	default:

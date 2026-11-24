@@ -34,6 +34,10 @@ var (
 	identityControl handle.ID
 	// identityProcess is kept so recovery can stop the service.
 	identityProcess handle.ID
+	// identityScopeInstalled records that the identity subtree scope is
+	// installed in the current VFS namespace. vfsRestarted clears it so a
+	// rebuilt namespace gets the scope back before ordinary sessions return.
+	identityScopeInstalled bool
 )
 
 // startIdentity registers and starts identityd. It runs only in normal mode,
@@ -95,20 +99,57 @@ func abortIdentityGrants(spec *supervisor.LaunchSpec) {
 	identityControl = 0
 }
 
-// openIdentityVFS creates /state/identity and opens identityd's VFS session
-// rooted there. The root confines the session to /state/identity and below;
-// it does not use a scope slot, because remoted's host-key protection owns the
-// shared slots and a bound slot cannot be replaced.
-func openIdentityVFS() (handle.ID, string) {
+// protectIdentityStorage creates /state/identity through PID 1's trusted setup
+// session, verifies it is the directory identityd expects, and installs the
+// subtree scope that denies Read|Write to every session without the identity
+// grant. It is idempotent within one VFS lifetime and runs before any ordinary
+// session can be published, so an unconfined session can still create the
+// directory but a later one cannot reach it.
+func protectIdentityStorage() bool {
+	if identityScopeInstalled {
+		return true
+	}
 	files, reason := openVFSSession()
 	if reason != "" {
-		return 0, reason
+		return false
 	}
 	defer closeOpen(files)
 	if !ensureIdentityDirectory(files) {
-		return 0, "IDENTITY_DIRECTORY_FAILED"
+		return false
 	}
-	authority, valid := vfs.RootedAuthority([]byte(identityDirectory))
+	if !installIdentityScope() {
+		return false
+	}
+	identityScopeInstalled = true
+	return true
+}
+
+// installIdentityScope binds the reserved slot to the identity subtree and
+// denies Read|Write to every session without the identity grant. Slots cannot
+// be replaced within a namespace lifetime, so this runs once per lifetime.
+func installIdentityScope() bool {
+	correlation++
+	request, ok := vfs.InstallScopeRequest(identityScopeSlot, []byte(identityDirectory), true, vfs.Read|vfs.Write, 0, correlation)
+	if !ok {
+		return false
+	}
+	result, status, sent := filesystemRequests.Control(handle.ID(vfsControlHandle), &request, vfsSessionDeadline)
+	if !sent {
+		return false
+	}
+	return status == ipc.StatusOK && result == vfs.StatusOK
+}
+
+// openIdentityVFS ensures the identity subtree scope is installed and opens
+// identityd's VFS session with both the subtree's Read|Write grant and a
+// canonical root confining it to /state/identity. Root confinement alone
+// leaves ordinary sessions able to reach the database, and a grant alone
+// would let identityd escape its directory, so the session has both.
+func openIdentityVFS() (handle.ID, string) {
+	if !protectIdentityStorage() {
+		return 0, "IDENTITY_PROTECTION_FAILED"
+	}
+	authority, valid := identityAuthority([]byte(identityDirectory))
 	if !valid {
 		return 0, "IDENTITY_ROOT_INVALID"
 	}
@@ -116,12 +157,17 @@ func openIdentityVFS() (handle.ID, string) {
 }
 
 // ensureIdentityDirectory creates /state and /state/identity when they are
-// missing. /state is the persistent volume's mount, already present in normal
-// mode; identityd's own directory is made through PID 1's unconfined session.
+// missing and verifies both are directories, refusing a file or a symlink
+// where the database root must be. /state is the persistent volume's mount,
+// already present in normal mode; identityd's own directory is made through
+// PID 1's unconfined session.
 func ensureIdentityDirectory(files handle.ID) bool {
 	for _, prefix := range [...]string{"/state", identityDirectory} {
-		stat, ok := callSession(files, vfs.Request{Operation: vfs.OperationStat, Path: []byte(prefix)})
-		if ok && stat.Status == vfs.StatusOK && stat.Kind == ramfs.KindDirectory {
+		stat, ok := callSession(files, vfs.Request{Operation: vfs.OperationStat, Path: []byte(prefix), Rights: vfs.NoFollow})
+		if ok && stat.Status == vfs.StatusOK {
+			if stat.Kind != ramfs.KindDirectory {
+				return false
+			}
 			continue
 		}
 		reply, ok := callSession(files, vfs.Request{Operation: vfs.OperationMkdir, Path: []byte(prefix)})
@@ -178,6 +224,36 @@ func openIdentityAdmin() handle.ID {
 	}
 	reply, status := receive(uint64(identityControl), identityControlDeadline)
 	result, valid := identityproto.DecodeControlReply(&reply, identityproto.OpAddAdmin, correlation)
+	if status != ipc.StatusOK || !valid || result != identityproto.ResultOK {
+		closeOpen(handle.ID(pair[0]))
+		return 0
+	}
+	return handle.ID(pair[0])
+}
+
+// openIdentityLookup mirrors openIdentityAdmin but asks identityd for a
+// lookup-only session over the same control channel. A lookup session can run
+// only LookupAuthorizeKey and LookupGetAccount: it cannot provision, reset, or
+// mutate, and no client-supplied field widens it. It is intentionally not wired
+// to production SSH workers yet (M4 FIX §5); the VM gate exercises the actual
+// endpoint.
+func openIdentityLookup() handle.ID {
+	if identityControl == 0 {
+		return 0
+	}
+	var pair [2]uint64
+	if !createChannel(&pair) {
+		return 0
+	}
+	correlation++
+	var message ipc.Message
+	if !identityproto.EncodeControlRequest(identityproto.OpAddLookup, handle.ID(pair[1]), correlation, &message) ||
+		!sendMessage(uint64(identityControl), message) {
+		closePair(pair)
+		return 0
+	}
+	reply, status := receive(uint64(identityControl), identityControlDeadline)
+	result, valid := identityproto.DecodeControlReply(&reply, identityproto.OpAddLookup, correlation)
 	if status != ipc.StatusOK || !valid || result != identityproto.ResultOK {
 		closeOpen(handle.ID(pair[0]))
 		return 0

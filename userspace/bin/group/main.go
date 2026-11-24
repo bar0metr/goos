@@ -156,9 +156,9 @@ func failResult(result identityproto.Result) {
 	case identityproto.ResultExhausted:
 		utility.Fail(nil, "limit reached")
 	case identityproto.ResultUnavailable:
-		utility.Fail(nil, "unavailable")
+		utility.Fail(nil, "identity store unavailable")
 	case identityproto.ResultUnprovisioned:
-		utility.Fail(nil, "unprovisioned")
+		utility.Fail(nil, "identity store unprovisioned; run 'user provision' first")
 	case identityproto.ResultDenied:
 		utility.Fail(nil, "denied")
 	default:

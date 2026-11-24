@@ -16,6 +16,12 @@ var (
 	ErrConflict    = errors.New("identity: conflict")
 	ErrDisabled    = errors.New("identity: disabled")
 	ErrUnavailable = errors.New("identity: unavailable")
+
+	// ErrOldFormat reports a snapshot in the obsolete pre-release V1 format.
+	// It wraps ErrInvalid so callers classifying ErrInvalid still match it,
+	// while errors.Is(err, ErrOldFormat) distinguishes the refusal. M4 does not
+	// silently upgrade V1 snapshots.
+	ErrOldFormat = fmt.Errorf("%w: obsolete V1 snapshot format; back up and re-provision, or run an explicit migration", ErrInvalid)
 )
 
 // ValidName reports whether name matches the account/group grammar
@@ -58,6 +64,14 @@ func (s *Store) validate() error {
 		return ErrInvalid
 	}
 	if s.nextAccountID == 0 || s.nextGroupID == 0 {
+		return ErrInvalid
+	}
+	// High-water marks are uint64 values bounded by the uint32 domain:
+	// [AllocBase, 0xFFFFFFFF], with 0xFFFFFFFF the exhausted sentinel.
+	if s.nextUID < uint64(AllocBase) || s.nextUID > uint64(maxAllocatableUnix)+1 {
+		return ErrInvalid
+	}
+	if s.nextGID < uint64(AllocBase) || s.nextGID > uint64(maxAllocatableUnix)+1 {
 		return ErrInvalid
 	}
 	for i := range s.accounts {
@@ -154,6 +168,18 @@ func (s *Store) validate() error {
 	}
 	for i := range s.groups {
 		if s.groups[i].ID >= s.nextGroupID {
+			return ErrInvalid
+		}
+	}
+	// Every issued numeric UID/GID must sit strictly below its high-water mark;
+	// otherwise a later automatic allocation could reuse an issued number.
+	for i := range s.accounts {
+		if uint64(s.accounts[i].UID) >= s.nextUID {
+			return ErrInvalid
+		}
+	}
+	for i := range s.groups {
+		if uint64(s.groups[i].GID) >= s.nextGID {
 			return ErrInvalid
 		}
 	}

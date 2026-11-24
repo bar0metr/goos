@@ -26,10 +26,17 @@ const (
 	ReservedUID = uint32(0)
 	ReservedGID = uint32(0xFFFFFFFF)
 
-	// AllocBase is the first allocatable Unix number; allocation picks the
-	// lowest unused value at or above AllocBase.
+	// AllocBase is the first allocatable Unix number; automatic allocation
+	// starts here and only increases.
 	AllocBase = uint32(1000)
 )
+
+// maxAllocatableUnix is the largest non-reserved Unix number. Both UID and GID
+// reserve 0 and 0xFFFFFFFF, so the last allocatable value is 0xFFFFFFFE. The
+// nextUID/nextGID high-water marks are uint64 values bounded by the uint32
+// domain: [AllocBase, 0xFFFFFFFF], where 0xFFFFFFFF is the exhausted sentinel
+// (the next candidate is the reserved terminal value).
+const maxAllocatableUnix = uint32(0xFFFFFFFE)
 
 // Identity bounds stay within the shared native limits. These declarations
 // fail to compile if a bound ever exceeds its native ceiling.

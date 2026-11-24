@@ -24,6 +24,13 @@ func testFP() []byte {
 	}
 	return fp
 }
+func testEpoch() [16]byte {
+	var epoch [16]byte
+	for index := range epoch {
+		epoch[index] = byte(index + 1)
+	}
+	return epoch
+}
 
 func requests() []Request {
 	name, home, key, fp := testName(), testHome(), testKey(), testFP()
@@ -54,8 +61,8 @@ func requests() []Request {
 }
 
 func replies() []Reply {
-	account := Record{Kind: RecordAccount, AccountID: 1, GroupID: 2, UID: 1000, Enabled: true, KeyCount: 3, Name: testName(), Home: testHome()}
-	group := Record{Kind: RecordGroup, GroupID: 2, GID: 1000, Name: []byte("wheel")}
+	account := Record{Kind: RecordAccount, AccountID: 1, GroupID: 2, UID: 1000, GID: 1000, Enabled: true, KeyCount: 3, Epoch: testEpoch(), Revision: 42, Groups: []uint32{1001, 1002}, Name: testName(), Home: testHome()}
+	group := Record{Kind: RecordGroup, GroupID: 2, GID: 1000, Epoch: testEpoch(), Revision: 42, Name: []byte("wheel")}
 	return []Reply{
 		{Opcode: AdminStatus, Result: ResultOK, State: StateAvailable, Accounts: 3, Groups: 2, Keys: 5},
 		{Opcode: AdminStatus, Result: ResultOK, State: StateUnprovisioned},
@@ -86,7 +93,7 @@ func replies() []Reply {
 
 func listRecords() []Record {
 	return []Record{
-		{Kind: RecordAccount, AccountID: 1, GroupID: 2, UID: 1000, Enabled: true, KeyCount: 1, Name: testName(), Home: testHome()},
+		{Kind: RecordAccount, AccountID: 1, GroupID: 2, UID: 1000, GID: 1000, Enabled: true, KeyCount: 1, Epoch: testEpoch(), Revision: 7, Groups: []uint32{1001, 1002}, Name: testName(), Home: testHome()},
 		{Kind: RecordAccount, AccountID: 3, GroupID: 2, UID: 1001, Name: []byte("bob")},
 	}
 }
@@ -233,7 +240,7 @@ func TestRequestRejects(t *testing.T) {
 	}{
 		{"protocol", func(m *ipc.Message) { m.ProtocolID++ }},
 		{"version zero", func(m *ipc.Message) { m.Version = 0 }},
-		{"version two", func(m *ipc.Message) { m.Version = 2 }},
+		{"old version", func(m *ipc.Message) { m.Version = 1 }},
 		{"reply kind", func(m *ipc.Message) { m.Kind = ipc.KindReply }},
 		{"notification", func(m *ipc.Message) { m.Kind = ipc.KindNotification }},
 		{"no correlation", func(m *ipc.Message) { m.Correlation = 0 }},
@@ -344,7 +351,6 @@ func TestReplyInvalid(t *testing.T) {
 		{Opcode: AdminGetAccount, Result: ResultOK, Records: []Record{account, account}},
 		{Opcode: AdminGetAccount, Result: ResultNotFound, Records: []Record{account}},
 		{Opcode: AdminGetGroup, Result: ResultOK, Records: []Record{account}},
-		{Opcode: AdminProvision, State: StateUnavailable},
 		{Opcode: AdminProvision, Accounts: 1},
 		{Opcode: AdminReset, Records: []Record{account}},
 	}
@@ -364,7 +370,7 @@ func TestReplyRejects(t *testing.T) {
 	}{
 		{"protocol", func(m *ipc.Message) { m.ProtocolID++ }},
 		{"version zero", func(m *ipc.Message) { m.Version = 0 }},
-		{"version two", func(m *ipc.Message) { m.Version = 2 }},
+		{"old version", func(m *ipc.Message) { m.Version = 1 }},
 		{"request kind", func(m *ipc.Message) { m.Kind = ipc.KindRequest }},
 		{"correlation", func(m *ipc.Message) { m.Correlation = 8 }},
 		{"payload correlation", func(m *ipc.Message) { binaryPut(m, replyCorr, 8) }},
@@ -405,12 +411,78 @@ func TestReplyRecordReservedBytes(t *testing.T) {
 	reply := replies()[6] // AdminGetAccount with a record
 	var wire ipc.Message
 	EncodeReply(&reply, 4, &wire)
-	for _, index := range []int{replyHeader + 5, replyHeader + 6, replyHeader + 7} {
+	for _, index := range []int{replyHeader + 6, replyHeader + 7} {
 		message := wire
 		message.Payload[index] = 0x80
 		var decoded Reply
 		if DecodeReply(&message, 4, reply.Opcode, &decoded) {
 			t.Fatalf("accepted nonzero record reserved byte %d", index)
+		}
+	}
+}
+
+// TestRecordEpochRevisionGroups verifies the epoch, revision and supplementary
+// group fields round-trip exactly through both get and list codecs, including a
+// group record carrying a nonzero epoch and revision.
+func TestRecordEpochRevisionGroups(t *testing.T) {
+	epoch := testEpoch()
+	revision := uint64(0x0102030405060708)
+	account := Record{Kind: RecordAccount, AccountID: 9, GroupID: 4, UID: 5000, GID: 5000, Enabled: true, KeyCount: 2, Epoch: epoch, Revision: revision, Groups: []uint32{10, 20, 30, 40}, Name: testName(), Home: testHome()}
+	group := Record{Kind: RecordGroup, GroupID: 4, GID: 5000, Epoch: epoch, Revision: revision, Name: []byte("wheel")}
+
+	reply := Reply{Opcode: AdminGetAccount, Result: ResultOK, State: StateAvailable, Records: []Record{account}}
+	var wire ipc.Message
+	if !EncodeReply(&reply, 55, &wire) {
+		t.Fatal("encode account get reply")
+	}
+	var decoded Reply
+	if !DecodeReply(&wire, 55, AdminGetAccount, &decoded) || !reflect.DeepEqual(decoded, reply) {
+		t.Fatalf("account get round-trip: %+v", decoded)
+	}
+
+	greply := Reply{Opcode: AdminGetGroup, Result: ResultOK, State: StateAvailable, Records: []Record{group}}
+	if !EncodeReply(&greply, 56, &wire) {
+		t.Fatal("encode group get reply")
+	}
+	if !DecodeReply(&wire, 56, AdminGetGroup, &decoded) || !reflect.DeepEqual(decoded, greply) {
+		t.Fatalf("group get round-trip: %+v", decoded)
+	}
+
+	if !EncodeListReply(AdminListAccounts, ResultOK, 2, false, []Record{account}, 57, &wire) {
+		t.Fatal("encode account list")
+	}
+	result, seq, more, records, ok := DecodeListReply(&wire, 57, AdminListAccounts)
+	if !ok || result != ResultOK || seq != 2 || more || !reflect.DeepEqual(records, []Record{account}) {
+		t.Fatal("account list round-trip")
+	}
+}
+
+// TestRecordFieldRejects corrupts the newly added record fields and verifies
+// decoding fails: a supplementary group list longer than the bound, a tampered
+// group count, and out-of-order or duplicate groups.
+func TestRecordFieldRejects(t *testing.T) {
+	account := Record{Kind: RecordAccount, AccountID: 1, GroupID: 2, UID: 1000, GID: 1000, Enabled: true, KeyCount: 1, Epoch: testEpoch(), Revision: 42, Groups: []uint32{10, 20, 30}, Name: testName(), Home: testHome()}
+	reply := Reply{Opcode: AdminGetAccount, Result: ResultOK, State: StateAvailable, Records: []Record{account}}
+	var wire ipc.Message
+	if !EncodeReply(&reply, 7, &wire) {
+		t.Fatal("encode")
+	}
+	groupStart := replyHeader + recordFixed + len(account.Name) + len(account.Home)
+	mutations := []struct {
+		name   string
+		mutate func(*ipc.Message)
+	}{
+		{"group count overflow", func(m *ipc.Message) { m.Payload[replyHeader+recordGroupLen] = identity.MaxSupplementaryGroups + 1 }},
+		{"group count tamper", func(m *ipc.Message) { m.Payload[replyHeader+recordGroupLen] = 1 }},
+		{"groups unsorted", func(m *ipc.Message) { m.Payload[groupStart+3] = 0xff }},
+		{"groups duplicate", func(m *ipc.Message) { m.Payload[groupStart+4] = 10 }},
+	}
+	for _, mutation := range mutations {
+		message := wire
+		mutation.mutate(&message)
+		var decoded Reply
+		if DecodeReply(&message, 7, AdminGetAccount, &decoded) {
+			t.Fatalf("accepted %s", mutation.name)
 		}
 	}
 }
@@ -472,7 +544,7 @@ func TestListRejects(t *testing.T) {
 		{"reserved tail", func(m *ipc.Message) { m.Payload[36] = 1 }},
 		{"state", func(m *ipc.Message) { m.Payload[2] = 1 }},
 		{"counts", func(m *ipc.Message) { binaryPut(m, replyAccounts, 1) }},
-		{"record reserved", func(m *ipc.Message) { m.Payload[replyHeader+5] = 1 }},
+		{"record reserved", func(m *ipc.Message) { m.Payload[replyHeader+6] = 1 }},
 	}
 	var wire ipc.Message
 	EncodeListReply(AdminListAccounts, ResultOK, 0, true, records, 9, &wire)
@@ -538,7 +610,7 @@ func TestVersionRejects(t *testing.T) {
 	request := requests()[0]
 	var wire ipc.Message
 	EncodeRequest(&request, 1, &wire)
-	for _, version := range []uint16{0, 2} {
+	for _, version := range []uint16{0, 1, 3} {
 		message := wire
 		message.Version = version
 		var decoded Request
@@ -548,7 +620,7 @@ func TestVersionRejects(t *testing.T) {
 	}
 	reply := replies()[0]
 	EncodeReply(&reply, 1, &wire)
-	for _, version := range []uint16{0, 2} {
+	for _, version := range []uint16{0, 1, 3} {
 		message := wire
 		message.Version = version
 		var decoded Reply
@@ -557,7 +629,7 @@ func TestVersionRejects(t *testing.T) {
 		}
 	}
 	EncodeControlRequest(OpAddAdmin, 9, 1, &wire)
-	for _, version := range []uint16{0, 2} {
+	for _, version := range []uint16{0, 1, 3} {
 		message := wire
 		message.Version = version
 		if _, _, _, ok := DecodeControlRequest(&message); ok {
@@ -592,6 +664,29 @@ func TestBounds(t *testing.T) {
 	var decoded Request
 	if _, ok := DecodeRequest(&wire, &decoded); !ok || len(decoded.IDs) != maxMembers {
 		t.Fatal("largest inline member list did not round-trip")
+	}
+
+	// A record with more than MaxSupplementaryGroups supplementary groups is
+	// rejected; a list whose records exceed the inline payload is rejected; and
+	// the largest single record still round-trips through a get reply.
+	tooMany := Record{Kind: RecordAccount, AccountID: 1, GroupID: 1, UID: 1000, GID: 1000, Name: name, Groups: make([]uint32, identity.MaxSupplementaryGroups+1)}
+	if EncodeReply(&Reply{Opcode: AdminGetAccount, Result: ResultOK, State: StateAvailable, Records: []Record{tooMany}}, 1, &ipc.Message{}) {
+		t.Fatal("encoded a record with too many supplementary groups")
+	}
+	big := Record{Kind: RecordAccount, AccountID: 1, GroupID: 1, UID: 1000, GID: 1000, Name: name, Home: make([]byte, identity.MaxHome), Groups: make([]uint32, identity.MaxSupplementaryGroups)}
+	for index := range big.Groups {
+		big.Groups[index] = uint32(1000 + index)
+	}
+	if EncodeListReply(AdminListAccounts, ResultOK, 0, false, []Record{big, big}, 1, &ipc.Message{}) {
+		t.Fatal("encoded a list that exceeds the inline payload")
+	}
+	var recordWire ipc.Message
+	if !EncodeReply(&Reply{Opcode: AdminGetAccount, Result: ResultOK, State: StateAvailable, Records: []Record{big}}, 1, &recordWire) {
+		t.Fatal("largest inline record did not encode")
+	}
+	var recordDecoded Reply
+	if !DecodeReply(&recordWire, 1, AdminGetAccount, &recordDecoded) || !reflect.DeepEqual(recordDecoded.Records, []Record{big}) {
+		t.Fatal("largest inline record did not round-trip")
 	}
 }
 
@@ -687,7 +782,7 @@ func FuzzDecodeListReply(f *testing.F) {
 	}{
 		{AdminListAccounts, records, 0, true},
 		{AdminListAccounts, nil, 3, false},
-		{AdminListGroups, []Record{{Kind: RecordGroup, GroupID: 5, GID: 1000, Name: []byte("wheel")}}, 0, false},
+		{AdminListGroups, []Record{{Kind: RecordGroup, GroupID: 5, GID: 1000, Epoch: testEpoch(), Revision: 9, Name: []byte("wheel")}}, 0, false},
 	}
 	for _, seed := range seeds {
 		var wire ipc.Message

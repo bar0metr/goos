@@ -400,6 +400,10 @@ rows below bound what the store and its records may hold.
 | `userspace/identity.MaxTotalKeys` | 128 | policy | global | keys live in the per-account arrays; this bounds their sum | `ResultExhausted` | none |
 | `userspace/identity.KeySize` | 32 | protocol (Ed25519 public key) | n/a | 32 bytes per stored key | key refused | n/a |
 | `userspace/identity.MaxSnapshotBytes` | 65536 | policy | global | the encoded snapshot buffer on save and load | save `ErrExhausted`; load `ErrInvalid` | none |
+| database epoch (`identity.Store.epoch`) | 16 bytes (128-bit) | protocol (snapshot format) | global | 16 bytes in the snapshot payload and store | n/a | none |
+| `nextUID` / `nextGID` high-water marks | uint64 in [1000, 0xFFFFFFFF]; `0xFFFFFFFF` sentinel | policy | global | two uint64 marks in the store and snapshot | `ResultExhausted` | none |
+| identityd session slots (`maxSessions`) | 16 | policy | `identityd` service | one session slot each, static | new admin or lookup session refused, `ResultExhausted` | none |
+| directory enumeration (`identityd.maxDirEntries`) | 8 | policy | `identityd` service | none | startup reconciliation fails closed, `Unavailable` | none |
 
 ### Log persistence
 

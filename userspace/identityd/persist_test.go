@@ -3,6 +3,7 @@ package identityd
 import (
 	"bytes"
 	"errors"
+	"sort"
 	"testing"
 
 	"goos/userspace/identity"
@@ -11,8 +12,13 @@ import (
 
 const testPath = "/state/identity/db"
 
+// testEpoch is a fixed nonzero database epoch for host tests.
+var testEpoch = [16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+
+func fixedEpoch() ([16]byte, error) { return testEpoch, nil }
+
 // memFiles is a faithful in-memory Files: exclusive create, append write,
-// and a rename that moves the temporary onto the target.
+// sync (recorded), rename, bounded directory listing.
 type memFiles struct {
 	files map[string][]byte
 	open  string
@@ -32,18 +38,24 @@ func (f *memFiles) Read(path string) ([]byte, error) {
 
 func (f *memFiles) Create(path string) error {
 	if _, ok := f.files[path]; ok {
-		return errors.New("identityd: already exists")
+		return ErrExists
 	}
 	f.files[path] = nil
 	return nil
 }
 
 func (f *memFiles) Unlink(path string) error {
+	if _, ok := f.files[path]; !ok {
+		return ErrNotFound
+	}
 	delete(f.files, path)
 	return nil
 }
 
 func (f *memFiles) OpenWrite(path string) (Handle, error) {
+	if _, ok := f.files[path]; !ok {
+		return 0, ErrNotFound
+	}
 	f.open = path
 	return 1, nil
 }
@@ -53,6 +65,8 @@ func (f *memFiles) Write(_ Handle, data []byte) (int, error) {
 	return len(data), nil
 }
 
+func (f *memFiles) Sync(Handle) error { return nil }
+
 func (f *memFiles) Close(Handle) error { return nil }
 
 func (f *memFiles) Replace(source, target string) error {
@@ -61,9 +75,26 @@ func (f *memFiles) Replace(source, target string) error {
 	return nil
 }
 
+func (f *memFiles) SyncDir(string) error { return nil }
+
+func (f *memFiles) ListNames(path string, max int) ([]string, error) {
+	dir := dirOf(path)
+	var names []string
+	for p := range f.files {
+		if dirOf(p) == dir {
+			names = append(names, baseOf(p))
+		}
+	}
+	sort.Strings(names)
+	if len(names) > max {
+		return nil, errors.New("too many entries")
+	}
+	return names, nil
+}
+
 func snapshotFor(t *testing.T, accounts ...string) []byte {
 	t.Helper()
-	store := identity.NewStore()
+	store := identity.NewStoreWithEpoch(testEpoch)
 	for _, name := range accounts {
 		if _, err := store.CreateAccount(name); err != nil {
 			t.Fatal(err)
@@ -76,6 +107,10 @@ func snapshotFor(t *testing.T, accounts ...string) []byte {
 	return data
 }
 
+func newTestService() *Service {
+	return New(newMemFiles(), testPath, fixedEpoch)
+}
+
 func TestPersistRoundTrip(t *testing.T) {
 	files := newMemFiles()
 	persist := NewPersist(files, testPath)
@@ -83,9 +118,9 @@ func TestPersistRoundTrip(t *testing.T) {
 	if err := persist.Save(want); err != nil {
 		t.Fatalf("Save = %v", err)
 	}
-	loaded, err := persist.Load()
+	loaded, err := persist.Open()
 	if err != nil {
-		t.Fatalf("Load = %v", err)
+		t.Fatalf("Open = %v", err)
 	}
 	got, _ := identity.Encode(loaded)
 	if !bytes.Equal(want, got) {
@@ -100,13 +135,12 @@ func TestPersistCorruptLoad(t *testing.T) {
 	files := newMemFiles()
 	files.files[testPath] = []byte("not a snapshot")
 	persist := NewPersist(files, testPath)
-	if _, err := persist.Load(); !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("Load corrupt = %v, want ErrCorrupt", err)
+	if _, err := persist.Open(); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open corrupt = %v, want ErrCorrupt", err)
 	}
-	// The same bytes drive the service to Unavailable.
-	service := New()
-	if err := service.Load([]byte("not a snapshot")); err == nil {
-		t.Fatal("Service.Load corrupt = nil")
+	service := New(files, testPath, fixedEpoch)
+	if err := service.Open(); err == nil {
+		t.Fatal("Service.Open corrupt = nil")
 	}
 	if service.State() != identityproto.StateUnavailable {
 		t.Fatalf("corrupt state = %v, want Unavailable", service.State())
@@ -116,16 +150,71 @@ func TestPersistCorruptLoad(t *testing.T) {
 func TestPersistMissingLoad(t *testing.T) {
 	files := newMemFiles()
 	persist := NewPersist(files, testPath)
-	if _, err := persist.Load(); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Load missing = %v, want ErrNotFound", err)
+	if _, err := persist.Open(); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Open missing = %v, want ErrNotFound", err)
 	}
-	service := New()
-	if err := service.Load(nil); err != nil {
-		t.Fatalf("Service.Load(nil) = %v", err)
+	service := New(files, testPath, fixedEpoch)
+	if err := service.Open(); err == nil {
+		t.Fatal("Service.Open missing = nil")
 	}
 	if service.State() != identityproto.StateUnprovisioned {
 		t.Fatalf("missing state = %v, want Unprovisioned", service.State())
 	}
+}
+
+func TestPersistStaleTempReconcile(t *testing.T) {
+	t.Run("db present stale temp removed", func(t *testing.T) {
+		files := newMemFiles()
+		files.files[testPath] = snapshotFor(t, "alice")
+		files.files[NewPersist(files, testPath).tempPath()] = []byte("partial")
+		persist := NewPersist(files, testPath)
+		store, err := persist.Open()
+		if err != nil {
+			t.Fatalf("Open = %v", err)
+		}
+		if store == nil {
+			t.Fatal("Open = nil store")
+		}
+		if _, ok := files.files[persist.tempPath()]; ok {
+			t.Fatal("stale temp not removed")
+		}
+		if len(files.files) != 1 {
+			t.Fatalf("expected only db, got %d entries", len(files.files))
+		}
+	})
+
+	t.Run("db absent stale temp unavailable", func(t *testing.T) {
+		files := newMemFiles()
+		persist := NewPersist(files, testPath)
+		files.files[persist.tempPath()] = []byte("partial")
+		if _, err := persist.Open(); !errors.Is(err, ErrUncertain) {
+			t.Fatalf("Open = %v, want ErrUncertain (interrupted provisioning)", err)
+		}
+		service := New(files, testPath, fixedEpoch)
+		if err := service.Open(); err == nil {
+			t.Fatal("Service.Open = nil, want error")
+		}
+		if service.State() != identityproto.StateUnavailable {
+			t.Fatalf("state = %v, want Unavailable", service.State())
+		}
+	})
+
+	t.Run("stale temp does not block future save", func(t *testing.T) {
+		files := newMemFiles()
+		persist := NewPersist(files, testPath)
+		files.files[persist.tempPath()] = []byte("partial")
+		want := snapshotFor(t, "alice")
+		if err := persist.Save(want); err != nil {
+			t.Fatalf("Save over stale temp = %v", err)
+		}
+		if _, ok := files.files[persist.tempPath()]; ok {
+			t.Fatal("stale temp still present after save")
+		}
+		got := files.files[testPath]
+		if !bytes.Equal(got, want) {
+			t.Fatal("save did not write the target")
+		}
+	})
 }
 
 func TestPersistFaultInjection(t *testing.T) {
@@ -157,6 +246,19 @@ func TestPersistFaultInjection(t *testing.T) {
 			},
 		},
 		{
+			name: "temp-sync",
+			fault: func(p *Persist) {
+				p.Faults.SyncErr = func() error { return errors.New("injected temp sync failure") }
+			},
+		},
+		{
+			name: "replace-uncertain",
+			fault: func(p *Persist) {
+				p.Faults.ReplaceErr = func() error { return ErrUncertain }
+			},
+			wantUncertain: true,
+		},
+		{
 			name: "after-replace",
 			fault: func(p *Persist) {
 				p.Faults.AfterReplace = func() error { return errors.New("injected after replace") }
@@ -165,11 +267,12 @@ func TestPersistFaultInjection(t *testing.T) {
 			wantNewInPlace: true,
 		},
 		{
-			name: "replace-uncertain",
+			name: "dir-sync",
 			fault: func(p *Persist) {
-				p.Faults.ReplaceErr = func() error { return ErrUncertain }
+				p.Faults.SyncDirErr = func() error { return errors.New("injected dir sync failure") }
 			},
-			wantUncertain: true,
+			wantUncertain:  true,
+			wantNewInPlace: true,
 		},
 	}
 
@@ -191,8 +294,6 @@ func TestPersistFaultInjection(t *testing.T) {
 				t.Fatalf("Save = %v, want a definite pre-replace failure", err)
 			}
 
-			// The target must hold one whole snapshot, old or new, never a
-			// partial or corrupt one.
 			current := files.files[testPath]
 			if test.wantNewInPlace {
 				if !bytes.Equal(current, snapshotFor(t, "alice", "bob")) {
@@ -201,17 +302,19 @@ func TestPersistFaultInjection(t *testing.T) {
 			} else if !bytes.Equal(current, oldData) {
 				t.Fatal("target does not hold the old snapshot after a pre-replace failure")
 			}
-
-			// Reconciliation forward re-reads and validates whatever survived.
-			loaded, loadErr := persist.Load()
-			if loadErr != nil {
-				t.Fatalf("reconcile Load = %v, want a valid snapshot", loadErr)
-			}
-			reencoded, _ := identity.Encode(loaded)
-			if !bytes.Equal(reencoded, current) {
-				t.Fatal("reconciled store does not match the stored snapshot")
+			if len(files.files) != 1 {
+				t.Fatalf("temporary file leaked: %d entries", len(files.files))
 			}
 		})
+	}
+}
+
+func TestPersistReadOversized(t *testing.T) {
+	files := newMemFiles()
+	files.files[testPath] = bytes.Repeat([]byte{0xaa}, identity.MaxSnapshotBytes+1)
+	persist := NewPersist(files, testPath)
+	if _, err := persist.Open(); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open oversized = %v, want ErrCorrupt", err)
 	}
 }
 

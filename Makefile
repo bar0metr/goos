@@ -645,6 +645,8 @@ test: test-unit test-integration test-security
 test-all:
 	$(MAKE) test
 	$(MAKE) test-identity-core
+	$(MAKE) test-identity-persist
+	$(MAKE) test-identity-vm
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test-incremental
@@ -687,6 +689,8 @@ release-check:
 	$(MAKE) docs
 	$(MAKE) test
 	$(MAKE) test-identity-core
+	$(MAKE) test-identity-persist
+	$(MAKE) test-identity-vm
 	$(MAKE) test-incremental
 	$(MAKE) test-crypto-frames
 	$(MAKE) test-storage-stress
@@ -747,10 +751,28 @@ test-security:
 # Identity core (ADR 0233): host tests for the identity store, codec, and
 # service dispatch/persistence, plus the SSH key-authorization handshake (proof
 # of possession stays in the pinned SSH library; the callback only authorizes).
-# The handshake tests need the sshcompat build tag and module.
-test-identity-core:
+# The handshake tests need the sshcompat build tag and prepared module.
+.PHONY: test-identity-core
+test-identity-core: $(SSH_ROOT_STAMP)
 	$(BUILD_ENV) go test -count=1 ./userspace/identity ./userspace/identityproto ./userspace/identityd
-	$(BUILD_ENV) go test -modfile=build/toolchains/ssh/go.mod -tags=goos_sshcompat -count=1 ./userspace/sshserver
+	$(BUILD_ENV) go test -modfile=$(SSH_ROOT)/go.mod -tags=goos_sshcompat -count=1 ./userspace/sshserver
+
+# Real FAT32 persistence fault gate (FIX §6.2): identityd persistence driven
+# against the real fat32 filesystem with device-boundary fault injection at the
+# flush and replace steps. Host-only; the native crash/reboot scenario is
+# test-identity-vm.
+.PHONY: test-identity-persist
+test-identity-persist:
+	$(BUILD_ENV) go test -count=1 ./userspace/identityd
+
+# Native identity lifecycle/security gate (FIX §6.3): boots a disposable disk
+# and exercises provision, mutation, restart, reboot, scope denial, untrusted
+# launch denial, and corrupt-DB recovery.
+.PHONY: test-identity-vm
+test-identity-vm:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/identity-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/identity.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/identity-virtio-blk.img
 
 # The storage stress test (ADR 0102): the model-based FAT32 workload at a
 # larger scale than the default suite, and the host FAT checker over volumes

@@ -679,7 +679,7 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'handles\n'
 	sleep 1
-	printf 'user list\n'
+	printf 'user status\n'
 	sleep 1
 	send_after_done 'log' 'INFO  kernel\[0\]: kernel initialized'
 	printf 'write /persist/startup.txt "a startup block larger than the former 128-byte limit"\n'
@@ -1413,7 +1413,7 @@ pass_group config
 # in normal mode, and the admin command reaches it over the identity session, so
 # a fresh volume reports the unprovisioned store.
 require_regex identity.service-reported '^\[ OK \] identityd$' 'the identity service reported started' "$log" 'Starting services'
-require_regex identity.user-list '^user: unprovisioned$' 'user list answers through the identity admin session' "$log" 'goos> user list'
+require_regex identity.user-status '^unprovisioned$' 'user status reports the unprovisioned store' "$log" 'goos> user status'
 pass_group identity
 
 require_regex release.ps-header '^PID   TYPE     STATE      MEM  CPU   COMMAND$' 'ps table header' "$log" 'goos> ps'

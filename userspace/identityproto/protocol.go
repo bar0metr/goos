@@ -18,15 +18,18 @@ import (
 const (
 	// ProtocolID is the ASCII tag "GIDNTY1".
 	ProtocolID = uint64(0x4749444e545931)
-	// Version 1 is the initial identity protocol (ADR 0233). A message of
-	// any other version is not this protocol and fails decoding.
-	Version = uint16(1)
+	// Version 1 was the initial identity protocol (ADR 0233). Version 2 adds
+	// the database epoch, committed revision, and the account's supplementary
+	// group Unix GIDs to the record so lookup can return one coherent committed
+	// principal view (M4 FIX §5). A message of any other version is not this
+	// protocol and fails decoding.
+	Version = uint16(2)
 
 	requestHeader = 32
 	replyHeader   = 40
 	controlSize   = 8
 
-	recordFixed = 32
+	recordFixed = 56
 
 	flagEnabled = 1
 	flagMore    = 1
@@ -63,10 +66,14 @@ const (
 	recordNameLen  = 2
 	recordHomeLen  = 3
 	recordKeyCount = 4
+	recordGroupLen = 5
+	// Bytes 6 and 7 are reserved.
 	recordUID      = 8
 	recordGID      = 12
 	recordAccount  = 16
 	recordGroup    = 24
+	recordEpoch    = 32
+	recordRevision = 48
 )
 
 // Opcode is one identity operation. Control operations run on PID 1's control
@@ -196,7 +203,9 @@ type Reply struct {
 
 // Record is the bounded account/group shape carried by get and list replies.
 // It carries core identity (IDs, numeric numbers, name, home, enabled and key
-// count); public keys and supplementary groups are managed through their own
+// count) plus the database epoch, committed revision and the account's
+// supplementary group Unix GIDs, so a lookup reply is one coherent committed
+// principal view (M4 FIX §5). Public keys are managed through their own
 // operations and are not serialized in the record. GID is the Unix GID: the
 // primary group's GID for an account record, the group's GID for a group
 // record. AccountID/UID are meaningful only for accounts; GroupID is the
@@ -210,8 +219,16 @@ type Record struct {
 	Enabled   bool
 	// KeyCount is the number of authorized public keys, up to MaxKeysPerAccount.
 	KeyCount uint8
-	Name     []byte
-	Home     []byte
+	// Epoch is the 128-bit database epoch and Revision the committed mutation
+	// sequence (Store.Sequence). Together they identify one committed view and
+	// apply to both account and group records.
+	Epoch    [16]byte
+	Revision uint64
+	// Groups are the account's supplementary group Unix GIDs, sorted ascending;
+	// empty for group records.
+	Groups []uint32
+	Name   []byte
+	Home   []byte
 }
 
 // EncodeControlRequest builds a control request that opens an administration
@@ -493,11 +510,11 @@ func validReply(r *Reply) bool {
 		return counts && len(r.Records) == 0
 	case AdminGetAccount, AdminGetGroup, LookupGetAccount:
 		if r.Result == ResultOK {
-			return counts && r.State == StateAvailable && len(r.Records) == 1 && validRecord(&r.Records[0]) && r.Records[0].Kind == recordKindFor(r.Opcode)
+			return counts && len(r.Records) == 1 && validRecord(&r.Records[0]) && r.Records[0].Kind == recordKindFor(r.Opcode)
 		}
-		return counts && r.State == StateAvailable && len(r.Records) == 0
+		return counts && len(r.Records) == 0
 	default:
-		return counts && r.State == StateAvailable && len(r.Records) == 0
+		return counts && len(r.Records) == 0
 	}
 }
 
@@ -606,20 +623,25 @@ func DecodeListReply(in *ipc.Message, correlation uint64, opcode Opcode) (Result
 
 func validRecord(r *Record) bool {
 	if r == nil || r.Kind < RecordAccount || r.Kind > lastRecordKind || !validName(r.Name) || !validHome(r.Home) ||
-		r.KeyCount > identity.MaxKeysPerAccount {
+		r.KeyCount > identity.MaxKeysPerAccount || len(r.Groups) > identity.MaxSupplementaryGroups {
 		return false
+	}
+	for index := 1; index < len(r.Groups); index++ {
+		if r.Groups[index-1] >= r.Groups[index] {
+			return false
+		}
 	}
 	switch r.Kind {
 	case RecordAccount:
 		return true
 	case RecordGroup:
-		return r.AccountID == 0 && r.UID == 0 && !r.Enabled && len(r.Home) == 0 && r.KeyCount == 0
+		return r.AccountID == 0 && r.UID == 0 && !r.Enabled && len(r.Home) == 0 && r.KeyCount == 0 && len(r.Groups) == 0
 	}
 	return false
 }
 
 func recordSize(r *Record) int {
-	return recordFixed + len(r.Name) + len(r.Home)
+	return recordFixed + len(r.Name) + len(r.Home) + 4*len(r.Groups)
 }
 
 func encodeRecord(payload []byte, r *Record) bool {
@@ -633,20 +655,28 @@ func encodeRecord(payload []byte, r *Record) bool {
 	payload[recordNameLen] = byte(len(r.Name))
 	payload[recordHomeLen] = byte(len(r.Home))
 	payload[recordKeyCount] = r.KeyCount
+	payload[recordGroupLen] = byte(len(r.Groups))
 	binary.LittleEndian.PutUint32(payload[recordUID:], r.UID)
 	binary.LittleEndian.PutUint32(payload[recordGID:], r.GID)
 	binary.LittleEndian.PutUint64(payload[recordAccount:], r.AccountID)
 	binary.LittleEndian.PutUint64(payload[recordGroup:], r.GroupID)
+	copy(payload[recordEpoch:recordEpoch+16], r.Epoch[:])
+	binary.LittleEndian.PutUint64(payload[recordRevision:], r.Revision)
 	offset := recordFixed
 	copy(payload[offset:], r.Name)
 	offset += len(r.Name)
 	copy(payload[offset:], r.Home)
+	offset += len(r.Home)
+	for _, gid := range r.Groups {
+		binary.LittleEndian.PutUint32(payload[offset:], gid)
+		offset += 4
+	}
 	return true
 }
 
 func decodeRecord(payload []byte) (Record, int, bool) {
 	var r Record
-	if len(payload) < recordFixed || !zero(payload[5:8]) {
+	if len(payload) < recordFixed || !zero(payload[6:8]) {
 		return r, 0, false
 	}
 	kind := RecordKind(payload[recordKind])
@@ -655,8 +685,10 @@ func decodeRecord(payload []byte) (Record, int, bool) {
 	}
 	nameLen, homeLen := int(payload[recordNameLen]), int(payload[recordHomeLen])
 	keyCount := payload[recordKeyCount]
+	groupLen := int(payload[recordGroupLen])
 	if nameLen > identity.MaxName || homeLen > identity.MaxHome || keyCount > identity.MaxKeysPerAccount ||
-		recordFixed+nameLen+homeLen > len(payload) {
+		groupLen > identity.MaxSupplementaryGroups ||
+		recordFixed+nameLen+homeLen+4*groupLen > len(payload) {
 		return r, 0, false
 	}
 	r = Record{
@@ -667,13 +699,23 @@ func decodeRecord(payload []byte) (Record, int, bool) {
 		GID:       binary.LittleEndian.Uint32(payload[recordGID:]),
 		Enabled:   payload[recordEnabled] == 1,
 		KeyCount:  keyCount,
+		Revision:  binary.LittleEndian.Uint64(payload[recordRevision:]),
 		Name:      sliceOf(payload, recordFixed, nameLen),
 		Home:      sliceOf(payload, recordFixed+nameLen, homeLen),
+	}
+	copy(r.Epoch[:], payload[recordEpoch:recordEpoch+16])
+	if groupLen > 0 {
+		r.Groups = make([]uint32, groupLen)
+		offset := recordFixed + nameLen + homeLen
+		for index := range r.Groups {
+			r.Groups[index] = binary.LittleEndian.Uint32(payload[offset:])
+			offset += 4
+		}
 	}
 	if !validRecord(&r) {
 		return Record{}, 0, false
 	}
-	return r, recordFixed + nameLen + homeLen, true
+	return r, recordFixed + nameLen + homeLen + 4*groupLen, true
 }
 
 // prepare fills out field by field: a composite literal of an ipc.Message

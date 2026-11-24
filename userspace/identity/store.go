@@ -8,6 +8,15 @@ import (
 
 const maxUint64 = ^uint64(0)
 
+// guardMutation refuses a mutation that would overflow the committed sequence
+// counter, before any state changes.
+func (s *Store) guardMutation() error {
+	if s.sequence == maxUint64 {
+		return ErrExhausted
+	}
+	return nil
+}
+
 // --- lookups ---
 
 func (s *Store) findAccount(name string) (int, bool) {
@@ -90,32 +99,37 @@ func (s *Store) peekGroupID() (uint64, error) {
 	return s.nextGroupID, nil
 }
 
-// allocUID returns the lowest unused UID at or above AllocBase, skipping
-// reserved values. It does not mutate the store.
-func (s *Store) allocUID() (uint32, error) {
-	for u := AllocBase; u >= AllocBase; u++ {
-		if reservedUnix(u) {
-			continue
+// peekUnix returns the next UID/GID a high-water mark would allocate, without
+// consuming it. It never scans the numeric domain: the mark only increases, so
+// an issued number is never reused. The mark is a uint64 in [AllocBase,
+// 0xFFFFFFFF]; 0xFFFFFFFF is the exhausted sentinel because the next candidate
+// would be the reserved terminal value.
+func peekUnix(next uint64) (uint32, error) {
+	v := next
+	for {
+		if v > uint64(maxAllocatableUnix) {
+			return 0, ErrExhausted
 		}
-		if _, ok := s.findAccountByUID(u); !ok {
-			return u, nil
+		if !reservedUnix(uint32(v)) {
+			return uint32(v), nil
 		}
+		v++
 	}
-	return 0, ErrExhausted
 }
 
-// allocGID returns the lowest unused GID at or above AllocBase, skipping
-// reserved values. It does not mutate the store.
-func (s *Store) allocGID() (uint32, error) {
-	for g := AllocBase; g >= AllocBase; g++ {
-		if reservedUnix(g) {
-			continue
-		}
-		if _, ok := s.findGroupByGID(g); !ok {
-			return g, nil
-		}
+// advanceUnix moves a high-water mark past the value just issued. The value is
+// a non-reserved uint32, so v+1 cannot overflow the uint64 mark.
+func advanceUnix(next *uint64, v uint32) {
+	*next = uint64(v) + 1
+}
+
+// advanceHighWater raises a high-water mark when an explicit assignment crosses
+// it; a lower assignment leaves the mark unchanged (deletion and reassignment
+// never lower it).
+func advanceHighWater(next *uint64, v uint32) {
+	if uint64(v) >= *next {
+		*next = uint64(v) + 1
 	}
-	return 0, ErrExhausted
 }
 
 // --- supplementary group array helpers (sorted ascending by GroupID) ---
@@ -222,6 +236,9 @@ func (s *Store) CreateAccount(name string) (*Account, error) {
 	if s == nil {
 		return nil, ErrUnavailable
 	}
+	if err := s.guardMutation(); err != nil {
+		return nil, err
+	}
 	if !ValidName(name) {
 		return nil, errInvalid("account name")
 	}
@@ -241,7 +258,7 @@ func (s *Store) CreateAccount(name string) (*Account, error) {
 	if err != nil {
 		return nil, err
 	}
-	uid, err := s.allocUID()
+	uid, err := peekUnix(s.nextUID)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +266,7 @@ func (s *Store) CreateAccount(name string) (*Account, error) {
 	if err != nil {
 		return nil, err
 	}
-	gid, err := s.allocGID()
+	gid, err := peekUnix(s.nextGID)
 	if err != nil {
 		return nil, err
 	}
@@ -259,8 +276,13 @@ func (s *Store) CreateAccount(name string) (*Account, error) {
 	group := Group{ID: groupID, GID: gid}
 	group.NameLen = uint8(len(name))
 	copy(group.Name[:], name)
+	// Commit only after every check has passed: the internal-ID counters, the
+	// numeric high-water marks, the records, and the sequence advance together,
+	// so a failed validation never consumes an ID.
 	s.nextAccountID++
 	s.nextGroupID++
+	advanceUnix(&s.nextUID, uid)
+	advanceUnix(&s.nextGID, gid)
 	s.accounts = append(s.accounts, account)
 	s.groups = append(s.groups, group)
 	s.sequence++
@@ -273,6 +295,9 @@ func (s *Store) CreateAccount(name string) (*Account, error) {
 func (s *Store) DeleteAccount(name string) error {
 	if s == nil {
 		return ErrUnavailable
+	}
+	if err := s.guardMutation(); err != nil {
+		return err
 	}
 	i, ok := s.findAccount(name)
 	if !ok {
@@ -291,6 +316,9 @@ func (s *Store) SetEnabled(name string, enabled bool) error {
 	if s == nil {
 		return ErrUnavailable
 	}
+	if err := s.guardMutation(); err != nil {
+		return err
+	}
 	i, ok := s.findAccount(name)
 	if !ok {
 		return errNotFound("account " + name)
@@ -303,6 +331,9 @@ func (s *Store) SetEnabled(name string, enabled bool) error {
 func (s *Store) SetUID(name string, uid uint32) error {
 	if s == nil {
 		return ErrUnavailable
+	}
+	if err := s.guardMutation(); err != nil {
+		return err
 	}
 	i, ok := s.findAccount(name)
 	if !ok {
@@ -317,6 +348,7 @@ func (s *Store) SetUID(name string, uid uint32) error {
 		}
 	}
 	s.accounts[i].UID = uid
+	advanceHighWater(&s.nextUID, uid)
 	s.sequence++
 	return nil
 }
@@ -325,6 +357,9 @@ func (s *Store) SetUID(name string, uid uint32) error {
 func (s *Store) SetPrimaryGID(name string, gid uint32) error {
 	if s == nil {
 		return ErrUnavailable
+	}
+	if err := s.guardMutation(); err != nil {
+		return err
 	}
 	i, ok := s.findAccount(name)
 	if !ok {
@@ -335,6 +370,7 @@ func (s *Store) SetPrimaryGID(name string, gid uint32) error {
 		return errNotFound("group GID")
 	}
 	s.accounts[i].PrimaryGID = s.groups[gi].ID
+	advanceHighWater(&s.nextGID, s.groups[gi].GID)
 	s.sequence++
 	return nil
 }
@@ -342,6 +378,9 @@ func (s *Store) SetPrimaryGID(name string, gid uint32) error {
 func (s *Store) SetHome(name, home string) error {
 	if s == nil {
 		return ErrUnavailable
+	}
+	if err := s.guardMutation(); err != nil {
+		return err
 	}
 	if len(home) > MaxHome {
 		return errInvalid("home path")
@@ -364,6 +403,9 @@ func (s *Store) SetHome(name, home string) error {
 func (s *Store) SetGroups(name string, gids []uint32) error {
 	if s == nil {
 		return ErrUnavailable
+	}
+	if err := s.guardMutation(); err != nil {
+		return err
 	}
 	if len(gids) > MaxSupplementaryGroups {
 		return errInvalid("supplementary groups")
@@ -400,6 +442,9 @@ func (s *Store) AddKey(name string, key Key) error {
 	if s == nil {
 		return ErrUnavailable
 	}
+	if err := s.guardMutation(); err != nil {
+		return err
+	}
 	i, ok := s.findAccount(name)
 	if !ok {
 		return errNotFound("account " + name)
@@ -419,6 +464,9 @@ func (s *Store) RemoveKey(name string, fingerprint [FingerprintSize]byte) error 
 	if s == nil {
 		return ErrUnavailable
 	}
+	if err := s.guardMutation(); err != nil {
+		return err
+	}
 	i, ok := s.findAccount(name)
 	if !ok {
 		return errNotFound("account " + name)
@@ -436,6 +484,9 @@ func (s *Store) CreateGroup(name string) (*Group, error) {
 	if s == nil {
 		return nil, ErrUnavailable
 	}
+	if err := s.guardMutation(); err != nil {
+		return nil, err
+	}
 	if !ValidName(name) {
 		return nil, errInvalid("group name")
 	}
@@ -449,7 +500,7 @@ func (s *Store) CreateGroup(name string) (*Group, error) {
 	if err != nil {
 		return nil, err
 	}
-	gid, err := s.allocGID()
+	gid, err := peekUnix(s.nextGID)
 	if err != nil {
 		return nil, err
 	}
@@ -457,6 +508,7 @@ func (s *Store) CreateGroup(name string) (*Group, error) {
 	group.NameLen = uint8(len(name))
 	copy(group.Name[:], name)
 	s.nextGroupID++
+	advanceUnix(&s.nextGID, gid)
 	s.groups = append(s.groups, group)
 	s.sequence++
 	return &group, nil
@@ -467,6 +519,9 @@ func (s *Store) CreateGroup(name string) (*Group, error) {
 func (s *Store) DeleteGroup(name string) error {
 	if s == nil {
 		return ErrUnavailable
+	}
+	if err := s.guardMutation(); err != nil {
+		return err
 	}
 	i, ok := s.findGroup(name)
 	if !ok {
@@ -485,6 +540,9 @@ func (s *Store) DeleteGroup(name string) error {
 func (s *Store) SetMembers(name string, uids []uint32) error {
 	if s == nil {
 		return ErrUnavailable
+	}
+	if err := s.guardMutation(); err != nil {
+		return err
 	}
 	gi, ok := s.findGroup(name)
 	if !ok {
