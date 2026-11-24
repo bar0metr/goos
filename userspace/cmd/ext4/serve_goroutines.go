@@ -15,14 +15,6 @@ import (
 	userwait "goos/userspace/wait"
 )
 
-// readJob is one read-only request a worker executes and returns.
-type readJob struct {
-	request     fsproto.Request
-	correlation uint64
-	reply       fsproto.Reply
-	name        [ramfs.MaxName]byte
-}
-
 // readPool runs the read-only requests on bounded worker goroutines. All its
 // methods except the worker loop belong to the owner goroutine.
 type readPool struct {
@@ -68,12 +60,9 @@ func (pool *readPool) worker() {
 // admit queues a read for a worker; the caller has already ensured a slot is
 // free, so the buffered send cannot block.
 func (pool *readPool) admit(request fsproto.Request, correlation uint64) {
-	job := readJob{request: request, correlation: correlation}
-	// Own the name before handoff: request.Name aliases owner-owned decode
-	// storage that the next receive overwrites. The worker must not depend on
-	// the owner's buffers after this point (ADR 0232).
-	n := copy(job.name[:], request.Name)
-	job.request.Name = job.name[:n]
+	// adoptReadJob owns the name before handoff: request.Name aliases
+	// owner-owned decode storage that the next receive overwrites.
+	job := adoptReadJob(request, correlation)
 	pool.inFlight++
 	pool.jobs <- job
 }
