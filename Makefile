@@ -640,6 +640,7 @@ test-all:
 	$(MAKE) test-crypto-frames
 	$(MAKE) test-ext4-mutations
 	$(MAKE) test-ext4-stress
+	$(MAKE) test-ext4-concurrency
 	$(MAKE) test-memory
 	$(MAKE) test-boot
 	$(MAKE) test-vfs-serial
@@ -679,6 +680,7 @@ release-check:
 	$(MAKE) test-storage-stress
 	$(MAKE) test-ext4-mutations
 	$(MAKE) test-ext4-stress
+	$(MAKE) test-ext4-concurrency
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-memory
@@ -696,6 +698,7 @@ release-check:
 	$(MAKE) test-goroutine-panic
 	$(MAKE) test-system-boot
 	$(MAKE) test-ext4-rw
+	$(MAKE) test-ext4-read-restart
 	$(MAKE) test-network
 	$(MAKE) test-tls
 	$(MAKE) test-remote

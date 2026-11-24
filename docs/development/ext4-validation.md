@@ -23,8 +23,11 @@ KVM on the same node.
 | `make test-pve-ext4` | `fsbench` five times on a 1 GiB read-write volume with the settled page count after each, 10000 names in one directory, the volume filled to `ENOSPC` and written again, then RAMFS and FAT32 for comparison | KVM |
 | `tools/ext4fixture/linux-ext4-reference.sh` | the same `fsbench` on Linux 6.12 | KVM |
 
-`test-all` and `release-check` run the pre-M3 gates above except the two on the
-lab node. Run the M3 procedure below for the additional concurrency gates.
+`test-all` and `release-check` run `test-ext4-concurrency`, including its
+`test-ext4-read-equivalence` prerequisite, alongside the pre-M3 host and TCG
+gates. `release-check` also runs `test-ext4-read-restart` after `test-ext4-rw`.
+Both aggregates run their gates sequentially. Lab-node measurements remain
+separate from these aggregates.
 
 ## Results
 
@@ -234,8 +237,9 @@ readdir median 36.0 ms, 1256 prefetch reads and 24652 fetches.
 
 ## M3 bounded parallel reads
 
-Branch: `feat/ext4-read-concurrency`. Reviewed HEAD:
-`e4ff6383d9d17cf526403faa8f4d13c0c5f5777a`.
+Branch: `feat/ext4-read-concurrency`. Reviewed acceptance record:
+`8d44b8452ccd1b26068c4edf467a887577b93d31` (documentation-only successor to
+tested implementation `b85957ed3b3efb403fc2598e7962f7f90fc5d8a7`).
 
 ### Serialized-transport measurement before FIX3
 
@@ -336,6 +340,28 @@ ISO but ended with `infra-error` after the SSH serial console disconnected:
 `Can't assign requested address` / `Broken pipe`. Its report records tool
 status 3 and cleanup `ok`; outer Make returned 2. It supplies no final benchmark
 result. The second attempt above passed after `pve-doctor` passed again.
+
+### Existing mixed workload
+
+The same final KVM run completed the existing `bench parallel` workload:
+each process creates, writes 4 KiB, closes and unlinks files in its own
+directory, for 200 iterations per process at scale 1. The five ext4 rounds
+reported these aggregate rates; M3 records this workload without a scaling
+requirement.
+
+| Processes | Round 1 ops/s | Round 2 | Round 3 | Round 4 | Round 5 | Median ops/s |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 169.1 | 174.2 | 168.8 | 167.9 | 175.9 | 169.1 |
+| 2 | 167.5 | 168.2 | 169.6 | 160.9 | 171.2 | 168.2 |
+| 4 | 160.9 | 172.3 | 177.0 | 159.4 | 178.4 | 172.3 |
+| 8 | 160.4 | 167.7 | 170.6 | 166.2 | 168.4 | 167.7 |
+
+Source: `serial.log` from `20261124T071705Z-2668fdcb`, lines 62–65,
+107–110, 152–155, 197–200 and 242–245. Each round ended with `bench ok`.
+The four-process / one-process median ratio is 1.02x; this mixed workload
+shows no material scaling. The later scale-5 ext4 round recorded
+175.3 / 168.6 / 177.8 / 169.1 ops/s at 1/2/4/8 processes (lines 294–297).
+These results come from the existing log; no new benchmark run supplied them.
 
 ### FIX3 validation procedure
 
