@@ -934,8 +934,8 @@ CA-1159	goos/userspace/ext4	requiredForWrite	process	immutable	none
 CA-1160	goos/userspace/ext4	stateNames	process	immutable	none
 CA-1161	goos/userspace/ext4	xattrPrefixes	process	immutable	none
 CA-1162	goos/userspace/cmd/block	volumes	process	owned	none
-CA-1194	goos/userspace/cmd/ext4	device	process	owned	none
-CA-1164	goos/userspace/cmd/ext4	blockHandle	process	owned	none
+CA-1194	goos/userspace/cmd/ext4	device	process	lock	test-ext4-concurrency
+CA-1164	goos/userspace/cmd/ext4	blockHandle	process	immutable	test-ext4-concurrency
 CA-1168	goos/userspace/cmd/ext4	cache	process	owned	none
 CA-1169	goos/userspace/cmd/ext4	consoleHandle	process	owned	none
 CA-1171	goos/userspace/cmd/ext4	listedName	process	owned	none

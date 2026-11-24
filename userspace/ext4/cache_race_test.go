@@ -1,6 +1,8 @@
 package ext4
 
 import (
+	"bytes"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -84,12 +86,77 @@ func TestCacheBorrowScoped(t *testing.T) {
 	}
 }
 
-// TestConcurrentRealisticReads runs lookup, stat and read operations from
-// several goroutines against the same filesystem, so the shared metadata cache
-// and the extent/directory traversal are exercised under -race, not only the
-// direct cache accesses of TestConcurrentCacheAccess.
+// TestConcurrentLookupStatRead checks shared-FS pathname traversal, inode metadata
+// and file bytes while eight readers hit and evict metadata cache entries.
+func TestConcurrentLookupStatRead(t *testing.T) {
+	fs := mount(t, &raceDevice{data: fixture(t, "canonical").data})
+	type expectedFile struct {
+		path  string
+		inode *Inode
+		data  []byte
+	}
+	var files []expectedFile
+	for _, entry := range readManifest(t, "manifest.tsv") {
+		if entry.kind != "file" || entry.size == 0 || entry.size > 1<<20 {
+			continue
+		}
+		inode := resolve(t, fs, entry.path)
+		files = append(files, expectedFile{entry.path, inode, readAll(t, fs, inode)})
+		if len(files) == 6 {
+			break
+		}
+	}
+	if len(files) < 2 {
+		t.Fatal("fixture needs independent nonempty files")
+	}
+	var group sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		group.Add(1)
+		go func(worker int) {
+			defer group.Done()
+			for round := 0; round < 32; round++ {
+				want := files[(worker+round)%len(files)]
+				inode, err := fs.Root()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				for _, part := range strings.Split(strings.Trim(want.path, "/"), "/") {
+					number, _, lookupErr := fs.Lookup(inode, []byte(part))
+					if lookupErr != nil {
+						t.Error(lookupErr)
+						return
+					}
+					inode, err = fs.Inode(number)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+				}
+				if inode.Number != want.inode.Number || inode.Size != want.inode.Size || inode.Mode != want.inode.Mode {
+					t.Errorf("metadata changed for %q", want.path)
+					return
+				}
+				for _, offset := range []uint64{0, inode.Size / 2, inode.Size - 1, inode.Size} {
+					buffer := make([]byte, 257)
+					n, err := fs.ReadFile(inode, offset, buffer)
+					end := offset + uint64(len(buffer))
+					if end > inode.Size {
+						end = inode.Size
+					}
+					if err != nil || n != int(end-offset) || !bytes.Equal(buffer[:n], want.data[offset:end]) {
+						t.Errorf("read %q at %d: n=%d error=%v", want.path, offset, n, err)
+						return
+					}
+				}
+			}
+		}(worker)
+	}
+	group.Wait()
+}
+
 func TestConcurrentRealisticReads(t *testing.T) {
-	fs := mount(t, fixture(t, "many"))
+	fs := mount(t, &raceDevice{data: fixture(t, "many").data})
 	root, err := fs.Root()
 	if err != nil {
 		t.Fatal(err)

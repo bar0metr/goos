@@ -2,42 +2,38 @@
 
 ## Status
 
-Accepted. Defines the M3 concurrency contract before any worker is introduced.
-Implementation follows this contract; the KVM performance gate is recorded in
-docs/development/ext4-validation.md.
+Accepted. Defines the final M3 concurrency contract. The validation record in
+docs/development/ext4-validation.md names the tested commits and KVM runs.
 
 ## Context
 
-One ext4 service executes one filesystem request at a time (spec §2.7). The
-loop is `IPCReceive` → `fsproto.Serve` → `IPCSend`, all on one thread. This
-serializes request handling, metadata-cache use, and block-client use, and
-caps aggregate throughput on a read-only workload whose requests are
-independent.
+Before M3, one ext4 service executed one filesystem request at a time
+(spec §2.7). Its loop was `IPCReceive` → `fsproto.Serve` → `IPCSend`, all on one
+thread. That baseline serialized request handling, metadata-cache use and
+block-client use, and capped aggregate throughput on independent read-only
+requests.
 
 ## Audit
 
-Shared state under `userspace/`, with the concurrency contract each item
-needs once readers run in parallel:
+The final M3 implementation uses these ownership boundaries:
 
-| Item | Owner today | After M3 |
-|---|---|---|
-| `cmd/ext4` `wire`, `requestMessage`, `replyMessage` | process | owner only: receive, decode, reply stay on the owner |
-| `cmd/ext4` `requestedName`, `listedName` | process | per-request scratch; a read worker decodes into its own copy |
-| `cmd/ext4` `blockWire`, `correlation` | process | per-worker: each worker needs its own correlation counter and request wire to overlap block IPC |
-| `cmd/ext4` `bulkMemory`, `bulkObject` | process | owner only: bulk transfer is serialized; workers use inline reads |
-| `cmd/ext4` `cache` (file cache) | process, shared with VFS | read data slots are request-named, so concurrent reads to different slots are safe; the single readdir name page is serialized |
-| `cmd/ext4` `volume` | process | shared FS; read path must become concurrent-safe (below) |
-| `ext4.FS.cache` (`blockCache`) | single owner | per-set lock (64 sets) plus atomic `clock`/`reads`/`hits`; a read copies the block it needs under the set lock |
-| `ext4.FS.cache.overlay`, `.base` | mutation owner | written only under the mutation barrier; read concurrently after the barrier orders the writes |
-| `ext4.FS.list` (`ListPrefetch`) | single owner | readdir path stays serialized in this milestone |
-| `ext4.FS.scratch` | single owner | per-call, moves to a stack/request buffer |
-| `ext4vol.Volume.prefetch` (`dirPrefetch`) | single owner | readdir path stays serialized |
-| `ext4vol.Volume.entry/source/target` | single owner | per-call |
-| `cmd/block` request wire, `correlation`, backend | process | must pipeline: overlap driver I/O across in-flight requests |
+| Item | Final owner / synchronization |
+|---|---|
+| `cmd/ext4` `wire`, `requestMessage`, `replyMessage` | owner receives, decodes and replies |
+| `cmd/ext4` `requestedName`, `listedName` | owner scratch; admission copies `Request.Name` into the read job before handoff |
+| `cmd/ext4` `blockHandle` | process-global, immutable after startup |
+| `cmd/ext4` `blockTransport.next`, send/receive | one transport; its mutex protects the correlation sequence and complete request/reply exchange |
+| `cmd/ext4` `blockClient.bulkMemory`, `bulkObject` | private to the checked-out client |
+| `cmd/ext4` `pooledDevice.clients` | bounded ownership pool; all clients share the serialized transport |
+| `cmd/ext4` `cache` (file cache) | workers use request-named data slots; owner serializes the readdir name page |
+| `cmd/ext4` `volume` | shared FS; read workers use concurrent-safe read paths |
+| `ext4.FS.cache` (`blockCache`) | one lock per set (64 sets); atomic `clock`/`reads`/`hits`; callers release borrows before another same-set access |
+| `ext4.FS.cache.overlay`, `.base` | mutation owner writes behind the read barrier |
+| `ext4.FS.list` (`ListPrefetch`), `ext4vol.Volume.prefetch` | owner serializes readdir |
+| inode and volume decode scratch | per-call |
+| `cmd/block`, virtio-blk request and driver state | serial service loops; no M3 pipeline |
 
-The audit above is added to docs/development/native-concurrency-audit.md and
-the machine-readable native-concurrency-audit.tsv once the worker fields
-exist; the reclassification happens in the same change that adds them.
+The native-concurrency audit records the globals and these object-level owners.
 
 ## Decision
 
@@ -52,13 +48,14 @@ the current loop for boot checks. The owner is the main goroutine.
 
 ```text
 owner (main goroutine)
-    +-- read worker 0..MaxReadWorkers-1   (bounded, goroutines)
+    +-- read worker 0..maxReadWorkers-1   (bounded, goroutines)
     +-- mutation owner == owner           (serialized barrier)
 ```
 
 The owner receives and classifies every request. Read-only operations
-(`Stat`, `Open`/lookup, `Read`, `ReadLink`, `FilesystemInfo`) are admitted to
-the read pool. Mutations (`Create`, `Mkdir`, `Write`, `Truncate`, `Link`,
+(`Stat`, `Open`/lookup, `Read`, `FilesystemInfo`) are admitted to the read pool.
+The owner handles `ReadLink` and directory listing. Mutations (`Create`, `Mkdir`,
+`Write`, `Truncate`, `Link`,
 `Unlink`, `Rename`, `Replace`, `Symlink`, `SetMetadata`, `Acquire`,
 `Release`, `Flush`, `Unmount`) run on the owner and are a barrier: a mutation
 waits for in-flight reads to retire and blocks new read admission until it
@@ -68,11 +65,13 @@ pin inodes on a writable volume.
 
 ### Metadata cache
 
-`blockCache.get` keeps its set-associative layout. The 64 sets get one lock
-each; `clock`, `reads`, `hits` become atomic. A read copies the inode or
-directory bytes it needs while it holds the set lock, so the returned slice is
-owned, not borrowed; the shared block is never parsed after the lock drops.
-`overlay` and `base` are only mutated by the owner under the mutation barrier.
+`blockCache.get` keeps its set-associative layout with one lock for each of 64
+sets; `clock`, `reads` and `hits` use atomics. It lends a block until the caller
+releases the set lock. Callers consume or copy bytes before that release and
+release the borrow before another same-set lookup. Extent traversal copies a
+node before descending; indirect traversal extracts the next pointer and
+releases its borrow before reading that block. The owner alone mutates `overlay`
+and `base` behind the read barrier.
 
 The read workers share the owner's `FS`: a per-worker read-only mount is
 rejected here, because a read-only mount refuses a volume the owner holds
@@ -87,42 +86,30 @@ lookup/stat/read target.
 
 ### Block I/O
 
-Each read worker owns a correlation counter and a request wire, so block
-requests overlap. The block service is serial today: its `serve` waits for the
-driver reply before the next receive, so overlapping ext4 requests still
-serialize at the block service. The 2x target therefore also requires the
-block service to pipeline driver I/O. That change is part of M3 and is
-measured before the cache work is assumed sufficient; if pipelining proves
-impossible within bounds, the profiling evidence and the remaining serial
-boundary are recorded instead of faking concurrency.
+Up to four read-only fsproto requests may execute concurrently. Each checked-out
+`blockClient` owns its bulk buffer, but all clients share one `blockTransport`.
+The transport mutex covers encoding, send, receive, decoding and correlation
+validation. It owns one monotonically increasing correlation sequence and permits
+one outstanding request on `blockHandle`. No concurrent caller receives from that
+endpoint. The block service and virtio-blk driver also retain serial request loops.
 
-The pipeline spans two processes:
+### Block pipeline experiment: attempted and reverted
 
-- The block service adopts the goroutine runtime and dispatches inline
-  read/write requests to a bounded worker set, each holding its own request
-  wire and correlation counter, so several driver exchanges are in flight at
-  once. Bulk transfers stay on the owner: they move 128 KiB through the
-  driver's single bulk area and are throughput-bound, not latency-bound.
-- The virtio-blk driver keeps several inline requests in flight: the DMA data
-  area is partitioned into one slot per worker, each with its own descriptor
-  chain and status byte. `transfer` submits one chain without waiting, and a
-  completion loop polls the used ring and answers each finished request by
-  correlation. Writes still read-modify-write inside their own slot, and the
-  bulk area remains a single region the owner uses serially.
+The experiment added a bounded block-service worker pool and four virtio-blk DMA
+slots, each with its own descriptor chain and status byte. A driver collector
+matched completions by correlation. Bulk transfers retained one owner.
 
-The KVM measurement for the current (ext4-only) state, run
-`20261123T155827Z-52b02f0b` (commit `6bdc5916`), is 882 ops/s at one client
-and 1225 ops/s at four (1.39x), so the block pipeline is the remaining
-serialized boundary; the ext4 read pool alone does not reach 2x.
+The earlier ext4-only run `20261123T155827Z-52b02f0b` (commit `6bdc5916`)
+measured 882 ops/s at one client and 1225 at four (1.39x), below 2x.
 
 The pipeline was implemented and measured, then reverted. The block service
 gained a bounded read-worker pool (commit `0b1a16c3`) and the driver a four-slot
 non-blocking submit path with a collector goroutine (commit `30154b16`); both
 ran on the goroutine runtime. KVM run `20261123T173540Z-362fc2f7` booted and
 passed, but throughput fell to 725 ops/s at one client and 1083 at four, and
-readdir-10k rose 221 ms to 300 ms. The goroutine runtime's park/awake and
-channel hand-off cost more per block request than the round-trip it overlaps,
-so the pipeline is a net loss. The serial block service and driver stay.
+readdir-10k rose from 221 ms to 300 ms. The experiment lost throughput; those
+measurements do not isolate runtime park/awake, channel handoff or driver costs.
+The final implementation keeps the serial block service and driver.
 
 The missed 2x is attributed to more than one serialization point, not the
 virtio-blk round-trip alone. The benchmark issues an open, a 4 KiB read, an
@@ -131,30 +118,34 @@ additional-volume `Remote` backend as `ReadLanePersistent`, which permits only
 one persistent-lane read at a time; concurrent file-data reads can therefore
 serialize in VFS before they reach ext4. Both the VFS persistent read lane and
 the serial block-service/driver request path remain serial boundaries, and
-neither was measured in isolation. Native threads (ADR 0203) may reduce the
-block path's overhead, but this ADR records no evidence that they alone
-guarantee 2x.
+neither was measured in isolation. This milestone retains those boundaries;
+FIX3 adds acceptance gates without reopening the pipeline experiment.
 
-The block endpoint is reached through one owner (the concurrency FIX): a
-single monotonic correlation sequence and one receive path, with the whole
-send/receive critical section under one mutex, replacing the per-client
-receive that could reuse a correlation or consume another caller's reply. A
-receiver-goroutine multiplexer was tried first and measured a 14x read-only
-and 4x readdir regression on the goroutine runtime, so the transport is
-serialized: correctness without the cross-goroutine hand-off. The serialized
-transport is part of the remaining serial boundary, but it restores the
-single-client and readdir numbers to the pre-FIX baseline.
+### Transport experiment: attempted and reverted
+
+The correctness fix replaced per-client endpoint receives with the serialized
+transport described above. The first attempt used a receiver-goroutine
+multiplexer and measured a 14x read-only and 4x readdir regression on the
+goroutine runtime; the implementation reverted that experiment. The accepted
+serialized transport avoids that cross-goroutine handoff. It remains a serial
+boundary. The 217 ms readdir-10k result returns near the earlier M3 pre-FIX
+level, not the M2 post-FIX result of 184 ms.
 
 ### Bounds
 
-`ext4.MaxReadWorkers = 4`, classified in the resource-policy inventory. The
-read pool and its per-worker wires are fixed-size; nothing grows with the
-request rate or the directory size.
+`userspace/cmd/ext4.maxReadWorkers = 4` appears in the resource-policy inventory.
+The service starts four read-worker goroutines. Both `jobs` and `results` have
+capacity `maxReadWorkers`, and admission keeps in-flight reads at or below four.
+The client ownership pool also has a fixed bound. Request rate cannot grow these
+resources.
 
 ## Consequences
 
 Read-only lookup/stat/read requests overlap, and a dedicated 1/2/4/8-client
 workload measures aggregate throughput. The target is at least 2x at four
-clients over one, with no material single-client regression. Mutations remain
-exactly one serialized owner, and journal/transaction/orphan/pin state is
-never touched concurrently. The serial build stays as the boot-check baseline.
+clients over one, with no material single-client regression. Before FIX3, the
+serialized-transport run measured 1.34x and about 7.2% less single-client throughput
+than the pre-M3 result; the validation record retains both regressions and the
+performance fallback. Mutations retain one serialized owner; readers do not
+concurrently mutate journal/transaction/orphan/pin state. The serial build stays
+as the boot-check baseline.

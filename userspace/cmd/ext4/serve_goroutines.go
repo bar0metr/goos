@@ -49,7 +49,11 @@ func (pool *readPool) worker() {
 	defer pool.joined.Done()
 	var name [ramfs.MaxName]byte
 	for job := range pool.jobs {
-		job.reply = answer(job.request, &name)
+		if restartGateRead(job.request) && holdRestartRead() {
+			job.reply = fsproto.Reply{Operation: job.request.Operation, Status: ramfs.StatusIOError}
+		} else {
+			job.reply = answer(job.request, &name)
+		}
 		pool.results <- job
 		// Wake the owner straight from the worker, with one stream write;
 		// a full stream is already readable, so a dropped wake is fine.
@@ -201,7 +205,7 @@ func runOwner(pool *readPool, completionRead handle.ID) {
 			// Serve inline when nothing else is queued or in flight: the
 			// pool's hand-off costs more than the request for a lone client,
 			// and a serial read is already correct.
-			if pool.inFlight == 0 && !requestPending() {
+			if pool.inFlight == 0 && !restartGateRead(request) && !requestPending() {
 				reply = answer(request, &listedName)
 				sendReply(reply, requestMessage.Correlation)
 				exitIfFailed()

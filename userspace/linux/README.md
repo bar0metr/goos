@@ -62,6 +62,13 @@ the inodes store them, the 40-link bound, `O_NOFOLLOW`, `d_type`, and the
 `file.txt`; `hold PATH SECONDS` keeps a descriptor open while the test
 replaces the filesystem instance behind it and checks that the old
 descriptor fails and a new open works;
+`ext4-read-restart PATH EXPECTED` starts four reader processes against private
+sparse files beside `PATH`. Each reader checks its own payload and `fstat`, then
+blocks on a cold page that the dedicated ext4 restart fixture holds, rejects its descriptor after
+the fault and verifies a fresh open. The host injects the fault after the service
+confirms an active read; the VFS persistent lane queues the other readers.
+Revocation permits `EIO`, `EBADF` and `ENOENT`; recovery also permits `EAGAIN` and
+`EINTR`. Timeouts and incorrect data fail the workload.
 `fork-fault`, `open-vfs-loss`, and `exec-vfs-loss` serve the validation kernel
 and VFS, which fail a fork mid-copy, die after an accepted `OperationOpen`
 before its reply, and die during an `execve`; `fpstate` checks that XMM
@@ -151,7 +158,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `4a068a52296fca685abc2a6236f66006b6040f80335b7a3e67deadb849e9f0e6` |
-| `prebuilt/abi-probe` | `e1a29b76c2f1d1b9746e7fb7b6710a41fe866d59e48e215fcfc011f7aada01c5` |
+| `prebuilt/abi-probe` | `b095fff19e26cc6343ddfd346ef5cb6fe840d50a605dfea7132ae59cda9d524e` |
 | `prebuilt/tty-probe` | `5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957` |
 | `prebuilt/netprobe` | `dca2339b9c61ea9f190613aa58b6289e6166a58463e1a4441bfd8ba661d742cb` |
 | `prebuilt/pie-probe` | `4e1822fc5fd6c174726c8751cabb0c298e67adfa46e7a82c9b425732b00c7144` |

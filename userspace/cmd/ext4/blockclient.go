@@ -130,8 +130,8 @@ func (client *blockClient) Capacity() uint64 {
 	return client.capacity
 }
 
-// pooledDevice dispatches device operations across a bounded pool of block
-// clients, all sharing one multiplexed transport.
+// pooledDevice dispatches device operations across a bounded ownership pool.
+// Each client owns its bulk buffer; their shared transport serializes block IPC.
 type pooledDevice struct {
 	transport *blockTransport
 	clients   chan *blockClient

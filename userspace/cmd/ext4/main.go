@@ -49,8 +49,8 @@ var (
 	// creates it for this launch only (ADR 0222).
 	cache  []byte
 	volume ext4vol.Volume
-	// device pools block clients so concurrent readers overlap block IPC
-	// (ADR 0232).
+	// device pools clients with private bulk buffers over one serialized
+	// block endpoint transport (ADR 0232).
 	device *pooledDevice
 )
 

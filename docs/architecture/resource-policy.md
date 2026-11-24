@@ -249,6 +249,7 @@ records.
 | `kernel/ramfs.MaxName`, `kernel/ramfs.MaxVolumeName`, `kernel/ramfs.MaxInlineData`, `kernel/ramfs.MaxDirBatch`, `kernel/ramfs.MaxDirRecord` | `NameMax`, 64, payload, 4096, record | protocol | n/a | n/a | refused | n/a |
 | `kernel/ramfs.MaxLinkTarget` | `PathMax` − 1 | protocol (ADR 0223) | symbolic link | one page per RAMFS link | `StatusNameTooLong`, Linux `ENAMETOOLONG` | n/a |
 | `userspace/vfs.MaxReadWorkers` | 4 | profile | VFS service | one worker each | requests queue (`ReadQueueCapacity` 8) | none |
+| `userspace/cmd/ext4.maxReadWorkers` | 4 | profile | ext4 service | four read-worker goroutines; `jobs` and `results` each hold at most four jobs | owner stops read admission at four in flight; no request-rate growth | ADR 0232 |
 | `userspace/block.Max*` | payload less header; 1 MiB bulk | protocol | n/a | n/a | refused | n/a |
 | `userspace/partition.Max*` | 128 partitions, 108-byte names | protocol (GPT) | n/a | n/a | table refused as unsupported | n/a |
 

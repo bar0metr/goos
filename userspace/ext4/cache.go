@@ -33,9 +33,8 @@ type cachedBlock struct {
 }
 
 // blockCache keeps recently used metadata blocks. File data bypasses it. Each
-// set has its own lock, so concurrent readers of different blocks proceed in
-// parallel; clock, reads and hits are atomic. get returns an owned copy, so a
-// caller never parses shared backing that another reader could evict.
+// set has its own lock; clock, reads and hits use atomics. get lends a slice
+// under the set lock, and callers copy or consume it before releasing the borrow.
 type blockCache struct {
 	device  Device
 	size    uint64

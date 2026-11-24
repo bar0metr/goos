@@ -15,11 +15,16 @@ iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
 out=${3:?output directory required}
 memory=${MEMORY:-512M}
+smp=${SMP:-1}
 command_timeout=${COMMAND_TIMEOUT:-60}
 read -r _hz _diag validation _opt variant <build/config/build
 [ "$validation" = 1 ] || { echo 'ext4-rw.sh needs a VALIDATION=1 build' >&2; exit 2; }
 tree=build/variants/$variant/system
-log=build/logs/ext4-rw.log
+if [ "${EXT4_ACTIVE_RESTART:-0}" = 1 ]; then
+	log=build/logs/ext4-read-restart.log
+else
+	log=build/logs/ext4-rw.log
+fi
 fatal='PANIC\|OUT_OF_MEMORY\|exec: no reply\|INIT_EXEC_.*FAILED\|VFS_.*FAILED\|BLOCK_.*FAILED'
 
 mkdir -p build/logs "$out"
@@ -135,9 +140,52 @@ held_fault() {
 		fail "a descriptor from before fault $1"
 }
 
+# active_fault runs four reader processes. The VFS persistent read lane
+# queues three behind one ext4 worker. The service retains that admitted read
+# until the backing endpoint closes; the host faults after its active marker.
+# Client startup and sleeping descriptors cannot satisfy this gate.
+active_fault() {
+	injected=$(grep -c "$4" "$log" || true)
+	active=$(grep -c 'EXT4_RESTART_READER_ACTIVE' "$log" || true)
+	finished=$(grep -c 'ext4 restart ok readers=4 revoked=4 fresh=4' "$log" || true)
+	start=$(wc -l <"$log")
+	sync_storage
+	run "/system/linux/abi-probe ext4-read-restart $2 $3 &"
+	# Four seconds bound the service barrier. Poll faster than its timeout.
+	admitted=
+	for attempt in $(seq 1 3000); do
+		[ "$(grep -c 'EXT4_RESTART_READER_ACTIVE' "$log" || true)" -gt "$active" ] && admitted=1 && break
+		grep -q 'EXT4_RESTART_BARRIER_TIMEOUT\|ext4 restart failed' "$log" && fail 'active-reader startup failed'
+		sleep 0.02
+	done
+	[ -n "$admitted" ] || fail "an admitted ext4 read before $1"
+	run "fault $1"
+	[ "$(grep -c "$4" "$log" || true)" -gt "$injected" ] || fail "fault $1 not injected"
+	settled=
+	for attempt in $(seq 1 1200); do
+		[ "$(grep -c 'ext4 restart ok readers=4 revoked=4 fresh=4' "$log" || true)" -gt "$finished" ] && settled=1 && break
+		grep -q 'EXT4_RESTART_BARRIER_TIMEOUT\|ext4 restart failed' "$log" && fail "active readers after $1"
+		sleep 0.05
+	done
+	[ -n "$settled" ] || fail "active readers did not finish after $1"
+	tail -n "+$((start + 1))" "$log" | tr -d '\r' >"$work/active"
+	[ "$(grep -c 'ext4 restart reader [0-3] revoked errno=' "$work/active" || true)" -eq 4 ] || fail "four revoked reads after $1"
+	[ "$(grep -c 'ext4 restart reader [0-3] fresh data ok' "$work/active" || true)" -eq 4 ] || fail "four fresh opens after $1"
+	await_content "$2" "$3" "recovered data after active-reader $1"
+	printf 'PASS active-ext4-readers fault=%s readers=4 revoked=4 fresh=4\n' "$1"
+}
+
+restart_fault() {
+	if [ "${EXT4_ACTIVE_RESTART:-0}" = 1 ]; then
+		active_fault "$@"
+	else
+		held_fault "$@"
+	fi
+}
+
 # The disk is a throwaway copy written in place: the host checks read what
 # the guest left on it.
-qemu-system-x86_64 -machine q35 -m "$memory" -accel tcg,thread=multi \
+qemu-system-x86_64 -machine q35 -m "$memory" -smp "cpus=$smp,sockets=1,cores=$smp,threads=1" -accel tcg,thread=multi \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$work/disk.img" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -192,7 +240,11 @@ run 'umount /mnt/k'
 # Kill the configured volume's instance. Its replacement gets a new
 # writable grant, replays the journal, and serves what the old one wrote.
 sync_storage
-run 'fault volume'
+if [ "${EXT4_ACTIVE_RESTART:-0}" = 1 ]; then
+	active_fault volume /mnt/cfg/journal.txt before-fault VOLUME_FAULT_INJECTED
+else
+	run 'fault volume'
+fi
 grep -q 'VOLUME_FAULT_INJECTED' "$log" || fail 'volume fault not injected'
 run 'cat /mnt/w/moved.txt'
 expect '^payload$' 'the other writable volume during the replacement'
@@ -232,6 +284,9 @@ expect '^ext4 rw ok$' 'a Linux program on a writable volume'
 write_marker /mnt/cfg/vfs.txt vfs-marker
 sync_storage
 restarts=$(grep -c 'VFS_RESTARTED_OK' "$log" || true)
+# Linux sessions cannot regain files after VFS death (ADR 0138). This legacy
+# restart check launches new readers after replacement; active-reader faults
+# below target ext4 and its storage backends while the VFS session survives.
 run 'fault vfs'
 restarted=
 for attempt in $(seq 1 60); do
@@ -246,10 +301,10 @@ write_marker /mnt/cfg/after-vfs.txt after-vfs
 # The block service and the driver: every instance gets a new writable
 # grant from the storage that came back, and a descriptor opened before
 # stays dead.
-held_fault block /mnt/w/moved.txt payload BLOCK_FAULT_INJECTED
+restart_fault block /mnt/w/moved.txt payload BLOCK_FAULT_INJECTED
 await_content /mnt/cfg/after-vfs.txt after-vfs 'the configured volume after a block restart'
 write_marker /mnt/cfg/after-block.txt after-block
-held_fault driver /mnt/cfg/journal.txt before-fault BLOCK_DRIVER_FAULT_INJECTED
+restart_fault driver /mnt/cfg/journal.txt before-fault BLOCK_DRIVER_FAULT_INJECTED
 await_content /mnt/w/moved.txt payload 'the shell volume after a driver restart'
 write_marker /mnt/cfg/after-driver.txt after-driver
 write_marker /mnt/w/after-driver.txt shell-after-driver
