@@ -91,8 +91,16 @@ func (ext4BenchScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	}
 	g.pass("ext4-memory-plateau")
 
+	// Read-only 1/2/4/8-client lookup/stat/read (M3, ADR 0232).
+	lines, err := runFsbench(ctx, g, "/mnt/bench readonly", "readonly")
+	if err != nil {
+		return "", err
+	}
+	record("ext4 readonly", lines)
+	g.pass("fsbench-readonly")
+
 	// 10000 names in one directory and 8 MiB of data.
-	lines, err := runFsbench(ctx, g, "/mnt/bench 5 8", "names")
+	lines, err = runFsbench(ctx, g, "/mnt/bench 5 8", "names")
 	if err != nil {
 		return "", err
 	}

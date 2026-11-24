@@ -45,10 +45,10 @@ func All() []Fixture {
 		{"musl-hello", muslHello, "0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f"},
 		{"fsprobe", fsprobe, "7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6"},
 		{"dirprobe", dirprobe, "4a068a52296fca685abc2a6236f66006b6040f80335b7a3e67deadb849e9f0e6"},
-		{"abi-probe", abiProbe, "e1a29b76c2f1d1b9746e7fb7b6710a41fe866d59e48e215fcfc011f7aada01c5"},
+		{"abi-probe", abiProbe, "b095fff19e26cc6343ddfd346ef5cb6fe840d50a605dfea7132ae59cda9d524e"},
 		{"tty-probe", ttyProbe, "5f4db52e6f3a1fb82d45271c6165420198557b520e5fdfbc5f8140d1e693c957"},
 		{"netprobe", netprobe, "dca2339b9c61ea9f190613aa58b6289e6166a58463e1a4441bfd8ba661d742cb"},
 		{"pie-probe", pieProbe, "4e1822fc5fd6c174726c8751cabb0c298e67adfa46e7a82c9b425732b00c7144"},
-		{"fsbench", fsbench, "5b6ec1f4dc8f2fa205579a2c11065da0bf6ca22ca71d40f4817dd4aa8664d083"},
+		{"fsbench", fsbench, "6968aec1df8b69188bfbe804a3660e3695bd16173b4db1b7189c72b2e56e9280"},
 	}
 }

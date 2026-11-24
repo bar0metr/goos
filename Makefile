@@ -131,6 +131,15 @@ VALIDATION ?= 0
 ifeq ($(filter $(VALIDATION),0 1),)
 $(error VALIDATION must be 0 or 1)
 endif
+EXT4_RESTART_GATE ?= 0
+ifeq ($(filter $(EXT4_RESTART_GATE),0 1),)
+$(error EXT4_RESTART_GATE must be 0 or 1)
+endif
+ifeq ($(EXT4_RESTART_GATE),1)
+ifneq ($(VALIDATION),1)
+$(error EXT4_RESTART_GATE requires VALIDATION=1)
+endif
+endif
 # VFS_PROBE builds the explicit native goroutine VFS acceptance fixture. It is
 # deliberately a separate validation variant so ordinary validation boots do
 # not run its 4,096-read memory plateau workload.
@@ -180,6 +189,9 @@ endif
 ifeq ($(VFS_PROBE),1)
 BUILD_TAGS += goos_vfs_probe
 endif
+ifeq ($(EXT4_RESTART_GATE),1)
+BUILD_TAGS += goos_ext4_restart_gate
+endif
 TINYGO_TAGS := -tags "$(BUILD_TAGS)"
 # go_deps lists the Go and assembly files of every project package a userspace
 # program imports, as go list sees them under the userspace target's tags, so
@@ -207,10 +219,10 @@ endif
 # written; the kernel banner, uname, and system.build.release all read it there.
 VERSION := $(shell sed -n 's/^[[:space:]]*Release[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' internal/version/version.go)
 # Each configuration builds into its own tree, so switching HZ, DIAG,
-# VALIDATION, VFS_PROBE, VFS_RUNTIME, or OPT never mixes objects built for
-# another configuration. The level is always in the name, so a tree built
-# before the default changed is never taken for one built at the new default.
-OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)$(if $(filter 1,$(VFS_PROBE)),-vfsprobe)$(if $(filter-out $(VFS_RUNTIME_DEFAULT),$(VFS_RUNTIME)),-vfs$(VFS_RUNTIME))-opt$(OPT)$(if $(filter-out 0,$(SOURCE_DATE_EPOCH)),-epoch$(SOURCE_DATE_EPOCH))
+# VALIDATION, VFS_PROBE, EXT4_RESTART_GATE, VFS_RUNTIME, or OPT keeps objects
+# from different configurations apart. The name includes the optimization level,
+# so an older default's tree cannot replace the selected configuration.
+OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)$(if $(filter 1,$(VFS_PROBE)),-vfsprobe)$(if $(filter 1,$(EXT4_RESTART_GATE)),-ext4-restart)$(if $(filter-out $(VFS_RUNTIME_DEFAULT),$(VFS_RUNTIME)),-vfs$(VFS_RUNTIME))-opt$(OPT)$(if $(filter-out 0,$(SOURCE_DATE_EPOCH)),-epoch$(SOURCE_DATE_EPOCH))
 
 .DEFAULT_GOAL := all
 
@@ -383,9 +395,9 @@ $(FAT32_IMAGE): $(FAT32_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kern
 	@$(STACKFRAMES) $(FAT32_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(FAT32_ELF) $@
 
-$(EXT4_ELF): $(call go_deps,./userspace/cmd/ext4) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(EXT4_ELF): $(call go_deps,./userspace/cmd/ext4,goos_goroutines) $(GOROUTINE_ROOT_STAMP) $(GOROUTINE_TARGET) userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
-	$(BUILD_ENV) tools/tinygo.sh build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/ext4
+	$(GOROUTINE_BUILD) -o $@ ./userspace/cmd/ext4
 
 $(EXT4_IMAGE): $(EXT4_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(EXT4_ELF)
@@ -628,6 +640,7 @@ test-all:
 	$(MAKE) test-crypto-frames
 	$(MAKE) test-ext4-mutations
 	$(MAKE) test-ext4-stress
+	$(MAKE) test-ext4-concurrency
 	$(MAKE) test-memory
 	$(MAKE) test-boot
 	$(MAKE) test-vfs-serial
@@ -667,6 +680,7 @@ release-check:
 	$(MAKE) test-storage-stress
 	$(MAKE) test-ext4-mutations
 	$(MAKE) test-ext4-stress
+	$(MAKE) test-ext4-concurrency
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-memory
@@ -684,6 +698,7 @@ release-check:
 	$(MAKE) test-goroutine-panic
 	$(MAKE) test-system-boot
 	$(MAKE) test-ext4-rw
+	$(MAKE) test-ext4-read-restart
 	$(MAKE) test-network
 	$(MAKE) test-tls
 	$(MAKE) test-remote
@@ -736,6 +751,14 @@ test-fat32:
 # damaged images instead of 60.
 test-ext4-unit:
 	$(BUILD_ENV) go test -count=1 ./userspace/ext4 ./userspace/ext4vol ./userspace/fsdetect ./userspace/volume ./tools/diskcompose
+
+.PHONY: test-ext4-concurrency test-ext4-read-equivalence test-ext4-read-restart
+
+test-ext4-read-equivalence:
+	$(BUILD_ENV) go test -count=1 -timeout 5m ./tools/ext4equivalence/...
+
+test-ext4-concurrency: test-ext4-read-equivalence
+	$(BUILD_ENV) go test -race -count=1 -timeout 30m ./userspace/ext4 ./userspace/cmd/ext4
 
 test-ext4-mutations:
 	$(BUILD_ENV) tools/ext4fixture/check-mutations.sh
@@ -897,6 +920,12 @@ test-ext4-rw:
 	@MEMORY=$(MEMORY) tests/boot/ext4-rw.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/ext4-rw
 	@$(BUILD_ENV) GOOS_EXT4_GUEST=$(abspath $(BUILD_DIR)/ext4-rw) go test -count=1 -run '^TestGuestImages$$' ./userspace/ext4vol
 	@tools/ext4fixture/check-guest-images.sh $(BUILD_DIR)/ext4-rw
+
+test-ext4-read-restart:
+	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1 EXT4_RESTART_GATE=1
+	@EXT4_ACTIVE_RESTART=1 MEMORY=$(MEMORY) SMP=4 tests/boot/ext4-rw.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/ext4-read-restart
+	@$(BUILD_ENV) GOOS_EXT4_GUEST=$(abspath $(BUILD_DIR)/ext4-read-restart) go test -count=1 -run '^TestGuestImages$$' ./userspace/ext4vol
+	@tools/ext4fixture/check-guest-images.sh $(BUILD_DIR)/ext4-read-restart
 
 # The network gate (ADR 0190, 0191): DHCP and ping on QEMU user networking
 # with a driver replacement, two guests on a private stream backend, and a
@@ -1062,6 +1091,7 @@ docs:
 	@test -f docs/adr/0224-ext4-mutation-engine-and-transaction-staging.md
 	@test -f docs/adr/0230-generation-safe-vfs-component-cache.md
 	@test -f docs/adr/0231-ext4-readdir-inode-prefetch.md
+	@test -f docs/adr/0232-ext4-parallel-read-execution.md
 	@test -f docs/userspace/ext4.md
 	@test -f docs/development/ext4-feature-matrix.md
 	@test -f docs/development/ext4-reference-versions.md
@@ -1603,7 +1633,7 @@ test-goroutines: goroutine-test-images
 
 # The goprobe ELF of the validation images, which goroutine-test-images
 # builds, for the instruction-hold check.
-GOROUTINE_PROBE_ELF = $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation$(if $(filter 1,$(VFS_PROBE)),-vfsprobe)$(if $(filter-out $(VFS_RUNTIME_DEFAULT),$(VFS_RUNTIME)),-vfs$(VFS_RUNTIME))-opt$(OPT)/userspace/bin-elf/goprobe.elf
+GOROUTINE_PROBE_ELF = $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation$(if $(filter 1,$(VFS_PROBE)),-vfsprobe)$(if $(filter 1,$(EXT4_RESTART_GATE)),-ext4-restart)$(if $(filter-out $(VFS_RUNTIME_DEFAULT),$(VFS_RUNTIME)),-vfs$(VFS_RUNTIME))-opt$(OPT)/userspace/bin-elf/goprobe.elf
 test-goroutine-gc: goroutine-test-images
 	@GOPROBE_ELF=$(GOROUTINE_PROBE_ELF) SUITE=gc SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
 

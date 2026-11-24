@@ -411,8 +411,8 @@ native collector and scheduler tests.
 
 ## Programs
 
-The program rows describe their callers' ownership. Goprobe, the VFS and the
-validation virtio-blk driver select the goroutine target. `VFS_RUNTIME=serial`
+The program rows describe their callers' ownership. Goprobe, the VFS, ext4 and
+the validation virtio-blk driver select the goroutine target. `VFS_RUNTIME=serial`
 builds the serial VFS fallback (ADR 0204); a normal build keeps a serial disk
 driver.
 The validation driver's peer G measures progress during IRQ waits; its serving
@@ -429,6 +429,28 @@ console handle set at startup, so that handle is immutable rather than
 owner-only. Fixture state is process-wide, not independent per Service.
 Goprobe workers use request-local records through `utility.Write`, not the
 main goroutine's `Print` or `Path` scratch.
+
+The ext4 service (ADR 0232) runs one mutation/JBD2 owner and a bounded pool of
+four read workers. `volume` and the fsproto `cache` are shared; the metadata
+cache borrows per-set locks. Workers use request-owned file-cache data slots;
+the owner serializes the singleton fsproto name page. `wire`, `requestMessage`,
+`replyMessage`, `requestedName` and `listedName` belong to the owner; it copies
+`Request.Name` into the job at admission, and workers answer from that owned name.
+The service owns one `blockTransport` shared by the per-worker `blockClient`
+objects. Its mutex covers
+the complete encode/send/receive/decode/correlation-validation exchange. Exactly
+one block request is outstanding on `blockHandle` at a time; concurrent callers
+do not perform `IPCWaitReceive` on that endpoint. Each checked-out client owns
+its bulk buffer while the transport serializes endpoint I/O.
+
+| State | Ownership / synchronization |
+|---|---|
+| `blockHandle` | process-global, immutable after startup |
+| `blockTransport.next` | one monotonically increasing correlation sequence, protected by `blockTransport.mu` |
+| `blockTransport` send/receive | protected by `blockTransport.mu` across the complete exchange |
+| `blockClient.bulkObject`, `blockClient.bulkMemory` | owned by the checked-out client |
+| `pooledDevice.clients` | bounded ownership pool; checkout grants exclusive client use |
+| `device` | shared process object whose block endpoint transport is serialized |
 
 A program that adds workers must review both its globals and the objects its
 workers borrow, as threadprobe does:

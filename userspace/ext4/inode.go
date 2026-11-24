@@ -115,10 +115,12 @@ func (fs *FS) inodeAllocated(number uint32) (bool, error) {
 			return false, nil
 		}
 	}
-	bitmap, err := fs.cache.get(desc.InodeBitmap)
+	bitmap, unlock, err := fs.cache.get(desc.InodeBitmap)
 	if err != nil {
 		return false, err
 	}
+	defer unlock()
+
 	return bitmap[index/8]&(1<<(index%8)) != 0, nil
 }
 
@@ -137,10 +139,12 @@ func (fs *FS) readInode(number uint32) (*Inode, error) {
 	byteOffset := uint64(index) * uint64(inodeSize)
 	block := desc.InodeTable + byteOffset/uint64(fs.blockSize)
 	within := int(byteOffset % uint64(fs.blockSize))
-	data, err := fs.cache.get(block)
+	data, unlock, err := fs.cache.get(block)
 	if err != nil {
 		return nil, err
 	}
+	defer unlock()
+
 	raw := make([]byte, inodeSize)
 	copy(raw, data[within:within+int(inodeSize)])
 	return fs.decodeInode(number, raw)

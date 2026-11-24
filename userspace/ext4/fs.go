@@ -68,7 +68,6 @@ type FS struct {
 	journal     Journal
 	negotiation Negotiation
 	state       State
-	scratch     []byte
 	// mutable is set by a writable mount once recovery has finished.
 	mutable bool
 	// txn is the running operation's transaction; pending holds the
@@ -179,7 +178,6 @@ func probe(device Device, checksum bool) (*FS, error) {
 func (fs *FS) open() error {
 	fs.cache.init(fs.device, fs.blockSize, fs.sb.BlocksCount)
 	fs.list.init(fs.blockSize)
-	fs.scratch = make([]byte, fs.blockSize)
 	if err := fs.validateGroups(); err != nil {
 		return err
 	}
@@ -229,7 +227,6 @@ func (fs *FS) mountWritable(options Options) (*FS, error) {
 	fs.state = StateRecovering
 	fs.cache.init(fs.device, fs.blockSize, fs.sb.BlocksCount)
 	fs.list.init(fs.blockSize)
-	fs.scratch = make([]byte, fs.blockSize)
 	fs.beforeReplay = true
 	inode, err := fs.journalInode()
 	if err == nil {
@@ -527,10 +524,13 @@ func (fs *FS) ReadFile(inode *Inode, offset uint64, target []byte) (int, error) 
 				chunk = blockSize - within
 				out = out[:chunk]
 			}
-			if err := fs.cache.readBlocks(mapping.Physical, fs.scratch); err != nil {
+			// A per-call scratch keeps concurrent readers of unaligned
+			// tails independent (ADR 0232).
+			scratch := make([]byte, fs.blockSize)
+			if err := fs.cache.readBlocks(mapping.Physical, scratch); err != nil {
 				return done, err
 			}
-			copy(out, fs.scratch[within:])
+			copy(out, scratch[within:])
 		}
 		done += int(chunk)
 	}

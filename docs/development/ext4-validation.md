@@ -17,11 +17,17 @@ KVM on the same node.
 | `make test-ext4-mutations` | five images the mutation code wrote pass the pinned `e2fsck -fn` and `debugfs`, among them a volume filled to `ENOSPC` and one with 10000 names in an indexed directory and a chain of 200 directories; `e2fsck` replays journals GoOS left after six cuts and finds the tree GoOS recovery finds; GoOS replays journals `debugfs` wrote | host, Docker |
 | `make test-volumes` | read-only additional volumes beside the persistent one: configured and shell mounts, refusals, links, metadata a Linux program sees, a replaced instance | TCG |
 | `make test-ext4-rw` | read-write volumes: writes, renames, refusals, `sync`, a commit made by the commit interval, a killed instance recovered from its journal, `abi-probe ext4-rw`, the VFS, block service and driver restarted under both volumes with held descriptors revoked, a clean unmount, a guest cut off with a volume mounted; the GoOS reader, GoOS recovery and the pinned `e2fsck` on what the guest left | TCG, Docker |
+| `make -j3 test-ext4-concurrency` | read-job name ownership, serialized block transport, realistic shared-FS reads under the race detector, same-set extent and indirect traversal, serial/concurrent service logical equivalence | host |
+| `make -j3 test-ext4-read-equivalence` | the serial and goroutine service loops answer the same deterministic read-only fsproto workload with equal logical replies | host |
+| `make -j3 test-ext4-read-restart` | four reader processes, a synchronized active-worker fault, descriptor revocation, replacement and correct reads after recovery; guest images pass recovery and `e2fsck` | TCG, Docker |
 | `make test-pve-ext4` | `fsbench` five times on a 1 GiB read-write volume with the settled page count after each, 10000 names in one directory, the volume filled to `ENOSPC` and written again, then RAMFS and FAT32 for comparison | KVM |
 | `tools/ext4fixture/linux-ext4-reference.sh` | the same `fsbench` on Linux 6.12 | KVM |
 
-`test-all` and `release-check` run every gate above except the two on the
-lab node.
+`test-all` and `release-check` run `test-ext4-concurrency`, including its
+`test-ext4-read-equivalence` prerequisite, alongside the pre-M3 host and TCG
+gates. `release-check` also runs `test-ext4-read-restart` after `test-ext4-rw`.
+Both aggregates run their gates sequentially. Lab-node measurements remain
+separate from these aggregates.
 
 ## Results
 
@@ -228,3 +234,185 @@ mutation epoch now advances on every successful `fold()` so a partial
 multi-transaction write that later fails still invalidates decoded batches.
 Run `20261123T123647Z-ba28f0c7` (commit `36f9ed78`): 10k readdir 193 ms, 2k
 readdir median 36.0 ms, 1256 prefetch reads and 24652 fetches.
+
+## M3 bounded parallel reads
+
+Branch: `feat/ext4-read-concurrency`.
+
+M3 acceptance includes the concurrency/race gate, serial-vs-concurrent
+equivalence, active-reader restart testing, crash/replay validation and the
+1/2/4/8-client read-only benchmark. The performance target was not met; the
+accepted fallback and remaining serial boundaries are recorded below.
+
+### Serialized-transport measurement before FIX3
+
+KVM run `20261123T200415Z-6046a6ae` records commit
+`26f7a44177caa82e9a243a93294b72e04e65eee9` with a clean worktree in
+`build/pve/runs/20261123T200415Z-6046a6ae/report.json`. Node `suptests`, KVM,
+`cpu=host`, one socket, 4 vCPUs, 1024 MiB. Scenario PASS; cleanup PASS
+(`cleanup=ok`).
+
+| Read-only clients | ops/s |
+|---:|---:|
+| 1 | 885.3 |
+| 2 | 1043.7 |
+| 4 | 1186.4 |
+| 8 | 1262.3 |
+
+Four clients / one client = 1.34x. The 2.0x target was not met. The accepted
+performance fallback retains singular mutation/JBD2 ownership and records the
+remaining serial boundaries: VFS persistent-read serialization and the serialized
+block endpoint, block service and driver paths. These measurements do not isolate
+the cost of each boundary.
+
+Readdir-2k median: 44.218 ms across five rounds. Readdir-10k: 217.259 ms
+(217 ms rounded). This returns near the earlier M3 pre-FIX level, not the M2
+post-FIX result of 184 ms: the rounded M3 result costs about 17.9% more time.
+
+The read-only single-client result falls from about 953.8 ops/s before M3 to
+885.3 ops/s, about 7.2%. Treat that loss as a regression when assessing the
+"no material single-client regression" goal. The adaptive dispatch path checks
+`requestPending()` before choosing inline execution; earlier investigation named
+that admission overhead. This record has no isolated profile that assigns the
+7.2% loss to that check alone. It also has no profile that assigns the remaining
+readdir cost to cache synchronization or directory ownership copies; those causes
+remain unconfirmed.
+
+### FIX3 host results (2026-11-24)
+
+The FIX3 worktree passed `make -j3 lint`, `docs`, `test-concurrency-audit`,
+`test-resource-policy`, `test-ext4-unit` and `test-ext4-stress`, one gate at a
+time. Stress completed in 322.760 s. `test-ext4-concurrency` passed both full
+race-instrumented packages: `userspace/ext4` in 519.532 s and
+`userspace/cmd/ext4` in 1.267 s. The standalone equivalence gate passed the
+46-reply read-only workload and the host adapter tests. Restoring nested cache
+borrows through a temporary Go overlay made both traversal regression tests fail
+at their completion bounds; the production source kept the fixed release points.
+
+`make -j3 test-ext4-rw` passed the normal VM crash/replay workload, the GoOS
+image checks and pinned `e2fsck`. `make -j3 test-ext4-read-restart` then passed
+with 4 vCPUs and 512 MiB under TCG. For each fault (`volume`, `block`, `driver`),
+the service marker preceded injection and all four reader processes reported
+old-descriptor revocation and correct data after fresh opens. The full script,
+GoOS clean/recovery checks and `e2fsck` also passed. The active log is
+`build/logs/ext4-read-restart.log`; the clean and dirty images are under
+`build/ext4-read-restart`.
+
+The final rerun also passed `test-linux-elf`, the normal VM gate, lint/docs,
+both policy gates, units and equivalence. Full ext4 race tests took 599.728 s;
+command-package race tests took 1.310 s.
+
+### Final FIX3 KVM measurement (2026-11-24)
+
+Final KVM run `20261124T071705Z-2668fdcb` tested commit
+`b85957ed3b3efb403fc2598e7962f7f90fc5d8a7` on node `suptests`,
+PVE 7.4-16, q35/OVMF, `cpu=host`, one socket, four cores and 1024 MiB.
+The scenario passed and cleanup completed successfully.
+
+Evidence: `build/pve/runs/20261124T071705Z-2668fdcb/report.json` and
+`build/pve/runs/20261124T071705Z-2668fdcb/serial.log`. The ISO SHA-256 was
+`d2f168be7d90a46000cc10ebed071f1a9314df13f6fa6377a2b2f91acd79306d`.
+
+| Read-only clients | ops/s |
+|---:|---:|
+| 1 | 882.3 |
+| 2 | 1060.9 |
+| 4 | 1226.0 |
+| 8 | 1350.6 |
+
+Four clients / one client = 1.39x. The final run misses the 2.0x target.
+The accepted fallback retains the read pool and serialized block transport;
+FIX3 adds correctness gates without changing those boundaries. Single-client
+throughput remains about 7.5% below the pre-M3 953.8 ops/s result. It differs
+by -0.34% from the earlier serialized-transport run, which does not prove a
+statistically significant FIX3 throughput change.
+
+Readdir-2k rounds: 56.303, 44.181, 45.299, 47.971 and 45.330 ms;
+median 45.330 ms. Readdir-10k: 223.555 ms. The latter costs about 21.5% more
+than the M2 post-FIX 184 ms result and 2.9% more than the earlier M3
+serialized-transport 217.259 ms result. Do not call this an M2 baseline recovery.
+The final run supplies no isolated profile to assign these regressions to
+`requestPending()`, cache locks or directory copies.
+
+The first attempt, `20261124T071349Z-82b10b27`, used the same clean commit and
+ISO but ended with `infra-error` after the SSH serial console disconnected:
+`Can't assign requested address` / `Broken pipe`. Its report records tool
+status 3 and cleanup `ok`; outer Make returned 2. It supplies no final benchmark
+result. The second attempt above passed after `pve-doctor` passed again.
+
+### Existing mixed workload
+
+The same final KVM run completed the existing `bench parallel` workload:
+each process creates, writes 4 KiB, closes and unlinks files in its own
+directory, for 200 iterations per process at scale 1. The five ext4 rounds
+reported these aggregate rates; M3 records this workload without a scaling
+requirement.
+
+| Processes | Round 1 ops/s | Round 2 | Round 3 | Round 4 | Round 5 | Median ops/s |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 169.1 | 174.2 | 168.8 | 167.9 | 175.9 | 169.1 |
+| 2 | 167.5 | 168.2 | 169.6 | 160.9 | 171.2 | 168.2 |
+| 4 | 160.9 | 172.3 | 177.0 | 159.4 | 178.4 | 172.3 |
+| 8 | 160.4 | 167.7 | 170.6 | 166.2 | 168.4 | 167.7 |
+
+Source: `serial.log` from `20261124T071705Z-2668fdcb`, lines 62–65,
+107–110, 152–155, 197–200 and 242–245. Each round ended with `bench ok`.
+The four-process / one-process median ratio is 1.02x; this mixed workload
+shows no material scaling. The later scale-5 ext4 round recorded
+175.3 / 168.6 / 177.8 / 169.1 ops/s at 1/2/4/8 processes (lines 294–297).
+These results come from the existing log; no new benchmark run supplied them.
+
+### FIX3 validation procedure
+
+Run all Make gates with three build jobs:
+
+```sh
+make -j3 lint
+make -j3 docs
+make -j3 test-concurrency-audit
+make -j3 test-resource-policy
+make -j3 test-ext4-unit
+make -j3 test-ext4-stress
+make -j3 test-ext4-concurrency
+make -j3 test-ext4-read-equivalence
+make -j3 test-ext4-rw
+make -j3 test-ext4-read-restart
+make -j3 test-pve-ext4
+```
+
+`test-ext4-concurrency` runs both ext4 packages with `-race -count=1`, including
+the read-job ownership and block transport tests. Synthetic traversal tests use
+same-set metadata blocks and a two-second completion bound for each call to
+`mapExtent` and `mapIndirect`. They cover cold and cached paths, including double
+and triple indirect maps.
+
+The equivalence gate compiles the production serial and goroutine service loops
+as separate host executables. It retains the loop statements, `answer`,
+`sendReply` and admission name ownership; host adapters replace capability IPC,
+waits and wake streams. Both builds run the production ext4 volume and engine
+against the same fixture. The comparison retains decoded reply fields and bytes,
+sorts by request identity and ignores completion order and timing. Native startup,
+syscalls and scheduling remain outside this host gate.
+
+The restart gate uses a separate validation build variant; normal builds omit its
+worker hold hook. Four reader processes own independent descriptors and perform
+checked reads and stats. The VFS persistent-read lane admits one ext4 read and
+queues the other readers. A cold read at 1 MiB reaches a service worker, which
+prints `EXT4_RESTART_READER_ACTIVE` and holds the request until the injected fault.
+The host waits for that service-side marker before killing the instance. This
+proves one active ext4 worker at the fault, not four simultaneous endpoint reads.
+Each reader uses a private file with a distinct payload marker, rejects its old
+descriptor and verifies metadata and four full pages through a fresh open.
+The sleeping `abi-probe hold` case remains a descriptor-revocation test and does
+not satisfy this gate. Active-reader faults target the ext4 instance, block
+service and driver while the Linux process keeps its VFS session. The harness
+also retains the existing VFS restart check and launches new processes afterward.
+ADR 0138 makes a running Linux process's VFS session fail permanently on VFS
+death; requiring that process to regain files would contradict the current
+capability model.
+
+An extra exploratory active-VFS case confirmed four read revocations and service
+replacement, but its fresh-open expectation failed. The readers later faulted on
+an unmapped code address; this run does not establish that fault's cause. FIX3
+does not certify active VFS-session renewal or change that separate lifecycle
+contract.

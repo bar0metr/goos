@@ -1152,6 +1152,8 @@ static int hold_test(const char *path, int seconds)
 	return 0;
 }
 
+#include "ext4-restart.h"
+
 /* ext4_rw checks a read-write ext4 volume mounted at base as a Linux program
  * uses it: a file written and synced, a rename onto another hard link of the
  * same inode that changes nothing, a rename to a free name, a file written
@@ -5061,6 +5063,8 @@ int main(int argc, char **argv)
 			return links_test();
 		if (!strcmp(argv[1], "open-intent"))
 			return open_intent_test();
+		if (!strcmp(argv[1], "ext4-read-restart") && argc >= 4)
+			return ext4_restart_test(argv[2], argv[3]);
 		if (!strcmp(argv[1], "hold") && argc >= 4)
 			return hold_test(argv[2], atoi(argv[3]));
 		if (!strcmp(argv[1], "ext4-rw") && argc >= 3)

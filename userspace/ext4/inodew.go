@@ -191,10 +191,11 @@ func (fs *FS) newInode(number uint32, mode uint16, uid uint32, gid uint32) (*Ino
 	}
 	inodeSize := uint64(fs.sb.InodeSize)
 	byteOffset := uint64(index) * inodeSize
-	data, err := fs.cache.get(desc.InodeTable + byteOffset/uint64(fs.blockSize))
+	data, unlock, err := fs.cache.get(desc.InodeTable + byteOffset/uint64(fs.blockSize))
 	if err != nil {
 		return nil, err
 	}
+	defer unlock()
 	within := int(byteOffset % uint64(fs.blockSize))
 	generation := le32(data, within+0x64) + 1
 	if generation == 0 {

@@ -49,10 +49,12 @@ func (fs *FS) Xattrs(inode *Inode) ([]Xattr, error) {
 		if inode.FileACL <= uint64(fs.sb.FirstDataBlock) || inode.FileACL >= fs.sb.BlocksCount {
 			return nil, corrupt("attribute block outside the volume")
 		}
-		data, err := fs.cache.get(inode.FileACL)
+		data, unlock, err := fs.cache.get(inode.FileACL)
 		if err != nil {
 			return nil, err
 		}
+		defer unlock()
+
 		if le32(data, 0) != xattrMagic || le32(data, 8) != 1 {
 			return nil, corrupt("attribute block header invalid")
 		}

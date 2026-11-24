@@ -267,11 +267,12 @@ func (check *volumeCheck) bitmaps() error {
 		start, count := fs.groupStart(group), fs.groupBlocks(group)
 		var bitmap []byte
 		if desc.Flags&groupBlockUninit == 0 {
-			data, err := fs.cache.get(desc.BlockBitmap)
-			if err != nil {
+			if err := fs.cache.withBlock(desc.BlockBitmap, func(data []byte) error {
+				bitmap = append([]byte(nil), data...)
+				return nil
+			}); err != nil {
 				return err
 			}
-			bitmap = append([]byte(nil), data...)
 			for bit := count; bit < uint64(fs.blockSize)*8; bit++ {
 				if !testBit(bitmap, bit) {
 					return fmt.Errorf("group %d block bitmap padding bit %d clear", group, bit)
