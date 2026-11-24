@@ -229,6 +229,8 @@ func grantValue(expression ast.Expr) (commands.Grant, error) {
 		return commands.GrantTCPRing, nil
 	case isSelector(expression, "commands", "GrantUDPRing"):
 		return commands.GrantUDPRing, nil
+	case isSelector(expression, "commands", "GrantIdentityAdmin"):
+		return commands.GrantIdentityAdmin, nil
 	case isSelector(expression, "commands", "GrantRemote"):
 		return commands.GrantRemote, nil
 	default:

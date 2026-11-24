@@ -149,6 +149,10 @@ func startServices(ticks uint64) {
 		// configuration service answers, and never in recovery (ADR 0222).
 		mountConfiguredVolumes()
 		startLogService(ticks)
+		// identityd stores its one snapshot under /state, which the
+		// persistent volume mounts at boot; it needs nothing else and
+		// nothing depends on it yet (ADR 0233).
+		startIdentity(ticks)
 		// The network reads its settings, so it starts after the
 		// configuration service; nothing before the shell waits for it.
 		startNetwork(ticks)

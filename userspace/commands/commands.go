@@ -59,10 +59,14 @@ const (
 	// through shared rings (ADR 0216), alongside any other grant. The
 	// authority is GrantUDP's.
 	GrantUDPRing
+	// GrantIdentityAdmin asks for an administration session with the
+	// identity service, over which a command reads and mutates accounts and
+	// groups (ADR 0233). It grants no VFS, storage, or session authority.
+	GrantIdentityAdmin
 
 	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal | GrantLaunch | GrantNetworkPing | GrantNetworkAdmin |
 		GrantResolve | GrantResolveAdmin | GrantUDP | GrantTCP | GrantRemote | GrantHostname | GrantTCPBulk | GrantTCPRing |
-		GrantUDPRing
+		GrantUDPRing | GrantIdentityAdmin
 )
 
 // Unbounded is the MaxArgs of a command that takes any number of arguments.
@@ -101,8 +105,8 @@ const (
 	// bits. An installed system records it, so a system built for another
 	// format is refused (ADR 0175). Format 7 adds the exact-key hostname grant,
 	// format 8 the GTCP 3 session grant, format 9 the GTCP 4 one, format 10
-	// the GUDP 3 one.
-	IndexFormat = 10
+	// the GUDP 3 one, format 11 the identity-admin one.
+	IndexFormat = 11
 )
 
 // Entry is one decoded index line. Its byte slices alias the index.

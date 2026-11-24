@@ -120,6 +120,11 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		remoteAdmin = openRemoteAdmin()
 	}
 	useRemote := remoteAdmin != 0
+	identityAdmin := handle.ID(0)
+	if grantable && grantsRequested&commands.GrantIdentityAdmin != 0 {
+		identityAdmin = openIdentityAdmin()
+	}
+	useIdentity := identityAdmin != 0
 	var hostnameConfig handle.ID
 	if grantsRequested&commands.GrantHostname != 0 {
 		scope, valid := configproto.MakeExactScope(configproto.HostnameKey)
@@ -181,6 +186,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		syslog.Warn("volume check refused in normal mode")
 		closeOpen(hostnameConfig)
 		closeOpen(remoteAdmin)
+		closeOpen(identityAdmin)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
 		closeUDP(udpSession)
@@ -195,6 +201,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			syslog.Error(reason)
 			closeOpen(hostnameConfig)
 			closeOpen(remoteAdmin)
+			closeOpen(identityAdmin)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
@@ -209,6 +216,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			syslog.Error(reason)
 			closeOpen(hostnameConfig)
 			closeOpen(remoteAdmin)
+			closeOpen(identityAdmin)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
@@ -228,6 +236,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		if !createChannel(&launchPair) {
 			closeOpen(hostnameConfig)
 			closeOpen(remoteAdmin)
+			closeOpen(identityAdmin)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
@@ -250,6 +259,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			closePair(launchPair)
 			closeOpen(hostnameConfig)
 			closeOpen(remoteAdmin)
+			closeOpen(identityAdmin)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
@@ -280,6 +290,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			closePair(launchPair)
 			closeOpen(hostnameConfig)
 			closeOpen(remoteAdmin)
+			closeOpen(identityAdmin)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
@@ -310,6 +321,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		handles++
 	}
 	if useRemote {
+		handles++
+	}
+	if useIdentity {
 		handles++
 	}
 	if useVFS {
@@ -421,6 +435,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useRemote {
 		writer.Handle([]byte("remote"), 0)
 	}
+	if useIdentity {
+		writer.Handle([]byte("identity"), 0)
+	}
 	if useVFS {
 		writer.Handle([]byte("vfs"), 0)
 	}
@@ -463,6 +480,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		syslog.Warn("APP_STARTUP_ENCODE_FAILED")
 		closeOpen(hostnameConfig)
 		closeOpen(remoteAdmin)
+		closeOpen(identityAdmin)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
 		closeUDP(udpSession)
@@ -491,6 +509,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	if useRemote {
 		grants = append(grants, supervisor.Capability{Name: "remote", Handle: remoteAdmin, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
+	}
+	if useIdentity {
+		grants = append(grants, supervisor.Capability{Name: "identity", Handle: identityAdmin, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
 	if useVFS {
 		grants = append(grants, supervisor.Capability{Name: "vfs", Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
@@ -555,6 +576,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closePair(ttyPair)
 		closeLinuxFamily(linuxNet)
 		closeOpen(remoteAdmin)
+		closeOpen(identityAdmin)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
 		closeUDP(udpSession)

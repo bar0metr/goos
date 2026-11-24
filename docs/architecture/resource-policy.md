@@ -383,6 +383,24 @@ fields from `OpStatus` and the TCP fields from `OpTCPStatus`.
 | `userspace/sftp.MaxPacket`, `userspace/sftp.MaxData` | 64 KiB, 32 KiB | protocol | n/a | n/a | packet refused | n/a |
 | `userspace/sshserver.Max*` | 32 KiB packet, 16 KiB data | protocol (RFC 4253 minimum) | n/a | n/a | connection closed | n/a |
 
+### Identity service
+
+`identityd` runs with the `normal` resource profile (4 channels, 16 streams, 16
+tasks, 8192 pages). Its database is one store with no per-principal shares; the
+rows below bound what the store and its records may hold.
+
+| Bound | Default / max | Class | Owner | Memory | At exhaustion | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `userspace/identity.MaxAccounts` | 64 | policy | global | a fixed-size account record each (name, home, 16 group IDs, 8 keys) | `ResultExhausted` | none |
+| `userspace/identity.MaxGroups` | 64 | policy | global | a fixed-size group record each | `ResultExhausted` | none |
+| `userspace/identity.MaxSupplementaryGroups` | 16 | policy | account | 16 `GroupID` slots inside each account record | `ResultInvalid` | none |
+| `userspace/identity.MaxName` | 31 | policy | account or group | a 31-byte name array inside each record | `ResultInvalid` | none |
+| `userspace/identity.MaxHome` | 64 | policy | account | a 64-byte home array inside each account record | `ResultInvalid` | none |
+| `userspace/identity.MaxKeysPerAccount` | 8 | policy | account | 8 key slots inside each account record | `ResultExhausted` | none |
+| `userspace/identity.MaxTotalKeys` | 128 | policy | global | keys live in the per-account arrays; this bounds their sum | `ResultExhausted` | none |
+| `userspace/identity.KeySize` | 32 | protocol (Ed25519 public key) | n/a | 32 bytes per stored key | key refused | n/a |
+| `userspace/identity.MaxSnapshotBytes` | 65536 | policy | global | the encoded snapshot buffer on save and load | save `ErrExhausted`; load `ErrInvalid` | none |
+
 ### Log persistence
 
 | Bound | Default / max | Class | Owner | Memory | At exhaustion | Status |

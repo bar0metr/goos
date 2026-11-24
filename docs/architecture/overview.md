@@ -76,6 +76,7 @@ concurrent read pool by default; the serial VFS remains a tested fallback.
 
 - [boot sequence](boot.md);
 - [filesystem stack](filesystem.md);
+- [identity core](identity.md);
 - [networking](networking.md);
 - [timekeeping](timekeeping.md);
 - [Linux compatibility](linux-compat.md);

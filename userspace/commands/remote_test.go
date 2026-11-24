@@ -16,7 +16,7 @@ func TestRemoteGrantRoundTrip(t *testing.T) {
 	if _, _, ok := Next([]byte("x\t999999\t0\t0\tx\tx\t\n"), 0); ok {
 		t.Fatal("oversized grant field accepted")
 	}
-	if _, _, ok := Next([]byte("x\t65535\t0\t0\tx\tx\t\n"), 0); ok {
-		t.Fatal("unknown grant bits accepted")
+	if _, _, ok := Next([]byte("x\t65536\t0\t0\tx\tx\t\n"), 0); ok {
+		t.Fatal("grant bit beyond the known bits accepted")
 	}
 }

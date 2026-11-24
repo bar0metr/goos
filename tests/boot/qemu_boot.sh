@@ -679,6 +679,8 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'handles\n'
 	sleep 1
+	printf 'user list\n'
+	sleep 1
 	send_after_done 'log' 'INFO  kernel\[0\]: kernel initialized'
 	printf 'write /persist/startup.txt "a startup block larger than the former 128-byte limit"\n'
 	sleep 2
@@ -1406,6 +1408,13 @@ require_regex config.session-admin 'config\[[0-9]*\]: session added rights=15' '
 require_window config.session-resolver 'config\[[0-9]*\]: session added rights=5' 'a read-only session with hosts reads' "$log" 'goos> log' 'goos> help'
 require_regex config.session-confined 'config\[[0-9]*\]: session added rights=1' 'a read-only session' "$log" 'goos> log'
 pass_group config
+
+# identityd supervises the account store (ADR 0233): it starts from the volume
+# in normal mode, and the admin command reaches it over the identity session, so
+# a fresh volume reports the unprovisioned store.
+require_regex identity.service-reported '^\[ OK \] identityd$' 'the identity service reported started' "$log" 'Starting services'
+require_regex identity.user-list '^user: unprovisioned$' 'user list answers through the identity admin session' "$log" 'goos> user list'
+pass_group identity
 
 require_regex release.ps-header '^PID   TYPE     STATE      MEM  CPU   COMMAND$' 'ps table header' "$log" 'goos> ps'
 # Memory and CPU are accounted per process, so init must report pages of its own.

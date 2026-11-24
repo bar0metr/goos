@@ -67,7 +67,7 @@ const (
 )
 
 // sessionServices are the services that run from the volume in normal mode.
-var sessionServices = [...]string{"config", "log", "shell", netServiceName, netDriverName, resolverName}
+var sessionServices = [...]string{"config", "log", identityServiceName, "shell", netServiceName, netDriverName, resolverName}
 
 // forcedRecovery reports whether the boot media asks for recovery mode.
 func forcedRecovery() bool {
@@ -326,7 +326,7 @@ func sessionServiceNames() []string {
 
 // diskService reports whether a service runs from the volume in normal mode.
 func diskService(name string) bool {
-	if name == "config" || name == "log" || name == remoteServiceName {
+	if name == "config" || name == "log" || name == identityServiceName || name == remoteServiceName {
 		return true
 	}
 	for index := range sessions {
@@ -382,14 +382,18 @@ func enterRecovery(stage supervisor.Stage, path, reason string) {
 	if snapshot, found := manager.Snapshot("vfs"); found && snapshot.State == supervisor.StateFailed {
 		manager.Rebase("vfs", execproto.BootstrapRoot+"vfs", supervisionTicks)
 	}
-	// Recovery runs no configuration or log service: neither is needed by
-	// the shell, and each would hold files on the volume a check needs.
-	for _, name := range [...]string{"config", "log"} {
+	// Recovery runs no configuration, log, or identity service: none is
+	// needed by the shell, and each would hold files on the volume a check
+	// needs to itself.
+	for _, name := range [...]string{"config", "log", identityServiceName} {
 		manager.Hold(name)
 		if manager.PlanStop(name) == supervisor.StatusOK {
 			process := &configProcessHandle
 			if name == "log" {
 				process = &logProcessHandle
+			}
+			if name == identityServiceName {
+				process = &identityProcess
 			}
 			if *process != 0 {
 				sys.ProcessKill(*process)
@@ -401,6 +405,10 @@ func enterRecovery(stage supervisor.Stage, path, reason string) {
 	if configControlHandle != 0 {
 		sys.HandleClose(configControlHandle)
 		configControlHandle = 0
+	}
+	if identityControl != 0 {
+		sys.HandleClose(identityControl)
+		identityControl = 0
 	}
 	// Recovery runs no network either: both services run from the volume.
 	stopLinuxSockets()

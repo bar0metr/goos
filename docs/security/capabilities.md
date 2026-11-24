@@ -497,3 +497,29 @@ below the root stays reachable unless another rule denies it. An open handle sta
 usable if another session moves its file out of the root; the session cannot reach that
 file again by path. Scopes inside the root still apply. The worker receives the far ends of the two streams and no VFS session. See
 [ADR 0209](../adr/0209-native-sftp-service.md).
+
+## Identity service
+
+PID 1 starts `identityd` in normal mode with three grants:
+
+| Grant | Rights |
+|---|---|
+| `control` channel | Read, Write, Wait, consumed; PID 1 keeps the client end |
+| `vfs` session confined to `/state/identity` | Read, Write, Wait on the channel; the session authority grants Read, Write on the `/state/identity` scope slot |
+| `log` device | Write |
+
+`identityd` holds no other channel, device, IRQ, DMA or launch authority. The
+VFS confinement follows the remoted `/state/security/ssh` pattern: PID 1
+installs the `/state/identity` subtree denied Read, Write, then opens a confined
+session whose scope slot carries Read, Write. Every path the session names stays
+under `/state/identity`. A restarted identityd receives fresh consumed
+endpoints, so it never keeps the previous instance's channel or session.
+
+`user` and `group` declare `commands.GrantIdentityAdmin` (`0x8000`, command index
+format 11). PID 1 maps the grant to one administration session over identityd's
+control channel and hands it to the command as the `identity` role. The command
+receives that session only; a command without the grant has no identity session
+and fails closed. The grant authorizes reading and mutating accounts and groups
+through identityd. It grants no VFS, storage, network, resolver or session
+authority, and no UID, mode, group or key confers native authority. Enforcement
+stays in PID 1, never in identityd.
