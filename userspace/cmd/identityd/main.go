@@ -34,6 +34,12 @@ const (
 	// Every outbound VFS request uses a bounded deadline.
 	vfsReplyDeadline = uint64(200)
 	vfsReplyAttempts = 5
+	// sendRetryDeadline bounds how long sendReply/sendList retry one message
+	// while the client queue is full (up to ipc.QueueCapacity messages may sit
+	// undrained), yielding one tick per retry. A send that cannot complete by
+	// then is a failure: for a multipart list the client will not receive the
+	// rest, so the sender must stop rather than orphan later chunks.
+	sendRetryDeadline = uint64(200)
 	// maxSessions bounds the admin and lookup sessions served at once.
 	maxSessions = 16
 	// identityReplyHeader and identityRecordFixed track the version-2 identity
@@ -245,14 +251,20 @@ func serve(current *session) {
 	var req identityproto.Request
 	correlation, valid := identityproto.DecodeRequest(&requestMsg, &req)
 	if !valid {
-		// Attribute a malformed request if it names a known data opcode, and
-		// answer it so the caller is never stranded.
+		// DecodeRequest rejects requests that carry attached handles; those
+		// handles were transferred into this process and must be released.
+		// Then attribute a malformed request if it names a known data opcode,
+		// and answer it so the caller is never stranded.
+		closeRequestHandles()
 		if op, corr, attributed := identityproto.RequestOpcode(&requestMsg); attributed {
 			sendReply(current.endpoint, identityproto.Reply{Opcode: op, Result: identityproto.ResultInvalid, State: service.State()}, corr)
 		}
 		return
 	}
 	if !sessionAllows(current, req.Opcode) {
+		// A valid request carries no handles, but release any defensively
+		// before answering the denial.
+		closeRequestHandles()
 		sendReply(current.endpoint, identityproto.Reply{Opcode: req.Opcode, Result: identityproto.ResultDenied, State: service.State()}, correlation)
 		return
 	}
@@ -280,15 +292,61 @@ func isListOpcode(op identityproto.Opcode) bool {
 	return op == identityproto.AdminListAccounts || op == identityproto.AdminListGroups
 }
 
+// closeRequestHandles closes every nonzero handle attached to the current
+// session request. DecodeRequest rejects requests that carry handles, and a
+// denied session never installs them, so both paths must release what the
+// kernel transferred in: a received handle is owned by this process and
+// otherwise leaks.
+func closeRequestHandles() {
+	for index := 0; index < int(requestMsg.HandleCount); index++ {
+		if requestMsg.Handles[index] != 0 {
+			sys.HandleClose(requestMsg.Handles[index])
+		}
+	}
+}
+
+// now returns the current monotonic clock in ticks.
+func now() uint64 {
+	ticks, _ := sys.ClockRead()
+	return ticks
+}
+
+// sendBounded encodes and sends one message, retrying while the peer queue is
+// full (StatusResourceExhausted), yielding one tick at a time, until a bounded
+// deadline. It returns false on any non-retryable status or when the deadline
+// elapses, so callers can stop a multipart stream on the first failed chunk.
+func sendBounded(endpoint handle.ID, message *ipc.Message) bool {
+	if message.HandleCount != 0 {
+		return false
+	}
+	size, ok := ipc.EncodeFrom(message, wire[:])
+	if !ok {
+		return false
+	}
+	deadline := now() + sendRetryDeadline
+	for now() < deadline {
+		status := sys.IPCSend(endpoint, wire[:size])
+		if status == kcall.StatusOK {
+			return true
+		}
+		if status != kcall.StatusResourceExhausted {
+			return false
+		}
+		var interests [kcall.WaitAnyMaxObjects]sys.Interest
+		if _, status = sys.WaitAny(&interests, 0, 1); status != kcall.StatusOK && status != kcall.StatusTimeout {
+			return false
+		}
+	}
+	return false
+}
+
 // sendReply encodes and sends one non-list reply.
 func sendReply(endpoint handle.ID, reply identityproto.Reply, correlation uint64) {
 	var message ipc.Message
 	if !identityproto.EncodeReply(&reply, correlation, &message) {
 		return
 	}
-	if size, ok := ipc.EncodeFrom(&message, wire[:]); ok {
-		sys.IPCSend(endpoint, wire[:size])
-	}
+	sendBounded(endpoint, &message)
 }
 
 // sendList sends a multipart list reply: notifications for every chunk but the
@@ -297,9 +355,7 @@ func sendList(endpoint handle.ID, op identityproto.Opcode, result identityproto.
 	if result != identityproto.ResultOK {
 		var message ipc.Message
 		if identityproto.EncodeListReply(op, result, 0, false, nil, correlation, &message) {
-			if size, ok := ipc.EncodeFrom(&message, wire[:]); ok {
-				sys.IPCSend(endpoint, wire[:size])
-			}
+			sendBounded(endpoint, &message)
 		}
 		return
 	}
@@ -318,8 +374,10 @@ func sendList(endpoint handle.ID, op identityproto.Opcode, result identityproto.
 		if !identityproto.EncodeListReply(op, identityproto.ResultOK, sequence, more, chunk, correlation, &message) {
 			return
 		}
-		if size, ok := ipc.EncodeFrom(&message, wire[:]); ok {
-			sys.IPCSend(endpoint, wire[:size])
+		if !sendBounded(endpoint, &message) {
+			// A failed chunk means the client will not receive the rest of
+			// the stream; stop immediately rather than orphan later chunks.
+			return
 		}
 		sequence++
 		if !more {

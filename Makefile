@@ -21,7 +21,7 @@ VFS_ELF = $(OUT_DIR)/userspace/vfs.elf
 # shell read is generated from the manifests the commands declare (ADR 0080).
 # The boot archive carries the recovery subset tools/initramfs names
 # (ADR 0175).
-VALIDATION_COMMANDS := cryptoprobe trustprobe memreclaim threadprobe goprobe
+VALIDATION_COMMANDS := cryptoprobe trustprobe memreclaim threadprobe goprobe identityprobe
 # Commands built with the goroutine runtime (ADR 0204): the TinyGo root
 # tools/goroutineroot prepares and the goroutine target.
 GOROUTINE_COMMANDS := goprobe
@@ -647,6 +647,7 @@ test-all:
 	$(MAKE) test-identity-core
 	$(MAKE) test-identity-persist
 	$(MAKE) test-identity-vm
+	$(MAKE) test-identity-crash
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test-incremental
@@ -691,6 +692,7 @@ release-check:
 	$(MAKE) test-identity-core
 	$(MAKE) test-identity-persist
 	$(MAKE) test-identity-vm
+	$(MAKE) test-identity-crash
 	$(MAKE) test-incremental
 	$(MAKE) test-crypto-frames
 	$(MAKE) test-storage-stress
@@ -773,6 +775,16 @@ test-identity-vm:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
 	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/identity-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/identity.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/identity-virtio-blk.img
+
+# Real QEMU crash-at-save gate (FIX §6.2): boots a disposable disk, commits a
+# durable mutation, then SIGKILLs the guest (no graceful reboot) and re-boots
+# the same image, asserting the DB loads to a valid committed state, never
+# corrupt or unavailable.
+.PHONY: test-identity-crash
+test-identity-crash:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/identity-crash-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/identity_crash.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/identity-crash-virtio-blk.img
 
 # The storage stress test (ADR 0102): the model-based FAT32 workload at a
 # larger scale than the default suite, and the host FAT checker over volumes

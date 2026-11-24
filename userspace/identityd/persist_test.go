@@ -20,8 +20,9 @@ func fixedEpoch() ([16]byte, error) { return testEpoch, nil }
 // memFiles is a faithful in-memory Files: exclusive create, append write,
 // sync (recorded), rename, bounded directory listing.
 type memFiles struct {
-	files map[string][]byte
-	open  string
+	files   map[string][]byte
+	open    string
+	unlinks int
 }
 
 func newMemFiles() *memFiles {
@@ -45,6 +46,7 @@ func (f *memFiles) Create(path string) error {
 }
 
 func (f *memFiles) Unlink(path string) error {
+	f.unlinks++
 	if _, ok := f.files[path]; !ok {
 		return ErrNotFound
 	}
@@ -226,6 +228,7 @@ func TestPersistFaultInjection(t *testing.T) {
 		fault          func(*Persist)
 		wantUncertain  bool
 		wantNewInPlace bool
+		wantTempKept   bool
 	}{
 		{
 			name: "before-temp-write",
@@ -257,6 +260,7 @@ func TestPersistFaultInjection(t *testing.T) {
 				p.Faults.ReplaceErr = func() error { return ErrUncertain }
 			},
 			wantUncertain: true,
+			wantTempKept:  true,
 		},
 		{
 			name: "after-replace",
@@ -302,7 +306,11 @@ func TestPersistFaultInjection(t *testing.T) {
 			} else if !bytes.Equal(current, oldData) {
 				t.Fatal("target does not hold the old snapshot after a pre-replace failure")
 			}
-			if len(files.files) != 1 {
+			if test.wantTempKept {
+				if _, ok := files.files[persist.tempPath()]; !ok {
+					t.Fatal("temporary file should be kept on an uncertain outcome")
+				}
+			} else if len(files.files) != 1 {
 				t.Fatalf("temporary file leaked: %d entries", len(files.files))
 			}
 		})
@@ -333,5 +341,48 @@ func TestPersistCleanFailureKeepsOldAndNoLeak(t *testing.T) {
 	}
 	if !bytes.Equal(files.files[testPath], oldData) {
 		t.Fatal("target changed on a clean failure")
+	}
+}
+
+func TestPersistUncertainReplaceKeepsTemp(t *testing.T) {
+	files := newMemFiles()
+	files.files[testPath] = snapshotFor(t, "alice")
+	persist := NewPersist(files, testPath)
+	persist.Faults.ReplaceErr = func() error { return ErrUncertain }
+
+	if err := persist.Save(snapshotFor(t, "alice", "bob")); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("Save = %v, want ErrUncertain", err)
+	}
+	// The uncertain replace outcome must not mutate the filesystem further:
+	// no Unlink on the temporary, so it is still present.
+	if files.unlinks != 0 {
+		t.Fatalf("Unlink called %d times on the uncertain path, want 0", files.unlinks)
+	}
+	if _, ok := files.files[persist.tempPath()]; !ok {
+		t.Fatal("temporary file was removed on the uncertain path")
+	}
+	// The fake Replace never ran, so the old snapshot is intact.
+	if !bytes.Equal(files.files[testPath], snapshotFor(t, "alice")) {
+		t.Fatal("target changed on an uncertain replace")
+	}
+}
+
+func TestPersistOpenBarrierFailsClosed(t *testing.T) {
+	files := newMemFiles()
+	files.files[testPath] = snapshotFor(t, "alice")
+
+	persist := NewPersist(files, testPath)
+	persist.Faults.SyncDirErr = func() error { return errors.New("injected barrier failure") }
+	if _, err := persist.Open(); err == nil {
+		t.Fatal("Open = nil, want durability barrier failure")
+	}
+
+	service := New(files, testPath, fixedEpoch)
+	service.persist.Faults.SyncDirErr = func() error { return errors.New("injected barrier failure") }
+	if err := service.Open(); err == nil {
+		t.Fatal("Service.Open = nil, want durability barrier failure")
+	}
+	if service.State() != identityproto.StateUnavailable {
+		t.Fatalf("state = %v, want Unavailable", service.State())
 	}
 }

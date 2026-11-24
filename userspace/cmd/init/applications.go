@@ -125,6 +125,11 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		identityAdmin = openIdentityAdmin()
 	}
 	useIdentity := identityAdmin != 0
+	identityLookup := handle.ID(0)
+	if grantable && grantsRequested&commands.GrantIdentityLookup != 0 {
+		identityLookup = openIdentityLookup()
+	}
+	useLookup := identityLookup != 0
 	var hostnameConfig handle.ID
 	if grantsRequested&commands.GrantHostname != 0 {
 		scope, valid := configproto.MakeExactScope(configproto.HostnameKey)
@@ -187,6 +192,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closeOpen(hostnameConfig)
 		closeOpen(remoteAdmin)
 		closeOpen(identityAdmin)
+		closeOpen(identityLookup)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
 		closeUDP(udpSession)
@@ -202,6 +208,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			closeOpen(hostnameConfig)
 			closeOpen(remoteAdmin)
 			closeOpen(identityAdmin)
+			closeOpen(identityLookup)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
@@ -217,6 +224,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			closeOpen(hostnameConfig)
 			closeOpen(remoteAdmin)
 			closeOpen(identityAdmin)
+			closeOpen(identityLookup)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
@@ -237,6 +245,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			closeOpen(hostnameConfig)
 			closeOpen(remoteAdmin)
 			closeOpen(identityAdmin)
+			closeOpen(identityLookup)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
@@ -260,6 +269,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			closeOpen(hostnameConfig)
 			closeOpen(remoteAdmin)
 			closeOpen(identityAdmin)
+			closeOpen(identityLookup)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
@@ -291,6 +301,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			closeOpen(hostnameConfig)
 			closeOpen(remoteAdmin)
 			closeOpen(identityAdmin)
+			closeOpen(identityLookup)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
@@ -324,6 +335,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		handles++
 	}
 	if useIdentity {
+		handles++
+	}
+	if useLookup {
 		handles++
 	}
 	if useVFS {
@@ -438,6 +452,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useIdentity {
 		writer.Handle([]byte("identity"), 0)
 	}
+	if useLookup {
+		writer.Handle([]byte("lookup"), 0)
+	}
 	if useVFS {
 		writer.Handle([]byte("vfs"), 0)
 	}
@@ -481,6 +498,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closeOpen(hostnameConfig)
 		closeOpen(remoteAdmin)
 		closeOpen(identityAdmin)
+		closeOpen(identityLookup)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
 		closeUDP(udpSession)
@@ -512,6 +530,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	if useIdentity {
 		grants = append(grants, supervisor.Capability{Name: "identity", Handle: identityAdmin, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
+	}
+	if useLookup {
+		grants = append(grants, supervisor.Capability{Name: "lookup", Handle: identityLookup, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
 	if useVFS {
 		grants = append(grants, supervisor.Capability{Name: "vfs", Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
@@ -577,6 +598,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closeLinuxFamily(linuxNet)
 		closeOpen(remoteAdmin)
 		closeOpen(identityAdmin)
+		closeOpen(identityLookup)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
 		closeUDP(udpSession)

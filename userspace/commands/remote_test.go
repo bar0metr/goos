@@ -13,10 +13,10 @@ func TestRemoteGrantRoundTrip(t *testing.T) {
 			t.Fatal("four-digit grant did not decode", grants)
 		}
 	}
-	if _, _, ok := Next([]byte("x\t999999\t0\t0\tx\tx\t\n"), 0); ok {
+	if _, _, ok := Next([]byte("x\t9999999\t0\t0\tx\tx\t\n"), 0); ok {
 		t.Fatal("oversized grant field accepted")
 	}
-	if _, _, ok := Next([]byte("x\t65536\t0\t0\tx\tx\t\n"), 0); ok {
+	if _, _, ok := Next([]byte("x\t131072\t0\t0\tx\tx\t\n"), 0); ok {
 		t.Fatal("grant bit beyond the known bits accepted")
 	}
 }

@@ -988,3 +988,4 @@ CA-1221	goos/userspace/bin/user	manifest	process	immutable	none
 CA-1222	goos/userspace/bin/group	manifest	process	immutable	none
 CA-1223	goos/userspace/identity	ErrOldFormat	process	immutable	none
 CA-1224	goos/userspace/identityd	ErrExists	process	immutable	none
+CA-1225	goos/userspace/bin/identityprobe	manifest	process	immutable	none

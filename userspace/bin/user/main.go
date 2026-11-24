@@ -252,15 +252,20 @@ func list(channel handle.ID, opcode identityproto.Opcode) {
 	if !identityproto.EncodeRequest(&identityproto.Request{Opcode: opcode}, correlation, &message) || !sendWithin(channel, &message, deadline) {
 		utility.Fail(nil, "identity request failed")
 	}
+	var expected uint64
 	for {
 		current := now()
 		if current >= deadline || receive(channel, deadline-current, &message) != kcall.StatusOK {
 			utility.Fail(nil, "identity service did not answer")
 		}
-		result, _, more, records, valid := identityproto.DecodeListReply(&message, correlation, opcode)
+		result, sequence, more, records, valid := identityproto.DecodeListReply(&message, correlation, opcode)
 		if !valid {
 			utility.Fail(nil, "invalid identity reply")
 		}
+		if sequence != expected {
+			utility.Fail(nil, "identity reply out of order")
+		}
+		expected++
 		if result != identityproto.ResultOK {
 			failResult(result)
 		}

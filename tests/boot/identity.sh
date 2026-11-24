@@ -282,6 +282,16 @@ rm -f "$log"
 	send_after_done 'user show bob; echo identity-show-bob-2' '^identity-show-bob-2$'
 	send_after_done 'user status; echo identity-status-3' '^identity-status-3$'
 
+	# The protected identity subtree denies every read and mutation to an
+	# ordinary shell session, through both /state and the /persist alias.
+	send_after_done 'echo x > /state/identity/db; echo identity-deny-write' '^identity-deny-write$'
+	send_after_done 'touch /state/identity/extra; echo identity-deny-create' '^identity-deny-create$'
+	send_after_done 'rm /state/identity/db; echo identity-deny-unlink' '^identity-deny-unlink$'
+	send_after_done 'mv /state/identity/db /state/identity/db2; echo identity-deny-rename' '^identity-deny-rename$'
+	send_after_done 'cp /system/motd /state/identity/db; echo identity-deny-replace' '^identity-deny-replace$'
+	send_after_done 'mv /state/identity /state/identity-moved; echo identity-deny-parent' '^identity-deny-parent$'
+	send_after_done 'cat /persist/state/identity/db; echo identity-deny-alias' '^identity-deny-alias$'
+
 	# Restart identityd through PID 1's restart path: killing the VFS tears
 	# down identityd's confined session, identityd exits, and the supervisor
 	# relaunches it with fresh grants (ADR 0233).
@@ -300,6 +310,11 @@ rm -f "$log"
 	send_after_done 'cp /system/bin/user /home/demo/user; echo identity-cp-user' '^identity-cp-user$'
 	send_after_done '/home/demo/user status; echo identity-untrusted' '^identity-untrusted$'
 	send_after_done 'cat /state/identity/db; echo identity-scope-1' '^identity-scope-1$'
+	# The scope is re-installed with the rebuilt namespace: the denials hold
+	# again after the VFS restart.
+	send_after_done 'touch /state/identity/extra; echo identity-deny-create-restart' '^identity-deny-create-restart$'
+	send_after_done 'rm /state/identity/db; echo identity-deny-unlink-restart' '^identity-deny-unlink-restart$'
+	send_after_done 'mv /state/identity /state/identity-moved; echo identity-deny-parent-restart' '^identity-deny-parent-restart$'
 
 	# Reboot the same disk and confirm the DB and the bob key revocation held.
 	printf 'reboot\n'
@@ -320,6 +335,17 @@ rm -f "$log"
 	send_after_done 'user show tmp; echo identity-show-tmp-2' '^identity-show-tmp-2$'
 	send_after_done 'user delete tmp; echo identity-del-tmp-2' '^identity-del-tmp-2$'
 	send_after_done 'cat /state/identity/db; echo identity-scope-2' '^identity-scope-2$'
+	# The scope holds across a reboot too.
+	send_after_done 'touch /state/identity/extra; echo identity-deny-create-reboot' '^identity-deny-create-reboot$'
+	send_after_done 'rm /state/identity/db; echo identity-deny-unlink-reboot' '^identity-deny-unlink-reboot$'
+	send_after_done 'mv /state/identity /state/identity-moved; echo identity-deny-parent-reboot' '^identity-deny-parent-reboot$'
+	# The real lookup session (item 4): alice still holds key_a, bob's key_b
+	# was revoked, and carol is added and disabled so identityprobe proves a
+	# disabled account denies. identityprobe is validation-only and PID 1
+	# grants it a lookup session for declaring GrantIdentityLookup.
+	send_after_done 'user add carol; echo identity-add-carol' '^identity-add-carol$'
+	send_after_done 'user disable carol; echo identity-disable-carol' '^identity-disable-carol$'
+	send_after_done 'identityprobe; echo identity-probe-done' '^identity-probe-done$'
 ) | qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
@@ -327,7 +353,7 @@ rm -f "$log"
 	-cdrom "$iso" -display none -serial stdio -no-shutdown >"$log" 2>&1 &
 pid=$!
 
-wait_for_marker identity '^identity-scope-2$' 900 "$log"
+wait_for_marker identity '^identity-probe-done$' 900 "$log"
 cleanup
 
 # --- assertions: clean boot ---
@@ -384,6 +410,27 @@ require_window identity.tmp-recreated '^tmp 2002 1004 /home/tmp yes 0$' 'recreat
 forbid_window identity.tmp-no-base-reuse ' 1000 ' 'recreated tmp did not fall back to AllocBase' "$log" 'goos> user show tmp; echo identity-show-tmp-2' 'identity-show-tmp-2'
 require_window identity.reboot-scope 'permission denied' 'identity scope re-installed after reboot' "$log" 'goos> cat /state/identity/db; echo identity-scope-2' 'identity-scope-2'
 pass_group identity-reboot
+
+# --- assertions: protected subtree denials (item 5) ---
+require_window identity.deny-write 'read-only filesystem' 'write to the identity DB denied' "$log" 'goos> echo x > /state/identity/db; echo identity-deny-write' 'identity-deny-write'
+require_window identity.deny-create 'read-only filesystem' 'create in the identity subtree denied' "$log" 'goos> touch /state/identity/extra; echo identity-deny-create' 'identity-deny-create'
+require_window identity.deny-unlink 'read-only filesystem' 'unlink of the identity DB denied' "$log" 'goos> rm /state/identity/db; echo identity-deny-unlink' 'identity-deny-unlink'
+require_window identity.deny-rename 'read-only filesystem' 'rename within the identity subtree denied' "$log" 'goos> mv /state/identity/db /state/identity/db2; echo identity-deny-rename' 'identity-deny-rename'
+require_window identity.deny-replace 'read-only filesystem' 'replace of the identity DB denied' "$log" 'goos> cp /system/motd /state/identity/db; echo identity-deny-replace' 'identity-deny-replace'
+require_window identity.deny-parent 'read-only filesystem' 'moving the identity subtree root denied' "$log" 'goos> mv /state/identity /state/identity-moved; echo identity-deny-parent' 'identity-deny-parent'
+require_window identity.deny-alias 'permission denied' 'the /persist/state/identity alias is denied too' "$log" 'goos> cat /persist/state/identity/db; echo identity-deny-alias' 'identity-deny-alias'
+require_window identity.deny-create-restart 'read-only filesystem' 'create denied again after the VFS restart' "$log" 'goos> touch /state/identity/extra; echo identity-deny-create-restart' 'identity-deny-create-restart'
+require_window identity.deny-unlink-restart 'read-only filesystem' 'unlink denied again after the VFS restart' "$log" 'goos> rm /state/identity/db; echo identity-deny-unlink-restart' 'identity-deny-unlink-restart'
+require_window identity.deny-parent-restart 'read-only filesystem' 'parent move denied again after the VFS restart' "$log" 'goos> mv /state/identity /state/identity-moved; echo identity-deny-parent-restart' 'identity-deny-parent-restart'
+require_window identity.deny-create-reboot 'read-only filesystem' 'create denied again after reboot' "$log" 'goos> touch /state/identity/extra; echo identity-deny-create-reboot' 'identity-deny-create-reboot'
+require_window identity.deny-unlink-reboot 'read-only filesystem' 'unlink denied again after reboot' "$log" 'goos> rm /state/identity/db; echo identity-deny-unlink-reboot' 'identity-deny-unlink-reboot'
+require_window identity.deny-parent-reboot 'read-only filesystem' 'parent move denied again after reboot' "$log" 'goos> mv /state/identity /state/identity-moved; echo identity-deny-parent-reboot' 'identity-deny-parent-reboot'
+pass_group identity-vm-security
+
+# --- assertions: lookup session (item 4) ---
+require_marker identity.probe-ok 'identityprobe-ok' "$log" 'identityprobe'
+forbid_regex identity.probe-no-fail 'identityprobe-fail' 'no identityprobe case mismatch' "$log" 'identityprobe'
+pass_group identity-lookup
 
 # --- corrupt DB recovery on a separate disposable image ---
 corrupt_db_file=build/identity-corrupt.db

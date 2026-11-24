@@ -7,7 +7,7 @@ package commands
 // Grant names an authority a command may ask PID 1 for, beyond the standard
 // streams every command receives. It is a request: PID 1 grants only the roles
 // it knows, and only to executables in the immutable system image.
-type Grant uint16
+type Grant uint32
 
 const (
 	// GrantVFS asks for a private session with the filesystem service.
@@ -63,10 +63,15 @@ const (
 	// identity service, over which a command reads and mutates accounts and
 	// groups (ADR 0233). It grants no VFS, storage, or session authority.
 	GrantIdentityAdmin
+	// GrantIdentityLookup asks for a lookup-only session with the identity
+	// service, over which a command may authorize a key or read one account
+	// but never provision, reset, or mutate (ADR 0233). It grants no VFS,
+	// storage, or session authority.
+	GrantIdentityLookup
 
 	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal | GrantLaunch | GrantNetworkPing | GrantNetworkAdmin |
 		GrantResolve | GrantResolveAdmin | GrantUDP | GrantTCP | GrantRemote | GrantHostname | GrantTCPBulk | GrantTCPRing |
-		GrantUDPRing | GrantIdentityAdmin
+		GrantUDPRing | GrantIdentityAdmin | GrantIdentityLookup
 )
 
 // Unbounded is the MaxArgs of a command that takes any number of arguments.
@@ -105,8 +110,9 @@ const (
 	// bits. An installed system records it, so a system built for another
 	// format is refused (ADR 0175). Format 7 adds the exact-key hostname grant,
 	// format 8 the GTCP 3 session grant, format 9 the GTCP 4 one, format 10
-	// the GUDP 3 one, format 11 the identity-admin one.
-	IndexFormat = 11
+	// the GUDP 3 one, format 11 the identity-admin one, format 12 the
+	// identity-lookup one.
+	IndexFormat = 12
 )
 
 // Entry is one decoded index line. Its byte slices alias the index.
@@ -268,7 +274,7 @@ func validOptionalText(text []byte, limit int) bool {
 }
 
 func decimal(text []byte, limit uint64) (uint64, bool) {
-	if len(text) == 0 || len(text) > 5 {
+	if len(text) == 0 || len(text) > 6 {
 		return 0, false
 	}
 	value := uint64(0)

@@ -95,8 +95,9 @@ type Faults struct {
 	// SyncErr, when non-nil, replaces the temporary-handle Sync result. A
 	// failure here is a definite pre-replace failure.
 	SyncErr func() error
-	// SyncDirErr, when non-nil, replaces the final directory Sync result. A
-	// failure here follows a committed rename and is uncertain.
+	// SyncDirErr, when non-nil, replaces the final directory Sync result. In a
+	// save a failure here follows a committed rename and is uncertain; in Open
+	// the same barrier confirms the loaded snapshot's storage and fails closed.
 	SyncDirErr func() error
 }
 
@@ -145,7 +146,17 @@ func (p *Persist) Open() (*identity.Store, error) {
 			return nil, err
 		}
 	}
-	return p.loadDB()
+	store, err := p.loadDB()
+	if err != nil {
+		return nil, err
+	}
+	// The loaded snapshot is not accepted as Available until the underlying
+	// storage is confirmed stable: issue the durability barrier for the
+	// directory that persists the snapshot. A failed barrier fails closed.
+	if err := p.syncDir(); err != nil {
+		return nil, fmt.Errorf("identityd: snapshot durability barrier failed: %w", err)
+	}
+	return store, nil
 }
 
 // Save atomically replaces the snapshot with data, following the required
@@ -170,11 +181,14 @@ func (p *Persist) saveBytes(data []byte) error {
 	if err := p.createTemp(temp); err != nil {
 		return err
 	}
-	replaced := false
+	// replaceAttempted is false until the atomic replace is about to run.
+	// §4.2 forbids any further filesystem mutation once an earlier operation
+	// could still complete, so the temporary is unlinked only on a definite
+	// pre-replace failure and never once the replace has been attempted —
+	// whether it committed, was refused, or its outcome is unknown.
+	replaceAttempted := false
 	defer func() {
-		if !replaced {
-			// Clean only this save's own temp; a confirmed rename has already
-			// moved it, so path-only cleanup is safe for the reserved name.
+		if !replaceAttempted {
 			_ = p.Files.Unlink(temp)
 		}
 	}()
@@ -208,6 +222,7 @@ func (p *Persist) saveBytes(data []byte) error {
 		return err
 	}
 
+	replaceAttempted = true
 	replaceErr := error(nil)
 	if p.Faults.ReplaceErr != nil {
 		replaceErr = p.Faults.ReplaceErr()
@@ -220,7 +235,6 @@ func (p *Persist) saveBytes(data []byte) error {
 		}
 		return replaceErr
 	}
-	replaced = true
 	if err := runHook(p.Faults.AfterReplace); err != nil {
 		// The rename committed; the caller must reconcile forward, never
 		// assume the old snapshot survived.
