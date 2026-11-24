@@ -237,16 +237,18 @@ readdir median 36.0 ms, 1256 prefetch reads and 24652 fetches.
 
 ## M3 bounded parallel reads
 
-Branch: `feat/ext4-read-concurrency`. Reviewed acceptance record:
-`8d44b8452ccd1b26068c4edf467a887577b93d31` (documentation-only successor to
-tested implementation `b85957ed3b3efb403fc2598e7962f7f90fc5d8a7`).
+Branch: `feat/ext4-read-concurrency`.
+
+M3 acceptance includes the concurrency/race gate, serial-vs-concurrent
+equivalence, active-reader restart testing, crash/replay validation and the
+1/2/4/8-client read-only benchmark. The performance target was not met; the
+accepted fallback and remaining serial boundaries are recorded below.
 
 ### Serialized-transport measurement before FIX3
 
 KVM run `20261123T200415Z-6046a6ae` records commit
 `26f7a44177caa82e9a243a93294b72e04e65eee9` with a clean worktree in
-`build/pve/runs/20261123T200415Z-6046a6ae/report.json`. This run predates
-reviewed HEAD; it does not certify the later commits. Node `suptests`, KVM,
+`build/pve/runs/20261123T200415Z-6046a6ae/report.json`. Node `suptests`, KVM,
 `cpu=host`, one socket, 4 vCPUs, 1024 MiB. Scenario PASS; cleanup PASS
 (`cleanup=ok`).
 
@@ -298,17 +300,14 @@ GoOS clean/recovery checks and `e2fsck` also passed. The active log is
 
 The final rerun also passed `test-linux-elf`, the normal VM gate, lint/docs,
 both policy gates, units and equivalence. Full ext4 race tests took 599.728 s;
-command-package race tests took 1.310 s. The implementation commit below
-contains the tested source; the later evidence commit changes documentation only.
+command-package race tests took 1.310 s.
 
 ### Final FIX3 KVM measurement (2026-11-24)
 
-`make -j3 test-pve-ext4` passed on clean implementation commit
-`b85957ed3b3efb403fc2598e7962f7f90fc5d8a7`. Run
-`20261124T071705Z-2668fdcb` used node `suptests`, PVE 7.4-16, q35/OVMF,
-`cpu=host`, one socket, four cores and 1024 MiB. The report records scenario
-`pass`, tool status 0 and cleanup `ok`; the outer Make command returned 0.
-The harness destroyed VM 154 and removed the uploaded ISO.
+Final KVM run `20261124T071705Z-2668fdcb` tested commit
+`b85957ed3b3efb403fc2598e7962f7f90fc5d8a7` on node `suptests`,
+PVE 7.4-16, q35/OVMF, `cpu=host`, one socket, four cores and 1024 MiB.
+The scenario passed and cleanup completed successfully.
 
 Evidence: `build/pve/runs/20261124T071705Z-2668fdcb/report.json` and
 `build/pve/runs/20261124T071705Z-2668fdcb/serial.log`. The ISO SHA-256 was
