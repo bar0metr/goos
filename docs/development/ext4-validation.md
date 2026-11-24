@@ -292,8 +292,50 @@ GoOS clean/recovery checks and `e2fsck` also passed. The active log is
 `build/logs/ext4-read-restart.log`; the clean and dirty images are under
 `build/ext4-read-restart`.
 
-These worktree results do not certify the pending final-commit KVM run. Record
-that result with its commit and run identifier.
+The final rerun also passed `test-linux-elf`, the normal VM gate, lint/docs,
+both policy gates, units and equivalence. Full ext4 race tests took 599.728 s;
+command-package race tests took 1.310 s. The implementation commit below
+contains the tested source; the later evidence commit changes documentation only.
+
+### Final FIX3 KVM measurement (2026-11-24)
+
+`make -j3 test-pve-ext4` passed on clean implementation commit
+`b85957ed3b3efb403fc2598e7962f7f90fc5d8a7`. Run
+`20261124T071705Z-2668fdcb` used node `suptests`, PVE 7.4-16, q35/OVMF,
+`cpu=host`, one socket, four cores and 1024 MiB. The report records scenario
+`pass`, tool status 0 and cleanup `ok`; the outer Make command returned 0.
+The harness destroyed VM 154 and removed the uploaded ISO.
+
+Evidence: `build/pve/runs/20261124T071705Z-2668fdcb/report.json` and
+`build/pve/runs/20261124T071705Z-2668fdcb/serial.log`. The ISO SHA-256 was
+`d2f168be7d90a46000cc10ebed071f1a9314df13f6fa6377a2b2f91acd79306d`.
+
+| Read-only clients | ops/s |
+|---:|---:|
+| 1 | 882.3 |
+| 2 | 1060.9 |
+| 4 | 1226.0 |
+| 8 | 1350.6 |
+
+Four clients / one client = 1.39x. The final run misses the 2.0x target.
+The accepted fallback retains the read pool and serialized block transport;
+FIX3 adds correctness gates without changing those boundaries. Single-client
+throughput remains about 7.5% below the pre-M3 953.8 ops/s result. It differs
+by -0.34% from the earlier serialized-transport run, which does not prove a
+statistically significant FIX3 throughput change.
+
+Readdir-2k rounds: 56.303, 44.181, 45.299, 47.971 and 45.330 ms;
+median 45.330 ms. Readdir-10k: 223.555 ms. The latter costs about 21.5% more
+than the M2 post-FIX 184 ms result and 2.9% more than the earlier M3
+serialized-transport 217.259 ms result. Do not call this an M2 baseline recovery.
+The final run supplies no isolated profile to assign these regressions to
+`requestPending()`, cache locks or directory copies.
+
+The first attempt, `20261124T071349Z-82b10b27`, used the same clean commit and
+ISO but ended with `infra-error` after the SSH serial console disconnected:
+`Can't assign requested address` / `Broken pipe`. Its report records tool
+status 3 and cleanup `ok`; outer Make returned 2. It supplies no final benchmark
+result. The second attempt above passed after `pve-doctor` passed again.
 
 ### FIX3 validation procedure
 

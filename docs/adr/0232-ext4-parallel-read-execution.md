@@ -146,6 +146,11 @@ workload measures aggregate throughput. The target is at least 2x at four
 clients over one, with no material single-client regression. Before FIX3, the
 serialized-transport run measured 1.34x and about 7.2% less single-client throughput
 than the pre-M3 result; the validation record retains both regressions and the
-performance fallback. Mutations retain one serialized owner; readers do not
+performance fallback. Final FIX3 run `20261124T071705Z-2668fdcb` on clean
+`b85957ed` passed correctness and cleanup, measured 1.39x at four clients, and
+retained a 7.5% single-client loss from pre-M3. Readdir-10k took 223.555 ms,
+21.5% above the M2 post-FIX 184 ms result. The final measurements still miss
+the performance goals; the validation record names the accepted fallback and
+unprofiled serial boundaries. Mutations retain one serialized owner; readers do not
 concurrently mutate journal/transaction/orphan/pin state. The serial build stays
 as the boot-check baseline.
