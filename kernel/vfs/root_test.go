@@ -232,7 +232,7 @@ func TestRootDoesNotExcludeMountBelowIt(t *testing.T) {
 }
 
 func TestAddSessionWireVersionAndShape(t *testing.T) {
-	if ControlVersion != 11 {
+	if ControlVersion != 12 {
 		t.Fatalf("control version %d", ControlVersion)
 	}
 	plain := Authority{Confined: true}
@@ -241,8 +241,8 @@ func TestAddSessionWireVersionAndShape(t *testing.T) {
 	if !ok || message.Version != ControlVersion {
 		t.Fatalf("encode %+v", message)
 	}
-	if _, decoded, ok := DecodeAddSessionAuthority(message); !ok || decoded != plain {
-		t.Fatalf("rootless round trip %+v %v", decoded, ok)
+	if _, decoded, identity, ok := DecodeAddSessionAuthority(message); !ok || decoded != plain || identity != (SessionIdentity{}) {
+		t.Fatalf("rootless round trip %+v %+v %v", decoded, identity, ok)
 	}
 	long := make([]byte, MaxRootPath)
 	long[0] = '/'
@@ -257,22 +257,22 @@ func TestAddSessionWireVersionAndShape(t *testing.T) {
 	if !ok {
 		t.Fatal("encode longest root")
 	}
-	if _, decoded, ok := DecodeAddSessionAuthority(message); !ok || decoded != rooted {
+	if _, decoded, _, ok := DecodeAddSessionAuthority(message); !ok || decoded != rooted {
 		t.Fatalf("rooted round trip %+v %v", decoded, ok)
 	}
 	for _, version := range []uint16{ControlVersion - 1, ControlVersion + 1, 0} {
 		old := message
 		old.Version = version
-		if _, _, ok := DecodeAddSessionAuthority(old); ok {
+		if _, _, _, ok := DecodeAddSessionAuthority(old); ok {
 			t.Fatalf("version %d decoded", version)
 		}
 	}
-	// A shorter payload than the grants, an over-long root, and bytes trailing
-	// a root that make it something else all fail.
-	for _, size := range []uint16{0, 2, 1 + MaxScopes, 2 + MaxScopes + MaxRootPath + 1} {
+	// A payload shorter than the flags, grants and root-size byte, and one
+	// with an over-long root, fail.
+	for _, size := range []uint16{0, 2, 2 + MaxScopes, 2 + MaxScopes + 1 + MaxRootPath + 1} {
 		short := message
 		short.PayloadSize = size
-		if _, _, ok := DecodeAddSessionAuthority(short); ok {
+		if _, _, _, ok := DecodeAddSessionAuthority(short); ok {
 			t.Fatalf("payload size %d decoded", size)
 		}
 	}
@@ -281,7 +281,7 @@ func TestAddSessionWireVersionAndShape(t *testing.T) {
 		bad, _ := AddSessionWithAuthorityRequest(5, short, 1)
 		size := bad.PayloadSize
 		bad.PayloadSize += uint16(copy(bad.Payload[size:], trailing))
-		if _, _, ok := DecodeAddSessionAuthority(bad); ok {
+		if _, _, _, ok := DecodeAddSessionAuthority(bad); ok {
 			t.Fatalf("trailing %q decoded", trailing)
 		}
 	}
@@ -302,12 +302,12 @@ func TestRootTravelsInAddSession(t *testing.T) {
 	if !ok {
 		t.Fatal("encode")
 	}
-	server, decoded, ok := DecodeAddSessionAuthority(message)
+	server, decoded, _, ok := DecodeAddSessionAuthority(message)
 	if !ok || server != 5 || decoded != authority {
 		t.Fatalf("decode %v %v %v", server, decoded, ok)
 	}
-	message.PayloadSize = 2 + MaxScopes + MaxRootPath + 1
-	if _, _, ok := DecodeAddSessionAuthority(message); ok {
+	message.PayloadSize = 2 + MaxScopes + 1 + MaxRootPath + 1
+	if _, _, _, ok := DecodeAddSessionAuthority(message); ok {
 		t.Fatal("oversize root decoded")
 	}
 	// A bad root in the message is refused rather than installed.
@@ -315,7 +315,7 @@ func TestRootTravelsInAddSession(t *testing.T) {
 	message.Payload[2+MaxScopes+1] = '.'
 	message.Payload[2+MaxScopes+2] = '.'
 	message.Payload[2+MaxScopes+3] = '/'
-	if _, _, ok := DecodeAddSessionAuthority(message); ok {
+	if _, _, _, ok := DecodeAddSessionAuthority(message); ok {
 		t.Fatal("non-canonical root decoded")
 	}
 }

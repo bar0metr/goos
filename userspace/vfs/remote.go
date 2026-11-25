@@ -227,6 +227,24 @@ func (remote *Remote) MkdirName(parent ramfs.NodeID, name ramfs.Name) (ramfs.Nod
 	return remote.looked(remote.named(fsproto.OperationMkdir, 0, parent, name))
 }
 
+func (remote *Remote) CreateNameWith(parent ramfs.NodeID, name ramfs.Name, create ramfs.CreateContext) (ramfs.NodeID, ramfs.Status) {
+	remote.forget(parent)
+	return remote.looked(remote.namedCreate(fsproto.OperationCreate, parent, name, create))
+}
+
+func (remote *Remote) MkdirNameWith(parent ramfs.NodeID, name ramfs.Name, create ramfs.CreateContext) (ramfs.NodeID, ramfs.Status) {
+	remote.forget(parent)
+	return remote.looked(remote.namedCreate(fsproto.OperationMkdir, parent, name, create))
+}
+
+func (remote *Remote) namedCreate(operation fsproto.Operation, parent ramfs.NodeID, name ramfs.Name, create ramfs.CreateContext) (fsproto.Reply, ramfs.Status) {
+	size := name.CopyTo(remote.name[:])
+	if size == 0 {
+		return fsproto.Reply{}, ramfs.StatusInvalidArgument
+	}
+	return remote.call(fsproto.Request{Operation: operation, Parent: parent, Name: remote.name[:size], Create: create})
+}
+
 func (remote *Remote) RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
 	remote.forgetAll()
 	_, status := remote.named(fsproto.OperationRename, id, parent, name)
@@ -279,6 +297,23 @@ func (remote *Remote) SymlinkName(parent ramfs.NodeID, name ramfs.Name, target [
 	remote.forget(parent)
 	copy(remote.pages.Slot(scratchSlot), target)
 	return remote.looked(remote.call(fsproto.Request{Operation: fsproto.OperationSymlink, Parent: parent, Name: remote.name[:size], Slot: scratchSlot, Size: uint32(len(target))}))
+}
+
+// SymlinkNameWith is SymlinkName with a resolved creation context.
+func (remote *Remote) SymlinkNameWith(parent ramfs.NodeID, name ramfs.Name, target []byte, create ramfs.CreateContext) (ramfs.NodeID, ramfs.Status) {
+	if !ramfs.ValidLinkTarget(target) {
+		return 0, ramfs.StatusInvalidArgument
+	}
+	if !remote.pages.Ready() {
+		return 0, ramfs.StatusUnsupported
+	}
+	size := name.CopyTo(remote.name[:])
+	if size == 0 {
+		return 0, ramfs.StatusInvalidArgument
+	}
+	remote.forget(parent)
+	copy(remote.pages.Slot(scratchSlot), target)
+	return remote.looked(remote.call(fsproto.Request{Operation: fsproto.OperationSymlink, Parent: parent, Name: remote.name[:size], Slot: scratchSlot, Size: uint32(len(target)), Create: create}))
 }
 
 // RenameEntry moves sourceName in sourceParent, which names id, to name in

@@ -7,40 +7,99 @@ import (
 	"goos/kernel/ramfs"
 )
 
+// The flags of an AddSession request, in payload byte 1.
+const (
+	addSessionConfined = 1
+	addSessionIdentity = 2
+)
+
+// sessionIdentitySize is the fixed inline size of a SessionIdentity:
+// AccountID (uint64), UID (uint32), PrimaryGID (uint32), Epoch ([16]byte).
+const sessionIdentitySize = 8 + 4 + 4 + 16
+
 func AddSessionWithAuthorityRequest(server handle.ID, authority Authority, correlation uint64) (ipc.Message, bool) {
-	message, ok := AddSessionRequest(server, correlation)
-	if !ok || !authority.Valid() {
+	return addSessionRequest(server, authority, SessionIdentity{}, correlation)
+}
+
+// AddIdentitySessionRequest hands the VFS a new session with authority and a
+// trusted principal. It is the PID 1 control path an account-aware session
+// uses; ordinary requests cannot install or override an identity (ADR 0234).
+func AddIdentitySessionRequest(server handle.ID, authority Authority, identity SessionIdentity, correlation uint64) (ipc.Message, bool) {
+	return addSessionRequest(server, authority, identity, correlation)
+}
+
+func addSessionRequest(server handle.ID, authority Authority, identity SessionIdentity, correlation uint64) (ipc.Message, bool) {
+	if server == 0 || correlation == 0 || !authority.Valid() || !identity.Valid() {
 		return ipc.Message{}, false
 	}
-	message.PayloadSize = 2 + MaxScopes + uint16(authority.RootSize)
-	copy(message.Payload[2+MaxScopes:], authority.Root[:authority.RootSize])
+	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest,
+		Correlation: correlation, Handles: [ipc.MaxAttachedHandles]handle.ID{server}, HandleCount: 1}
+	message.Payload[0] = operationAddSession
 	if authority.Confined {
-		message.Payload[1] = 1
+		message.Payload[1] |= addSessionConfined
 	}
 	for slot, rights := range authority.Grants {
 		message.Payload[2+slot] = byte(rights)
 	}
+	offset := 2 + MaxScopes
+	message.Payload[offset] = authority.RootSize
+	offset++
+	offset += copy(message.Payload[offset:], authority.Root[:authority.RootSize])
+	message.PayloadSize = uint16(offset)
+	if identity.AccountID != 0 {
+		message.Payload[1] |= addSessionIdentity
+		binary.LittleEndian.PutUint64(message.Payload[offset:], identity.AccountID)
+		binary.LittleEndian.PutUint32(message.Payload[offset+8:], identity.UID)
+		binary.LittleEndian.PutUint32(message.Payload[offset+12:], identity.PrimaryGID)
+		copy(message.Payload[offset+16:offset+sessionIdentitySize], identity.Epoch[:])
+		message.PayloadSize = uint16(offset + sessionIdentitySize)
+	}
 	return message, true
 }
 
-func DecodeAddSessionAuthority(message ipc.Message) (handle.ID, Authority, bool) {
+func DecodeAddSessionAuthority(message ipc.Message) (handle.ID, Authority, SessionIdentity, bool) {
 	var authority Authority
+	var identity SessionIdentity
 	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindRequest ||
 		message.Correlation == 0 || message.HandleCount != 1 || message.Handles[0] == 0 || message.Payload[0] != operationAddSession {
-		return 0, authority, false
+		return 0, authority, identity, false
 	}
 	if message.PayloadSize == 1 {
-		return message.Handles[0], authority, true
+		return message.Handles[0], authority, identity, message.Payload[1] == 0
 	}
-	if message.PayloadSize < 2+MaxScopes || message.PayloadSize > 2+MaxScopes+MaxRootPath || message.Payload[1] > 1 {
-		return 0, authority, false
+	if message.PayloadSize < 2+MaxScopes+1 || message.Payload[1]&^(addSessionConfined|addSessionIdentity) != 0 {
+		return 0, authority, identity, false
 	}
-	authority.RootSize = uint8(copy(authority.Root[:], message.Payload[2+MaxScopes:message.PayloadSize]))
-	authority.Confined = message.Payload[1] == 1
+	authority.Confined = message.Payload[1]&addSessionConfined != 0
 	for slot := range authority.Grants {
 		authority.Grants[slot] = Rights(message.Payload[2+slot])
 	}
-	return message.Handles[0], authority, authority.Valid()
+	offset := 2 + MaxScopes
+	rootSize := int(message.Payload[offset])
+	offset++
+	if rootSize > MaxRootPath || offset+rootSize > int(message.PayloadSize) {
+		return 0, authority, identity, false
+	}
+	authority.RootSize = uint8(copy(authority.Root[:], message.Payload[offset:offset+rootSize]))
+	offset += rootSize
+	if !authority.Valid() {
+		return 0, authority, identity, false
+	}
+	if message.Payload[1]&addSessionIdentity != 0 {
+		if offset+sessionIdentitySize != int(message.PayloadSize) {
+			return 0, authority, identity, false
+		}
+		identity.AccountID = binary.LittleEndian.Uint64(message.Payload[offset:])
+		identity.UID = binary.LittleEndian.Uint32(message.Payload[offset+8:])
+		identity.PrimaryGID = binary.LittleEndian.Uint32(message.Payload[offset+12:])
+		copy(identity.Epoch[:], message.Payload[offset+16:offset+sessionIdentitySize])
+		if !identity.Valid() {
+			return 0, authority, identity, false
+		}
+	} else if offset != int(message.PayloadSize) {
+		return 0, authority, identity, false
+	}
+	return message.Handles[0], authority, identity, true
 }
 
 const scopeControlHeader = 6

@@ -14,9 +14,9 @@ func TestAuthoritySessionControlRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("encode")
 	}
-	endpoint, decoded, ok := DecodeAddSessionAuthority(message)
-	if !ok || endpoint != 7 || decoded != authority {
-		t.Fatalf("decode: %d %+v %v", endpoint, decoded, ok)
+	endpoint, decoded, identity, ok := DecodeAddSessionAuthority(message)
+	if !ok || endpoint != 7 || decoded != authority || identity != (SessionIdentity{}) {
+		t.Fatalf("decode: %d %+v %+v %v", endpoint, decoded, identity, ok)
 	}
 	if _, ok := DecodeAddSession(message); ok {
 		t.Fatal("legacy decoder discarded authority")
@@ -37,13 +37,33 @@ func TestAuthoritySessionControlRoundTrip(t *testing.T) {
 	for index, mutate := range mutations {
 		corrupt := message
 		mutate(&corrupt)
-		if _, _, ok := DecodeAddSessionAuthority(corrupt); ok {
+		if _, _, _, ok := DecodeAddSessionAuthority(corrupt); ok {
 			t.Fatalf("accepted corruption %d", index)
 		}
 	}
 	legacy, _ := AddSessionRequest(8, 10)
-	if endpoint, decoded, ok := DecodeAddSessionAuthority(legacy); !ok || endpoint != 8 || decoded != (Authority{}) {
+	if endpoint, decoded, identity, ok := DecodeAddSessionAuthority(legacy); !ok || endpoint != 8 || decoded != (Authority{}) || identity != (SessionIdentity{}) {
 		t.Fatal("legacy default")
+	}
+}
+
+func TestIdentitySessionControlRoundTrip(t *testing.T) {
+	authority := Authority{Confined: true}
+	authority.Grants[0] = Read | Write
+	identity := SessionIdentity{AccountID: 7, UID: 1000, PrimaryGID: 1000}
+	copy(identity.Epoch[:], []byte("epoch0123456789"))
+	message, ok := AddIdentitySessionRequest(7, authority, identity, 9)
+	if !ok {
+		t.Fatal("encode")
+	}
+	endpoint, decoded, got, ok := DecodeAddSessionAuthority(message)
+	if !ok || endpoint != 7 || decoded != authority || got != identity {
+		t.Fatalf("decode: %d %+v %+v %v", endpoint, decoded, got, ok)
+	}
+	corrupt := message
+	corrupt.PayloadSize--
+	if _, _, _, ok := DecodeAddSessionAuthority(corrupt); ok {
+		t.Fatal("accepted truncated identity")
 	}
 }
 

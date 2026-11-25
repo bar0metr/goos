@@ -211,8 +211,20 @@ func (namespace *Namespace) ReadLink(owner Owner, path []byte) ([]byte, Status) 
 
 // Symlink makes path a symbolic link to target. target is stored as given;
 // nothing about it is checked but its length and that it holds no NUL, as on
-// Linux. A dangling link is a valid link.
+// Linux. A dangling link is a valid link. It is the legacy entry point: the
+// link is owned by the system session's fixed ownership.
 func (namespace *Namespace) Symlink(path []byte, target []byte) Status {
+	return namespace.symlinkAt(0, path, target, 0o777)
+}
+
+// SymlinkAs makes path a symbolic link owned by the trusted identity of owner.
+// A symbolic link's permission bits are always 0o777, so mode is not a
+// parameter; the owner's UID and GID are what the backend records.
+func (namespace *Namespace) SymlinkAs(owner Owner, path []byte, target []byte) Status {
+	return namespace.symlinkAt(owner, path, target, 0o777)
+}
+
+func (namespace *Namespace) symlinkAt(owner Owner, path []byte, target []byte, mode uint16) Status {
 	if !ramfs.ValidLinkTarget(target) {
 		if len(target) > ramfs.MaxLinkTarget {
 			return StatusNameTooLong
@@ -229,11 +241,14 @@ func (namespace *Namespace) Symlink(path []byte, target []byte) Status {
 	if protected || namespace.mounts[mountIndex].readOnly {
 		return StatusPermissionDenied
 	}
-	links, ok := namespace.mounts[mountIndex].backend.(LinkBackend)
-	if !ok {
+	backend := namespace.mounts[mountIndex].backend
+	if creation, ok := backend.(CreationBackend); ok {
+		_, status = mapNodeResult(creation.SymlinkNameWith(parent, name, target, namespace.createContext(owner, mode)))
+	} else if links, ok := backend.(LinkBackend); ok {
+		_, status = mapNodeResult(links.SymlinkName(parent, name, target))
+	} else {
 		return StatusUnsupported
 	}
-	_, status = mapNodeResult(links.SymlinkName(parent, name, target))
 	namespace.invalidateMutation(mountIndex, parent, name)
 	return status
 }

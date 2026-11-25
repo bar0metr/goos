@@ -129,6 +129,16 @@ type Backend interface {
 	UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Status
 }
 
+// CreationBackend creates objects with a resolved creation context (mode, UID,
+// GID). A backend that persists Unix metadata implements it; a backend without
+// one (FAT32, RAMFS) keeps the legacy Backend methods and presents synthesized
+// modes at stat time, never claiming persisted ownership (ADR 0234).
+type CreationBackend interface {
+	CreateNameWith(parent ramfs.NodeID, name ramfs.Name, create ramfs.CreateContext) (ramfs.NodeID, ramfs.Status)
+	MkdirNameWith(parent ramfs.NodeID, name ramfs.Name, create ramfs.CreateContext) (ramfs.NodeID, ramfs.Status)
+	SymlinkNameWith(parent ramfs.NodeID, name ramfs.Name, target []byte, create ramfs.CreateContext) (ramfs.NodeID, ramfs.Status)
+}
+
 // BatchBackend writes many directory records in one call. A backend without
 // it, or one answering StatusUnsupported, lists one entry at a time. End and a
 // short batch keep the meaning ramfs.DirBatch gives them.
@@ -299,6 +309,7 @@ type Namespace struct {
 	reserved    [maxReserved]reservedPath
 	scopes      [MaxScopes]scope
 	authorities [MaxAuthorities]ownerAuthority
+	identities  [MaxAuthorities]ownerIdentity
 	scopeNames  [2][ramfs.MaxName]byte
 	counters    AuthorityCounters
 	// dirBatch holds records a backend returned until each one's authority is
@@ -624,11 +635,29 @@ func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handl
 	return handle, status
 }
 
-// OpenIntent resolves and optionally creates or truncates one regular file,
-// acquires its stable object, and installs the handle without another path
-// lookup. A directory is reported by kind and receives no VFS handle.
+// createContext resolves the creation context for owner: the requested mode's
+// low 12 bits, and the UID and primary GID of the session's trusted identity,
+// or zero for an identity-free system session.
+func (namespace *Namespace) createContext(owner Owner, mode uint16) ramfs.CreateContext {
+	create := ramfs.CreateContext{Mode: mode}
+	if identity := namespace.Identity(owner); identity.AccountID != 0 {
+		create.UID, create.GID = identity.UID, identity.PrimaryGID
+	}
+	return create
+}
+
+// OpenIntent resolves and optionally creates or truncates one regular file
+// with mode 0's creation permission bits. Callers that create with an explicit
+// mode use OpenIntentMode.
 func (namespace *Namespace) OpenIntent(owner Owner, path []byte, rights Rights, flags OpenFlags) (Handle, ramfs.Kind, Status) {
-	if owner == 0 || rights == 0 || rights&^(Read|Write) != 0 || !flags.Valid() || flags&(OpenCreate|OpenDirectory) == OpenCreate|OpenDirectory {
+	return namespace.OpenIntentMode(owner, path, rights, flags, 0)
+}
+
+// OpenIntentMode is OpenIntent with the requested creation permission bits,
+// already masked by the caller's umask for a Linux open. mode is ignored
+// unless the call creates.
+func (namespace *Namespace) OpenIntentMode(owner Owner, path []byte, rights Rights, flags OpenFlags, mode uint16) (Handle, ramfs.Kind, Status) {
+	if owner == 0 || rights == 0 || rights&^(Read|Write) != 0 || !flags.Valid() || flags&(OpenCreate|OpenDirectory) == OpenCreate|OpenDirectory || mode&^ramfs.ModePermissions != 0 {
 		return 0, 0, StatusInvalidArgument
 	}
 	if !namespace.insideRoot(owner, path, false) {
@@ -659,7 +688,11 @@ func (namespace *Namespace) OpenIntent(owner Owner, path []byte, rights Rights, 
 			return 0, 0, StatusPermissionDenied
 		}
 		var backendStatus ramfs.Status
-		node, backendStatus = backend.CreateName(parent, name)
+		if creation, ok := backend.(CreationBackend); ok {
+			node, backendStatus = creation.CreateNameWith(parent, name, namespace.createContext(owner, mode))
+		} else {
+			node, backendStatus = backend.CreateName(parent, name)
+		}
 		// The create may have changed the namespace even when it reports a
 		// failure, so the touched component is dropped either way; stable
 		// backends keep unrelated prefixes warm, FAT32/unknown flush (ADR 0230).
@@ -974,7 +1007,35 @@ func (namespace *Namespace) Seek(owner Owner, handle Handle, offset uint64) Stat
 	return StatusOK
 }
 
+// DefaultFileMode and DefaultDirMode are the documented creation defaults for
+// native callers and identity-free system sessions (ADR 0234).
+const (
+	DefaultFileMode = 0o644
+	DefaultDirMode  = 0o755
+)
+
+// Create makes a file or directory with the system session's fixed ownership
+// and the documented default mode. It is the legacy entry point; the service
+// dispatch uses CreateAs so a session's trusted identity can name the owner.
 func (namespace *Namespace) Create(path []byte, directory bool) Status {
+	mode := uint16(DefaultFileMode)
+	if directory {
+		mode = DefaultDirMode
+	}
+	return namespace.createAt(0, path, directory, mode)
+}
+
+// CreateAs makes a file or directory owned by the trusted identity of owner,
+// with mode's low 12 bits. An identity-free owner keeps the system session's
+// fixed ownership (UID 0, GID 0).
+func (namespace *Namespace) CreateAs(owner Owner, path []byte, directory bool, mode uint16) Status {
+	if mode&^ramfs.ModePermissions != 0 {
+		return StatusInvalidArgument
+	}
+	return namespace.createAt(owner, path, directory, mode)
+}
+
+func (namespace *Namespace) createAt(owner Owner, path []byte, directory bool, mode uint16) Status {
 	if namespace.reservedTarget(path) {
 		return StatusPermissionDenied
 	}
@@ -985,10 +1046,18 @@ func (namespace *Namespace) Create(path []byte, directory bool) Status {
 	if protected {
 		return StatusPermissionDenied
 	}
+	create := namespace.createContext(owner, mode)
+	backend := namespace.mounts[mountIndex].backend
 	if directory {
-		_, status = mapNodeResult(namespace.mounts[mountIndex].backend.MkdirName(parent, name))
+		if creation, ok := backend.(CreationBackend); ok {
+			_, status = mapNodeResult(creation.MkdirNameWith(parent, name, create))
+		} else {
+			_, status = mapNodeResult(backend.MkdirName(parent, name))
+		}
+	} else if creation, ok := backend.(CreationBackend); ok {
+		_, status = mapNodeResult(creation.CreateNameWith(parent, name, create))
 	} else {
-		_, status = mapNodeResult(namespace.mounts[mountIndex].backend.CreateName(parent, name))
+		_, status = mapNodeResult(backend.CreateName(parent, name))
 	}
 	// A backend can leave the name behind when its durability step fails;
 	// the touched component is dropped either way, so a later resolution

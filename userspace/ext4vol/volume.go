@@ -512,13 +512,36 @@ func (volume *Volume) FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status) {
 }
 
 // The mutations. A read-only volume refuses each one the way a read-only
-// backend does. New objects belong to user and group 0 with modes 0644 and
-// 0755: GoOS grants nothing from them (ADR 0223).
+// backend does. New objects take the ownership and mode the VFS resolved from
+// the session's trusted identity, or the legacy fixed 0644/0755 with UID and
+// GID 0 for an identity-free system session. The owner grants nothing (ADR
+// 0234).
 
 const (
 	fileMode      = ext4.ModeRegular | 0o644
 	directoryMode = 0o755
 )
+
+// resolvedCreate turns a resolved creation context and the parent directory
+// into the final mode, UID and GID. When the parent carries the set-group-ID
+// bit, a new object inherits the parent's GID and a new directory inherits
+// the bit itself, all inside this one mutation; otherwise the context's
+// ownership and mode stand (ADR 0234). No set-id transition grants anything.
+func resolvedCreate(parent *ext4.Inode, create ramfs.CreateContext, directory bool) (uint16, uint32, uint32) {
+	uid, gid := create.UID, create.GID
+	inherits := parent.Mode&ramfs.ModeSetGID != 0
+	if inherits {
+		gid = parent.GID
+	}
+	mode := create.Mode
+	if directory {
+		if inherits {
+			mode |= ramfs.ModeSetGID
+		}
+		return mode, uid, gid
+	}
+	return ext4.ModeRegular | mode, uid, gid
+}
 
 // mutable returns the directory parent of a writable volume.
 func (volume *Volume) mutable(parent ramfs.NodeID) (*ext4.Inode, ramfs.Status) {
@@ -557,6 +580,10 @@ func created(inode *ext4.Inode, err error) (ramfs.NodeID, ramfs.Status) {
 }
 
 func (volume *Volume) CreateName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
+	return volume.CreateNameWith(parent, name, ramfs.CreateContext{Mode: fileMode &^ ext4.ModeRegular, UID: 0, GID: 0})
+}
+
+func (volume *Volume) CreateNameWith(parent ramfs.NodeID, name ramfs.Name, create ramfs.CreateContext) (ramfs.NodeID, ramfs.Status) {
 	dir, status := volume.mutable(parent)
 	if status != ramfs.StatusOK {
 		return 0, status
@@ -566,10 +593,15 @@ func (volume *Volume) CreateName(parent ramfs.NodeID, name ramfs.Name) (ramfs.No
 	if status != ramfs.StatusOK {
 		return 0, status
 	}
-	return created(volume.fs.Create(dir, bytes, fileMode, 0, 0))
+	mode, uid, gid := resolvedCreate(dir, create, false)
+	return created(volume.fs.Create(dir, bytes, mode, uid, gid))
 }
 
 func (volume *Volume) MkdirName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
+	return volume.MkdirNameWith(parent, name, ramfs.CreateContext{Mode: directoryMode, UID: 0, GID: 0})
+}
+
+func (volume *Volume) MkdirNameWith(parent ramfs.NodeID, name ramfs.Name, create ramfs.CreateContext) (ramfs.NodeID, ramfs.Status) {
 	dir, status := volume.mutable(parent)
 	if status != ramfs.StatusOK {
 		return 0, status
@@ -579,7 +611,8 @@ func (volume *Volume) MkdirName(parent ramfs.NodeID, name ramfs.Name) (ramfs.Nod
 	if status != ramfs.StatusOK {
 		return 0, status
 	}
-	return created(volume.fs.Mkdir(dir, bytes, directoryMode, 0, 0))
+	mode, uid, gid := resolvedCreate(dir, create, true)
+	return created(volume.fs.Mkdir(dir, bytes, mode, uid, gid))
 }
 
 // file returns the regular file id of a writable volume.
@@ -652,6 +685,10 @@ func (volume *Volume) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Sta
 }
 
 func (volume *Volume) SymlinkName(parent ramfs.NodeID, name ramfs.Name, target []byte) (ramfs.NodeID, ramfs.Status) {
+	return volume.SymlinkNameWith(parent, name, target, ramfs.CreateContext{Mode: 0o777, UID: 0, GID: 0})
+}
+
+func (volume *Volume) SymlinkNameWith(parent ramfs.NodeID, name ramfs.Name, target []byte, create ramfs.CreateContext) (ramfs.NodeID, ramfs.Status) {
 	dir, status := volume.mutable(parent)
 	if status != ramfs.StatusOK {
 		return 0, status
@@ -669,7 +706,11 @@ func (volume *Volume) SymlinkName(parent ramfs.NodeID, name ramfs.Name, target [
 	if status != ramfs.StatusOK {
 		return 0, status
 	}
-	return created(volume.fs.Symlink(dir, bytes, link, 0, 0))
+	uid, gid := create.UID, create.GID
+	if dir.Mode&ramfs.ModeSetGID != 0 {
+		gid = dir.GID
+	}
+	return created(volume.fs.Symlink(dir, bytes, link, uid, gid))
 }
 
 func (volume *Volume) LinkName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {

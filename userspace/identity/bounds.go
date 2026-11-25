@@ -43,4 +43,6 @@ const maxAllocatableUnix = uint32(0xFFFFFFFE)
 var (
 	_ [limits.NameMax - MaxName + 1]byte
 	_ [limits.PathMax - MaxHome + 1]byte
+	_ [limits.SupplementaryGroupsMax - MaxSupplementaryGroups + 1]byte
+	_ [MaxSupplementaryGroups - limits.SupplementaryGroupsMax + 1]byte
 )

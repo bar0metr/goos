@@ -131,7 +131,36 @@ const (
 	ModeRegular   = 0x8000
 	ModeSymlink   = 0xA000
 	ModeSocket    = 0xC000
+
+	// The special permission bits, in the low 12 bits Linux stores alongside
+	// the type. GoOS stores and reports them but never grants authority or
+	// executes set-id transitions from them (ADR 0234).
+	ModeSetUID = 0o4000
+	ModeSetGID = 0o2000
+	ModeSticky = 0o1000
+	// ModePermissions is the mask of the low 12 permission and special bits.
+	ModePermissions = 0o7777
 )
+
+// CreateContext is the resolved creation metadata a backend receives for one
+// created object: the requested mode's low 12 bits and the owning UID and
+// primary GID. The VFS derives UID and GID from the trusted session identity;
+// an identity-free system session passes zero for both, which a backend that
+// stores Unix metadata writes verbatim and a backend without one (FAT32,
+// RAMFS) ignores. Only trusted backend IPC carries it; ordinary client wire
+// never accepts UID or GID.
+type CreateContext struct {
+	Mode uint16
+	UID  uint32
+	GID  uint32
+}
+
+// Valid reports whether the mode's permission bits are the only bits set and
+// UID and GID are within range. Any uint32 is a representable owner, so UID
+// and GID always validate; the mode must not carry file-type bits.
+func (create CreateContext) Valid() bool {
+	return create.Mode&^ModePermissions == 0
+}
 
 // Unix is the POSIX metadata a filesystem keeps for a node: the mode with its
 // type bits, ownership, link count, inode number and generation, allocated
