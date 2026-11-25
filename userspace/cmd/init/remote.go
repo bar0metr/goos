@@ -398,9 +398,10 @@ func principalSessionIdentity(principal *remotePrincipal) vfs.SessionIdentity {
 }
 
 // remoteShellAuthority is the restricted VFS authority of a shell or exec
-// session: the validated account home read-write, plus the additional-volume
-// root read-write as the shared writable storage grant. Program execution is
-// delegated to PID 1, so no program directory is granted here (ADR 0234).
+// session: the validated account home read-write, the additional-volume root
+// read-write as the shared writable storage grant, and the program tree
+// read-only so the shell can read the command index and resolve programs
+// (ADR 0234).
 func remoteShellAuthority(home []byte) (vfs.Authority, bool) {
 	authority, ok := vfs.RootedAuthority(home)
 	if !ok {
@@ -408,7 +409,9 @@ func remoteShellAuthority(home []byte) (vfs.Authority, bool) {
 	}
 	authority.Positives[0].Rights = vfs.Read | vfs.Write
 	authority.Positives[0].Size = uint8(copy(authority.Positives[0].Path[:], []byte("/mnt")))
-	authority.PositiveCount = 1
+	authority.Positives[1].Rights = vfs.Read
+	authority.Positives[1].Size = uint8(copy(authority.Positives[1].Path[:], []byte("/system")))
+	authority.PositiveCount = 2
 	return authority, true
 }
 

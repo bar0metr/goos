@@ -504,7 +504,13 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 			reply.Status = vfs.StatusPermissionDenied
 			break
 		}
-		reply.Handle, reply.Kind, reply.Status = service.namespace.OpenIntentMode(owner, request.Path, request.Rights&^vfs.NoFollow, request.OpenFlags, request.Mode)
+		// Open resolves the creation default exactly like Create/Mkdir: only a
+		// caller-set mode is used, otherwise the documented file default.
+		mode := request.Mode
+		if !request.ModeSet {
+			mode = vfs.DefaultFileMode
+		}
+		reply.Handle, reply.Kind, reply.Status = service.namespace.OpenIntentMode(owner, request.Path, request.Rights&^vfs.NoFollow, request.OpenFlags, mode)
 	case vfs.OperationClose:
 		reply.Status = service.namespace.Close(owner, request.Handle)
 	case vfs.OperationRead:
