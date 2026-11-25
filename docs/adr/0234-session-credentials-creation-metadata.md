@@ -94,16 +94,16 @@ session record. A disabled, missing, recreated, or revoked account fails
 closed. A worker-supplied username or account ID never chooses grants.
 
 Shell, exec, and SFTP share one account principal. SFTP roots at the validated
-sftp-root, which defaults to the account home. Shell and exec keep an
-unconfined VFS session carrying the account's trusted `SessionIdentity`, fenced
-by the identity subtree and host-key scopes; program execution is delegated to
-PID 1 through the exec channel. Cross-account home isolation for shell and exec
-is not enforced: the eight-slot VFS scope table cannot express per-account home
-plus read-only program and mounted-volume access, which waits for the scope
-expansion. Legacy `system.remote.user`, `authorized-keys`, and `sftp-root`
-import into one account idempotently; after a committed migration the account
-database is the sole account and key authority, with no fallback to legacy keys
-on a missing or corrupt database.
+account home. Shell and exec receive a root-confined VFS authority carrying the
+account's trusted `SessionIdentity`: the home is read-write, the
+additional-volume root is read-write as the shared writable storage grant, and
+the program tree is read-only so the shell can read the command index and
+resolve programs. One account therefore cannot name another account's files
+through the shell, its launched commands, or SFTP. Program execution is
+delegated to PID 1 through the exec channel. Legacy `system.remote.user`,
+`authorized-keys`, and `sftp-root` import into one account idempotently; after a
+committed migration the account database is the sole account and key authority,
+with no fallback to legacy keys on a missing or corrupt database.
 
 ### 5. Invariants
 
@@ -117,5 +117,5 @@ Account-backed creation writes real ownership and mode into ext4 and reports
 them through `stat`; FAT32 and RAMFS keep presenting synthesized metadata.
 Linux processes see credentials derived from their launch identity. Remote
 sessions admit only accounts the identity database currently authorizes, and
-their filesystem access stays scoped to the account home plus the granted
-program directories.
+their filesystem access stays scoped to the account home plus the bounded
+positive grants (shared writable storage read-write, program tree read-only).
