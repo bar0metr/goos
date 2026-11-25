@@ -4,6 +4,7 @@ package main
 
 import (
 	configproto "goos/userspace/config"
+	"goos/userspace/identity"
 	"goos/userspace/identityproto"
 	syslog "goos/userspace/log"
 	"goos/userspace/remotepolicy"
@@ -18,6 +19,14 @@ var remoteMigrationKeys [remotepolicy.MaxAuthorizedKeysBytes]byte
 // is never reset, so a missing, corrupt, or ambiguous candidate is retried on a
 // later admission rather than silently accepted.
 var remoteMigrationDone bool
+
+// remoteMigratedAccount is the name of the account the legacy import created
+// or matched. Key mutations applied through the legacy remote command are
+// mirrored into this account once the import has committed.
+var (
+	remoteMigratedAccount    [identity.MaxName]byte
+	remoteMigratedAccountLen uint8
+)
 
 // migrateRemoteIdentity imports the legacy system.remote.user,
 // system.remote.authorized-keys and system.remote.sftp-root settings into one
@@ -65,6 +74,7 @@ func migrateRemoteIdentity() bool {
 		syslog.Warn("remote identity migration rejected", syslog.Str("reason", err.Error()))
 		return false
 	}
+	remoteMigratedAccountLen = uint8(copy(remoteMigratedAccount[:], plan.Name))
 	account, ok := identityAdminCall(&identityproto.Request{Opcode: identityproto.AdminGetAccount, Name: []byte(plan.Name)})
 	if !ok {
 		syslog.Warn("remote identity migration: identity unavailable")

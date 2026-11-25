@@ -83,7 +83,9 @@ func (b *KeyRequestBuffer) Accept(in *ipc.Message) (AdminOperation, []byte, uint
 }
 
 const KeyControlProtocolID = uint64(0x47524b4559435431) // GRKEYCT1
-const KeyControlVersion = uint16(1)
+// Version 1 carried only the key-file lease. Version 2 adds KeySync, which
+// mirrors a committed key add or remove into the migrated account database.
+const KeyControlVersion = uint16(2)
 
 type KeyControlOperation uint8
 
@@ -91,6 +93,7 @@ const (
 	KeyBegin KeyControlOperation = iota + 1
 	KeyCheck
 	KeyEnd
+	KeySync
 )
 
 type KeyControlReply struct {
@@ -117,8 +120,37 @@ func DecodeKeyControlRequest(in *ipc.Message) (KeyControlOperation, uint64, bool
 	var canonical ipc.Message
 	return op, token, EncodeKeyControlRequest(op, token, in.Correlation, &canonical)
 }
+
+// KeySyncSize is the fixed request size of a KeySync: the opcode, a remove
+// flag, and the 32-byte Ed25519 key (add) or SHA-256 fingerprint (remove).
+const KeySyncSize = 34
+
+// EncodeKeySyncRequest carries the exact key mutation a remoted committed to
+// the authorized_keys file, so PID 1 can mirror it into the migrated account.
+func EncodeKeySyncRequest(remove bool, value [32]byte, corr uint64, out *ipc.Message) bool {
+	if corr == 0 {
+		return false
+	}
+	*out = ipc.Message{ProtocolID: KeyControlProtocolID, Version: KeyControlVersion, Kind: ipc.KindRequest, Correlation: corr, PayloadSize: KeySyncSize}
+	out.Payload[0] = byte(KeySync)
+	if remove {
+		out.Payload[1] = 1
+	}
+	copy(out.Payload[2:KeySyncSize], value[:])
+	return true
+}
+
+func DecodeKeySyncRequest(in *ipc.Message) (bool, [32]byte, uint64, bool) {
+	var value [32]byte
+	if in.ProtocolID != KeyControlProtocolID || in.Version != KeyControlVersion || in.Kind != ipc.KindRequest ||
+		in.PayloadSize != KeySyncSize || in.HandleCount != 0 || in.Payload[0] != byte(KeySync) || in.Payload[1] > 1 {
+		return false, value, 0, false
+	}
+	copy(value[:], in.Payload[2:KeySyncSize])
+	return in.Payload[1] == 1, value, in.Correlation, true
+}
 func EncodeKeyControlReply(reply KeyControlReply, files handle.ID, corr uint64, out *ipc.Message) bool {
-	if corr == 0 || reply.Operation < KeyBegin || reply.Operation > KeyEnd || reply.Result > ResultPermissionDenied {
+	if corr == 0 || reply.Operation < KeyBegin || reply.Operation > KeySync || reply.Result > ResultPermissionDenied {
 		return false
 	}
 	success := reply.Operation == KeyBegin && reply.Result == ResultOK
