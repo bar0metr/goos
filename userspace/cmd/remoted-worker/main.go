@@ -41,6 +41,12 @@ var endDeadline uint64
 var exitCode uint32
 var exitKnown bool
 
+// The username and key the SSH handshake just authenticated with, remembered so
+// the admission request can carry them for PID 1's authoritative revalidation.
+var authenticatedUser [remoteapi.MaxUsername]byte
+var authenticatedUserSize uint8
+var authenticatedKey [32]byte
+
 //export userspaceMain
 func userspaceMain() {
 	arena.InitService()
@@ -80,10 +86,6 @@ func userspaceMain() {
 		sys.Exit(1)
 	}
 	conn.TimeoutTicks = uint64(policy.HandshakeTimeoutMS)*clock.TicksPerSecond/1000 + 1
-	keys := make([]ed25519.PublicKey, int(policy.KeyCount))
-	for i := range keys {
-		keys[i] = policy.Keys[i][:]
-	}
 	signingClient, ok = newHostSigner(ed25519.PublicKey(policy.HostPublicKey[:]), policy.Generation, signerTransport{
 		send: func(message *ipc.Message) bool { return remoteservice.Send(signerChannel, message) },
 		receive: func(ticks uint64, message *ipc.Message) kcall.Status {
@@ -101,27 +103,35 @@ func userspaceMain() {
 	if policy.SFTPEnabled {
 		subsystem = sftpSubsystem
 	}
+	authorizeKey := func(requested string, key ed25519.PublicKey) (bool, error) {
+		if !authorizeKeyIPC(requested, key) {
+			return false, nil
+		}
+		authenticatedUserSize = uint8(copy(authenticatedUser[:], requested))
+		copy(authenticatedKey[:], key)
+		return true, nil
+	}
 	var err error
-	server, err = sshserver.New(&conn, sshserver.Config{HostPublicKey: ed25519.PublicKey(policy.HostPublicKey[:]), SignHost: signingClient.Sign, Username: username, AuthorizedKeys: keys, MaxAuthAttempts: int(policy.MaxAuthAttempts), Subsystem: subsystem})
+	server, err = sshserver.New(&conn, sshserver.Config{HostPublicKey: ed25519.PublicKey(policy.HostPublicKey[:]), SignHost: signingClient.Sign, Username: username, AuthorizeKey: authorizeKey, MaxAuthAttempts: int(policy.MaxAuthAttempts), Subsystem: subsystem})
 	if err != nil {
 		finish(1)
 	}
 	signingClient.deadline = remoteservice.Now() + conn.TimeoutTicks
 	conn.HandshakeDeadline(conn.TimeoutTicks)
-	if server.Handshake() != nil || server.User() != username {
+	if server.Handshake() != nil {
 		syslog.Warn("remote SSH authentication or handshake failed")
 		finish(1)
 	}
 	conn.ClearDeadline()
 	signingClient.deadline = 0
 	handshaken = true
-	authenticated, _, ok := call(remoteapi.Request{Operation: remoteapi.OperationAuthenticate})
+	authenticated, _, ok := call(remoteapi.Request{Operation: remoteapi.OperationAuthenticate, Username: authenticatedUser, UserSize: authenticatedUserSize, Key: authenticatedKey})
 	if !ok {
 		syslog.Warn("remote session admission refused")
 		finish(1)
 	}
 	token = authenticated.Session
-	syslog.Info("remote authentication accepted", syslog.Str("user", username), syslog.Uint("session", token))
+	syslog.Info("remote authentication accepted", syslog.Str("user", server.User()), syslog.Uint("session", token))
 	engine = tty.NewEngine(func(bytes []byte) bool {
 		return newlines.Write(&output, bytes, engine != nil && engine.Raw())
 	}, func(message ipc.Message) bool { return remoteservice.Send(terminal, &message) })
@@ -391,6 +401,41 @@ func consumeWorkerStdout(buffer []byte) {
 	}
 }
 func workerOutputFree() int { return output.Free() }
+
+// authorizeKeyIPC asks PID 1 whether the enabled account named username holds
+// key. The worker holds no lookup session, identity-admin grant, or key
+// database: the reply is only an authorization decision, never a session or a
+// grant, and PID 1 revalidates at admission anyway. It is bounded by the SSH
+// handshake timeout because it runs inside Handshake.
+func authorizeKeyIPC(username string, key ed25519.PublicKey) bool {
+	if !remoteapi.ValidUsername([]byte(username)) || len(key) != ed25519.PublicKeySize {
+		return false
+	}
+	var request remoteapi.Request
+	request.Operation = remoteapi.OperationAuthorizeKey
+	request.UserSize = uint8(copy(request.Username[:], username))
+	copy(request.Key[:], key)
+	sequence++
+	var message ipc.Message
+	if !remoteapi.EncodeRequest(&request, sequence, &message) || !remoteservice.Send(control, &message) {
+		return false
+	}
+	deadline := remoteservice.Now() + conn.TimeoutTicks
+	for remoteservice.Now() < deadline {
+		if remoteservice.Receive(control, deadline-remoteservice.Now(), &message) != kcall.StatusOK {
+			return false
+		}
+		var reply remoteapi.Reply
+		if !remoteapi.DecodeReply(&message, sequence, remoteapi.OperationAuthorizeKey, &reply) {
+			remoteservice.CloseHandles(&message)
+			return false
+		}
+		remoteservice.CloseHandles(&message)
+		return reply.Result == remoteapi.ResultOK
+	}
+	return false
+}
+
 func call(request remoteapi.Request) (remoteapi.Reply, [3]handle.ID, bool) {
 	var message ipc.Message
 	var reply remoteapi.Reply

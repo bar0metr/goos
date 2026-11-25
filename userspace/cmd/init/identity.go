@@ -32,6 +32,11 @@ const (
 var (
 	// identityControl is PID 1's end of identityd's control channel.
 	identityControl handle.ID
+	// identityLookup is PID 1's persistent lookup session, opened once
+	// identityd is up and reused for key authorization and account lookup
+	// during remote admission. It is closed when identityd restarts so a
+	// fresh session is opened over the new control channel.
+	identityLookup handle.ID
 	// identityProcess is kept so recovery can stop the service.
 	identityProcess handle.ID
 	// identityScopeInstalled records that the identity subtree scope is
@@ -63,6 +68,8 @@ func startIdentity(ticks uint64) {
 func prepareIdentityGrants(spec *supervisor.LaunchSpec) bool {
 	closeOpen(identityControl)
 	identityControl = 0
+	closeOpen(identityLookup)
+	identityLookup = 0
 	return renewIdentityGrants(spec)
 }
 
@@ -259,4 +266,98 @@ func openIdentityLookup() handle.ID {
 		return 0
 	}
 	return handle.ID(pair[0])
+}
+
+// identityLookupSession returns PID 1's persistent lookup session, opened on
+// first use once identityd is up. It is used for both key authorization and
+// account lookup during remote admission. It returns 0 when identityd is not up
+// or the session could not be opened, so admission fails closed.
+func identityLookupSession() handle.ID {
+	if identityLookup != 0 {
+		return identityLookup
+	}
+	identityLookup = openIdentityLookup()
+	return identityLookup
+}
+
+// identityAuthorizeKey revalidates username+key against the current committed
+// identity snapshot over the persistent lookup session. It returns the identity
+// result code; only ResultOK is an authorization. Disabled accounts, removed
+// keys, wrong keys, missing accounts and an unavailable store all deny.
+func identityAuthorizeKey(username []byte, key [32]byte) identityproto.Result {
+	session := identityLookupSession()
+	if session == 0 {
+		return identityproto.ResultUnavailable
+	}
+	correlation++
+	var message ipc.Message
+	if !identityproto.EncodeRequest(&identityproto.Request{Opcode: identityproto.LookupAuthorizeKey, Name: username, Key: key[:]}, correlation, &message) ||
+		!sendMessage(uint64(session), message) {
+		return identityproto.ResultUnavailable
+	}
+	reply, status := receive(uint64(session), identityControlDeadline)
+	if status != ipc.StatusOK {
+		return identityproto.ResultUnavailable
+	}
+	var decoded identityproto.Reply
+	if !identityproto.DecodeReply(&reply, correlation, identityproto.LookupAuthorizeKey, &decoded) {
+		return identityproto.ResultUnavailable
+	}
+	return decoded.Result
+}
+
+// identityGetAccount fetches the full committed principal for username over the
+// persistent lookup session. It returns the record and the identity result;
+// only ResultOK with exactly one record is a valid principal. An empty or
+// corrupt principal view fails closed.
+func identityGetAccount(username []byte) (identityproto.Record, identityproto.Result) {
+	session := identityLookupSession()
+	if session == 0 {
+		return identityproto.Record{}, identityproto.ResultUnavailable
+	}
+	correlation++
+	var message ipc.Message
+	if !identityproto.EncodeRequest(&identityproto.Request{Opcode: identityproto.LookupGetAccount, Name: username}, correlation, &message) ||
+		!sendMessage(uint64(session), message) {
+		return identityproto.Record{}, identityproto.ResultUnavailable
+	}
+	reply, status := receive(uint64(session), identityControlDeadline)
+	if status != ipc.StatusOK {
+		return identityproto.Record{}, identityproto.ResultUnavailable
+	}
+	var decoded identityproto.Reply
+	if !identityproto.DecodeReply(&reply, correlation, identityproto.LookupGetAccount, &decoded) {
+		return identityproto.Record{}, identityproto.ResultUnavailable
+	}
+	if decoded.Result != identityproto.ResultOK || len(decoded.Records) != 1 {
+		return identityproto.Record{}, decoded.Result
+	}
+	return decoded.Records[0], identityproto.ResultOK
+}
+
+// identityAdminCall opens an administration session, sends one administration
+// request, and returns its decoded reply. Each call opens a fresh session, so a
+// restarted identityd never sees a stale session. A non-OK exchange returns
+// false; the caller treats an uncertain outcome as a failed migration.
+func identityAdminCall(request *identityproto.Request) (identityproto.Reply, bool) {
+	session := openIdentityAdmin()
+	if session == 0 {
+		return identityproto.Reply{}, false
+	}
+	defer closeOpen(session)
+	correlation++
+	var message ipc.Message
+	if !identityproto.EncodeRequest(request, correlation, &message) ||
+		!sendMessage(uint64(session), message) {
+		return identityproto.Reply{}, false
+	}
+	reply, status := receive(uint64(session), identityControlDeadline)
+	if status != ipc.StatusOK {
+		return identityproto.Reply{}, false
+	}
+	var decoded identityproto.Reply
+	if !identityproto.DecodeReply(&reply, correlation, request.Opcode, &decoded) {
+		return identityproto.Reply{}, false
+	}
+	return decoded, true
 }

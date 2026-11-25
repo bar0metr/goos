@@ -1148,6 +1148,7 @@ docs:
 	@test -f docs/adr/0231-ext4-readdir-inode-prefetch.md
 	@test -f docs/adr/0232-ext4-parallel-read-execution.md
 	@test -f docs/adr/0233-identity-account-core.md
+	@test -f docs/adr/0234-session-credentials-creation-metadata.md
 	@test -f docs/userspace/ext4.md
 	@test -f docs/development/ext4-feature-matrix.md
 	@test -f docs/development/ext4-reference-versions.md

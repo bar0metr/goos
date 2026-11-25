@@ -405,6 +405,19 @@ rows below bound what the store and its records may hold.
 | identityd session slots (`maxSessions`) | 16 | policy | `identityd` service | one session slot each, static | new admin or lookup session refused, `ResultExhausted` | none |
 | directory enumeration (`identityd.maxDirEntries`) | 8 | policy | `identityd` service | none | startup reconciliation fails closed, `Unavailable` | none |
 
+### Session identity and Linux credentials
+
+A trusted principal rides the `AddSession` control request and the startup
+object; both are bounded by fixed inline records, not by caller-driven
+allocation.
+
+| Bound | Default / max | Class | Owner | Memory | At exhaustion | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `internal/limits.SupplementaryGroupsMax` | 16 | policy | account / process | 16 `uint32` group slots in one credential or record | `ResultInvalid` / `EINVAL` | none |
+| `kernel/vfs.SessionIdentity` | 32 bytes (AccountID, UID, GID, epoch) | protocol (control request) | session | one `ownerIdentity` per `MaxAuthorities` (64) slot | `StatusResourceExhausted` | none |
+| `userspace/startup.Credentials` | 97 bytes (UID, GID, AccountID, epoch, 16 groups) | protocol (GST5 startup object) | launch | a fixed block after the string area, inside `startup.MaxSize` (64 KiB) | startup `Finish` fails | none |
+| `kernel/compat/linux.ProcessState.credentials` | 97 bytes | policy | process | one snapshot per process, inherited across fork/exec and shared across threads | n/a | none |
+
 ### Log persistence
 
 | Bound | Default / max | Class | Owner | Memory | At exhaustion | Status |

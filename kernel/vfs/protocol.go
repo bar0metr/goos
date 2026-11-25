@@ -217,10 +217,10 @@ type Request struct {
 	// Mode is the requested creation permission bits for open, create, and
 	// mkdir. ModeSet reports that Mode is authoritative; when false the
 	// receiver uses the documented default mode (ADR 0234).
-	Mode    uint16
-	ModeSet bool
-	pathSize      int
-	targetSize    int
+	Mode       uint16
+	ModeSet    bool
+	pathSize   int
+	targetSize int
 }
 
 // Reply answers a request. A listed name too long for the message is in the

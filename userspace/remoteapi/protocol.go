@@ -8,8 +8,13 @@ import (
 )
 
 const (
-	ProtocolID    = uint64(0x4752454d4f544531) // GREMOTE1
-	Version       = uint16(3)
+	ProtocolID = uint64(0x4752454d4f544531) // GREMOTE1
+	// Version 3 carried terminal/exec/SFTP session control. Version 4 adds
+	// account-aware authorization: OperationAuthenticate and the new
+	// OperationAuthorizeKey carry the requested username and the presented
+	// 32-byte Ed25519 public key so PID 1 can revalidate against the identity
+	// database at admission. A message of any other version fails decoding.
+	Version       = uint16(4)
 	MaxSessions   = 4
 	MaxHandshakes = 2
 	MaxWorkers    = MaxSessions + MaxHandshakes
@@ -35,6 +40,7 @@ const (
 	OperationGeometry
 	OperationAuthenticate
 	OperationTerminalEnd
+	OperationAuthorizeKey
 )
 
 type Result uint8
@@ -88,15 +94,33 @@ type Request struct {
 	Mode        ExecutionMode
 	CommandSize uint16
 	Command     handle.ID
+	// Username, UserSize and Key carry the requested username and the
+	// presented 32-byte Ed25519 public key for OperationAuthenticate and
+	// OperationAuthorizeKey. They are empty for every other operation, and the
+	// worker-supplied values never choose grants: PID 1 revalidates them
+	// against the identity database at admission.
+	Username [MaxUsername]byte
+	UserSize uint8
+	Key      [32]byte
 }
 
 func validRequest(request *Request) bool {
-	if request.Mode > ModeSFTP || (request.Operation != OperationOpen && (request.Mode != ModeTerminal || request.CommandSize != 0 || request.Command != 0)) {
+	if request.Mode > ModeSFTP {
+		return false
+	}
+	if request.Operation == OperationAuthenticate || request.Operation == OperationAuthorizeKey {
+		return request.Mode == ModeTerminal && request.Session == 0 && request.Geometry == (Geometry{}) &&
+			request.CommandSize == 0 && request.Command == 0 &&
+			request.UserSize >= 1 && int(request.UserSize) <= MaxUsername &&
+			ValidUsername(request.Username[:request.UserSize]) && zero(request.Username[request.UserSize:])
+	}
+	if request.UserSize != 0 || request.Username != [MaxUsername]byte{} || request.Key != [32]byte{} {
+		return false
+	}
+	if request.Operation != OperationOpen && (request.Mode != ModeTerminal || request.CommandSize != 0 || request.Command != 0) {
 		return false
 	}
 	switch request.Operation {
-	case OperationAuthenticate:
-		return request.Session == 0 && request.Geometry == (Geometry{})
 	case OperationOpen:
 		if request.Mode == ModeExec {
 			return request.Session == 0 && request.Geometry == (Geometry{}) && request.Command != 0 && request.CommandSize > 0 && int(request.CommandSize) <= MaxCommand
@@ -117,9 +141,16 @@ func EncodeRequest(request *Request, correlation uint64, out *ipc.Message) bool 
 	if correlation == 0 || !validRequest(request) {
 		return false
 	}
-	*out = ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: requestSize + uint16(request.Geometry.TermSize)}
+	size := requestSize + uint16(request.Geometry.TermSize)
+	if request.Operation == OperationAuthenticate || request.Operation == OperationAuthorizeKey {
+		size = requestSize + uint16(request.UserSize) + 32
+	}
+	*out = ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: size}
 	out.Payload[0] = byte(request.Operation)
 	out.Payload[1] = request.Geometry.TermSize
+	if request.Operation == OperationAuthenticate || request.Operation == OperationAuthorizeKey {
+		out.Payload[1] = request.UserSize
+	}
 	out.Payload[2] = byte(request.Mode)
 	binary.LittleEndian.PutUint16(out.Payload[4:6], request.CommandSize)
 	if request.Mode == ModeExec {
@@ -130,7 +161,12 @@ func EncodeRequest(request *Request, correlation uint64, out *ipc.Message) bool 
 	binary.LittleEndian.PutUint16(out.Payload[16:18], request.Geometry.Columns)
 	binary.LittleEndian.PutUint16(out.Payload[18:20], request.Geometry.Rows)
 	binary.LittleEndian.PutUint64(out.Payload[24:32], request.Geometry.Sequence)
-	copy(out.Payload[requestSize:], request.Geometry.Term[:request.Geometry.TermSize])
+	if request.Operation == OperationAuthenticate || request.Operation == OperationAuthorizeKey {
+		copy(out.Payload[requestSize:], request.Username[:request.UserSize])
+		copy(out.Payload[requestSize+request.UserSize:], request.Key[:])
+	} else {
+		copy(out.Payload[requestSize:], request.Geometry.Term[:request.Geometry.TermSize])
+	}
 	return true
 }
 
@@ -140,20 +176,37 @@ func DecodeRequest(in *ipc.Message, out *Request) bool {
 	}
 	var request Request
 	request.Operation = Operation(in.Payload[0])
-	request.Geometry.TermSize = in.Payload[1]
 	request.Mode = ExecutionMode(in.Payload[2])
 	request.CommandSize = binary.LittleEndian.Uint16(in.Payload[4:6])
 	if in.HandleCount == 1 {
 		request.Command = in.Handles[0]
 	}
-	if int(request.Geometry.TermSize) > MaxTerm || in.PayloadSize != requestSize+uint16(request.Geometry.TermSize) || in.Payload[3] != 0 || !zero(in.Payload[6:8]) || !zero(in.Payload[20:24]) {
+	auth := request.Operation == OperationAuthenticate || request.Operation == OperationAuthorizeKey
+	if !auth {
+		request.Geometry.TermSize = in.Payload[1]
+		if int(request.Geometry.TermSize) > MaxTerm || in.PayloadSize != requestSize+uint16(request.Geometry.TermSize) {
+			return false
+		}
+	} else {
+		request.UserSize = in.Payload[1]
+		if request.UserSize == 0 || int(request.UserSize) > MaxUsername || in.PayloadSize != requestSize+uint16(request.UserSize)+32 {
+			return false
+		}
+	}
+	if in.Payload[3] != 0 || !zero(in.Payload[6:8]) || !zero(in.Payload[20:24]) {
 		return false
 	}
 	request.Session = binary.LittleEndian.Uint64(in.Payload[8:16])
 	request.Geometry.Columns = binary.LittleEndian.Uint16(in.Payload[16:18])
 	request.Geometry.Rows = binary.LittleEndian.Uint16(in.Payload[18:20])
 	request.Geometry.Sequence = binary.LittleEndian.Uint64(in.Payload[24:32])
-	copy(request.Geometry.Term[:], in.Payload[requestSize:in.PayloadSize])
+	if auth {
+		copy(request.Username[:], in.Payload[requestSize:requestSize+int(request.UserSize)])
+		copy(request.Key[:], in.Payload[requestSize+int(request.UserSize):requestSize+int(request.UserSize)+32])
+		request.Geometry = Geometry{}
+	} else {
+		copy(request.Geometry.Term[:], in.Payload[requestSize:in.PayloadSize])
+	}
 	if !validRequest(&request) || (request.Mode == ModeExec) != (in.HandleCount == 1) {
 		return false
 	}
@@ -186,8 +239,11 @@ func validReply(reply *Reply) bool {
 	if reply.Mode > ModeSFTP || reply.Operation != OperationOpen && reply.Mode != ModeTerminal {
 		return false
 	}
-	if reply.Operation < OperationOpen || reply.Operation > OperationAuthenticate || reply.Result > ResultPermissionDenied {
+	if reply.Operation < OperationOpen || reply.Operation > OperationAuthorizeKey || reply.Result > ResultPermissionDenied {
 		return false
+	}
+	if reply.Operation == OperationAuthorizeKey {
+		return reply.Session == 0 && (reply.Result == ResultOK || reply.Result == ResultPermissionDenied)
 	}
 	return reply.Result != ResultOK || reply.Session != 0
 }

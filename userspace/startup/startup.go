@@ -6,19 +6,21 @@
 //
 //	offset  size  field
 //	0       4     magic "GST4"
-//	4       2     version (4)
+//	4       2     version (5)
 //	6       2     handle count
 //	8       4     total size of the object
 //	12      4     argument count (at least 1: argv[0])
 //	16      4     environment count
 //	20      4     offset of the string area
-//	24      8     reserved, zero
+//	24      1     credential flag (0 or 1); version 5
+//	25      7     reserved, zero
 //	32            string table: (2 + arguments + environment) entries of
 //	              {u32 offset, u32 length} — the command, the working
 //	              directory, each argument, each "NAME=VALUE" variable
 //	              handle table: entries of {u32 name offset, u32 name length,
 //	              u64 handle ID}
-//	              string area, up to the total size
+//	              string area, then, when the credential flag is set, the
+//	              fixed Credentials block at the end of the object
 //
 // All fields are little-endian. The string area starts right after the handle
 // table, every string lies inside it, and no string contains a zero byte, so

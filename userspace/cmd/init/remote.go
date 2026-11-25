@@ -13,15 +13,37 @@ import (
 	"goos/kernel/vfs"
 	configproto "goos/userspace/config"
 	execproto "goos/userspace/exec"
+	"goos/userspace/identity"
+	"goos/userspace/identityproto"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
 	"goos/userspace/remoteapi"
+	"goos/userspace/remotepolicy"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 	userwait "goos/userspace/wait"
 )
 
 const remoteServiceName = "remoted"
+
+// remotePrincipal is the bounded account principal a worker is bound to at
+// admission. Identity is data, never authority: it selects the scoped grants
+// and launch credentials, but a worker- or client-supplied name, key, or
+// AccountID never widens them. It carries exactly what the launch and VFS
+// session need; the database revision is retained for the admission record.
+type remotePrincipal struct {
+	AccountID  uint64
+	Epoch      [16]byte
+	Revision   uint64
+	UID        uint32
+	GID        uint32
+	Groups     [identity.MaxSupplementaryGroups]uint32
+	GroupCount uint8
+	Home       [identity.MaxHome]byte
+	HomeLen    uint8
+	Name       [identity.MaxName]byte
+	NameLen    uint8
+}
 
 // Worker slots are not supervisor services. A slot is reused only after its
 // shell, jobs, processes, mappings, streams, and endpoints have been released.
@@ -43,6 +65,10 @@ type remoteWorker struct {
 	sftpRoot              [remoteapi.MaxSFTPRoot]byte
 	sftpRootSize          uint8
 	grace                 supervisor.RemoteGrace
+	// principal is the validated account principal bound at admission, and
+	// principalBound says one is present. Every account session uses it.
+	principal      remotePrincipal
+	principalBound bool
 }
 
 var (
@@ -298,7 +324,7 @@ func launchRemoteWorker(worker *remoteWorker, executable supervisor.Executable) 
 		{Name: "signer", Handle: handle.ID(signer[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 	}
-	event, result := launchRemoteExecutable(executable, "remoted-worker", grants, false, nil)
+	event, result := launchRemoteExecutable(executable, "remoted-worker", grants, false, nil, nil)
 	if result != supervisor.LaunchOK {
 		closeOpen(handle.ID(pair[1]))
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
@@ -314,11 +340,100 @@ func launchRemoteWorker(worker *remoteWorker, executable supervisor.Executable) 
 	notifyRemoteCounts()
 }
 
-func launchRemoteExecutable(executable supervisor.Executable, name string, grants []supervisor.Capability, shell bool, command []byte) (supervisor.LifecycleEvent, supervisor.LaunchStatus) {
+// bindRemotePrincipal revalidates the username+key the worker authenticated
+// with against the current committed identity snapshot and fetches the full
+// principal. It binds the result to the worker only on success. A disabled,
+// missing, removed-key, recreated, corrupt or unavailable account fails closed,
+// and a worker-supplied name or AccountID never chooses the grant: the whole
+// decision is re-derived from the identity database at admission.
+func bindRemotePrincipal(worker *remoteWorker, username []byte, key [32]byte) remoteapi.Result {
+	// Import the legacy single-user settings on first admission, retrying while
+	// the candidate stays missing, corrupt, or ambiguous. The import is
+	// idempotent and never widens authority; a committed import makes the
+	// account database the sole authority.
+	if !remoteMigrationDone {
+		remoteMigrationDone = migrateRemoteIdentity()
+	}
+	if result := identityAuthorizeKey(username, key); result != identityproto.ResultOK {
+		if result == identityproto.ResultUnavailable || result == identityproto.ResultUnprovisioned {
+			return remoteapi.ResultUnavailable
+		}
+		return remoteapi.ResultPermissionDenied
+	}
+	record, result := identityGetAccount(username)
+	if result != identityproto.ResultOK {
+		if result == identityproto.ResultUnavailable || result == identityproto.ResultUnprovisioned {
+			return remoteapi.ResultUnavailable
+		}
+		return remoteapi.ResultPermissionDenied
+	}
+	if record.Kind != identityproto.RecordAccount || !record.Enabled || record.AccountID == 0 ||
+		record.UID == 0 || record.GID == 0 || len(record.Name) == 0 || len(record.Home) == 0 ||
+		len(record.Name) > identity.MaxName || len(record.Home) > identity.MaxHome ||
+		len(record.Groups) > identity.MaxSupplementaryGroups ||
+		!remotepolicy.ValidSFTPRoot(string(record.Home)) {
+		return remoteapi.ResultPermissionDenied
+	}
+	principal := remotePrincipal{
+		AccountID:  record.AccountID,
+		Epoch:      record.Epoch,
+		Revision:   record.Revision,
+		UID:        record.UID,
+		GID:        record.GID,
+		GroupCount: uint8(len(record.Groups)),
+	}
+	copy(principal.Groups[:], record.Groups)
+	principal.HomeLen = uint8(copy(principal.Home[:], record.Home))
+	principal.NameLen = uint8(copy(principal.Name[:], record.Name))
+	worker.principal = principal
+	worker.principalBound = true
+	return remoteapi.ResultOK
+}
+
+// remoteSessionIdentity is the trusted immutable VFS principal the worker's
+// account session carries. It stays separate from the scoped authority; the
+// UID/GID grant nothing by themselves.
+func remoteSessionIdentity(worker *remoteWorker) vfs.SessionIdentity {
+	principal := &worker.principal
+	return vfs.SessionIdentity{AccountID: principal.AccountID, UID: principal.UID, PrimaryGID: principal.GID, Epoch: principal.Epoch}
+}
+
+// openAccountSession asks the VFS for a session with a scoped authority and a
+// trusted principal. It is the account-aware equivalent of
+// openRemoteAuthoritySession and installs the SessionIdentity the kernel uses
+// for creation metadata (ADR 0234).
+func openAccountSession(authority vfs.Authority, identity vfs.SessionIdentity) (handle.ID, string) {
+	var pair [2]uint64
+	if !createChannel(&pair) {
+		return 0, "REMOTE_ACCOUNT_CHANNEL_FAILED"
+	}
+	correlation++
+	request, ok := vfs.AddIdentitySessionRequest(handle.ID(pair[1]), authority, identity, correlation)
+	if !ok {
+		closePair(pair)
+		return 0, "REMOTE_ACCOUNT_SEND_FAILED"
+	}
+	result, status, sent := filesystemRequests.Control(handle.ID(vfsControlHandle), &request, vfsSessionDeadline)
+	if !sent {
+		closePair(pair)
+		return 0, "REMOTE_ACCOUNT_SEND_FAILED"
+	}
+	if status != ipc.StatusOK || result != vfs.StatusOK {
+		closeOpen(handle.ID(pair[0]))
+		return 0, "REMOTE_ACCOUNT_REFUSED"
+	}
+	return handle.ID(pair[0]), ""
+}
+
+func launchRemoteExecutable(executable supervisor.Executable, name string, grants []supervisor.Capability, shell bool, command []byte, principal *remotePrincipal) (supervisor.LifecycleEvent, supervisor.LaunchStatus) {
 	slot, staging := stagingSlot()
 	variables := 0
 	if shell {
 		variables = 2
+	}
+	account := principal != nil
+	if account {
+		variables += 3
 	}
 	arguments := 1
 	if len(command) != 0 {
@@ -329,7 +444,13 @@ func launchRemoteExecutable(executable supervisor.Executable, name string, grant
 	}
 	writer := startup.NewWriter(staging, arguments, variables, len(grants))
 	writer.Command([]byte(name))
-	writer.CWD([]byte("/"))
+	// An account shell is rooted at its home, so its working directory must be
+	// inside that root for the shell's own initial VFS check to pass.
+	cwd := []byte("/")
+	if account {
+		cwd = principal.Home[:principal.HomeLen]
+	}
+	writer.CWD(cwd)
 	writer.Argument([]byte(name))
 	if len(command) != 0 {
 		if shell {
@@ -340,6 +461,14 @@ func launchRemoteExecutable(executable supervisor.Executable, name string, grant
 	if shell {
 		writer.Variable([]byte("PATH"), []byte(supervisor.SearchPath(boot.Mode())))
 		writer.Variable([]byte("GOOS_SESSION"), []byte("remote"))
+	}
+	if account {
+		writer.Variable([]byte("HOME"), principal.Home[:principal.HomeLen])
+		writer.Variable([]byte("USER"), principal.Name[:principal.NameLen])
+		writer.Variable([]byte("LOGNAME"), principal.Name[:principal.NameLen])
+		credentials := startup.Credentials{UID: principal.UID, GID: principal.GID, AccountID: principal.AccountID, Epoch: principal.Epoch, GroupCount: principal.GroupCount}
+		copy(credentials.Groups[:], principal.Groups[:principal.GroupCount])
+		writer.Credentials(credentials)
 	}
 	for _, grant := range grants {
 		writer.Handle([]byte(grant.Name), 0)
@@ -370,6 +499,15 @@ func pollRemoteWorker(worker *remoteWorker) {
 	result := remoteapi.ResultInvalidArgument
 	switch request.Operation {
 	case remoteapi.OperationAuthenticate:
+		// Revalidate the key and bind the full principal before any grant.
+		// The worker's earlier handshake authorize reply is never trusted for
+		// admission: this re-derives the decision from the current committed
+		// identity snapshot, so a disabled/deleted/recreated account or a
+		// removed key fails closed.
+		result = bindRemotePrincipal(worker, request.Username[:request.UserSize], request.Key)
+		if result != remoteapi.ResultOK {
+			break
+		}
 		result = remoteRegistry.Authenticate(worker.id, worker.owner, int(worker.limit))
 		if result == remoteapi.ResultOK {
 			notifyRemoteCounts()
@@ -379,7 +517,7 @@ func pollRemoteWorker(worker *remoteWorker) {
 		if result != remoteapi.ResultOK {
 			break
 		}
-		if request.Mode == remoteapi.ModeSFTP && worker.sftpRootSize == 0 {
+		if request.Mode == remoteapi.ModeSFTP && !worker.principalBound {
 			result = remoteapi.ResultPermissionDenied
 			break
 		}
@@ -475,7 +613,18 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 	}
 	session.page = sys.Window(base, execproto.AreaSize)
 	session.pageBase, session.pageSize = base, size
-	files, reason := openVFSSession()
+	// The shell's data access is root-confined to the validated account home;
+	// program execution is delegated to PID 1 through the exec channel, so the
+	// shell never needs to name /system or any other path outside home.
+	home := worker.principal.Home[:worker.principal.HomeLen]
+	authority, valid := vfs.RootedAuthority(home)
+	if !valid {
+		syslog.Warn("remote shell home root invalid", syslog.Uint("session", worker.id))
+		closeOpen(handle.ID(tty[0]))
+		failRemoteOpen(worker, remoteapi.ResultUnavailable)
+		return
+	}
+	files, reason := openAccountSession(authority, remoteSessionIdentity(worker))
 	if reason != "" {
 		syslog.Warn("remote shell filesystem session failed", syslog.Str("reason", reason), syslog.Uint("session", worker.id))
 		closeOpen(handle.ID(tty[0]))
@@ -498,7 +647,7 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 	if settings != 0 {
 		grants = append(grants, supervisor.Capability{Name: "config", Handle: settings, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
-	event, result := launchRemoteExecutable(executable, "shell", grants, true, worker.command[:worker.commandSize])
+	event, result := launchRemoteExecutable(executable, "shell", grants, true, worker.command[:worker.commandSize], &worker.principal)
 	if result != supervisor.LaunchOK {
 		syslog.Warn("remote shell launch failed", syslog.Uint("status", uint64(result)), syslog.Uint("session", worker.id))
 		closeOpen(files)
@@ -531,27 +680,29 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 }
 
 // launchRemoteSFTP starts the fixed sftpd image with its two streams and a VFS
-// session rooted at the directory this connection was admitted with. It grants
-// no terminal, launcher, configuration, network, or signing authority. The
-// process is the session's "shell" for reaping, so every path that ends a
-// connection ends it too.
+// session rooted exactly at the validated account home. It grants no terminal,
+// launcher, configuration, network, or signing authority. The process is the
+// session's "shell" for reaping, so every path that ends a connection ends it
+// too.
 func launchRemoteSFTP(worker *remoteWorker, executable supervisor.Executable) {
 	session := &worker.session
 	session.execMode = true
-	root := worker.sftpRoot[:worker.sftpRootSize]
-	authority, valid := vfs.RootedAuthority(root)
+	// SFTP is rooted exactly at the validated account home, never an
+	// arbitrary worker- or client-chosen root.
+	home := worker.principal.Home[:worker.principal.HomeLen]
+	authority, valid := vfs.RootedAuthority(home)
 	if !valid || !createStream(&session.output) || !createStream(&session.input) {
 		syslog.Warn("remote SFTP stream allocation failed", syslog.Uint("session", worker.id))
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
 		return
 	}
-	files, reason := openRemoteAuthoritySession(authority)
+	files, reason := openAccountSession(authority, remoteSessionIdentity(worker))
 	if reason != "" {
 		syslog.Warn("remote SFTP filesystem session failed", syslog.Str("reason", reason), syslog.Uint("session", worker.id))
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
 		return
 	}
-	stat, ok := callSession(files, vfs.Request{Operation: vfs.OperationStat, Path: root})
+	stat, ok := callSession(files, vfs.Request{Operation: vfs.OperationStat, Path: home})
 	if !ok || stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindDirectory {
 		syslog.Warn("remote SFTP root is not a directory", syslog.Uint("session", worker.id))
 		closeOpen(files)
@@ -564,7 +715,7 @@ func launchRemoteSFTP(worker *remoteWorker, executable supervisor.Executable) {
 		{Name: "vfs", Handle: files, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 	}
-	event, result := launchRemoteExecutable(executable, "sftpd", grants, false, root)
+	event, result := launchRemoteExecutable(executable, "sftpd", grants, false, home, &worker.principal)
 	if result != supervisor.LaunchOK {
 		syslog.Warn("remote SFTP launch failed", syslog.Uint("status", uint64(result)), syslog.Uint("session", worker.id))
 		closeOpen(files)

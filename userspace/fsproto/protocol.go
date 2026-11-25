@@ -187,7 +187,7 @@ type Request struct {
 	Slot uint32
 	// Create is the resolved creation context of a create, mkdir, or symlink.
 	Create ramfs.CreateContext
-	Name  []byte
+	Name   []byte
 }
 
 // Reply answers the request with the same correlation.
