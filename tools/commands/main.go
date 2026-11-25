@@ -49,7 +49,7 @@ func build(root string) ([]byte, error) { return buildSelected(root, true) }
 
 func validationCommand(name string) bool {
 	switch name {
-	case "cryptoprobe", "trustprobe", "memreclaim", "threadprobe", "goprobe":
+	case "cryptoprobe", "trustprobe", "memreclaim", "threadprobe", "goprobe", "identityprobe":
 		return true
 	default:
 		return false
@@ -229,6 +229,10 @@ func grantValue(expression ast.Expr) (commands.Grant, error) {
 		return commands.GrantTCPRing, nil
 	case isSelector(expression, "commands", "GrantUDPRing"):
 		return commands.GrantUDPRing, nil
+	case isSelector(expression, "commands", "GrantIdentityAdmin"):
+		return commands.GrantIdentityAdmin, nil
+	case isSelector(expression, "commands", "GrantIdentityLookup"):
+		return commands.GrantIdentityLookup, nil
 	case isSelector(expression, "commands", "GrantRemote"):
 		return commands.GrantRemote, nil
 	default:

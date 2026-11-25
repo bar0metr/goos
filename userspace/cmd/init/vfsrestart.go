@@ -85,6 +85,7 @@ func vfsRestarted() {
 	closeOpen(shellFiles)
 	shellFiles = 0
 	remoteScopesInstalled = false
+	identityScopeInstalled = false
 	for index := range remoteScopes {
 		remoteScopes[index].installed = false
 	}
@@ -99,8 +100,13 @@ func renewVFSClients() {
 	if !vfsClientsPending {
 		return
 	}
-	if boot.Mode() == supervisor.ModeNormal && !protectRemoteStorage() {
-		fatal("INIT_REMOTE_STORAGE_PROTECTION_FAILED\n")
+	if boot.Mode() == supervisor.ModeNormal {
+		if !protectRemoteStorage() {
+			fatal("INIT_REMOTE_STORAGE_PROTECTION_FAILED\n")
+		}
+		if !protectIdentityStorage() {
+			fatal("INIT_IDENTITY_STORAGE_PROTECTION_FAILED\n")
+		}
 	}
 	vfsClientsPending = false
 	if session, reason := openVFSSession(); reason == "" {

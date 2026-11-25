@@ -25,7 +25,7 @@ func TestNativeAdministrationIndexAgreement(t *testing.T) {
 			}
 			name := directory.Name()
 			_, found := commands.Lookup(index, []byte(name))
-			want := validation || name != "cryptoprobe" && name != "trustprobe" && name != "memreclaim" && name != "threadprobe" && name != "goprobe"
+			want := validation || name != "cryptoprobe" && name != "trustprobe" && name != "memreclaim" && name != "threadprobe" && name != "goprobe" && name != "identityprobe"
 			if found != want {
 				t.Fatalf("validation=%v name=%s found=%v", validation, name, found)
 			}

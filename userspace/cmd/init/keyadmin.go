@@ -59,7 +59,7 @@ func remoteKeyScopes(host, keys string) bool {
 			missing++
 		}
 	}
-	if remoteScopeCount+missing > len(remoteScopes) || !ensureRemotePolicyScopes(host, keys) || remoteScopeCount+missing > len(remoteScopes) {
+	if remoteScopeCount+missing > remoteScopeMax || !ensureRemotePolicyScopes(host, keys) || remoteScopeCount+missing > remoteScopeMax {
 		return false
 	}
 	for _, name := range names {

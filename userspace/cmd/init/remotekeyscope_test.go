@@ -91,3 +91,49 @@ func TestRemoteKeyAuthorityDoesNotReuseRetiredScopes(t *testing.T) {
 		}
 	}
 }
+
+func TestIdentityScopeSlotContract(t *testing.T) {
+	if identityScopeSlot != vfs.MaxScopes-1 {
+		t.Fatalf("identity slot %d, want %d", identityScopeSlot, vfs.MaxScopes-1)
+	}
+	if remoteScopeMax != identityScopeSlot {
+		t.Fatal("remote prefix not bounded to the slots before identity")
+	}
+}
+
+func TestRemoteScopeSlotBound(t *testing.T) {
+	if remoteScopeAtLimit(remoteScopeMax - 1) {
+		t.Fatal("last remote slot refused")
+	}
+	if !remoteScopeAtLimit(remoteScopeMax) {
+		t.Fatal("identity slot not protected from remote allocation")
+	}
+}
+
+func TestIdentityAuthorityGrantsRootAndScope(t *testing.T) {
+	authority, ok := identityAuthority([]byte("/state/identity"))
+	if !ok {
+		t.Fatal("identity authority refused")
+	}
+	if !authority.Confined {
+		t.Fatal("identity authority not confined")
+	}
+	if !authority.Valid() {
+		t.Fatal("identity authority invalid")
+	}
+	if string(authority.Root[:authority.RootSize]) != "/state/identity" {
+		t.Fatalf("root %q", authority.Root[:authority.RootSize])
+	}
+	for slot := 0; slot < vfs.MaxScopes; slot++ {
+		want := vfs.Rights(0)
+		if slot == int(identityScopeSlot) {
+			want = vfs.Read | vfs.Write
+		}
+		if authority.Grants[slot] != want {
+			t.Fatalf("grant %d = %v, want %v", slot, authority.Grants[slot], want)
+		}
+	}
+	if _, ok := identityAuthority([]byte("relative")); ok {
+		t.Fatal("non-canonical root accepted")
+	}
+}

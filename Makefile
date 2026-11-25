@@ -21,7 +21,7 @@ VFS_ELF = $(OUT_DIR)/userspace/vfs.elf
 # shell read is generated from the manifests the commands declare (ADR 0080).
 # The boot archive carries the recovery subset tools/initramfs names
 # (ADR 0175).
-VALIDATION_COMMANDS := cryptoprobe trustprobe memreclaim threadprobe goprobe
+VALIDATION_COMMANDS := cryptoprobe trustprobe memreclaim threadprobe goprobe identityprobe
 # Commands built with the goroutine runtime (ADR 0204): the TinyGo root
 # tools/goroutineroot prepares and the goroutine target.
 GOROUTINE_COMMANDS := goprobe
@@ -59,6 +59,8 @@ REMOTED_WORKER_IMAGE = $(OUT_DIR)/userspace/remoted-worker
 REMOTED_WORKER_ELF = $(OUT_DIR)/userspace/remoted-worker.elf
 SFTPD_IMAGE = $(OUT_DIR)/userspace/sftpd
 SFTPD_ELF = $(OUT_DIR)/userspace/sftpd.elf
+IDENTITYD_IMAGE = $(OUT_DIR)/userspace/identityd
+IDENTITYD_ELF = $(OUT_DIR)/userspace/identityd.elf
 # tools/stackframes bounds every stack frame by the unmapped guard below the
 # stack (ADR 0088). It runs on every userspace ELF before elf2native turns it
 # into an image, and on the kernel right after it is linked.
@@ -251,16 +253,16 @@ $(KERNEL): $(shell find $(CURDIR)/kernel $(CURDIR)/internal \( -type f -o -type 
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tools/tinygo.sh build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=$(OPT) -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-SERVICE_NAMES := init fault-probe shell vfs block virtio-blk fat32 ext4 log config tty netd virtio-net resolved linuxsockd remoted remoted-worker sftpd
+SERVICE_NAMES := init fault-probe shell vfs block virtio-blk fat32 ext4 log config tty netd virtio-net resolved linuxsockd remoted remoted-worker sftpd identityd
 .PHONY: $(addprefix service-,$(SERVICE_NAMES)) $(addprefix command-,$(COMMANDS)) kernel-iso boot-service-vfs
 $(addprefix service-,$(SERVICE_NAMES)): service-%: $(OUT_DIR)/userspace/%
 $(addprefix command-,$(COMMANDS)): command-%: $(COMMAND_DIR)/%
 kernel-iso: iso
 boot-service-vfs: iso
 
-$(COMMAND_ELFS) $(INIT_ELF) $(SHELL_ELF) $(VFS_ELF) $(BLOCK_ELF) $(VIRTIO_BLOCK_ELF) $(FAT32_ELF) $(EXT4_ELF) $(LOG_ELF) $(CONFIG_ELF) $(TTY_ELF) $(NETD_ELF) $(VIRTIO_NET_ELF) $(RESOLVED_ELF) $(LINUXSOCKD_ELF) $(REMOTED_ELF) $(REMOTED_WORKER_ELF) $(SFTPD_ELF): go.mod go.sum
+$(COMMAND_ELFS) $(INIT_ELF) $(SHELL_ELF) $(VFS_ELF) $(BLOCK_ELF) $(VIRTIO_BLOCK_ELF) $(FAT32_ELF) $(EXT4_ELF) $(LOG_ELF) $(CONFIG_ELF) $(TTY_ELF) $(NETD_ELF) $(VIRTIO_NET_ELF) $(RESOLVED_ELF) $(LINUXSOCKD_ELF) $(REMOTED_ELF) $(REMOTED_WORKER_ELF) $(SFTPD_ELF) $(IDENTITYD_ELF): go.mod go.sum
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(EXT4_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(EXT4_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE) $(IDENTITYD_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(dir $@)
@@ -419,6 +421,14 @@ $(CONFIG_IMAGE): $(CONFIG_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) ke
 	@$(STACKFRAMES) $(CONFIG_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(CONFIG_ELF) $@
 
+$(IDENTITYD_ELF): $(call go_deps,./userspace/cmd/identityd) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tools/tinygo.sh build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/identityd
+
+$(IDENTITYD_IMAGE): $(IDENTITYD_ELF) tools/elf2native/main.go $(ELF2NATIVE_SOURCES) kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(IDENTITYD_ELF)
+	$(BUILD_ENV) go run ./tools/elf2native $(IDENTITYD_ELF) $@
+
 $(TTY_ELF): $(call go_deps,./userspace/cmd/tty) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tools/tinygo.sh build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/tty
@@ -531,9 +541,9 @@ $(SYSTEM_TREE_INPUTS): FORCE $$(SYSTEM_TREE_SOURCES) $$(SYSTEM_TREE_SOURCE_DIRS)
 $(SYSTEM_TREE_STATE): FORCE
 	@set -e; mkdir -p $(dir $@); tmp='$@.tmp'; { $(system_tree_digest); } > "$$tmp"; if test -f '$@' && cmp -s "$$tmp" '$@'; then rm -f "$$tmp"; else mv "$$tmp" '$@'; fi
 
-$(SYSTEM_TREE): $(SYSTEM_TREE_INPUTS) $(SYSTEM_TREE_STATE) $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX)
+$(SYSTEM_TREE): $(SYSTEM_TREE_INPUTS) $(SYSTEM_TREE_STATE) $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE) $(IDENTITYD_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX)
 	@$(if $(strip $(VALIDATION_CA_BUNDLE)),true,$(BUILD_ENV) go run ./tools/truststore -check security/ca-source.pem security/ca-certificates.pem)
-	@$(BUILD_ENV) SYSTEM_CA_BUNDLE='$(SYSTEM_CA_SOURCE)' SYSTEM_TRUST_UPDATE_KEY='$(SYSTEM_TRUST_KEY_SOURCE)' SYSTEM_TRUST_UPDATE_URL='$(SYSTEM_TRUST_URL)' LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $@
+	@$(BUILD_ENV) SYSTEM_CA_BUNDLE='$(SYSTEM_CA_SOURCE)' SYSTEM_TRUST_UPDATE_KEY='$(SYSTEM_TRUST_KEY_SOURCE)' SYSTEM_TRUST_UPDATE_URL='$(SYSTEM_TRUST_URL)' LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(LINUXSOCKD_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(SFTPD_IMAGE) $(IDENTITYD_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $@
 	@set -e; tmp='$(SYSTEM_TREE_STATE).tmp'; { $(system_tree_digest); } > "$$tmp"; mv "$$tmp" '$(SYSTEM_TREE_STATE)'; touch '$@'
 
 $(SYSTEM_IMAGE): $(SYSTEM_TREE) $$(SYSTEM_IMAGE_SOURCES)
@@ -634,6 +644,10 @@ test: test-unit test-integration test-security
 
 test-all:
 	$(MAKE) test
+	$(MAKE) test-identity-core
+	$(MAKE) test-identity-persist
+	$(MAKE) test-identity-vm
+	$(MAKE) test-identity-crash
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test-incremental
@@ -675,6 +689,10 @@ release-check:
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test
+	$(MAKE) test-identity-core
+	$(MAKE) test-identity-persist
+	$(MAKE) test-identity-vm
+	$(MAKE) test-identity-crash
 	$(MAKE) test-incremental
 	$(MAKE) test-crypto-frames
 	$(MAKE) test-storage-stress
@@ -730,7 +748,43 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/ext4 ./userspace/ext4vol ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnsstub ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes ./userspace/cryptosys ./userspace/tlsclient ./userspace/fetch ./tools/truststore ./tools/sysimage ./tools/cryptocompat ./tools/tlscompat ./tools/tlsfixture ./tools/tlspeer ./userspace/truststore ./userspace/truststate ./userspace/trustupdate ./tools/trustfixture ./tools/trustpeer ./tools/trustscan ./userspace/remoteapi ./userspace/remotepolicy ./userspace/remoteservice ./userspace/sftp ./userspace/sshserver ./userspace/runtime/arena ./userspace/tcpdispatch ./tools/sshcompat
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/ext4 ./userspace/ext4vol ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnsstub ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes ./userspace/cryptosys ./userspace/tlsclient ./userspace/fetch ./tools/truststore ./tools/sysimage ./tools/cryptocompat ./tools/tlscompat ./tools/tlsfixture ./tools/tlspeer ./userspace/truststore ./userspace/truststate ./userspace/trustupdate ./tools/trustfixture ./tools/trustpeer ./tools/trustscan ./userspace/remoteapi ./userspace/remotepolicy ./userspace/remoteservice ./userspace/sftp ./userspace/sshserver ./userspace/runtime/arena ./userspace/tcpdispatch ./tools/sshcompat ./userspace/identity ./userspace/identityproto ./userspace/identityd
+
+# Identity core (ADR 0233): host tests for the identity store, codec, and
+# service dispatch/persistence, plus the SSH key-authorization handshake (proof
+# of possession stays in the pinned SSH library; the callback only authorizes).
+# The handshake tests need the sshcompat build tag and prepared module.
+.PHONY: test-identity-core
+test-identity-core: $(SSH_ROOT_STAMP)
+	$(BUILD_ENV) go test -count=1 ./userspace/identity ./userspace/identityproto ./userspace/identityd
+	$(BUILD_ENV) go test -modfile=$(SSH_ROOT)/go.mod -tags=goos_sshcompat -count=1 ./userspace/sshserver
+
+# Real FAT32 persistence fault gate (FIX §6.2): identityd persistence driven
+# against the real fat32 filesystem with device-boundary fault injection at the
+# flush and replace steps. Host-only; the native crash/reboot scenario is
+# test-identity-vm.
+.PHONY: test-identity-persist
+test-identity-persist:
+	$(BUILD_ENV) go test -count=1 ./userspace/identityd
+
+# Native identity lifecycle/security gate (FIX §6.3): boots a disposable disk
+# and exercises provision, mutation, restart, reboot, scope denial, untrusted
+# launch denial, and corrupt-DB recovery.
+.PHONY: test-identity-vm
+test-identity-vm:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/identity-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/identity.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/identity-virtio-blk.img
+
+# Real QEMU crash-at-save gate (FIX §6.2): boots a disposable disk, commits a
+# durable mutation, then SIGKILLs the guest (no graceful reboot) and re-boots
+# the same image, asserting the DB loads to a valid committed state, never
+# corrupt or unavailable.
+.PHONY: test-identity-crash
+test-identity-crash:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/identity-crash-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/identity_crash.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/identity-crash-virtio-blk.img
 
 # The storage stress test (ADR 0102): the model-based FAT32 workload at a
 # larger scale than the default suite, and the host FAT checker over volumes
@@ -1047,6 +1101,7 @@ docs:
 	@test -f docs/architecture/processes.md
 	@test -f docs/kernel/native-images.md
 	@test -f docs/architecture/capabilities.md
+	@test -f docs/architecture/identity.md
 	@test -f docs/architecture/ipc.md
 	@test -f docs/userspace/tty.md
 	@test -f docs/userspace/ramfs.md
@@ -1092,6 +1147,7 @@ docs:
 	@test -f docs/adr/0230-generation-safe-vfs-component-cache.md
 	@test -f docs/adr/0231-ext4-readdir-inode-prefetch.md
 	@test -f docs/adr/0232-ext4-parallel-read-execution.md
+	@test -f docs/adr/0233-identity-account-core.md
 	@test -f docs/userspace/ext4.md
 	@test -f docs/development/ext4-feature-matrix.md
 	@test -f docs/development/ext4-reference-versions.md

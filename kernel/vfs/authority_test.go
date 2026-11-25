@@ -149,3 +149,67 @@ func TestScopedAncestryLimitsFailClosed(t *testing.T) {
 		t.Fatal("scope replacement")
 	}
 }
+
+// The identity database subtree lives on the last scope slot. Its owner gets a
+// session that is both confined to the subtree root and granted the slot, and
+// neither an ordinary session nor a root-only session may reach the database.
+func TestIdentitySubtreeScopeGrantAndRoot(t *testing.T) {
+	namespace, _ := mountedNamespace(t)
+	for _, path := range []string{"/state", "/state/identity", "/state/other", "/home"} {
+		if status := namespace.Create([]byte(path), true); status != StatusOK {
+			t.Fatal(status)
+		}
+	}
+	if status := namespace.Create([]byte("/state/identity/key"), false); status != StatusOK {
+		t.Fatal(status)
+	}
+	// The reserved slot protects the database subtree, denying Read|Write to
+	// every session that lacks the identity grant.
+	slot := uint8(MaxScopes - 1)
+	if status := namespace.InstallScope(slot, []byte("/state/identity"), true, Read|Write); status != StatusOK {
+		t.Fatal(status)
+	}
+	// An ordinary session cannot read, write or create inside the subtree.
+	if _, status := namespace.Open(1, []byte("/state/identity/key"), Read); status != StatusPermissionDenied {
+		t.Fatalf("ordinary read=%d", status)
+	}
+	if _, status := namespace.Open(1, []byte("/state/identity/key"), Write); status != StatusPermissionDenied {
+		t.Fatalf("ordinary write=%d", status)
+	}
+	if status := namespace.AuthorizePath(1, []byte("/state/identity/new"), Write, false); status != StatusPermissionDenied {
+		t.Fatalf("ordinary create=%d", status)
+	}
+	// Root confinement alone is not enough: the subtree scope still denies.
+	rootOnly, ok := RootedAuthority([]byte("/state/identity"))
+	if !ok {
+		t.Fatal("root")
+	}
+	if status := namespace.SetAuthority(3, rootOnly); status != StatusOK {
+		t.Fatal(status)
+	}
+	if status := namespace.AuthorizePath(3, []byte("/state/identity/key"), Read, false); status != StatusPermissionDenied {
+		t.Fatalf("root-only read=%d", status)
+	}
+	// identityd's authority is both confined to the root and granted the slot.
+	authority, ok := RootedAuthority([]byte("/state/identity"))
+	if !ok {
+		t.Fatal("root")
+	}
+	authority.Confined = true
+	authority.Grants[slot] = Read | Write
+	if status := namespace.SetAuthority(2, authority); status != StatusOK {
+		t.Fatal(status)
+	}
+	if status := namespace.AuthorizePath(2, []byte("/state/identity/key"), Read, false); status != StatusOK {
+		t.Fatalf("identity read=%d", status)
+	}
+	if status := namespace.AuthorizePath(2, []byte("/state/identity/new"), Write, false); status != StatusOK {
+		t.Fatalf("identity create=%d", status)
+	}
+	// The root still keeps identityd from escaping the subtree.
+	for _, path := range []string{"/state", "/state/other", "/home", "/state/identity/../other"} {
+		if status := namespace.AuthorizePath(2, []byte(path), Read, false); status != StatusPermissionDenied {
+			t.Fatalf("identity escape %s=%d", path, status)
+		}
+	}
+}

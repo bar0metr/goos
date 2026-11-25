@@ -79,7 +79,26 @@ func newBackend(conn net.Conn, cfg Config) (backend, error) {
 		source = rand.Reader
 	}
 	source = nativeRandom(source)
+	authorizeKey := cfg.AuthorizeKey
 	server := &ssh.ServerConfig{Config: ssh.Config{Rand: source}, MaxAuthTries: cfg.MaxAuthAttempts, PublicKeyCallback: func(c ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+		if authorizeKey != nil {
+			if key.Type() != ssh.KeyAlgoED25519 {
+				return nil, ssh.ErrNoAuth
+			}
+			public, ok := key.(ssh.CryptoPublicKey)
+			if !ok {
+				return nil, ssh.ErrNoAuth
+			}
+			raw, ok := public.CryptoPublicKey().(ed25519.PublicKey)
+			if !ok {
+				return nil, ssh.ErrNoAuth
+			}
+			allow, err := authorizeKey(c.User(), raw)
+			if err != nil || !allow {
+				return nil, ssh.ErrNoAuth
+			}
+			return nil, nil
+		}
 		allowed := 0
 		blob := key.Marshal()
 		for _, candidate := range keys {

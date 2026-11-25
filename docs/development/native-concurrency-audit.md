@@ -408,6 +408,7 @@ native collector and scheduler tests.
 | `vfs`, `block`, `fat32`, `partition` | Independent instances safe with separate backends | Volume and mount state belong to an owner; VFS workers use captured read plans and obey the persistent lane and barriers. The fixture's `validationReads` (CA-0760) has owner-only arms; worker gates use published atomics and channels. |
 | `safesave` | One owner per request-owned temporary pathname | Atomic Create reserves a candidate with a monotonic suffix; collisions are skipped within a bound. Separate workspaces can save the same target without sharing a temporary file. Stale candidates remain untouched. No cleanup follows an ambiguous Replace. |
 | `config`, `release`, `commands`, `truststate`, `truststore`, `trustupdate`, `remotepolicy`, `httpwire`, `fetch`, `sshserver`, `tty`, `init`, `linux` | Concurrent-safe codecs and policy, or Independent instances safe objects | Package-level variables are immutable tables and error values. |
+| `identity`, `identityproto`, `identityd` | Concurrent-safe codecs; Single-owner store, service, and persistence | `identity.Store`, `identityd.Service`, and `identityd.Persist` belong to identityd's one service loop. `identityd.Service` clones the committed store into a candidate before each mutation, so no shared mutable slices cross requests. The `identityproto` and snapshot codecs are Concurrent-safe for distinct buffers. Package-level variables are immutable sentinel errors only. |
 
 ## Programs
 
@@ -421,6 +422,11 @@ other shipped programs use one service loop and do not start workers through
 `go` or `thread.Start`. The SSH backend uses a synchronous pump; its region scopes
 must not park or migrate. Linking a library into goprobe does not mean its
 stateful APIs run on workers.
+
+identityd is one such single-loop service: it owns its store, candidate
+coordinator, persistence layer, session slots, and wire buffers, and exits on
+VFS or control peer death so PID 1 restarts it with fresh grants. `user` and
+`group` are single-loop commands built on `utility`.
 
 VFS separates namespace/admission/commit ownership from worker access to
 published read plans. The persistent lane owns a whole Remote operation;

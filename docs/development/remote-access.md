@@ -144,6 +144,16 @@ PID 1 confines key administration to the configured public-key file and its
 transactional staging siblings. The command receives no host private-key
 access. Host identity protection and worker signing grants remain unchanged.
 
+M4 adds an account-aware authorization seam without changing admission.
+`sshserver.Config` now carries `AuthorizeKey func(username string, key
+ed25519.PublicKey) (bool, error)`. A non-nil hook receives the requested
+username and the presented Ed25519 public key and returns an authorization
+decision. A nil hook selects the legacy constant-time
+`Username`/`AuthorizedKeys` comparison, which remains the production admission
+path. Proof of possession stays in the pinned SSH library, which verifies the
+signature after the callback. Production multi-account admission is deferred to
+M5 (ADR 0233).
+
 ## Configuration
 
 `remoted` has a read-only `system.remote.` configuration session. Configure the
@@ -185,9 +195,10 @@ and run `remote reload` to recover without restarting the service. A rejected
 replacement after a valid commit keeps the previous listener and policy.
 
 GCF1 scoped revisions bracket candidate reads, including concurrent changes that
-restore a previous value. Path changes also need free VFS scope capacity. Eight
-scope slots retain old private-path protection during the VFS lifetime; reload
-rejects scope exhaustion rather than exposing a previous host key.
+restore a previous value. Path changes also need free VFS scope capacity. Seven
+scope slots retain old private-path protection during the VFS lifetime; the
+eighth slot holds the identity database, and reload rejects scope exhaustion
+rather than exposing a previous host key.
 
 ## Host identity
 

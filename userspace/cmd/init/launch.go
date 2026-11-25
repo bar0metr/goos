@@ -101,6 +101,11 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 		closeExecutable(executable)
 		return 0, false
 	}
+	identityListener := bytesString(spec.Name[:spec.NameSize]) == identityServiceName
+	if identityListener && !prepareIdentityGrants(&spec) {
+		closeExecutable(executable)
+		return 0, false
+	}
 	slot, staging := stagingSlot()
 	// A service started again in this boot is told so. What it left behind,
 	// such as the end of the log file, is then its own work to pick up
@@ -146,6 +151,9 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 		if remoteListener {
 			abortRemoteGrants(&spec)
 		}
+		if identityListener {
+			abortIdentityGrants(&spec)
+		}
 		return 0, false
 	}
 	event, launched := requestLaunch(executable, processName, spec.Capabilities[:spec.CapabilityCount], spec.Profile, slot, uint32(len(startupData)))
@@ -185,6 +193,8 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 			logProcessHandle = keepProcess(logProcessHandle, event.ProcessHandle)
 		case remoteServiceName:
 			remoteProcess = keepProcess(remoteProcess, event.ProcessHandle)
+		case identityServiceName:
+			identityProcess = keepProcess(identityProcess, event.ProcessHandle)
 		case "block":
 			blockProcessHandle = keepProcess(blockProcessHandle, event.ProcessHandle)
 		}
@@ -200,6 +210,9 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	}
 	if remoteListener && launched != supervisor.LaunchOK {
 		abortRemoteGrants(&spec)
+	}
+	if identityListener && launched != supervisor.LaunchOK {
+		abortIdentityGrants(&spec)
 	}
 	if launched != supervisor.LaunchOK || !keep && sys.HandleClose(event.ProcessHandle) != 0 {
 		if !supervisionComplete {

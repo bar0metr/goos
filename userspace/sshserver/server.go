@@ -19,10 +19,17 @@ var ErrConfig = errors.New("sshserver: invalid configuration")
 var ErrCompatibilityBuild = errors.New("sshserver: build requires generated SSH compatibility module")
 
 type Config struct {
-	HostPublicKey   ed25519.PublicKey
-	SignHost        func([]byte) ([]byte, error)
-	Username        string
-	AuthorizedKeys  []ed25519.PublicKey
+	HostPublicKey  ed25519.PublicKey
+	SignHost       func([]byte) ([]byte, error)
+	Username       string
+	AuthorizedKeys []ed25519.PublicKey
+	// AuthorizeKey is the account-aware authorization hook. When non-nil, it
+	// receives the requested username and the presented Ed25519 public key and
+	// returns an authorization decision. A nil AuthorizeKey selects the legacy
+	// constant-time Username/AuthorizedKeys comparison. The result is an
+	// authorization decision only: proof-of-possession is verified separately
+	// by the SSH library, and the callback grants nothing.
+	AuthorizeKey    func(username string, key ed25519.PublicKey) (bool, error)
 	Banner          string
 	MaxAuthAttempts int
 	// Subsystem is the one subsystem name a session may request, or empty for
