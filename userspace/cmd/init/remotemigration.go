@@ -71,7 +71,15 @@ func migrateRemoteIdentity() bool {
 		return false
 	}
 	switch account.Result {
-	case identityproto.ResultNotFound:
+	case identityproto.ResultNotFound, identityproto.ResultUnprovisioned:
+		if account.Result == identityproto.ResultUnprovisioned {
+			// An unprovisioned database is empty; provision it once before the
+			// import, which is the explicit defined recovery path.
+			if reply, ok := identityAdminCall(&identityproto.Request{Opcode: identityproto.AdminProvision}); !ok || reply.Result != identityproto.ResultOK {
+				syslog.Warn("remote identity migration: provision failed")
+				return false
+			}
+		}
 		if reply, ok := identityAdminCall(&identityproto.Request{Opcode: identityproto.AdminAddAccount, Name: []byte(plan.Name)}); !ok || reply.Result != identityproto.ResultOK {
 			syslog.Warn("remote identity migration: account creation failed")
 			return false

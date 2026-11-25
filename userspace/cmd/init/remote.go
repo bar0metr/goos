@@ -497,6 +497,22 @@ func pollRemoteWorker(worker *remoteWorker) {
 	defer closeMessageHandles(&message)
 	result := remoteapi.ResultInvalidArgument
 	switch request.Operation {
+	case remoteapi.OperationAuthorizeKey:
+		// Key authorization during the SSH handshake. The reply is only a
+		// decision, never a session or a grant; admission revalidates against
+		// the same committed snapshot at OperationAuthenticate. The reply
+		// codec carries only OK or PermissionDenied, so an unavailable store
+		// denies (fail closed) here and is reported at admission. The legacy
+		// import runs here first so the very first handshake already sees the
+		// migrated account, not an empty database.
+		if !remoteMigrationDone {
+			remoteMigrationDone = migrateRemoteIdentity()
+		}
+		if identityAuthorizeKey(request.Username[:request.UserSize], request.Key) == identityproto.ResultOK {
+			result = remoteapi.ResultOK
+		} else {
+			result = remoteapi.ResultPermissionDenied
+		}
 	case remoteapi.OperationAuthenticate:
 		// Revalidate the key and bind the full principal before any grant.
 		// The worker's earlier handshake authorize reply is never trusted for
@@ -576,7 +592,11 @@ func replyRemote(worker *remoteWorker, operation remoteapi.Operation, result rem
 	if operation == remoteapi.OperationOpen {
 		mode = worker.mode
 	}
-	return remoteapi.EncodeReply(&remoteapi.Reply{Operation: operation, Result: result, Session: worker.id, Mode: mode}, attachments, requestCorrelation, &reply) && sendMessage(uint64(worker.control), reply)
+	session := worker.id
+	if operation == remoteapi.OperationAuthorizeKey {
+		session = 0
+	}
+	return remoteapi.EncodeReply(&remoteapi.Reply{Operation: operation, Result: result, Session: session, Mode: mode}, attachments, requestCorrelation, &reply) && sendMessage(uint64(worker.control), reply)
 }
 
 func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
