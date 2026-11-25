@@ -103,6 +103,8 @@ run 'user uid alice 2000'
 run 'user home alice /home/alice'
 run 'user show alice'
 expect 'alice 2000 1000 /home/alice' 'account alice with UID 2000'
+# Home provisioning is explicit: create the directory the shell is rooted at.
+run 'mkdir /home/alice'
 
 # Generate a disposable Ed25519 client key, create the legacy authorized_keys
 # file the listener still requires, and authorize the key for the account.
