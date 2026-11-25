@@ -975,6 +975,15 @@ test-ext4-rw:
 	@$(BUILD_ENV) GOOS_EXT4_GUEST=$(abspath $(BUILD_DIR)/ext4-rw) go test -count=1 -run '^TestGuestImages$$' ./userspace/ext4vol
 	@tools/ext4fixture/check-guest-images.sh $(BUILD_DIR)/ext4-rw
 
+# Identity/session/creation gate (ADR 0234): boots an ext4 volume, admits an
+# account with a high UID/GID over SSH, and verifies the files it creates carry
+# that ownership in the guest (Linux stat) and on the host (pinned debugfs).
+.PHONY: test-identity-session-vm
+test-identity-session-vm:
+	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
+	@MEMORY=$(MEMORY) tests/boot/identity-session.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/identity-session
+	@tools/ext4fixture/check-identity-session.sh $(BUILD_DIR)/identity-session
+
 test-ext4-read-restart:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1 EXT4_RESTART_GATE=1
 	@EXT4_ACTIVE_RESTART=1 MEMORY=$(MEMORY) SMP=4 tests/boot/ext4-rw.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/ext4-read-restart
