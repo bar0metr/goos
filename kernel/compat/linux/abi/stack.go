@@ -84,7 +84,7 @@ const (
 // carries behind AT_RANDOM. The kernel passes nil only when the generator
 // refuses output, and the entry is then left out: a constant or a guessable
 // value there would be read as a secret.
-func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Startup, random *[RandomSize]byte) (InitialStack, StackError) {
+func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Startup, random *[RandomSize]byte, uid, gid uint64) (InitialStack, StackError) {
 	if startup == nil || image == nil || top == 0 || top%16 != 0 || image.Entry == 0 || image.ProgramHeaderAddress == 0 ||
 		image.ProgramHeaderCount == 0 || image.ProgramHeaderCount > elf.MaxProgramHeaders {
 		return InitialStack{}, StackInvalidInput
@@ -215,10 +215,10 @@ func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Star
 		auxPHNUM, uint64(image.ProgramHeaderCount),
 		auxPageSize, vm.PageSize,
 		auxEntry, image.Entry,
-		auxUID, SyntheticUID,
-		auxEUID, SyntheticUID,
-		auxGID, SyntheticGID,
-		auxEGID, SyntheticGID,
+		auxUID, uid,
+		auxEUID, uid,
+		auxGID, gid,
+		auxEGID, gid,
 		auxSecure, 0,
 		auxClockTick, ClockTicks,
 		auxPlatform, platformAddress,

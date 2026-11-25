@@ -34,6 +34,11 @@ type ProcessState struct {
 	// umask is the file mode creation mask umask sets. It is inherited across
 	// fork and exec as on Linux.
 	umask uint16
+	// credentials is the bounded credential snapshot derived from the trusted
+	// launch identity: real/effective/saved UID/GID (equal at launch), the
+	// supplementary GIDs, the stable account ID and the identity database
+	// epoch. It is inherited across fork and exec and shared across threads.
+	credentials startup.Credentials
 	// Signals holds one thread's mask at a time: that of maskTID, or of the
 	// first thread when maskTID is zero. The first thread's mask waits in
 	// firstMask while another thread's is in force.
@@ -182,6 +187,14 @@ func replaceRootHeld(oldRoot uint64, newRoot uint64, brkBase uint64, brkLimit ui
 // usual Linux login default.
 const DefaultUmask = 0o022
 
+// LegacyUID and LegacyGID are the explicit local bootstrap and legacy launch
+// identity: the fixed credential an identity-free Linux process reports, which
+// matches the pre-account behavior (ADR 0234).
+const (
+	LegacyUID = uint32(1000)
+	LegacyGID = uint32(1000)
+)
+
 // SetUmask replaces the file mode creation mask with the permission bits of
 // mask and returns the previous one, as umask does.
 func (state *ProcessState) SetUmask(mask uint64) uint64 {
@@ -189,6 +202,12 @@ func (state *ProcessState) SetUmask(mask uint64) uint64 {
 	state.umask = uint16(mask & 0o777)
 	return previous
 }
+
+// Umask returns the file mode creation mask.
+func (state *ProcessState) Umask() uint16 { return state.umask }
+
+// Credentials returns the process's credential snapshot.
+func (state *ProcessState) Credentials() startup.Credentials { return state.credentials }
 
 func (state *ProcessState) closeOnExecHeld(released *Released) {
 	guard.Check()
@@ -377,6 +396,10 @@ func installProcessHeld(root uint64, goosProcessID process.ID, data startup.Data
 	state.PID, state.FamilyID = record.PID, record.FamilyID
 	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
 	state.umask = DefaultUmask
+	state.credentials, _ = data.Credentials()
+	if state.credentials.AccountID == 0 {
+		state.credentials.UID, state.credentials.GID = LegacyUID, LegacyGID
+	}
 	standardIn, standardOut, standardErr := streams.Input, streams.Output, streams.Error
 	terminal := TerminalID(0)
 	if streams.Control != 0 {
@@ -452,6 +475,7 @@ func forkProcessHeld(parentRoot uint64, childRoot uint64, record ProcessRecord, 
 	child.BrkBase, child.BrkCurrent, child.BrkLimit = parent.BrkBase, parent.BrkCurrent, parent.BrkLimit
 	child.PID, child.Forked = record.PID, true
 	child.umask = parent.umask
+	child.credentials = parent.credentials
 	child.Signals.CopyFrom(&parent.Signals)
 	child.cwdLen = uint16(copy(child.cwd[:], parent.CWD()))
 	return true

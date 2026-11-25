@@ -57,7 +57,7 @@ func stackString(t *testing.T, stack InitialStack, address uint64) string {
 
 func TestBuildInitialStackLayout(t *testing.T) {
 	var target [MaxInitialStackSize]byte
-	stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), testStartup(t), nil)
+	stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), testStartup(t), nil, SyntheticUID, SyntheticGID)
 	if failure != StackOK || stack.Pointer%16 != 0 || stack.Top != vm.UserStackTop || len(stack.Data) != int(stack.Top-stack.Pointer) {
 		t.Fatalf("stack failure=%d layout=%+v", failure, stack)
 	}
@@ -117,8 +117,8 @@ func TestBuildInitialStackLayout(t *testing.T) {
 func TestBuildInitialStackCarriesRandomBytes(t *testing.T) {
 	var target, plain [MaxInitialStackSize]byte
 	random := [RandomSize]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
-	stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), testStartup(t), &random)
-	without, _ := BuildInitialStack(plain[:], vm.UserStackTop, testImage(), testStartup(t), nil)
+	stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), testStartup(t), &random, SyntheticUID, SyntheticGID)
+	without, _ := BuildInitialStack(plain[:], vm.UserStackTop, testImage(), testStartup(t), nil, SyntheticUID, SyntheticGID)
 	if failure != StackOK || stack.Pointer%16 != 0 || stack.Pointer >= without.Pointer {
 		t.Fatalf("failure=%d pointer=%#x, without %#x", failure, stack.Pointer, without.Pointer)
 	}
@@ -173,18 +173,18 @@ func TestBuildInitialStackRejectsInvalidAndOversizedInput(t *testing.T) {
 		{name: "NUL argument", input: badStartup{args: 1, arg: []byte{'x', 0}}, want: StackStringInvalid},
 	}
 	for _, test := range tests {
-		if _, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), test.input, nil); failure != test.want {
+		if _, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), test.input, nil, SyntheticUID, SyntheticGID); failure != test.want {
 			t.Errorf("%s: failure %d, want %d", test.name, failure, test.want)
 		}
 	}
-	if _, failure := BuildInitialStack(target[:128], vm.UserStackTop, testImage(), testStartup(t), nil); failure != StackTooLarge {
+	if _, failure := BuildInitialStack(target[:128], vm.UserStackTop, testImage(), testStartup(t), nil, SyntheticUID, SyntheticGID); failure != StackTooLarge {
 		t.Fatalf("small target failure = %d", failure)
 	}
 }
 
 func TestBuildInitialStackAcceptsEmptyArgumentVector(t *testing.T) {
 	var target [MaxInitialStackSize]byte
-	stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), badStartup{}, nil)
+	stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), badStartup{}, nil, SyntheticUID, SyntheticGID)
 	if failure != StackOK || binary.LittleEndian.Uint64(stack.Data[:8]) != 0 {
 		t.Fatalf("failure=%d argc=%d", failure, binary.LittleEndian.Uint64(stack.Data[:8]))
 	}
@@ -197,7 +197,7 @@ func (rawExecStartup) Environment(int) ([]byte, bool) { return []byte("without-e
 func TestBuildInitialStackPreservesRawEnvironment(t *testing.T) {
 	var target [MaxInitialStackSize]byte
 	input := rawExecStartup{badStartup{args: 1, envs: 1, arg: []byte{}}}
-	stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), input, nil)
+	stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), input, nil, SyntheticUID, SyntheticGID)
 	if failure != StackOK {
 		t.Fatalf("failure = %d", failure)
 	}
@@ -220,7 +220,7 @@ func FuzzBuildInitialStack(fuzz *testing.F) {
 		// without it.
 		random := [RandomSize]byte{0xa5}
 		for _, source := range []*[RandomSize]byte{nil, &random} {
-			stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), input, source)
+			stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), input, source, SyntheticUID, SyntheticGID)
 			if failure == StackOK && (stack.Pointer%16 != 0 || stack.Pointer < vm.UserStackTop-elf.DefaultStackReserve || stack.Top != vm.UserStackTop) {
 				t.Fatalf("invalid successful layout: %+v", stack)
 			}

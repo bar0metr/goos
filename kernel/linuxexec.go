@@ -468,7 +468,12 @@ func (handler *linuxCallHandler) prepareLinuxExec(state *linuxExecState) linuxab
 	if randomBytes(local.linuxStackRandom[:]) {
 		random = &local.linuxStackRandom
 	}
-	stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], layout.StackTop, &linuxLaunchImage, &state.snapshot, random)
+	credentials := handler.state.Credentials()
+	uid, gid := uint64(linuxcompat.LegacyUID), uint64(linuxcompat.LegacyGID)
+	if credentials.AccountID != 0 {
+		uid, gid = uint64(credentials.UID), uint64(credentials.GID)
+	}
+	stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], layout.StackTop, &linuxLaunchImage, &state.snapshot, random, uid, gid)
 	clear(local.linuxStackRandom[:])
 	brkBase, brkLimit, brkOK := linuxcompat.BrkBounds(linuxLaunchImage.LoadEnd(), vm.PageSize, vm.UserMapBase)
 	if stackStatus != linuxabi.StackOK {
