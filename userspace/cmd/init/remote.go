@@ -390,11 +390,10 @@ func bindRemotePrincipal(worker *remoteWorker, username []byte, key [32]byte) re
 	return remoteapi.ResultOK
 }
 
-// remoteSessionIdentity is the trusted immutable VFS principal the worker's
-// account session carries. It stays separate from the scoped authority; the
-// UID/GID grant nothing by themselves.
-func remoteSessionIdentity(worker *remoteWorker) vfs.SessionIdentity {
-	principal := &worker.principal
+// principalSessionIdentity is the trusted immutable VFS principal a session
+// carries. It stays separate from the scoped authority; the UID/GID grant
+// nothing by themselves.
+func principalSessionIdentity(principal *remotePrincipal) vfs.SessionIdentity {
 	return vfs.SessionIdentity{AccountID: principal.AccountID, UID: principal.UID, PrimaryGID: principal.GID, Epoch: principal.Epoch}
 }
 
@@ -613,18 +612,11 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 	}
 	session.page = sys.Window(base, execproto.AreaSize)
 	session.pageBase, session.pageSize = base, size
-	// The shell's data access is root-confined to the validated account home;
-	// program execution is delegated to PID 1 through the exec channel, so the
-	// shell never needs to name /system or any other path outside home.
-	home := worker.principal.Home[:worker.principal.HomeLen]
-	authority, valid := vfs.RootedAuthority(home)
-	if !valid {
-		syslog.Warn("remote shell home root invalid", syslog.Uint("session", worker.id))
-		closeOpen(handle.ID(tty[0]))
-		failRemoteOpen(worker, remoteapi.ResultUnavailable)
-		return
-	}
-	files, reason := openAccountSession(authority, remoteSessionIdentity(worker))
+	// The shell keeps the legacy unconfined VFS session, which the identity
+	// subtree scope and the host-key scopes still fence, and carries the
+	// trusted SessionIdentity so its own creations use the account's UID and
+	// GID. Program execution is delegated to PID 1 through the exec channel.
+	files, reason := openAccountSession(vfs.Authority{}, principalSessionIdentity(&worker.principal))
 	if reason != "" {
 		syslog.Warn("remote shell filesystem session failed", syslog.Str("reason", reason), syslog.Uint("session", worker.id))
 		closeOpen(handle.ID(tty[0]))
@@ -658,6 +650,7 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 	}
 	session.shellProcess, session.shellPID = event.ProcessHandle, event.Process
 	session.execClient = 0
+	session.principal, session.principalBound = worker.principal, true
 	session.active = true
 	attachments := []handle.ID{worker.tty, handle.ID(session.output[0])}
 	if session.execMode {
@@ -696,7 +689,7 @@ func launchRemoteSFTP(worker *remoteWorker, executable supervisor.Executable) {
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
 		return
 	}
-	files, reason := openAccountSession(authority, remoteSessionIdentity(worker))
+	files, reason := openAccountSession(authority, principalSessionIdentity(&worker.principal))
 	if reason != "" {
 		syslog.Warn("remote SFTP filesystem session failed", syslog.Str("reason", reason), syslog.Uint("session", worker.id))
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)

@@ -217,7 +217,13 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		}
 	}
 	if useVFS {
-		session, reason := openVFSSession()
+		var session handle.ID
+		var reason string
+		if launchingJob != nil && launchingJob.session.principalBound {
+			session, reason = openAccountSession(vfs.Authority{}, principalSessionIdentity(&launchingJob.session.principal))
+		} else {
+			session, reason = openVFSSession()
+		}
 		if reason != "" {
 			syslog.Error("APP_VFS_SESSION_FAILED")
 			syslog.Error(reason)
@@ -489,6 +495,15 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useLinuxNet {
 		writer.Handle([]byte("linux-net"), 0)
 		writer.Handle([]byte("linux-net-pool"), 0)
+	}
+	// A Linux command launched from an account shell carries the account
+	// credential snapshot, so its getuid/getgid/getgroups report the account,
+	// matching the SessionIdentity its VFS session already carries.
+	if linuxProcess && launchingJob != nil && launchingJob.session.principalBound {
+		principal := &launchingJob.session.principal
+		credentials := startup.Credentials{UID: principal.UID, GID: principal.GID, AccountID: principal.AccountID, Epoch: principal.Epoch, GroupCount: principal.GroupCount}
+		copy(credentials.Groups[:], principal.Groups[:])
+		writer.Credentials(credentials)
 	}
 	// The request was validated when it arrived, so what does not fit is its
 	// size: its strings need more room in the startup object's tables.
