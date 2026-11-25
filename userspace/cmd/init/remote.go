@@ -693,17 +693,22 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 }
 
 // launchRemoteSFTP starts the fixed sftpd image with its two streams and a VFS
-// session rooted exactly at the validated account home. It grants no terminal,
-// launcher, configuration, network, or signing authority. The process is the
-// session's "shell" for reaping, so every path that ends a connection ends it
-// too.
+// session rooted at the validated SFTP root, which defaults to the account
+// home and follows the administrator's validated system.remote.sftp-root
+// setting. It grants no terminal, launcher, configuration, network, or signing
+// authority. The process is the session's "shell" for reaping, so every path
+// that ends a connection ends it too.
 func launchRemoteSFTP(worker *remoteWorker, executable supervisor.Executable) {
 	session := &worker.session
 	session.execMode = true
-	// SFTP is rooted exactly at the validated account home, never an
-	// arbitrary worker- or client-chosen root.
-	home := worker.principal.Home[:worker.principal.HomeLen]
-	authority, valid := vfs.RootedAuthority(home)
+	// The root is the validated sftp-root the worker was admitted with; the
+	// migration set it to the account home, so it defaults there and never
+	// accepts an arbitrary worker- or client-chosen path.
+	root := worker.sftpRoot[:worker.sftpRootSize]
+	if worker.sftpRootSize == 0 {
+		root = worker.principal.Home[:worker.principal.HomeLen]
+	}
+	authority, valid := vfs.RootedAuthority(root)
 	if !valid || !createStream(&session.output) || !createStream(&session.input) {
 		syslog.Warn("remote SFTP stream allocation failed", syslog.Uint("session", worker.id))
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
@@ -715,7 +720,7 @@ func launchRemoteSFTP(worker *remoteWorker, executable supervisor.Executable) {
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
 		return
 	}
-	stat, ok := callSession(files, vfs.Request{Operation: vfs.OperationStat, Path: home})
+	stat, ok := callSession(files, vfs.Request{Operation: vfs.OperationStat, Path: root})
 	if !ok || stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindDirectory {
 		syslog.Warn("remote SFTP root is not a directory", syslog.Uint("session", worker.id))
 		closeOpen(files)
@@ -728,7 +733,7 @@ func launchRemoteSFTP(worker *remoteWorker, executable supervisor.Executable) {
 		{Name: "vfs", Handle: files, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 	}
-	event, result := launchRemoteExecutable(executable, "sftpd", grants, false, home, &worker.principal)
+	event, result := launchRemoteExecutable(executable, "sftpd", grants, false, root, &worker.principal)
 	if result != supervisor.LaunchOK {
 		syslog.Warn("remote SFTP launch failed", syslog.Uint("status", uint64(result)), syslog.Uint("session", worker.id))
 		closeOpen(files)
