@@ -94,11 +94,16 @@ session record. A disabled, missing, recreated, or revoked account fails
 closed. A worker-supplied username or account ID never chooses grants.
 
 Shell, exec, and SFTP share one account principal. SFTP roots at the validated
-account home; shell and exec receive only the scoped grants they need,
-including read access to program directories. Legacy `system.remote.user`,
-`authorized-keys`, and `sftp-root` import into one account idempotently; after
-a committed migration the account database is the sole account and key
-authority, with no fallback to legacy keys on a missing or corrupt database.
+sftp-root, which defaults to the account home. Shell and exec keep an
+unconfined VFS session carrying the account's trusted `SessionIdentity`, fenced
+by the identity subtree and host-key scopes; program execution is delegated to
+PID 1 through the exec channel. Cross-account home isolation for shell and exec
+is not enforced: the eight-slot VFS scope table cannot express per-account home
+plus read-only program and mounted-volume access, which waits for the scope
+expansion. Legacy `system.remote.user`, `authorized-keys`, and `sftp-root`
+import into one account idempotently; after a committed migration the account
+database is the sole account and key authority, with no fallback to legacy keys
+on a missing or corrupt database.
 
 ### 5. Invariants
 

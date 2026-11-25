@@ -241,6 +241,7 @@ records.
 | `kernel/vfs.MaxCache` | 512 (64 sets × 8 ways) | profile (ADR 0230) | namespace | static | entry evicted | none |
 | `kernel/vfs.MaxScopes`, `kernel/vfs.MaxAuthorities` | 8, 64 | policy | session | static | `StatusResourceExhausted` | none |
 | `kernel/vfs.MaxRootPath` | 64 | protocol | n/a | n/a | refused | n/a |
+| `kernel/vfs.MaxPositivePaths` | 2 | policy | session | two fixed `PositivePath` records per rooted session | `StatusResourceExhausted` | none |
 | `kernel/vfs.MaxPath` | `limits.PathMax` | protocol (ADR 0110) | n/a | n/a | `StatusInvalidArgument` | n/a |
 | `kernel/vfs.MaxLinkExpansions` | 40 | protocol (ADR 0223, Linux's bound) | path resolution | three `PathMax` buffers per namespace, allocated when a mount can hold links | `StatusLoop`, Linux `ELOOP` | n/a |
 | `kernel/vfs.MaxProtocolData`, `kernel/vfs.MaxReplyData`, `kernel/vfs.MaxInlineName`, `kernel/vfs.MaxDirBatch` | message payload less headers; 4096 | protocol | n/a | n/a | n/a | n/a |

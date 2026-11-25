@@ -220,7 +220,12 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		var session handle.ID
 		var reason string
 		if launchingJob != nil && launchingJob.session.principalBound {
-			session, reason = openAccountSession(vfs.Authority{}, principalSessionIdentity(&launchingJob.session.principal))
+			principal := &launchingJob.session.principal
+			authority, valid := remoteShellAuthority(principal.Home[:principal.HomeLen])
+			if !valid {
+				authority = vfs.Authority{}
+			}
+			session, reason = openAccountSession(authority, principalSessionIdentity(principal))
 		} else {
 			session, reason = openVFSSession()
 		}

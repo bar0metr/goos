@@ -660,7 +660,7 @@ func (namespace *Namespace) OpenIntentMode(owner Owner, path []byte, rights Righ
 	if owner == 0 || rights == 0 || rights&^(Read|Write) != 0 || !flags.Valid() || flags&(OpenCreate|OpenDirectory) == OpenCreate|OpenDirectory || mode&^ramfs.ModePermissions != 0 {
 		return 0, 0, StatusInvalidArgument
 	}
-	if !namespace.insideRoot(owner, path, false) {
+	if !namespace.insideRoot(owner, path, false, rights) {
 		return 0, 0, StatusPermissionDenied
 	}
 	mountIndex, node, protected, status := namespace.resolve(path)

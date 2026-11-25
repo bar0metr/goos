@@ -87,7 +87,7 @@ func (namespace *Namespace) Expand(owner Owner, path []byte, followFinal bool) (
 	}
 	// A rooted session reads no link outside its root, not even one that
 	// points back in.
-	if !namespace.insideRoot(owner, state.path[:size], false) {
+	if !namespace.insideRoot(owner, state.path[:size], false, Read) {
 		return nil, StatusPermissionDenied
 	}
 	for expansions := 0; ; expansions++ {
@@ -121,7 +121,7 @@ func (namespace *Namespace) Expand(owner Owner, path []byte, followFinal bool) (
 		if !ok {
 			return nil, StatusNameTooLong
 		}
-		if !namespace.insideRoot(owner, state.path[:size], false) {
+		if !namespace.insideRoot(owner, state.path[:size], false, Read) {
 			return nil, StatusPermissionDenied
 		}
 	}

@@ -11,6 +11,7 @@ import (
 const (
 	addSessionConfined = 1
 	addSessionIdentity = 2
+	addSessionPositive = 4
 )
 
 // sessionIdentitySize is the fixed inline size of a SessionIdentity:
@@ -45,6 +46,18 @@ func addSessionRequest(server handle.ID, authority Authority, identity SessionId
 	message.Payload[offset] = authority.RootSize
 	offset++
 	offset += copy(message.Payload[offset:], authority.Root[:authority.RootSize])
+	if authority.PositiveCount != 0 {
+		message.Payload[1] |= addSessionPositive
+		message.Payload[offset] = authority.PositiveCount
+		offset++
+		for index := 0; index < int(authority.PositiveCount); index++ {
+			positive := &authority.Positives[index]
+			message.Payload[offset] = positive.Size
+			message.Payload[offset+1] = byte(positive.Rights)
+			offset += 2
+			offset += copy(message.Payload[offset:], positive.Path[:positive.Size])
+		}
+	}
 	message.PayloadSize = uint16(offset)
 	if identity.AccountID != 0 {
 		message.Payload[1] |= addSessionIdentity
@@ -67,7 +80,7 @@ func DecodeAddSessionAuthority(message ipc.Message) (handle.ID, Authority, Sessi
 	if message.PayloadSize == 1 {
 		return message.Handles[0], authority, identity, message.Payload[1] == 0
 	}
-	if message.PayloadSize < 2+MaxScopes+1 || message.Payload[1]&^(addSessionConfined|addSessionIdentity) != 0 {
+	if message.PayloadSize < 2+MaxScopes+1 || message.Payload[1]&^(addSessionConfined|addSessionIdentity|addSessionPositive) != 0 {
 		return 0, authority, identity, false
 	}
 	authority.Confined = message.Payload[1]&addSessionConfined != 0
@@ -82,6 +95,31 @@ func DecodeAddSessionAuthority(message ipc.Message) (handle.ID, Authority, Sessi
 	}
 	authority.RootSize = uint8(copy(authority.Root[:], message.Payload[offset:offset+rootSize]))
 	offset += rootSize
+	if message.Payload[1]&addSessionPositive != 0 {
+		if offset >= int(message.PayloadSize) {
+			return 0, authority, identity, false
+		}
+		count := int(message.Payload[offset])
+		offset++
+		if count > MaxPositivePaths {
+			return 0, authority, identity, false
+		}
+		authority.PositiveCount = uint8(count)
+		for index := 0; index < count; index++ {
+			if offset+2 > int(message.PayloadSize) {
+				return 0, authority, identity, false
+			}
+			size := int(message.Payload[offset])
+			rights := Rights(message.Payload[offset+1])
+			offset += 2
+			if size == 0 || size > MaxRootPath || offset+size > int(message.PayloadSize) {
+				return 0, authority, identity, false
+			}
+			authority.Positives[index].Size = uint8(copy(authority.Positives[index].Path[:], message.Payload[offset:offset+size]))
+			authority.Positives[index].Rights = rights
+			offset += size
+		}
+	}
 	if !authority.Valid() {
 		return 0, authority, identity, false
 	}

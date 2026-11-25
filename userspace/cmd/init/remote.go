@@ -397,6 +397,21 @@ func principalSessionIdentity(principal *remotePrincipal) vfs.SessionIdentity {
 	return vfs.SessionIdentity{AccountID: principal.AccountID, UID: principal.UID, PrimaryGID: principal.GID, Epoch: principal.Epoch}
 }
 
+// remoteShellAuthority is the restricted VFS authority of a shell or exec
+// session: the validated account home read-write, plus the additional-volume
+// root read-write as the shared writable storage grant. Program execution is
+// delegated to PID 1, so no program directory is granted here (ADR 0234).
+func remoteShellAuthority(home []byte) (vfs.Authority, bool) {
+	authority, ok := vfs.RootedAuthority(home)
+	if !ok {
+		return authority, false
+	}
+	authority.Positives[0].Rights = vfs.Read | vfs.Write
+	authority.Positives[0].Size = uint8(copy(authority.Positives[0].Path[:], []byte("/mnt")))
+	authority.PositiveCount = 1
+	return authority, true
+}
+
 // openAccountSession asks the VFS for a session with a scoped authority and a
 // trusted principal. It is the account-aware equivalent of
 // openRemoteAuthoritySession and installs the SessionIdentity the kernel uses
@@ -632,18 +647,27 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 	}
 	session.page = sys.Window(base, execproto.AreaSize)
 	session.pageBase, session.pageSize = base, size
-	// The shell keeps the legacy unconfined VFS session, which the identity
-	// subtree scope and the host-key scopes still fence, and carries the
-	// trusted SessionIdentity so its own creations use the account's UID and
-	// GID. Program execution is delegated to PID 1 through the exec channel.
-	files, reason := openAccountSession(vfs.Authority{}, principalSessionIdentity(&worker.principal))
+	// The shell's VFS session is root-confined to the validated account home
+	// with the additional-volume root as the only shared writable grant, so
+	// one account cannot name another account's files. Program execution is
+	// delegated to PID 1 through the exec channel. The trusted SessionIdentity
+	// makes the shell's own creations use the account's UID and GID.
+	home := worker.principal.Home[:worker.principal.HomeLen]
+	authority, valid := remoteShellAuthority(home)
+	if !valid {
+		syslog.Warn("remote shell home root invalid", syslog.Uint("session", worker.id))
+		closeOpen(handle.ID(tty[0]))
+		failRemoteOpen(worker, remoteapi.ResultUnavailable)
+		return
+	}
+	files, reason := openAccountSession(authority, principalSessionIdentity(&worker.principal))
 	if reason != "" {
 		syslog.Warn("remote shell filesystem session failed", syslog.Str("reason", reason), syslog.Uint("session", worker.id))
 		closeOpen(handle.ID(tty[0]))
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
 		return
 	}
-	settings, _ := openConfigSession("", configproto.Read|configproto.Write|configproto.HostsRead)
+	settings, _ := openConfigSession("", configproto.Read|configproto.HostsRead)
 	grants := []supervisor.Capability{
 		{Name: "stdout", Handle: handle.ID(session.output[1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait},
 		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read},
@@ -693,21 +717,16 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 }
 
 // launchRemoteSFTP starts the fixed sftpd image with its two streams and a VFS
-// session rooted at the validated SFTP root, which defaults to the account
-// home and follows the administrator's validated system.remote.sftp-root
-// setting. It grants no terminal, launcher, configuration, network, or signing
-// authority. The process is the session's "shell" for reaping, so every path
-// that ends a connection ends it too.
+// session rooted at the admitted account home. It grants no terminal,
+// launcher, configuration, network, or signing authority. The process is the
+// session's "shell" for reaping, so every path that ends a connection ends it
+// too.
 func launchRemoteSFTP(worker *remoteWorker, executable supervisor.Executable) {
 	session := &worker.session
 	session.execMode = true
-	// The root is the validated sftp-root the worker was admitted with; the
-	// migration set it to the account home, so it defaults there and never
-	// accepts an arbitrary worker- or client-chosen path.
-	root := worker.sftpRoot[:worker.sftpRootSize]
-	if worker.sftpRootSize == 0 {
-		root = worker.principal.Home[:worker.principal.HomeLen]
-	}
+	// SFTP is rooted exactly at the validated account home; it never accepts
+	// a worker-, client- or legacy-configuration-chosen root.
+	root := worker.principal.Home[:worker.principal.HomeLen]
 	authority, valid := vfs.RootedAuthority(root)
 	if !valid || !createStream(&session.output) || !createStream(&session.input) {
 		syslog.Warn("remote SFTP stream allocation failed", syslog.Uint("session", worker.id))

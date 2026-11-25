@@ -232,7 +232,7 @@ func TestRootDoesNotExcludeMountBelowIt(t *testing.T) {
 }
 
 func TestAddSessionWireVersionAndShape(t *testing.T) {
-	if ControlVersion != 12 {
+	if ControlVersion != 13 {
 		t.Fatalf("control version %d", ControlVersion)
 	}
 	plain := Authority{Confined: true}
