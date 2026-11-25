@@ -21,9 +21,10 @@ const (
 	// Version 1 was the initial identity protocol (ADR 0233). Version 2 adds
 	// the database epoch, committed revision, and the account's supplementary
 	// group Unix GIDs to the record so lookup can return one coherent committed
-	// principal view (M4 FIX §5). A message of any other version is not this
-	// protocol and fails decoding.
-	Version = uint16(2)
+	// principal view (M4 FIX §5). Version 3 adds AdminSetGroupGID, an explicit
+	// Unix GID for a group (ADR 0234). A message of any other version is not
+	// this protocol and fails decoding.
+	Version = uint16(3)
 
 	requestHeader = 32
 	replyHeader   = 40
@@ -105,6 +106,7 @@ const (
 	AdminAddGroup
 	AdminDeleteGroup
 	AdminSetMembers
+	AdminSetGroupGID
 	// Lookup operations.
 	LookupAuthorizeKey
 	LookupGetAccount
@@ -413,6 +415,8 @@ func validRequest(r *Request) bool {
 	case AdminSetMembers:
 		return !r.Enabled && validName(r.Name) && scalar && len(r.Home) == 0 && len(r.Key) == 0 &&
 			len(r.Fingerprint) == 0 && len(r.IDs) <= identity.MaxAccounts
+	case AdminSetGroupGID:
+		return !r.Enabled && validName(r.Name) && r.UID == 0 && noData
 	case LookupAuthorizeKey:
 		return !r.Enabled && validName(r.Name) && validKey(r.Key) && scalar && len(r.Home) == 0 && len(r.Fingerprint) == 0 && len(r.IDs) == 0
 	}

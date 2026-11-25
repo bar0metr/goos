@@ -739,6 +739,38 @@ func TestSetPrimaryGIDAndSetGroupsByNumber(t *testing.T) {
 	}
 }
 
+func TestSetGroupGID(t *testing.T) {
+	s := NewStore()
+	alice := mustAccount(t, s, "alice")
+	wheel, err := s.CreateGroup("wheel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetGroupGID("wheel", 80000); err != nil {
+		t.Fatal(err)
+	}
+	g, _ := s.GroupByName("wheel")
+	if g.GID != 80000 {
+		t.Fatalf("group GID = %d, want 80000", g.GID)
+	}
+	if err := s.SetPrimaryGID("alice", 80000); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := s.AccountByName("alice")
+	if a.PrimaryGID != wheel.ID {
+		t.Fatalf("primary = %d, want %d", a.PrimaryGID, wheel.ID)
+	}
+	if _, err := s.GroupByGID(80000); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetGroupGID("wheel", 0); err == nil {
+		t.Fatal("reserved GID accepted")
+	}
+	if err := s.SetGroupGID("wheel", alice.UID); err == nil && alice.UID == 80000 {
+		t.Fatal("duplicate GID accepted")
+	}
+}
+
 func TestSetMembersByUID(t *testing.T) {
 	s := NewStore()
 	alice := mustAccount(t, s, "alice")

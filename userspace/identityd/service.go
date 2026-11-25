@@ -256,6 +256,8 @@ func (s *Service) HandleRequest(r *identityproto.Request) identityproto.Reply {
 		reply.Result = s.mutate(func(st *identity.Store) error { return st.DeleteGroup(string(r.Name)) })
 	case identityproto.AdminSetMembers:
 		reply.Result = s.mutate(func(st *identity.Store) error { return st.SetMembers(string(r.Name), r.IDs) })
+	case identityproto.AdminSetGroupGID:
+		reply.Result = s.mutate(func(st *identity.Store) error { return st.SetGroupGID(string(r.Name), r.GID) })
 	default:
 		reply.Result = identityproto.ResultInvalid
 	}

@@ -375,6 +375,34 @@ func (s *Store) SetPrimaryGID(name string, gid uint32) error {
 	return nil
 }
 
+// SetGroupGID assigns a group an explicit Unix GID. It mirrors SetUID's
+// reserved-value and uniqueness rules; a group the account database references
+// keeps working through its stable GroupID, which does not change.
+func (s *Store) SetGroupGID(name string, gid uint32) error {
+	if s == nil {
+		return ErrUnavailable
+	}
+	if err := s.guardMutation(); err != nil {
+		return err
+	}
+	i, ok := s.findGroup(name)
+	if !ok {
+		return errNotFound("group " + name)
+	}
+	if reservedUnix(gid) {
+		return errInvalid("reserved GID")
+	}
+	for j := range s.groups {
+		if j != i && s.groups[j].GID == gid {
+			return errExists("GID")
+		}
+	}
+	s.groups[i].GID = gid
+	advanceHighWater(&s.nextGID, gid)
+	s.sequence++
+	return nil
+}
+
 func (s *Store) SetHome(name, home string) error {
 	if s == nil {
 		return ErrUnavailable

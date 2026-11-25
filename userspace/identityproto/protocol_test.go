@@ -610,7 +610,7 @@ func TestVersionRejects(t *testing.T) {
 	request := requests()[0]
 	var wire ipc.Message
 	EncodeRequest(&request, 1, &wire)
-	for _, version := range []uint16{0, 1, 3} {
+	for _, version := range []uint16{0, 1, 2, 4} {
 		message := wire
 		message.Version = version
 		var decoded Request
@@ -620,7 +620,7 @@ func TestVersionRejects(t *testing.T) {
 	}
 	reply := replies()[0]
 	EncodeReply(&reply, 1, &wire)
-	for _, version := range []uint16{0, 1, 3} {
+	for _, version := range []uint16{0, 1, 2, 4} {
 		message := wire
 		message.Version = version
 		var decoded Reply
@@ -629,7 +629,7 @@ func TestVersionRejects(t *testing.T) {
 		}
 	}
 	EncodeControlRequest(OpAddAdmin, 9, 1, &wire)
-	for _, version := range []uint16{0, 1, 3} {
+	for _, version := range []uint16{0, 1, 2, 4} {
 		message := wire
 		message.Version = version
 		if _, _, _, ok := DecodeControlRequest(&message); ok {

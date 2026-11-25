@@ -99,10 +99,13 @@ done
 # auto-allocated private group.
 run 'user provision'
 run 'user add alice'
-run 'user uid alice 2000'
+run 'user uid alice 70000'
+run 'group add staff'
+run 'group gid staff 80000'
+run 'user gid alice 80000'
 run 'user home alice /home/alice'
 run 'user show alice'
-expect 'alice 2000 1000 /home/alice' 'account alice with UID 2000'
+expect 'alice 70000 80000 /home/alice' 'account alice with high UID 70000 GID 80000'
 # Home provisioning is explicit: create the directory the shell is rooted at.
 run 'mkdir /home/alice'
 
@@ -132,7 +135,7 @@ result=$(ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o U
 	-o KexAlgorithms=curve25519-sha256 -o HostKeyAlgorithms=ssh-ed25519 -o PubkeyAcceptedAlgorithms=ssh-ed25519 \
 	alice@127.0.0.1 'mkdir /mnt/w/alice-made; touch /mnt/w/alice-made/f.txt; stat /mnt/w/alice-made/f.txt' 2>&1) || fail "SSH exec as alice: $result"
 printf 'guest stat: %s\n' "$result"
-printf '%s' "$result" | grep -q 'uid=2000 gid=1000' || fail "guest stat does not report the account ownership: $result"
+printf '%s' "$result" | grep -q 'uid=70000 gid=80000' || fail "guest stat does not report the account ownership: $result"
 
 # Cut the guest off and extract the written volume for the host debugfs check.
 run 'sync'
