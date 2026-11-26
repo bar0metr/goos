@@ -333,3 +333,59 @@ func TestForgottenRootDoesNotReachTheEntrysNextOwner(t *testing.T) {
 		t.Fatal(status)
 	}
 }
+
+// TestPositivePathsExtendARootedSession proves the bounded positive-path
+// grants that give an account shell its shared storage and read-only program
+// access without widening the home root.
+func TestPositivePathsExtendARootedSession(t *testing.T) {
+	namespace, _ := mountedNamespace(t)
+	for _, path := range []string{"/home", "/home/user", "/home/other", "/mnt", "/mnt/w", "/system", "/system/bin", "/state"} {
+		if status := namespace.Create([]byte(path), true); status != StatusOK {
+			t.Fatalf("mkdir %s: %v", path, status)
+		}
+	}
+	authority, ok := RootedAuthority([]byte("/home/user"))
+	if !ok {
+		t.Fatal("root refused")
+	}
+	authority.Positives[0].Rights = Read | Write
+	authority.Positives[0].Size = uint8(copy(authority.Positives[0].Path[:], []byte("/mnt")))
+	authority.Positives[1].Rights = Read
+	authority.Positives[1].Size = uint8(copy(authority.Positives[1].Path[:], []byte("/system")))
+	authority.PositiveCount = 2
+	if !authority.Valid() {
+		t.Fatal("authority with positive grants refused")
+	}
+	owner := Owner(9)
+	if status := namespace.SetAuthority(owner, authority); status != StatusOK {
+		t.Fatalf("set authority: %v", status)
+	}
+	// The home root stays read-write.
+	if status := namespace.AuthorizePath(owner, []byte("/home/user/a"), Write, false); status != StatusOK {
+		t.Fatalf("root write: %v", status)
+	}
+	// A read-write positive path and the path itself are writable.
+	for _, path := range []string{"/mnt", "/mnt/w", "/mnt/w/new"} {
+		if status := namespace.AuthorizePath(owner, []byte(path), Write, false); status != StatusOK {
+			t.Fatalf("positive write %s: %v", path, status)
+		}
+	}
+	// A read-only positive path is readable but never writable.
+	if status := namespace.AuthorizePath(owner, []byte("/system/bin/sh"), Read, false); status != StatusOK {
+		t.Fatalf("program read: %v", status)
+	}
+	if status := namespace.AuthorizePath(owner, []byte("/system/bin/sh"), Write, false); status != StatusPermissionDenied {
+		t.Fatalf("program write: %v", status)
+	}
+	// Everything else stays denied: another home, the state tree, and a name
+	// that merely shares a prefix with a granted path.
+	for _, path := range []string{"/home/other", "/home/other/b", "/state", "/", "/mntx", "/system2"} {
+		if status := namespace.AuthorizePath(owner, []byte(path), Read, false); status != StatusPermissionDenied {
+			t.Fatalf("%s: %v", path, status)
+		}
+	}
+	// The grants do not leak to another session.
+	if status := namespace.AuthorizePath(Owner(3), []byte("/home/other/b"), Read, false); status != StatusOK {
+		t.Fatalf("other session: %v", status)
+	}
+}

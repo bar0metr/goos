@@ -108,6 +108,19 @@ run 'user show alice'
 expect 'alice 70000 80000 /home/alice' 'account alice with high UID 70000 GID 80000'
 # Home provisioning is explicit: create the directory the shell is rooted at.
 run 'mkdir /home/alice'
+# A second account with a distinct UID, GID, home and key proves admission is
+# per-account, not a single shared identity.
+run 'group add ops'
+run 'group gid ops 80001'
+run 'user add bob'
+run 'user uid bob 70001'
+run 'user gid bob 80001'
+run 'user home bob /home/bob'
+run 'user show bob'
+expect 'bob 70001 80001 /home/bob' 'account bob with UID 70001 GID 80001'
+run 'mkdir /home/bob'
+# A file bob owns; alice's rooted session must not reach it.
+run 'echo bob-secret > /home/bob/secret'
 
 # Generate a disposable Ed25519 client key and authorize it for the account
 # directly. The legacy authorized_keys file is deliberately never created:
@@ -116,8 +129,20 @@ run 'mkdir /home/alice'
 ssh-keygen -q -t ed25519 -N '' -C identity-session -f "$work/client"
 client_pub=$(cat "$work/client.pub")
 run "user key add alice \"$client_pub\""
+ssh-keygen -q -t ed25519 -N '' -C identity-session-bob -f "$work/bob"
+bob_pub=$(cat "$work/bob.pub")
+run "user key add bob \"$bob_pub\""
 run 'user show alice'
 expect 'yes 1' 'authorized key committed'
+run 'user show bob'
+expect 'yes 1' 'second account key committed'
+# An SSH helper used for the admission assertions below.
+ssh_as() { # key user command
+	ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+		-o BatchMode=yes -o ConnectTimeout=30 -p 22022 -i "$1" \
+		-o KexAlgorithms=curve25519-sha256 -o HostKeyAlgorithms=ssh-ed25519 -o PubkeyAcceptedAlgorithms=ssh-ed25519 \
+		"$2"@127.0.0.1 "$3"
+}
 
 run 'config set system.remote.enabled true'
 run 'config set system.remote.port 22'
@@ -148,6 +173,35 @@ result=$(ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o U
 	alice@127.0.0.1 'stat /mnt/w/alice-made' 2>&1) || fail "SSH exec without the legacy key file: $result"
 printf 'fileless stat: %s\n' "$result"
 printf '%s' "$result" | grep -q 'uid=70000' || fail "fileless admission did not run: $result"
+
+# The second account admits with its own identity and creates its own files.
+result=$(ssh_as "$work/bob" bob 'mkdir /mnt/w/bob-made; stat /mnt/w/bob-made' 2>&1) || fail "SSH exec as bob: $result"
+printf 'bob stat: %s\n' "$result"
+printf '%s' "$result" | grep -q 'uid=70001 gid=80001' || fail "bob stat does not report bob's ownership: $result"
+
+# Cross-account home isolation: alice's rooted session cannot name bob's home.
+if result=$(ssh_as "$work/client" alice 'cat /home/bob/secret' 2>&1); then
+	fail "alice read another account's home: $result"
+fi
+printf 'cross-account denial: %s\n' "$result"
+printf '%s' "$result" | grep -qi 'permission denied' || fail "cross-account read did not fail closed: $result"
+
+# A key authorized for bob must not admit alice.
+if result=$(ssh_as "$work/bob" alice 'true' 2>&1); then
+	fail "bob's key admitted alice: $result"
+fi
+printf 'wrong-key denial: %s\n' "$result"
+
+# A disabled account fails closed even with its own valid key, and re-enabling
+# restores admission.
+run 'user disable bob'
+if result=$(ssh_as "$work/bob" bob 'true' 2>&1); then
+	fail "disabled account was admitted: $result"
+fi
+printf 'disabled denial: %s\n' "$result"
+run 'user enable bob'
+result=$(ssh_as "$work/bob" bob 'stat /mnt/w/bob-made' 2>&1) || fail "re-enabled account admission: $result"
+printf '%s' "$result" | grep -q 'uid=70001' || fail "re-enabled admission did not run: $result"
 
 # Cut the guest off and extract the written volume for the host debugfs check.
 run 'sync'
