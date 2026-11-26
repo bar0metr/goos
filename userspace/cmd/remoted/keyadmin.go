@@ -385,8 +385,14 @@ func keyAdmin(op remoteapi.AdminOperation, argument []byte) (result remoteapi.Ad
 	if err != nil {
 		return result, []byte(err.Error() + "\n")
 	}
-	if (op == remoteapi.AdminKeyAdd || op == remoteapi.AdminKeyRemove) && !syncKeyToAccount(syncRemove, syncValue) {
-		syslog.Warn("remote key mirror into account database failed", syslog.Str("fingerprint", affected))
+	if op == remoteapi.AdminKeyAdd || op == remoteapi.AdminKeyRemove {
+		// The account database is the sole key authority: a key mutation is only
+		// reported as committed once identityd has durably recorded it. A failed
+		// mirror fails the command instead of leaving a stale file authoritative.
+		if !syncKeyToAccount(syncRemove, syncValue) {
+			syslog.Warn("remote key mirror into account database failed", syslog.Str("fingerprint", affected))
+			return remoteapi.AdminUnavailable, []byte("remote key mirror into the account database failed\n")
+		}
 	}
 	return remoteapi.AdminOK, []byte("authorized keys committed fingerprint=" + affected + " generation=" + strconv.FormatUint(generation, 10) + "\n")
 }

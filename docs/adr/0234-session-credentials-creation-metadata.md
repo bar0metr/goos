@@ -101,9 +101,14 @@ the program tree is read-only so the shell can read the command index and
 resolve programs. One account therefore cannot name another account's files
 through the shell, its launched commands, or SFTP. Program execution is
 delegated to PID 1 through the exec channel. Legacy `system.remote.user`,
-`authorized-keys`, and `sftp-root` import into one account idempotently; after a
-committed migration the account database is the sole account and key authority,
-with no fallback to legacy keys on a missing or corrupt database.
+`authorized-keys`, and `sftp-root` import through the explicit local `user
+import-legacy` command: one identityd commit creates the account, its home,
+every validated key and a persisted, versioned marker together, so no partial
+import is observable. An incoming connection never triggers the import, and a
+second import is an `ErrExists` no-op. After the marker commits, the account
+database is the sole account and key authority: listener startup and reload do
+not require the legacy key file, and a legacy key mutation that identityd does
+not durably record fails instead of reporting success.
 
 ### 5. Invariants
 
