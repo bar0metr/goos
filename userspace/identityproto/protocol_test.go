@@ -90,6 +90,7 @@ func replies() []Reply {
 		{Opcode: LookupAuthorizeKey, Result: ResultOK},
 		{Opcode: LookupAuthorizeKey, Result: ResultDenied},
 		{Opcode: LookupGetAccount, Result: ResultOK, Records: []Record{account}},
+		{Opcode: LookupAuthorizeAndResolve, Result: ResultOK, Records: []Record{account}},
 	}
 }
 

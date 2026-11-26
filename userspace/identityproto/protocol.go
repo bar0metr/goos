@@ -156,7 +156,7 @@ const (
 
 func recordKindFor(op Opcode) RecordKind {
 	switch op {
-	case AdminGetAccount, AdminListAccounts, LookupGetAccount:
+	case AdminGetAccount, AdminListAccounts, LookupGetAccount, LookupAuthorizeAndResolve:
 		return RecordAccount
 	case AdminGetGroup, AdminListGroups:
 		return RecordGroup
