@@ -204,3 +204,50 @@ func TestVFSControlsUseSharedOwnership(t *testing.T) {
 		t.Fatal("async executable completion bypasses endpoint ownership")
 	}
 }
+
+// TestAdmissionBindsThroughCoherentLookup enforces §2's admission rule: the
+// principal must be authorized and resolved in one committed snapshot, never by
+// authorizing a key and then fetching a principal by name in a second request.
+func TestAdmissionBindsThroughCoherentLookup(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "remote.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body *ast.FuncDecl
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Name.Name == "bindRemotePrincipal" {
+			body = function
+			break
+		}
+	}
+	if body == nil {
+		t.Fatal("bindRemotePrincipal not found")
+	}
+	var coherent, splitAuthorize, splitResolve int
+	ast.Inspect(body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		identifier, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		switch identifier.Name {
+		case "identityAuthorizeAndResolve":
+			coherent++
+		case "identityAuthorizeKey":
+			splitAuthorize++
+		case "identityGetAccount":
+			splitResolve++
+		}
+		return true
+	})
+	if coherent != 1 {
+		t.Fatalf("bindRemotePrincipal makes %d coherent authorize-and-resolve calls, want 1", coherent)
+	}
+	if splitAuthorize != 0 || splitResolve != 0 {
+		t.Fatalf("bindRemotePrincipal still splits authorization (%d) from resolution (%d)", splitAuthorize, splitResolve)
+	}
+}
