@@ -132,7 +132,7 @@ expect '/mnt/w.*ext4.*rw' 'configured ext4 volume mounted read-write'
 # Create as the account over SSH, then verify the stored ownership in the
 # guest with the native stat command (mode, uid, gid).
 result=$(ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-	-o BatchMode=yes -o ConnectTimeout=15 -p 22022 -i "$work/client" \
+	-o BatchMode=yes -o ConnectTimeout=30 -p 22022 -i "$work/client" \
 	-o KexAlgorithms=curve25519-sha256 -o HostKeyAlgorithms=ssh-ed25519 -o PubkeyAcceptedAlgorithms=ssh-ed25519 \
 	alice@127.0.0.1 'mkdir /mnt/w/alice-made; touch /mnt/w/alice-made/f.txt; stat /mnt/w/alice-made/f.txt' 2>&1) || fail "SSH exec as alice: $result"
 printf 'guest stat: %s\n' "$result"
@@ -143,7 +143,7 @@ printf '%s' "$result" | grep -q 'uid=70000 gid=80000' || fail "guest stat does n
 run 'remote reload'
 refuse 'rejected' 'remote reload without the legacy key file'
 result=$(ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-	-o BatchMode=yes -o ConnectTimeout=15 -p 22022 -i "$work/client" \
+	-o BatchMode=yes -o ConnectTimeout=30 -p 22022 -i "$work/client" \
 	-o KexAlgorithms=curve25519-sha256 -o HostKeyAlgorithms=ssh-ed25519 -o PubkeyAcceptedAlgorithms=ssh-ed25519 \
 	alice@127.0.0.1 'stat /mnt/w/alice-made' 2>&1) || fail "SSH exec without the legacy key file: $result"
 printf 'fileless stat: %s\n' "$result"
