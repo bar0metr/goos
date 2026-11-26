@@ -310,6 +310,34 @@ func identityAuthorizeKey(username []byte, key [32]byte) identityproto.Result {
 // persistent lookup session. It returns the record and the identity result;
 // only ResultOK with exactly one record is a valid principal. An empty or
 // corrupt principal view fails closed.
+// identityAuthorizeAndResolve asks identityd for one coherent answer: the key
+// authorization and the resolved account record from the same committed
+// snapshot. Admission never authorizes one snapshot and resolves another.
+func identityAuthorizeAndResolve(username []byte, key [32]byte) (identityproto.Record, identityproto.Result) {
+	session := identityLookupSession()
+	if session == 0 {
+		return identityproto.Record{}, identityproto.ResultUnavailable
+	}
+	correlation++
+	var message ipc.Message
+	if !identityproto.EncodeRequest(&identityproto.Request{Opcode: identityproto.LookupAuthorizeAndResolve, Name: username, Key: key[:]}, correlation, &message) ||
+		!sendMessage(uint64(session), message) {
+		return identityproto.Record{}, identityproto.ResultUnavailable
+	}
+	reply, status := receive(uint64(session), identityControlDeadline)
+	if status != ipc.StatusOK {
+		return identityproto.Record{}, identityproto.ResultUnavailable
+	}
+	var decoded identityproto.Reply
+	if !identityproto.DecodeReply(&reply, correlation, identityproto.LookupAuthorizeAndResolve, &decoded) {
+		return identityproto.Record{}, identityproto.ResultUnavailable
+	}
+	if decoded.Result != identityproto.ResultOK || len(decoded.Records) != 1 {
+		return identityproto.Record{}, decoded.Result
+	}
+	return decoded.Records[0], identityproto.ResultOK
+}
+
 func identityGetAccount(username []byte) (identityproto.Record, identityproto.Result) {
 	session := identityLookupSession()
 	if session == 0 {

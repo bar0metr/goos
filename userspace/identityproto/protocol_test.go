@@ -58,6 +58,7 @@ func requests() []Request {
 		{Opcode: AdminImportLegacy, Name: name, Home: home, Key: EncodeImportKeys([][]byte{key})},
 		{Opcode: LookupAuthorizeKey, Name: name, Key: key},
 		{Opcode: LookupGetAccount, Name: name},
+		{Opcode: LookupAuthorizeAndResolve, Name: name, Key: key},
 	}
 }
 

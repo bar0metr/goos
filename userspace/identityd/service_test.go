@@ -618,3 +618,31 @@ func TestDispatchImportLegacyRejectsBadKeys(t *testing.T) {
 		t.Fatalf("malformed keys = %v, want ResultInvalid", r.Result)
 	}
 }
+
+func TestDispatchLookupAuthorizeAndResolve(t *testing.T) {
+	service := newTestService()
+	mustProvision(t, service)
+	if r := service.HandleRequest(&identityproto.Request{Opcode: identityproto.AdminAddAccount, Name: []byte("alice")}); r.Result != identityproto.ResultOK {
+		t.Fatalf("add = %v", r.Result)
+	}
+	if r := service.HandleRequest(&identityproto.Request{Opcode: identityproto.AdminSetHome, Name: []byte("alice"), Home: []byte("/home/alice")}); r.Result != identityproto.ResultOK {
+		t.Fatalf("set home = %v", r.Result)
+	}
+	if r := service.HandleRequest(&identityproto.Request{Opcode: identityproto.AdminAddKey, Name: []byte("alice"), Key: key(7)}); r.Result != identityproto.ResultOK {
+		t.Fatalf("add key = %v", r.Result)
+	}
+	r := service.HandleRequest(&identityproto.Request{Opcode: identityproto.LookupAuthorizeAndResolve, Name: []byte("alice"), Key: key(7)})
+	if r.Result != identityproto.ResultOK || len(r.Records) != 1 {
+		t.Fatalf("resolve = %v records=%d, want OK and one record", r.Result, len(r.Records))
+	}
+	record := r.Records[0]
+	if record.Kind != identityproto.RecordAccount || record.AccountID == 0 || record.UID == 0 || record.GID == 0 ||
+		len(record.Name) == 0 || len(record.Home) == 0 || record.Epoch == ([16]byte{}) {
+		t.Fatalf("record = %+v", record)
+	}
+	// A wrong key denies and resolves nothing.
+	denied := service.HandleRequest(&identityproto.Request{Opcode: identityproto.LookupAuthorizeAndResolve, Name: []byte("alice"), Key: key(9)})
+	if denied.Result == identityproto.ResultOK || len(denied.Records) != 0 {
+		t.Fatalf("wrong key = %v records=%d, want denial", denied.Result, len(denied.Records))
+	}
+}

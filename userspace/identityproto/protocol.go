@@ -111,7 +111,8 @@ const (
 	// Lookup operations.
 	LookupAuthorizeKey
 	LookupGetAccount
-	lastOpcode = LookupGetAccount
+	LookupAuthorizeAndResolve
+	lastOpcode = LookupAuthorizeAndResolve
 )
 
 func isControlOpcode(op Opcode) bool { return op == OpAddAdmin || op == OpAddLookup }
@@ -424,6 +425,8 @@ func validRequest(r *Request) bool {
 			r.UID == 0 && r.GID == 0 && len(r.Fingerprint) == 0 && len(r.IDs) == 0
 	case LookupAuthorizeKey:
 		return !r.Enabled && validName(r.Name) && validKey(r.Key) && scalar && len(r.Home) == 0 && len(r.Fingerprint) == 0 && len(r.IDs) == 0
+	case LookupAuthorizeAndResolve:
+		return !r.Enabled && validName(r.Name) && validKey(r.Key) && scalar && len(r.Home) == 0 && len(r.Fingerprint) == 0 && len(r.IDs) == 0
 	}
 	return false
 }
@@ -558,7 +561,7 @@ func validReply(r *Reply) bool {
 			return r.Accounts <= identity.MaxAccounts && r.Groups <= identity.MaxGroups && r.Keys <= identity.MaxTotalKeys && len(r.Records) == 0
 		}
 		return counts && len(r.Records) == 0
-	case AdminGetAccount, AdminGetGroup, LookupGetAccount:
+	case AdminGetAccount, AdminGetGroup, LookupGetAccount, LookupAuthorizeAndResolve:
 		if r.Result == ResultOK {
 			return counts && len(r.Records) == 1 && validRecord(&r.Records[0]) && r.Records[0].Kind == recordKindFor(r.Opcode)
 		}

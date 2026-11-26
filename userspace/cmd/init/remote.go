@@ -347,13 +347,10 @@ func launchRemoteWorker(worker *remoteWorker, executable supervisor.Executable) 
 // and a worker-supplied name or AccountID never chooses the grant: the whole
 // decision is re-derived from the identity database at admission.
 func bindRemotePrincipal(worker *remoteWorker, username []byte, key [32]byte) remoteapi.Result {
-	if result := identityAuthorizeKey(username, key); result != identityproto.ResultOK {
-		if result == identityproto.ResultUnavailable || result == identityproto.ResultUnprovisioned {
-			return remoteapi.ResultUnavailable
-		}
-		return remoteapi.ResultPermissionDenied
-	}
-	record, result := identityGetAccount(username)
+	// One coherent authorize-and-resolve: the key authorization and the
+	// principal record come from the same committed snapshot, so a concurrent
+	// key removal or account change cannot authorize one state and bind another.
+	record, result := identityAuthorizeAndResolve(username, key)
 	if result != identityproto.ResultOK {
 		if result == identityproto.ResultUnavailable || result == identityproto.ResultUnprovisioned {
 			return remoteapi.ResultUnavailable

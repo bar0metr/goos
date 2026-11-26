@@ -221,6 +221,18 @@ func (s *Service) HandleRequest(r *identityproto.Request) identityproto.Reply {
 	case identityproto.LookupAuthorizeKey:
 		_, result := s.AuthorizeKey(string(r.Name), r.Key)
 		reply.Result = result
+	case identityproto.LookupAuthorizeAndResolve:
+		// One coherent answer from the same committed snapshot: the key
+		// authorization and the resolved account record are read together, so
+		// admission never authorizes one snapshot and resolves another.
+		if _, result := s.AuthorizeKey(string(r.Name), r.Key); result != identityproto.ResultOK {
+			reply.Result = result
+		} else if account, err := s.store.AccountByName(string(r.Name)); err != nil {
+			reply.Result = resultFor(err)
+		} else {
+			reply.Result = identityproto.ResultOK
+			reply.Records = []identityproto.Record{s.accountRecord(account)}
+		}
 
 	case identityproto.AdminAddAccount:
 		reply.Result = s.mutate(func(st *identity.Store) error {
