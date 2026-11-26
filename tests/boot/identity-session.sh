@@ -109,11 +109,12 @@ expect 'alice 70000 80000 /home/alice' 'account alice with high UID 70000 GID 80
 # Home provisioning is explicit: create the directory the shell is rooted at.
 run 'mkdir /home/alice'
 
-# Generate a disposable Ed25519 client key, create the legacy authorized_keys
-# file the listener still requires, and authorize the key for the account.
+# Generate a disposable Ed25519 client key and authorize it for the account
+# directly. The legacy authorized_keys file is deliberately never created:
+# the account database is the sole key authority and the listener must start
+# and admit accounts without that file.
 ssh-keygen -q -t ed25519 -N '' -C identity-session -f "$work/client"
 client_pub=$(cat "$work/client.pub")
-run "remote key add \"$client_pub\""
 run "user key add alice \"$client_pub\""
 run 'user show alice'
 expect 'yes 1' 'authorized key committed'
@@ -122,7 +123,7 @@ run 'config set system.remote.enabled true'
 run 'config set system.remote.port 22'
 run 'remote reload'
 refuse() { ! grep -q "$1" "$work/output" || fail "$2"; }
-refuse 'rejected' 'remote reload accepted the account listener'
+refuse 'rejected' 'remote reload accepted the account listener without the legacy key file'
 
 # The ext4 volume is configured to mount read-write at /mnt/w at boot.
 run 'mount'
@@ -136,6 +137,17 @@ result=$(ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o U
 	alice@127.0.0.1 'mkdir /mnt/w/alice-made; touch /mnt/w/alice-made/f.txt; stat /mnt/w/alice-made/f.txt' 2>&1) || fail "SSH exec as alice: $result"
 printf 'guest stat: %s\n' "$result"
 printf '%s' "$result" | grep -q 'uid=70000 gid=80000' || fail "guest stat does not report the account ownership: $result"
+
+# The account database is the sole key authority after cutover: reload and
+# admit the same account again while the legacy key file stays absent.
+run 'remote reload'
+refuse 'rejected' 'remote reload without the legacy key file'
+result=$(ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+	-o BatchMode=yes -o ConnectTimeout=15 -p 22022 -i "$work/client" \
+	-o KexAlgorithms=curve25519-sha256 -o HostKeyAlgorithms=ssh-ed25519 -o PubkeyAcceptedAlgorithms=ssh-ed25519 \
+	alice@127.0.0.1 'stat /mnt/w/alice-made' 2>&1) || fail "SSH exec without the legacy key file: $result"
+printf 'fileless stat: %s\n' "$result"
+printf '%s' "$result" | grep -q 'uid=70000' || fail "fileless admission did not run: $result"
 
 # Cut the guest off and extract the written volume for the host debugfs check.
 run 'sync'
