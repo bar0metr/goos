@@ -116,8 +116,16 @@ const (
 )
 
 func isControlOpcode(op Opcode) bool { return op == OpAddAdmin || op == OpAddLookup }
-func isDataOpcode(op Opcode) bool    { return op >= AdminStatus && op <= lastOpcode }
-func isListOpcode(op Opcode) bool    { return op == AdminListAccounts || op == AdminListGroups }
+
+// IsLookupOpcode reports whether op may run on a lookup session. Every other
+// data opcode requires the administration session, so a lookup session can
+// never mutate or provision. This is the single classification the service's
+// session gate and its tests share.
+func IsLookupOpcode(op Opcode) bool {
+	return op == LookupAuthorizeKey || op == LookupGetAccount || op == LookupAuthorizeAndResolve
+}
+func isDataOpcode(op Opcode) bool { return op >= AdminStatus && op <= lastOpcode }
+func isListOpcode(op Opcode) bool { return op == AdminListAccounts || op == AdminListGroups }
 
 // Result is a data-operation result code.
 type Result uint8

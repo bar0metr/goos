@@ -818,3 +818,20 @@ func FuzzDecodeListReply(f *testing.F) {
 		}
 	})
 }
+
+func TestIsLookupOpcode(t *testing.T) {
+	// Every lookup opcode must run on a lookup session; the same opcodes must
+	// be refused on an administration session, and vice versa. Admission calls
+	// LookupAuthorizeAndResolve on the persistent lookup session, so omitting
+	// it here silently breaks account admission.
+	for _, op := range []Opcode{LookupAuthorizeKey, LookupGetAccount, LookupAuthorizeAndResolve} {
+		if !IsLookupOpcode(op) {
+			t.Fatalf("lookup opcode %d classified as administration", op)
+		}
+	}
+	for _, op := range []Opcode{AdminProvision, AdminAddAccount, AdminAddKey, AdminImportLegacy, AdminStatus} {
+		if IsLookupOpcode(op) {
+			t.Fatalf("administration opcode %d classified as lookup", op)
+		}
+	}
+}
