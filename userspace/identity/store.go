@@ -403,6 +403,58 @@ func (s *Store) SetGroupGID(name string, gid uint32) error {
 	return nil
 }
 
+// LegacyMigrated returns the persisted legacy-import marker version: 0 when no
+// import has committed, otherwise the imported format version.
+func (s *Store) LegacyMigrated() uint8 {
+	if s == nil {
+		return 0
+	}
+	return s.legacyMigrated
+}
+
+// MarkLegacyMigrated records the persisted legacy-import marker. It is called
+// only by the atomic import so the marker commits with the account and keys.
+func (s *Store) MarkLegacyMigrated(version uint8) error {
+	if s == nil {
+		return ErrUnavailable
+	}
+	if err := s.guardMutation(); err != nil {
+		return err
+	}
+	if version == 0 || s.legacyMigrated != 0 {
+		return errExists("legacy import marker")
+	}
+	s.legacyMigrated = version
+	s.sequence++
+	return nil
+}
+
+// ImportLegacy provisions the single legacy account, its home, and its
+// validated keys in one store mutation and records the persisted marker. It is
+// the sole automatic authority for the legacy cutover: it refuses an existing
+// account name rather than merging into one, and a second import is an
+// ErrExists no-op, so a completed import is never re-applied.
+func (s *Store) ImportLegacy(name, home string, keys []Key) error {
+	if s == nil {
+		return ErrUnavailable
+	}
+	if s.legacyMigrated != 0 {
+		return errExists("legacy import marker")
+	}
+	if _, err := s.CreateAccount(name); err != nil {
+		return err
+	}
+	if err := s.SetHome(name, home); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if err := s.AddKey(name, key); err != nil {
+			return err
+		}
+	}
+	return s.MarkLegacyMigrated(1)
+}
+
 func (s *Store) SetHome(name, home string) error {
 	if s == nil {
 		return ErrUnavailable

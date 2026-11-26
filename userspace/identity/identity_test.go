@@ -739,6 +739,82 @@ func TestSetPrimaryGIDAndSetGroupsByNumber(t *testing.T) {
 	}
 }
 
+func TestImportLegacyIsAtomicAndOnce(t *testing.T) {
+	s := NewStoreWithEpoch(epochFromByte(0x42))
+	var key Key
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	if err := s.ImportLegacy("legacy", "/home/legacy", []Key{key}); err != nil {
+		t.Fatal(err)
+	}
+	if s.LegacyMigrated() != 1 {
+		t.Fatalf("marker = %d, want 1", s.LegacyMigrated())
+	}
+	a, err := s.AccountByName("legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(a.Home[:a.HomeLen]) != "/home/legacy" || a.KeyCount != 1 {
+		t.Fatalf("account home=%q keys=%d", a.Home[:a.HomeLen], a.KeyCount)
+	}
+	if err := s.ImportLegacy("legacy", "/home/legacy", []Key{key}); err == nil {
+		t.Fatal("second import was accepted")
+	}
+	data, err := Encode(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.LegacyMigrated() != 1 {
+		t.Fatalf("decoded marker = %d, want 1", decoded.LegacyMigrated())
+	}
+	again, err := Encode(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, again) {
+		t.Fatal("marker round-trip is not byte-identical")
+	}
+}
+
+func TestSnapshotUpgradesVersion2WithoutMarker(t *testing.T) {
+	s := NewStoreWithEpoch(epochFromByte(0x43))
+	data, err := Encode(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Drop the version-3 marker byte and re-version the header as version 2.
+	const header = len(snapshotMagic) + versionSize + sequenceSize
+	const payloadFixed = epochSize + 4*8
+	marker := header + payloadFixed
+	v2 := make([]byte, 0, len(data)-1)
+	v2 = append(v2, data[:marker]...)
+	v2 = append(v2, data[marker+1:]...)
+	binary.LittleEndian.PutUint16(v2[len(snapshotMagic):len(snapshotMagic)+versionSize], 2)
+	body := v2[:len(v2)-digestSize]
+	sum := sha256.Sum256(body)
+	copy(v2[len(v2)-digestSize:], sum[:])
+	decoded, err := Decode(v2)
+	if err != nil {
+		t.Fatalf("decode version 2: %v", err)
+	}
+	if decoded.LegacyMigrated() != 0 || decoded.Epoch() != s.Epoch() {
+		t.Fatalf("upgrade lost epoch or marker: marker=%d", decoded.LegacyMigrated())
+	}
+	// The next commit re-encodes the documented version 3 layout.
+	upgraded, err := Encode(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binary.LittleEndian.Uint16(upgraded[len(snapshotMagic):len(snapshotMagic)+versionSize]) != snapshotVersion {
+		t.Fatal("re-encode did not write the current snapshot version")
+	}
+}
+
 func TestSetGroupGID(t *testing.T) {
 	s := NewStore()
 	alice := mustAccount(t, s, "alice")
