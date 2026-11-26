@@ -69,7 +69,29 @@ type remoteWorker struct {
 	// principalBound says one is present. Every account session uses it.
 	principal      remotePrincipal
 	principalBound bool
+	// pending is the bounded, one-use admission record an allowed handshake
+	// probe issues. The signed OperationAuthenticate must present its token,
+	// name and key; PID 1 consumes it exactly once.
+	pending remoteAdmission
 }
+
+// remoteAdmission is PID 1's outstanding handshake authorization record. It is
+// bound to this worker, the probed identity, and the one-use token, and it is
+// cleared on teardown and on the first matching signed authentication.
+type remoteAdmission struct {
+	valid    bool
+	token    uint64
+	username [remoteapi.MaxUsername]byte
+	userSize uint8
+	key      [32]byte
+	epoch    [16]byte
+	account  uint64
+}
+
+// remoteAdmissionTokens is PID 1's monotone one-use token counter. A token is
+// never reused, so a replayed or stale token cannot match an outstanding
+// record.
+var remoteAdmissionTokens uint64
 
 var (
 	remoteRegistry       supervisor.RemoteRegistry
@@ -346,7 +368,26 @@ func launchRemoteWorker(worker *remoteWorker, executable supervisor.Executable) 
 // missing, removed-key, recreated, corrupt or unavailable account fails closed,
 // and a worker-supplied name or AccountID never chooses the grant: the whole
 // decision is re-derived from the identity database at admission.
-func bindRemotePrincipal(worker *remoteWorker, username []byte, key [32]byte) remoteapi.Result {
+// consumeAdmission accepts exactly the outstanding record for this worker and
+// clears it, so a second Authenticate with the same token fails. A mismatched
+// token, name or key also clears the record: an uncertain admission never
+// leaves a reusable authorization behind.
+func (worker *remoteWorker) consumeAdmission(token uint64, username []byte, key [32]byte) (remoteAdmission, bool) {
+	pending := worker.pending
+	worker.pending = remoteAdmission{}
+	if !pending.valid || token == 0 || token != pending.token || key != pending.key ||
+		int(pending.userSize) != len(username) {
+		return remoteAdmission{}, false
+	}
+	for index := 0; index < len(username); index++ {
+		if username[index] != pending.username[index] {
+			return remoteAdmission{}, false
+		}
+	}
+	return pending, true
+}
+
+func bindRemotePrincipal(worker *remoteWorker, username []byte, key [32]byte, pendingEpoch [16]byte, pendingAccount uint64) remoteapi.Result {
 	// One coherent authorize-and-resolve: the key authorization and the
 	// principal record come from the same committed snapshot, so a concurrent
 	// key removal or account change cannot authorize one state and bind another.
@@ -355,6 +396,12 @@ func bindRemotePrincipal(worker *remoteWorker, username []byte, key [32]byte) re
 		if result == identityproto.ResultUnavailable || result == identityproto.ResultUnprovisioned {
 			return remoteapi.ResultUnavailable
 		}
+		return remoteapi.ResultPermissionDenied
+	}
+	// The probed record must still be the same identity in the same database
+	// epoch; a changed epoch or AccountID means deletion and recreation, which
+	// fails the outstanding admission even if the same key was re-added.
+	if record.Epoch != pendingEpoch || record.AccountID != pendingAccount {
 		return remoteapi.ResultPermissionDenied
 	}
 	if record.Kind != identityproto.RecordAccount || !record.Enabled || record.AccountID == 0 ||
@@ -513,18 +560,26 @@ func pollRemoteWorker(worker *remoteWorker) {
 		// denies (fail closed) here and is reported at admission. The account
 		// database is the sole authority: the legacy import is an explicit
 		// local command, never triggered by an incoming connection.
-		if identityAuthorizeKey(request.Username[:request.UserSize], request.Key) == identityproto.ResultOK {
+		if record, resolved := identityAuthorizeAndResolve(request.Username[:request.UserSize], request.Key); resolved == identityproto.ResultOK {
+			remoteAdmissionTokens++
+			worker.pending = remoteAdmission{valid: true, token: remoteAdmissionTokens, userSize: request.UserSize,
+				key: request.Key, epoch: record.Epoch, account: record.AccountID}
+			copy(worker.pending.username[:], request.Username[:request.UserSize])
 			result = remoteapi.ResultOK
 		} else {
+			worker.pending = remoteAdmission{}
 			result = remoteapi.ResultPermissionDenied
 		}
 	case remoteapi.OperationAuthenticate:
-		// Revalidate the key and bind the full principal before any grant.
-		// The worker's earlier handshake authorize reply is never trusted for
-		// admission: this re-derives the decision from the current committed
-		// identity snapshot, so a disabled/deleted/recreated account or a
-		// removed key fails closed.
-		result = bindRemotePrincipal(worker, request.Username[:request.UserSize], request.Key)
+		// Accept only the matching outstanding record, consume it once, then
+		// revalidate the same identity against the current committed snapshot.
+		// The probe's allowed reply is never sufficient for admission.
+		pending, ok := worker.consumeAdmission(request.Token, request.Username[:request.UserSize], request.Key)
+		if !ok {
+			result = remoteapi.ResultPermissionDenied
+			break
+		}
+		result = bindRemotePrincipal(worker, request.Username[:request.UserSize], request.Key, pending.epoch, pending.account)
 		if result != remoteapi.ResultOK {
 			break
 		}
@@ -598,10 +653,14 @@ func replyRemote(worker *remoteWorker, operation remoteapi.Operation, result rem
 		mode = worker.mode
 	}
 	session := worker.id
+	token := uint64(0)
 	if operation == remoteapi.OperationAuthorizeKey {
 		session = 0
+		if result == remoteapi.ResultOK {
+			token = worker.pending.token
+		}
 	}
-	return remoteapi.EncodeReply(&remoteapi.Reply{Operation: operation, Result: result, Session: session, Mode: mode}, attachments, requestCorrelation, &reply) && sendMessage(uint64(worker.control), reply)
+	return remoteapi.EncodeReply(&remoteapi.Reply{Operation: operation, Result: result, Session: session, Mode: mode, Token: token}, attachments, requestCorrelation, &reply) && sendMessage(uint64(worker.control), reply)
 }
 
 func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
@@ -833,6 +892,9 @@ func closeRemoteWorker(worker *remoteWorker) {
 	if worker.id == 0 {
 		return
 	}
+	// Teardown clears any outstanding admission token so a closed connection
+	// can never be resumed.
+	worker.pending = remoteAdmission{}
 	remoteRegistry.BeginClose(worker.id, worker.owner)
 	remoteKill(worker.process)
 	releaseRemoteShell(worker)

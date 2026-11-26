@@ -13,8 +13,10 @@ const (
 	// account-aware authorization: OperationAuthenticate and the new
 	// OperationAuthorizeKey carry the requested username and the presented
 	// 32-byte Ed25519 public key so PID 1 can revalidate against the identity
-	// database at admission. A message of any other version fails decoding.
-	Version       = uint16(4)
+	// database at admission. Version 5 adds the bounded one-use admission
+	// token PID 1 issues to the handshake authorization and consumes once at
+	// signed authentication. A message of any other version fails decoding.
+	Version       = uint16(5)
 	MaxSessions   = 4
 	MaxHandshakes = 2
 	MaxWorkers    = MaxSessions + MaxHandshakes
@@ -102,6 +104,11 @@ type Request struct {
 	Username [MaxUsername]byte
 	UserSize uint8
 	Key      [32]byte
+	// Token is the one-use admission token PID 1 issued to this worker's
+	// handshake authorization. OperationAuthorizeKey sends zero; the signed
+	// OperationAuthenticate must present the exact outstanding token, which PID 1
+	// consumes once.
+	Token uint64
 }
 
 func validRequest(request *Request) bool {
@@ -109,6 +116,9 @@ func validRequest(request *Request) bool {
 		return false
 	}
 	if request.Operation == OperationAuthenticate || request.Operation == OperationAuthorizeKey {
+		if request.Operation == OperationAuthorizeKey && request.Token != 0 {
+			return false
+		}
 		return request.Mode == ModeTerminal && request.Session == 0 && request.Geometry == (Geometry{}) &&
 			request.CommandSize == 0 && request.Command == 0 &&
 			request.UserSize >= 1 && int(request.UserSize) <= MaxUsername &&
@@ -162,6 +172,7 @@ func EncodeRequest(request *Request, correlation uint64, out *ipc.Message) bool 
 	binary.LittleEndian.PutUint16(out.Payload[18:20], request.Geometry.Rows)
 	binary.LittleEndian.PutUint64(out.Payload[24:32], request.Geometry.Sequence)
 	if request.Operation == OperationAuthenticate || request.Operation == OperationAuthorizeKey {
+		binary.LittleEndian.PutUint64(out.Payload[24:32], request.Token)
 		copy(out.Payload[requestSize:], request.Username[:request.UserSize])
 		copy(out.Payload[requestSize+request.UserSize:], request.Key[:])
 	} else {
@@ -201,6 +212,7 @@ func DecodeRequest(in *ipc.Message, out *Request) bool {
 	request.Geometry.Rows = binary.LittleEndian.Uint16(in.Payload[18:20])
 	request.Geometry.Sequence = binary.LittleEndian.Uint64(in.Payload[24:32])
 	if auth {
+		request.Token = binary.LittleEndian.Uint64(in.Payload[24:32])
 		copy(request.Username[:], in.Payload[requestSize:requestSize+int(request.UserSize)])
 		copy(request.Key[:], in.Payload[requestSize+int(request.UserSize):requestSize+int(request.UserSize)+32])
 		request.Geometry = Geometry{}
@@ -223,6 +235,10 @@ type Reply struct {
 	Result    Result
 	Session   uint64
 	Mode      ExecutionMode
+	// Token is the one-use admission token OperationAuthorizeKey returns on an
+	// allowed probe. Every other reply and every denial carries zero so a probe
+	// that is not proven cannot mint an admission.
+	Token uint64
 }
 
 func replyHandles(reply *Reply) int {
@@ -243,7 +259,13 @@ func validReply(reply *Reply) bool {
 		return false
 	}
 	if reply.Operation == OperationAuthorizeKey {
-		return reply.Session == 0 && (reply.Result == ResultOK || reply.Result == ResultPermissionDenied)
+		if reply.Result == ResultPermissionDenied {
+			return reply.Session == 0 && reply.Token == 0
+		}
+		return reply.Session == 0 && reply.Result == ResultOK
+	}
+	if reply.Token != 0 {
+		return false
 	}
 	return reply.Result != ResultOK || reply.Session != 0
 }
@@ -266,15 +288,17 @@ func EncodeReply(reply *Reply, attachments []handle.ID, correlation uint64, out 
 	out.Payload[0], out.Payload[1] = byte(reply.Operation), byte(reply.Result)
 	out.Payload[2] = byte(reply.Mode)
 	binary.LittleEndian.PutUint64(out.Payload[8:16], reply.Session)
+	binary.LittleEndian.PutUint64(out.Payload[16:24], reply.Token)
 	copy(out.Handles[:], attachments)
 	return true
 }
 
 func DecodeReply(in *ipc.Message, correlation uint64, operation Operation, out *Reply) bool {
-	if in.ProtocolID != ProtocolID || in.Version != Version || in.Kind != ipc.KindReply || correlation == 0 || in.Correlation != correlation || in.PayloadSize != replySize || !zero(in.Payload[3:8]) || !zero(in.Payload[16:replySize]) {
+	if in.ProtocolID != ProtocolID || in.Version != Version || in.Kind != ipc.KindReply || correlation == 0 || in.Correlation != correlation || in.PayloadSize != replySize || !zero(in.Payload[3:8]) {
 		return false
 	}
-	reply := Reply{Operation: Operation(in.Payload[0]), Result: Result(in.Payload[1]), Mode: ExecutionMode(in.Payload[2]), Session: binary.LittleEndian.Uint64(in.Payload[8:16])}
+	reply := Reply{Operation: Operation(in.Payload[0]), Result: Result(in.Payload[1]), Mode: ExecutionMode(in.Payload[2]),
+		Session: binary.LittleEndian.Uint64(in.Payload[8:16]), Token: binary.LittleEndian.Uint64(in.Payload[16:24])}
 	if reply.Operation != operation || !validReply(&reply) || int(in.HandleCount) != replyHandles(&reply) {
 		return false
 	}

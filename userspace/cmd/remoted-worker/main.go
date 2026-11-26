@@ -46,6 +46,7 @@ var exitKnown bool
 var authenticatedUser [remoteapi.MaxUsername]byte
 var authenticatedUserSize uint8
 var authenticatedKey [32]byte
+var authenticatedToken uint64
 
 //export userspaceMain
 func userspaceMain() {
@@ -104,11 +105,13 @@ func userspaceMain() {
 		subsystem = sftpSubsystem
 	}
 	authorizeKey := func(requested string, key ed25519.PublicKey) (bool, error) {
-		if !authorizeKeyIPC(requested, key) {
+		token, allowed := authorizeKeyIPC(requested, key)
+		if !allowed {
 			return false, nil
 		}
 		authenticatedUserSize = uint8(copy(authenticatedUser[:], requested))
 		copy(authenticatedKey[:], key)
+		authenticatedToken = token
 		return true, nil
 	}
 	var err error
@@ -125,7 +128,7 @@ func userspaceMain() {
 	conn.ClearDeadline()
 	signingClient.deadline = 0
 	handshaken = true
-	authenticated, _, ok := call(remoteapi.Request{Operation: remoteapi.OperationAuthenticate, Username: authenticatedUser, UserSize: authenticatedUserSize, Key: authenticatedKey})
+	authenticated, _, ok := call(remoteapi.Request{Operation: remoteapi.OperationAuthenticate, Username: authenticatedUser, UserSize: authenticatedUserSize, Key: authenticatedKey, Token: authenticatedToken})
 	if !ok {
 		syslog.Warn("remote session admission refused")
 		finish(1)
@@ -407,9 +410,9 @@ func workerOutputFree() int { return output.Free() }
 // database: the reply is only an authorization decision, never a session or a
 // grant, and PID 1 revalidates at admission anyway. It is bounded by the SSH
 // handshake timeout because it runs inside Handshake.
-func authorizeKeyIPC(username string, key ed25519.PublicKey) bool {
+func authorizeKeyIPC(username string, key ed25519.PublicKey) (uint64, bool) {
 	if !remoteapi.ValidUsername([]byte(username)) || len(key) != ed25519.PublicKeySize {
-		return false
+		return 0, false
 	}
 	var request remoteapi.Request
 	request.Operation = remoteapi.OperationAuthorizeKey
@@ -418,22 +421,25 @@ func authorizeKeyIPC(username string, key ed25519.PublicKey) bool {
 	sequence++
 	var message ipc.Message
 	if !remoteapi.EncodeRequest(&request, sequence, &message) || !remoteservice.Send(control, &message) {
-		return false
+		return 0, false
 	}
 	deadline := remoteservice.Now() + conn.TimeoutTicks
 	for remoteservice.Now() < deadline {
 		if remoteservice.Receive(control, deadline-remoteservice.Now(), &message) != kcall.StatusOK {
-			return false
+			return 0, false
 		}
 		var reply remoteapi.Reply
 		if !remoteapi.DecodeReply(&message, sequence, remoteapi.OperationAuthorizeKey, &reply) {
 			remoteservice.CloseHandles(&message)
-			return false
+			return 0, false
 		}
 		remoteservice.CloseHandles(&message)
-		return reply.Result == remoteapi.ResultOK
+		if reply.Result != remoteapi.ResultOK || reply.Token == 0 {
+			return 0, false
+		}
+		return reply.Token, true
 	}
-	return false
+	return 0, false
 }
 
 func call(request remoteapi.Request) (remoteapi.Reply, [3]handle.ID, bool) {

@@ -991,6 +991,8 @@ CA-1223	goos/userspace/identity	ErrOldFormat	process	immutable	none
 CA-1224	goos/userspace/identityd	ErrExists	process	immutable	none
 CA-1225	goos/userspace/bin/identityprobe	manifest	process	immutable	none
 CA-1226	goos/userspace/cmd/init	identityLookup	process	owned	none
+CA-0177	goos/userspace/cmd/init	remoteAdmissionTokens	process	owned	none
+CA-0178	goos/userspace/cmd/remoted-worker	authenticatedToken	process	owned	none
 CA-1229	goos/userspace/cmd/remoted-worker	authenticatedKey	process	owned	none
 CA-1230	goos/userspace/cmd/remoted-worker	authenticatedUser	process	owned	none
 CA-1231	goos/userspace/cmd/remoted-worker	authenticatedUserSize	process	owned	none

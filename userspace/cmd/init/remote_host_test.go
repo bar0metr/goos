@@ -251,3 +251,65 @@ func TestAdmissionBindsThroughCoherentLookup(t *testing.T) {
 		t.Fatalf("bindRemotePrincipal still splits authorization (%d) from resolution (%d)", splitAuthorize, splitResolve)
 	}
 }
+
+// TestAdmissionUsesOneUseToken enforces §2's admission rule at the source
+// level: a handshake probe must issue a bounded one-use token, and the signed
+// authentication must consume it before binding the principal.
+func TestAdmissionUsesOneUseToken(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "remote.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var poll *ast.FuncDecl
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Name.Name == "pollRemoteWorker" {
+			poll = function
+			break
+		}
+	}
+	if poll == nil {
+		t.Fatal("pollRemoteWorker not found")
+	}
+	var issues, consumes int
+	ast.Inspect(poll, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.IncDecStmt:
+			if identifier, ok := typed.X.(*ast.Ident); ok && identifier.Name == "remoteAdmissionTokens" {
+				issues++
+			}
+		case *ast.CallExpr:
+			selector, ok := typed.Fun.(*ast.SelectorExpr)
+			if ok && selector.Sel.Name == "consumeAdmission" {
+				consumes++
+			}
+		}
+		return true
+	})
+	if issues != 1 {
+		t.Fatalf("probe issues %d admission tokens, want 1", issues)
+	}
+	if consumes != 1 {
+		t.Fatalf("signed authentication consumes %d admission tokens, want 1", consumes)
+	}
+	// Teardown must clear an outstanding token so a closed connection cannot resume.
+	var closes bool
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "closeRemoteWorker" {
+			continue
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			assignment, ok := node.(*ast.AssignStmt)
+			if ok && len(assignment.Lhs) == 1 {
+				if selector, ok := assignment.Lhs[0].(*ast.SelectorExpr); ok && selector.Sel.Name == "pending" {
+					closes = true
+				}
+			}
+			return true
+		})
+	}
+	if !closes {
+		t.Fatal("closeRemoteWorker does not clear the outstanding admission")
+	}
+}
