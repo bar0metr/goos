@@ -387,6 +387,11 @@ func importLegacy(data startup.Data, channel handle.ID) {
 		}
 		keys = append(keys, public)
 	}
+	// An empty database is provisioned once before the one-shot import; this is
+	// the explicit local recovery path, never an incoming-connection action.
+	if state := exchange(channel, identityproto.Request{Opcode: identityproto.AdminStatus}).State; state == identityproto.StateUnprovisioned {
+		requireResult(exchange(channel, identityproto.Request{Opcode: identityproto.AdminProvision}).Result)
+	}
 	reply := exchange(channel, identityproto.Request{Opcode: identityproto.AdminImportLegacy,
 		Name: name, Home: home, Key: identityproto.EncodeImportKeys(keys)})
 	if reply.Result == identityproto.ResultExists {

@@ -55,6 +55,7 @@ func requests() []Request {
 		{Opcode: AdminAddGroup, Name: []byte("wheel")},
 		{Opcode: AdminDeleteGroup, Name: []byte("wheel")},
 		{Opcode: AdminSetMembers, Name: []byte("wheel"), IDs: []uint32{1000, 1001, 1002}},
+		{Opcode: AdminImportLegacy, Name: name, Home: home, Key: EncodeImportKeys([][]byte{key})},
 		{Opcode: LookupAuthorizeKey, Name: name, Key: key},
 		{Opcode: LookupGetAccount, Name: name},
 	}
@@ -254,7 +255,7 @@ func TestRequestRejects(t *testing.T) {
 		{"reserved byte", func(m *ipc.Message) { m.Payload[7] = 1 }},
 		{"reserved tail", func(m *ipc.Message) { m.Payload[20] = 1 }},
 		{"name too long", func(m *ipc.Message) { m.Payload[2] = identity.MaxName + 1 }},
-		{"key too long", func(m *ipc.Message) { m.Payload[5] = identity.KeySize + 1 }},
+		{"key too long", func(m *ipc.Message) { m.Payload[5] = byte(maxPackedKeyLen + 1) }},
 	}
 	for _, request := range requests() {
 		for _, mutation := range mutations {

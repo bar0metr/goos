@@ -330,7 +330,7 @@ func DecodeRequest(in *ipc.Message, out *Request) (correlation uint64, ok bool) 
 	nameLen, homeLen := int(payload[requestNameLen]), int(payload[requestHomeLen])
 	idCount, keyLen, fpLen := int(payload[requestIDCount]), int(payload[requestKeyLen]), int(payload[requestFPLen])
 	if nameLen > identity.MaxName || homeLen > identity.MaxHome || idCount > identity.MaxAccounts ||
-		keyLen > identity.KeySize || fpLen > identity.FingerprintSize ||
+		keyLen > maxPackedKeyLen || fpLen > identity.FingerprintSize ||
 		requestHeader+nameLen+homeLen+keyLen+fpLen+4*idCount != int(in.PayloadSize) {
 		return 0, false
 	}
@@ -431,6 +431,11 @@ func validRequest(r *Request) bool {
 // MaxImportKeys bounds the keys the atomic legacy import carries, sized to the
 // fixed IPC payload budget: name (31) + home (64) + count (1) + keys (4 x 32).
 const MaxImportKeys = 4
+
+// maxPackedKeyLen bounds Request.Key on the wire: one count byte plus the
+// packed legacy-import keys. Opcode-specific validation still enforces the
+// exact single-key size for key operations.
+const maxPackedKeyLen = 1 + MaxImportKeys*identity.KeySize
 
 // ParseImportKeys decodes the packed [count][key...] form the atomic legacy
 // import carries in Request.Key.

@@ -347,13 +347,6 @@ func launchRemoteWorker(worker *remoteWorker, executable supervisor.Executable) 
 // and a worker-supplied name or AccountID never chooses the grant: the whole
 // decision is re-derived from the identity database at admission.
 func bindRemotePrincipal(worker *remoteWorker, username []byte, key [32]byte) remoteapi.Result {
-	// Import the legacy single-user settings on first admission, retrying while
-	// the candidate stays missing, corrupt, or ambiguous. The import is
-	// idempotent and never widens authority; a committed import makes the
-	// account database the sole authority.
-	if !remoteMigrationDone {
-		remoteMigrationDone = migrateRemoteIdentity()
-	}
 	if result := identityAuthorizeKey(username, key); result != identityproto.ResultOK {
 		if result == identityproto.ResultUnavailable || result == identityproto.ResultUnprovisioned {
 			return remoteapi.ResultUnavailable
@@ -520,12 +513,9 @@ func pollRemoteWorker(worker *remoteWorker) {
 		// decision, never a session or a grant; admission revalidates against
 		// the same committed snapshot at OperationAuthenticate. The reply
 		// codec carries only OK or PermissionDenied, so an unavailable store
-		// denies (fail closed) here and is reported at admission. The legacy
-		// import runs here first so the very first handshake already sees the
-		// migrated account, not an empty database.
-		if !remoteMigrationDone {
-			remoteMigrationDone = migrateRemoteIdentity()
-		}
+		// denies (fail closed) here and is reported at admission. The account
+		// database is the sole authority: the legacy import is an explicit
+		// local command, never triggered by an incoming connection.
 		if identityAuthorizeKey(request.Username[:request.UserSize], request.Key) == identityproto.ResultOK {
 			result = remoteapi.ResultOK
 		} else {

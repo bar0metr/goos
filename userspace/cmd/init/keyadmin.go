@@ -101,8 +101,7 @@ func remoteKeyControl(message *ipc.Message) bool {
 	// stays authoritative. It fails closed when migration has not committed.
 	if remove, value, corr, ok := remoteapi.DecodeKeySyncRequest(message); ok {
 		result := remoteapi.ResultPermissionDenied
-		if remoteMigrationDone && remoteMigratedAccountLen != 0 {
-			name := remoteMigratedAccount[:remoteMigratedAccountLen]
+		if name, ok := legacyRemoteAccount(); ok {
 			request := &identityproto.Request{Opcode: identityproto.AdminAddKey, Name: name, Key: value[:]}
 			if remove {
 				var key identity.Key

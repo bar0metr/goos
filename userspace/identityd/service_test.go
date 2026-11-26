@@ -589,3 +589,32 @@ func TestSnapshotRoundTrip(t *testing.T) {
 		t.Fatal("snapshot re-encode differs")
 	}
 }
+
+func TestDispatchImportLegacy(t *testing.T) {
+	service := newTestService()
+	if r := service.HandleRequest(request(identityproto.AdminStatus)); r.State != identityproto.StateUnprovisioned {
+		t.Fatalf("state %v, want Unprovisioned", r.State)
+	}
+	mustProvision(t, service)
+	keys := identityproto.EncodeImportKeys([][]byte{key(1), key(2)})
+	importReq := &identityproto.Request{Opcode: identityproto.AdminImportLegacy, Name: []byte("remote-admin"), Home: []byte("/home/user"), Key: keys}
+	if r := service.HandleRequest(importReq); r.Result != identityproto.ResultOK {
+		t.Fatalf("import = %v, want ResultOK", r.Result)
+	}
+	if r := service.HandleRequest(importReq); r.Result != identityproto.ResultExists {
+		t.Fatalf("second import = %v, want ResultExists", r.Result)
+	}
+	accounts, _, keysCount := service.Counts()
+	if accounts != 1 || keysCount != 2 {
+		t.Fatalf("counts accounts=%d keys=%d, want 1 and 2", accounts, keysCount)
+	}
+}
+
+func TestDispatchImportLegacyRejectsBadKeys(t *testing.T) {
+	service := newTestService()
+	mustProvision(t, service)
+	r := service.HandleRequest(&identityproto.Request{Opcode: identityproto.AdminImportLegacy, Name: []byte("remote-admin"), Home: []byte("/home/user"), Key: []byte{3, 0}})
+	if r.Result != identityproto.ResultInvalid {
+		t.Fatalf("malformed keys = %v, want ResultInvalid", r.Result)
+	}
+}
