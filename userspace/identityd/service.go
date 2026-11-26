@@ -258,6 +258,15 @@ func (s *Service) HandleRequest(r *identityproto.Request) identityproto.Reply {
 		reply.Result = s.mutate(func(st *identity.Store) error { return st.SetMembers(string(r.Name), r.IDs) })
 	case identityproto.AdminSetGroupGID:
 		reply.Result = s.mutate(func(st *identity.Store) error { return st.SetGroupGID(string(r.Name), r.GID) })
+	case identityproto.AdminImportLegacy:
+		keys, ok := identityproto.ParseImportKeys(r.Key)
+		if !ok {
+			reply.Result = identityproto.ResultInvalid
+			break
+		}
+		reply.Result = s.mutate(func(st *identity.Store) error {
+			return st.ImportLegacy(string(r.Name), string(r.Home), keys)
+		})
 	default:
 		reply.Result = identityproto.ResultInvalid
 	}

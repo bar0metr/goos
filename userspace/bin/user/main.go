@@ -11,6 +11,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/vfs"
 	"goos/userspace/commands"
 	"goos/userspace/identity"
 	"goos/userspace/identityproto"
@@ -21,12 +22,12 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "user status|provision|reset|list|show|add|disable|enable|delete|uid|gid|home|groups|key",
+	Usage:   "user status|provision|reset|list|show|add|disable|enable|delete|uid|gid|home|groups|key|import",
 	Summary: "manage identity accounts",
-	Options: "status; provision; reset --confirm (destroys identity records, not home directories or disk ownership metadata); list; show NAME; add NAME; disable NAME; enable NAME; delete NAME; uid NAME UID; gid NAME GID; home NAME PATH; groups NAME [GID...]; key add NAME KEY; key remove NAME FINGERPRINT",
+	Options: "status; provision; reset --confirm (destroys identity records, not home directories or disk ownership metadata); list; show NAME; add NAME; disable NAME; enable NAME; delete NAME; uid NAME UID; gid NAME GID; home NAME PATH; groups NAME [GID...]; key add NAME KEY; key remove NAME FINGERPRINT; import-legacy NAME HOME AUTHORIZED_KEYS_PATH",
 	MinArgs: 1,
 	MaxArgs: commands.Unbounded,
-	Grants:  commands.GrantIdentityAdmin,
+	Grants:  commands.GrantIdentityAdmin | commands.GrantVFS,
 }
 
 const (
@@ -76,6 +77,8 @@ func run(data startup.Data) {
 		setGroups(data, channel)
 	case utility.Equal(argument, "key"):
 		key(data, channel)
+	case utility.Equal(argument, "import-legacy") && data.ArgCount() == 4:
+		importLegacy(data, channel)
 	default:
 		utility.Usage()
 	}
@@ -345,6 +348,53 @@ func failResult(result identityproto.Result) {
 	default:
 		utility.Fail(nil, "invalid")
 	}
+}
+
+// importLegacy reads a bounded legacy authorized_keys file through the
+// explicitly granted VFS session and imports the account, its home, every
+// validated Ed25519 key and the persisted marker in one identityd commit.
+func importLegacy(data startup.Data, channel handle.ID) {
+	name := required(data, 2)
+	home := required(data, 3)
+	path := utility.Path(data, 4)
+	opened, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path})
+	utility.Check(opened, received, path, false)
+	var buffer [remotepolicy.MaxAuthorizedKeysBytes]byte
+	size := 0
+	for {
+		reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: vfs.MaxReplyData})
+		utility.Check(reply, received, path, false)
+		if len(reply.Data) == 0 {
+			break
+		}
+		if size+len(reply.Data) > len(buffer) {
+			utility.CallVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+			utility.Fail(nil, "authorized keys too large")
+		}
+		copy(buffer[size:], reply.Data)
+		size += len(reply.Data)
+	}
+	utility.CallVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+	parsed, err := remotepolicy.ParseAuthorizedKeys(buffer[:size])
+	if err != nil {
+		utility.Fail(nil, "invalid authorized keys")
+	}
+	var keys [][]byte
+	for index := 0; index < parsed.Len(); index++ {
+		public, ok := parsed.At(index)
+		if !ok || len(public) != identity.KeySize {
+			utility.Fail(nil, "invalid authorized key")
+		}
+		keys = append(keys, public)
+	}
+	reply := exchange(channel, identityproto.Request{Opcode: identityproto.AdminImportLegacy,
+		Name: name, Home: home, Key: identityproto.EncodeImportKeys(keys)})
+	if reply.Result == identityproto.ResultExists {
+		utility.Mark("USER_IMPORT_LEGACY_EXISTS_OK\n")
+		return
+	}
+	requireResult(reply.Result)
+	utility.Mark("USER_IMPORT_LEGACY_OK\n")
 }
 
 // parseKey accepts one authorized_keys line and returns its raw Ed25519 key.

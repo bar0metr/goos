@@ -107,6 +107,7 @@ const (
 	AdminDeleteGroup
 	AdminSetMembers
 	AdminSetGroupGID
+	AdminImportLegacy
 	// Lookup operations.
 	LookupAuthorizeKey
 	LookupGetAccount
@@ -417,10 +418,50 @@ func validRequest(r *Request) bool {
 			len(r.Fingerprint) == 0 && len(r.IDs) <= identity.MaxAccounts
 	case AdminSetGroupGID:
 		return !r.Enabled && validName(r.Name) && r.UID == 0 && noData
+	case AdminImportLegacy:
+		_, keysOK := ParseImportKeys(r.Key)
+		return !r.Enabled && validName(r.Name) && validHome(r.Home) && keysOK &&
+			r.UID == 0 && r.GID == 0 && len(r.Fingerprint) == 0 && len(r.IDs) == 0
 	case LookupAuthorizeKey:
 		return !r.Enabled && validName(r.Name) && validKey(r.Key) && scalar && len(r.Home) == 0 && len(r.Fingerprint) == 0 && len(r.IDs) == 0
 	}
 	return false
+}
+
+// MaxImportKeys bounds the keys the atomic legacy import carries, sized to the
+// fixed IPC payload budget: name (31) + home (64) + count (1) + keys (4 x 32).
+const MaxImportKeys = 4
+
+// ParseImportKeys decodes the packed [count][key...] form the atomic legacy
+// import carries in Request.Key.
+func ParseImportKeys(packed []byte) ([]identity.Key, bool) {
+	if len(packed) == 0 || packed[0] > MaxImportKeys {
+		return nil, false
+	}
+	count := int(packed[0])
+	if len(packed) != 1+count*identity.KeySize {
+		return nil, false
+	}
+	var keys []identity.Key
+	for i := 0; i < count; i++ {
+		var key identity.Key
+		copy(key[:], packed[1+i*identity.KeySize:])
+		keys = append(keys, key)
+	}
+	return keys, true
+}
+
+// EncodeImportKeys packs validated public keys for Request.Key.
+func EncodeImportKeys(keys [][]byte) []byte {
+	if len(keys) > MaxImportKeys {
+		return nil
+	}
+	out := make([]byte, 1, 1+len(keys)*identity.KeySize)
+	out[0] = byte(len(keys))
+	for _, key := range keys {
+		out = append(out, key...)
+	}
+	return out
 }
 
 // EncodeReply encodes one administration or lookup reply, other than a list

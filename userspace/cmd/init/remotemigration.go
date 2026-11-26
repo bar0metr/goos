@@ -74,46 +74,30 @@ func migrateRemoteIdentity() bool {
 		syslog.Warn("remote identity migration rejected", syslog.Str("reason", err.Error()))
 		return false
 	}
-	remoteMigratedAccountLen = uint8(copy(remoteMigratedAccount[:], plan.Name))
-	account, ok := identityAdminCall(&identityproto.Request{Opcode: identityproto.AdminGetAccount, Name: []byte(plan.Name)})
+	packed := make([][]byte, len(plan.Keys))
+	for index, key := range plan.Keys {
+		packed[index] = key
+	}
+	// One durable identityd commit imports the account, its home, every key
+	// and the persisted marker together. No partially applied import can be
+	// observed, and a second import is an ErrExists no-op.
+	reply, ok := identityAdminCall(&identityproto.Request{Opcode: identityproto.AdminImportLegacy,
+		Name: []byte(plan.Name), Home: []byte(plan.Home), Key: identityproto.EncodeImportKeys(packed)})
 	if !ok {
 		syslog.Warn("remote identity migration: identity unavailable")
 		return false
 	}
-	switch account.Result {
-	case identityproto.ResultNotFound, identityproto.ResultUnprovisioned:
-		if account.Result == identityproto.ResultUnprovisioned {
-			// An unprovisioned database is empty; provision it once before the
-			// import, which is the explicit defined recovery path.
-			if reply, ok := identityAdminCall(&identityproto.Request{Opcode: identityproto.AdminProvision}); !ok || reply.Result != identityproto.ResultOK {
-				syslog.Warn("remote identity migration: provision failed")
-				return false
-			}
-		}
-		if reply, ok := identityAdminCall(&identityproto.Request{Opcode: identityproto.AdminAddAccount, Name: []byte(plan.Name)}); !ok || reply.Result != identityproto.ResultOK {
-			syslog.Warn("remote identity migration: account creation failed")
-			return false
-		}
-		if reply, ok := identityAdminCall(&identityproto.Request{Opcode: identityproto.AdminSetHome, Name: []byte(plan.Name), Home: []byte(plan.Home)}); !ok || reply.Result != identityproto.ResultOK {
-			syslog.Warn("remote identity migration: home assignment failed")
-			return false
-		}
-	case identityproto.ResultOK:
-		if len(account.Records) != 1 || string(account.Records[0].Home) != plan.Home {
-			syslog.Warn("remote identity migration: account exists with a conflicting name or home; resolution required")
-			return false
-		}
-	default:
-		syslog.Warn("remote identity migration: account lookup failed", syslog.Uint("result", uint64(account.Result)))
+	if reply.Result == identityproto.ResultExists {
+		// The persisted marker (or the account) already exists: the import is
+		// complete, so treat the request as a successful no-op.
+		remoteMigratedAccountLen = uint8(copy(remoteMigratedAccount[:], plan.Name))
+		return true
+	}
+	if reply.Result != identityproto.ResultOK {
+		syslog.Warn("remote identity migration rejected", syslog.Uint("result", uint64(reply.Result)))
 		return false
 	}
-	for _, key := range plan.Keys {
-		reply, ok := identityAdminCall(&identityproto.Request{Opcode: identityproto.AdminAddKey, Name: []byte(plan.Name), Key: key})
-		if !ok || reply.Result != identityproto.ResultOK && reply.Result != identityproto.ResultExists {
-			syslog.Warn("remote identity migration: key import failed")
-			return false
-		}
-	}
+	remoteMigratedAccountLen = uint8(copy(remoteMigratedAccount[:], plan.Name))
 	syslog.Info("remote identity migration committed", syslog.Str("user", plan.Name))
 	return true
 }
