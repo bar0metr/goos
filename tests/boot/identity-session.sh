@@ -143,6 +143,25 @@ ssh_as() { # key user command
 		-o KexAlgorithms=curve25519-sha256 -o HostKeyAlgorithms=ssh-ed25519 -o PubkeyAcceptedAlgorithms=ssh-ed25519 \
 		"$2"@127.0.0.1 "$3"
 }
+# ssh_ok retries only transport-level failures, so a slow QEMU banner under host
+# load does not fail an assertion whose expected outcome is success.
+ssh_ok() { # key user command
+	attempt=0
+	while [ "$attempt" -lt 3 ]; do
+		if ssh_out=$(ssh_as "$1" "$2" "$3" 2>&1); then
+			printf '%s' "$ssh_out"
+			return 0
+		fi
+		attempt=$((attempt + 1))
+		printf '%s' "$ssh_out" | grep -qiE 'timed out|connection reset|connection refused|broken pipe|kex_exchange' || {
+			printf '%s' "$ssh_out"
+			return 1
+		}
+		sleep 2
+	done
+	printf '%s' "$ssh_out"
+	return 1
+}
 
 run 'config set system.remote.enabled true'
 run 'config set system.remote.port 22'
@@ -156,10 +175,7 @@ expect '/mnt/w.*ext4.*rw' 'configured ext4 volume mounted read-write'
 
 # Create as the account over SSH, then verify the stored ownership in the
 # guest with the native stat command (mode, uid, gid).
-result=$(ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-	-o BatchMode=yes -o ConnectTimeout=30 -p 22022 -i "$work/client" \
-	-o KexAlgorithms=curve25519-sha256 -o HostKeyAlgorithms=ssh-ed25519 -o PubkeyAcceptedAlgorithms=ssh-ed25519 \
-	alice@127.0.0.1 'mkdir /mnt/w/alice-made; touch /mnt/w/alice-made/f.txt; stat /mnt/w/alice-made/f.txt' 2>&1) || fail "SSH exec as alice: $result"
+result=$(ssh_ok "$work/client" alice 'mkdir /mnt/w/alice-made; touch /mnt/w/alice-made/f.txt; stat /mnt/w/alice-made/f.txt') || fail "SSH exec as alice: $result"
 printf 'guest stat: %s\n' "$result"
 printf '%s' "$result" | grep -q 'uid=70000 gid=80000' || fail "guest stat does not report the account ownership: $result"
 
@@ -167,15 +183,12 @@ printf '%s' "$result" | grep -q 'uid=70000 gid=80000' || fail "guest stat does n
 # admit the same account again while the legacy key file stays absent.
 run 'remote reload'
 refuse 'rejected' 'remote reload without the legacy key file'
-result=$(ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-	-o BatchMode=yes -o ConnectTimeout=30 -p 22022 -i "$work/client" \
-	-o KexAlgorithms=curve25519-sha256 -o HostKeyAlgorithms=ssh-ed25519 -o PubkeyAcceptedAlgorithms=ssh-ed25519 \
-	alice@127.0.0.1 'stat /mnt/w/alice-made' 2>&1) || fail "SSH exec without the legacy key file: $result"
+result=$(ssh_ok "$work/client" alice 'stat /mnt/w/alice-made') || fail "SSH exec without the legacy key file: $result"
 printf 'fileless stat: %s\n' "$result"
 printf '%s' "$result" | grep -q 'uid=70000' || fail "fileless admission did not run: $result"
 
 # The second account admits with its own identity and creates its own files.
-result=$(ssh_as "$work/bob" bob 'mkdir /mnt/w/bob-made; stat /mnt/w/bob-made' 2>&1) || fail "SSH exec as bob: $result"
+result=$(ssh_ok "$work/bob" bob 'mkdir /mnt/w/bob-made; stat /mnt/w/bob-made') || fail "SSH exec as bob: $result"
 printf 'bob stat: %s\n' "$result"
 printf '%s' "$result" | grep -q 'uid=70001 gid=80001' || fail "bob stat does not report bob's ownership: $result"
 
@@ -200,7 +213,7 @@ if result=$(ssh_as "$work/bob" bob 'true' 2>&1); then
 fi
 printf 'disabled denial: %s\n' "$result"
 run 'user enable bob'
-result=$(ssh_as "$work/bob" bob 'stat /mnt/w/bob-made' 2>&1) || fail "re-enabled account admission: $result"
+result=$(ssh_ok "$work/bob" bob 'stat /mnt/w/bob-made') || fail "re-enabled account admission: $result"
 printf '%s' "$result" | grep -q 'uid=70001' || fail "re-enabled admission did not run: $result"
 
 # Cut the guest off and extract the written volume for the host debugfs check.
