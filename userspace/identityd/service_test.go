@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"goos/kernel/ipc"
 	"goos/userspace/identity"
 	"goos/userspace/identityproto"
 )
@@ -644,5 +645,74 @@ func TestDispatchLookupAuthorizeAndResolve(t *testing.T) {
 	denied := service.HandleRequest(&identityproto.Request{Opcode: identityproto.LookupAuthorizeAndResolve, Name: []byte("alice"), Key: key(9)})
 	if denied.Result == identityproto.ResultOK || len(denied.Records) != 0 {
 		t.Fatalf("wrong key = %v records=%d, want denial", denied.Result, len(denied.Records))
+	}
+}
+
+// TestWireLookupAuthorizeAndResolveRoundTrip exercises exactly the IPC path a
+// remote admission uses: an encoded request, a decoded request, the dispatch,
+// an encoded reply and a decoded reply. A dispatch-only test cannot catch a
+// codec gap such as a missing record kind for the new opcode.
+func TestWireLookupAuthorizeAndResolveRoundTrip(t *testing.T) {
+	service := newTestService()
+	mustProvision(t, service)
+	for _, step := range []*identityproto.Request{
+		{Opcode: identityproto.AdminAddAccount, Name: []byte("alice")},
+		{Opcode: identityproto.AdminSetHome, Name: []byte("alice"), Home: []byte("/home/alice")},
+		{Opcode: identityproto.AdminAddKey, Name: []byte("alice"), Key: key(7)},
+	} {
+		if r := service.HandleRequest(step); r.Result != identityproto.ResultOK {
+			t.Fatalf("setup %d = %v", step.Opcode, r.Result)
+		}
+	}
+	request := &identityproto.Request{Opcode: identityproto.LookupAuthorizeAndResolve, Name: []byte("alice"), Key: key(7)}
+	var wire ipc.Message
+	if !identityproto.EncodeRequest(request, 9, &wire) {
+		t.Fatal("encode request")
+	}
+	var decoded identityproto.Request
+	correlation, ok := identityproto.DecodeRequest(&wire, &decoded)
+	if !ok || correlation != 9 || decoded.Opcode != identityproto.LookupAuthorizeAndResolve || len(decoded.Key) != identity.KeySize {
+		t.Fatalf("decode request: ok=%v correlation=%d", ok, correlation)
+	}
+	reply := service.HandleRequest(&decoded)
+	if reply.Result != identityproto.ResultOK || len(reply.Records) != 1 {
+		t.Fatalf("dispatch: result=%v records=%d", reply.Result, len(reply.Records))
+	}
+	var replyWire ipc.Message
+	if !identityproto.EncodeReply(&reply, 9, &replyWire) {
+		t.Fatal("encode reply")
+	}
+	var decodedReply identityproto.Reply
+	if !identityproto.DecodeReply(&replyWire, 9, identityproto.LookupAuthorizeAndResolve, &decodedReply) {
+		t.Fatal("decode reply")
+	}
+	if decodedReply.Result != identityproto.ResultOK || len(decodedReply.Records) != 1 {
+		t.Fatalf("decoded reply: result=%v records=%d", decodedReply.Result, len(decodedReply.Records))
+	}
+	record := decodedReply.Records[0]
+	if record.Kind != identityproto.RecordAccount || record.AccountID == 0 || record.UID == 0 || record.GID == 0 ||
+		string(record.Name) != "alice" || string(record.Home) != "/home/alice" || record.Epoch == ([16]byte{}) {
+		t.Fatalf("record = %+v", record)
+	}
+	// A wrong key must deny over the same wire path and carry no record.
+	bad := &identityproto.Request{Opcode: identityproto.LookupAuthorizeAndResolve, Name: []byte("alice"), Key: key(9)}
+	if !identityproto.EncodeRequest(bad, 10, &wire) {
+		t.Fatal("encode bad request")
+	}
+	if _, badOK := identityproto.DecodeRequest(&wire, &decoded); !badOK {
+		t.Fatal("decode bad request")
+	}
+	denied := service.HandleRequest(&decoded)
+	if denied.Result == identityproto.ResultOK || len(denied.Records) != 0 {
+		t.Fatalf("wrong key: result=%v records=%d", denied.Result, len(denied.Records))
+	}
+	if !identityproto.EncodeReply(&denied, 10, &replyWire) {
+		t.Fatal("encode denied reply")
+	}
+	if !identityproto.DecodeReply(&replyWire, 10, identityproto.LookupAuthorizeAndResolve, &decodedReply) {
+		t.Fatal("decode denied reply")
+	}
+	if decodedReply.Result == identityproto.ResultOK || len(decodedReply.Records) != 0 {
+		t.Fatalf("decoded wrong key: result=%v records=%d", decodedReply.Result, len(decodedReply.Records))
 	}
 }
