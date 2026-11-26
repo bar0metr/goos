@@ -173,3 +173,53 @@ func TestAuthorizeKeyDeniesDisabledAccount(t *testing.T) {
 		t.Fatalf("failed handshake reported user %q", authenticated)
 	}
 }
+
+// TestVerifiedKeyIsTheSignedKey proves the server exposes the exact key the
+// pinned library verified at signed authentication, not a probed key. Account
+// admission uses this identity, so a probe-only key must never surface here.
+func TestVerifiedKeyIsTheSignedKey(t *testing.T) {
+	store := identity.NewStore()
+	if _, err := store.CreateAccount("alice"); err != nil {
+		t.Fatal(err)
+	}
+	pub, signer := newSigner(t)
+	if err := store.AddKey("alice", identityKey(t, pub)); err != nil {
+		t.Fatal(err)
+	}
+	server, client := socketPair(t)
+	s, err := New(server, accountConfig(t, store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.Handshake() }()
+	conn, _, _, clientErr := ssh.NewClientConn(client, "pipe", &ssh.ClientConfig{User: "alice", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+	if clientErr == nil {
+		conn.Close()
+	}
+	client.Close()
+	if serverErr := <-done; serverErr != nil || clientErr != nil {
+		t.Fatalf("handshake failed: server=%v client=%v", serverErr, clientErr)
+	}
+	verified, ok := s.VerifiedKey()
+	if !ok || len(verified) != ed25519.PublicKeySize || !verified.Equal(pub) {
+		t.Fatalf("verified key = %x ok=%v, want the signed key %x", verified, ok, pub)
+	}
+}
+
+// TestVerifiedKeyAbsentBeforeAuthentication proves the verified key is not
+// exposed before a signed authentication completes.
+func TestVerifiedKeyAbsentBeforeAuthentication(t *testing.T) {
+	store := identity.NewStore()
+	if _, err := store.CreateAccount("alice"); err != nil {
+		t.Fatal(err)
+	}
+	server, _ := socketPair(t)
+	s, err := New(server, accountConfig(t, store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.VerifiedKey(); ok {
+		t.Fatal("verified key exposed before authentication")
+	}
+}

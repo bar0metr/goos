@@ -75,6 +75,7 @@ type backend interface {
 	Exit(uint32) error
 	Close() error
 	User() string
+	VerifiedKey() (ed25519.PublicKey, bool)
 	NeedInput() int
 	KeyExchangePending() bool
 }
@@ -95,14 +96,15 @@ func New(conn net.Conn, cfg Config) (*Server, error) {
 	}
 	return &Server{backend: b}, nil
 }
-func (s *Server) Handshake() error                  { return s.backend.Handshake() }
-func (s *Server) Feed(b []byte) (int, error)        { return s.backend.Feed(b) }
-func (s *Server) Poll() (Event, error)              { return s.backend.Poll() }
-func (s *Server) Write(b []byte) (int, error)       { return s.backend.Write(b) }
-func (s *Server) ConsumeInput(n uint32) error       { return s.backend.ConsumeInput(n) }
-func (s *Server) WriteStderr(b []byte) (int, error) { return s.backend.WriteStderr(b) }
-func (s *Server) Exit(status uint32) error          { return s.backend.Exit(status) }
-func (s *Server) Close() error                      { return s.backend.Close() }
-func (s *Server) User() string                      { return s.backend.User() }
-func (s *Server) NeedInput() int                    { return s.backend.NeedInput() }
-func (s *Server) KeyExchangePending() bool          { return s.backend.KeyExchangePending() }
+func (s *Server) Handshake() error                       { return s.backend.Handshake() }
+func (s *Server) Feed(b []byte) (int, error)             { return s.backend.Feed(b) }
+func (s *Server) Poll() (Event, error)                   { return s.backend.Poll() }
+func (s *Server) Write(b []byte) (int, error)            { return s.backend.Write(b) }
+func (s *Server) ConsumeInput(n uint32) error            { return s.backend.ConsumeInput(n) }
+func (s *Server) WriteStderr(b []byte) (int, error)      { return s.backend.WriteStderr(b) }
+func (s *Server) Exit(status uint32) error               { return s.backend.Exit(status) }
+func (s *Server) Close() error                           { return s.backend.Close() }
+func (s *Server) User() string                           { return s.backend.User() }
+func (s *Server) VerifiedKey() (ed25519.PublicKey, bool) { return s.backend.VerifiedKey() }
+func (s *Server) NeedInput() int                         { return s.backend.NeedInput() }
+func (s *Server) KeyExchangePending() bool               { return s.backend.KeyExchangePending() }

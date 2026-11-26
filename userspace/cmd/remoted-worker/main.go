@@ -43,9 +43,6 @@ var exitKnown bool
 
 // The username and key the SSH handshake just authenticated with, remembered so
 // the admission request can carry them for PID 1's authoritative revalidation.
-var authenticatedUser [remoteapi.MaxUsername]byte
-var authenticatedUserSize uint8
-var authenticatedKey [32]byte
 var authenticatedToken uint64
 
 //export userspaceMain
@@ -109,8 +106,6 @@ func userspaceMain() {
 		if !allowed {
 			return false, nil
 		}
-		authenticatedUserSize = uint8(copy(authenticatedUser[:], requested))
-		copy(authenticatedKey[:], key)
 		authenticatedToken = token
 		return true, nil
 	}
@@ -128,7 +123,21 @@ func userspaceMain() {
 	conn.ClearDeadline()
 	signingClient.deadline = 0
 	handshaken = true
-	authenticated, _, ok := call(remoteapi.Request{Operation: remoteapi.OperationAuthenticate, Username: authenticatedUser, UserSize: authenticatedUserSize, Key: authenticatedKey, Token: authenticatedToken})
+	// Use only the identity the pinned SSH library verified at signed
+	// authentication. The probe callback state is a hint for the token, never
+	// proof of possession: a probe with one key cannot bind another.
+	verifiedUser := server.User()
+	verifiedKey, verifiedOK := server.VerifiedKey()
+	if !verifiedOK || len(verifiedUser) == 0 || len(verifiedUser) > remoteapi.MaxUsername {
+		syslog.Warn("remote signed authentication did not expose a verified key")
+		finish(1)
+	}
+	var verifiedUsername [remoteapi.MaxUsername]byte
+	authenticatedKeySize := uint8(copy(verifiedUsername[:], verifiedUser))
+	var admittedKey [32]byte
+	copy(admittedKey[:], verifiedKey)
+	authenticated, _, ok := call(remoteapi.Request{Operation: remoteapi.OperationAuthenticate,
+		Username: verifiedUsername, UserSize: authenticatedKeySize, Key: admittedKey, Token: authenticatedToken})
 	if !ok {
 		syslog.Warn("remote session admission refused")
 		finish(1)

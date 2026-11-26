@@ -20,6 +20,11 @@ type pumpBackend struct {
 	data    []byte
 	command [remoteapi.MaxCommand]byte
 	failure stableError
+	// verifiedKey is the public key the pinned SSH library proved possession of
+	// at signed authentication. It is the exact verified key, never a probed
+	// one, and it stays zero until the library accepts the signature.
+	verifiedKey [ed25519.PublicKeySize]byte
+	verified    bool
 }
 type stableError struct {
 	message [256]byte
@@ -80,6 +85,7 @@ func newBackend(conn net.Conn, cfg Config) (backend, error) {
 	}
 	source = nativeRandom(source)
 	authorizeKey := cfg.AuthorizeKey
+	b := &pumpBackend{memory: newPumpMemory(), data: make([]byte, MaxData)}
 	server := &ssh.ServerConfig{Config: ssh.Config{Rand: source}, MaxAuthTries: cfg.MaxAuthAttempts, PublicKeyCallback: func(c ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 		if authorizeKey != nil {
 			if key.Type() != ssh.KeyAlgoED25519 {
@@ -109,12 +115,26 @@ func newBackend(conn net.Conn, cfg Config) (backend, error) {
 		}
 		return nil, nil
 	}}
+	// Record the exact key the library verified. The probe callback is not
+	// proof of possession; this one runs only after the signature is accepted.
+	server.VerifiedPublicKeyCallback = func(c ssh.ConnMetadata, key ssh.PublicKey, permissions *ssh.Permissions, signatureAlgorithm string) (*ssh.Permissions, error) {
+		public, ok := key.(ssh.CryptoPublicKey)
+		if !ok {
+			return nil, ssh.ErrNoAuth
+		}
+		raw, ok := public.CryptoPublicKey().(ed25519.PublicKey)
+		if !ok || len(raw) != ed25519.PublicKeySize || key.Type() != ssh.KeyAlgoED25519 {
+			return nil, ssh.ErrNoAuth
+		}
+		copy(b.verifiedKey[:], raw)
+		b.verified = true
+		return permissions, nil
+	}
 	if cfg.Banner != "" {
 		banner := cfg.Banner
 		server.BannerCallback = func(ssh.ConnMetadata) string { return banner }
 	}
 	server.AddHostKey(signer)
-	b := &pumpBackend{memory: newPumpMemory(), data: make([]byte, MaxData)}
 	p, err := ssh.NewPump(conn, ssh.PumpConfig{Server: server, Memory: &b.memory, Subsystem: cfg.Subsystem})
 	if err != nil {
 		return nil, err
@@ -158,7 +178,13 @@ func (b *pumpBackend) Exit(status uint32) error {
 	defer scope.leave()
 	return b.stable(b.pump.Exit(status))
 }
-func (b *pumpBackend) Close() error             { return b.pump.Close() }
-func (b *pumpBackend) User() string             { return b.pump.User() }
+func (b *pumpBackend) Close() error { return b.pump.Close() }
+func (b *pumpBackend) User() string { return b.pump.User() }
+func (b *pumpBackend) VerifiedKey() (ed25519.PublicKey, bool) {
+	if !b.verified {
+		return nil, false
+	}
+	return append(ed25519.PublicKey(nil), b.verifiedKey[:]...), true
+}
 func (b *pumpBackend) NeedInput() int           { return b.pump.NeedInput() }
 func (b *pumpBackend) KeyExchangePending() bool { return b.pump.KeyExchangePending() }
