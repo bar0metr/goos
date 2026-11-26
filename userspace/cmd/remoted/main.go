@@ -310,7 +310,9 @@ func reloadCandidate(expected []byte, expectedRevision uint64, expectedPath stri
 	}
 	defer clear(host.Private)
 	keyData, err := keyReader.Read(policy.AuthorizedKeys, remotepolicy.MaxAuthorizedKeysBytes)
-	if errors.Is(err, remotepolicy.ErrNotFound) && !policy.Enabled {
+	if errors.Is(err, remotepolicy.ErrNotFound) {
+		// The account database is the sole key authority after cutover; a
+		// missing legacy authorized_keys file is empty, not an error (ADR 0234).
 		keyData = nil
 		err = nil
 	}
