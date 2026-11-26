@@ -534,7 +534,7 @@ try:
     # The legacy cutover is an explicit local command, never triggered by an
     # incoming connection. It imports the one legacy account, its home, its
     # validated keys and the persisted marker in a single identityd commit.
-    console("user import-legacy remote-admin /home/user /home/user/remote-keys/authorized_keys", rb"USER_IMPORT_LEGACY_OK")
+    console("migrate remote-admin /home/user /home/user/remote-keys/authorized_keys", rb"MIGRATE_OK")
     invalid = status(listener="closed", settings="invalid")
     require("bootstrap.invalid-status", invalid.get("reason") is not None,
             "invalid startup retains running admin service and rejection reason")
