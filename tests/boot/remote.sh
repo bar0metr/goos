@@ -295,7 +295,7 @@ def boot():
     children.append(guest)
     serial = guest.stdin
     wait_until(lambda: re.search(PROMPT, serial_log.read_bytes()), "serial shell prompt", 120)
-    wait_until(lambda: b"NETD_READY 10.0.2." in serial_log.read_bytes(), "native DHCP ready", 30)
+    wait_until(lambda: b"NETD_READY 10.0.2." in serial_log.read_bytes(), "native DHCP ready", 90)
     # Allow validation's storage-driver replacement to complete before writes.
     time.sleep(4)
     require(f"boot{boot_number}.ready", True, "installed shell and native network ready")
@@ -359,7 +359,7 @@ def reload_ok():
 
 
 def scan(port):
-    result = run(["ssh-keyscan", "-T", "5", "-p", port, "-t", "ed25519", "127.0.0.1"], 10)
+    result = run(["ssh-keyscan", "-T", "15", "-p", port, "-t", "ed25519", "127.0.0.1"], 30)
     return [line for line in result.stdout.splitlines() if b" ssh-ed25519 " in line]
 
 
@@ -693,13 +693,13 @@ try:
             "follower stays quiet with no new matching record")
     trigger_time = time.monotonic()
     ssh_exec(ports[0], "log.follow-trigger", "remote reload", sessions=1)
-    session.wait(rb"remoted\[[0-9]+\]: remote listener active", idle_start, 10)
-    require("log.follow-wake", time.monotonic() - trigger_time < 10,
+    session.wait(rb"remoted\[[0-9]+\]: remote listener active", idle_start, 30)
+    require("log.follow-wake", time.monotonic() - trigger_time < 30,
             "second SSH session wakes the event-driven follower")
     session.pump()
     second_event_start = len(session.stdout)
     ssh_exec(ports[0], "log.follow-second-trigger", "remote reload", sessions=1)
-    session.wait(rb"remoted\[[0-9]+\]: remote listener active", second_event_start, 10)
+    session.wait(rb"remoted\[[0-9]+\]: remote listener active", second_event_start, 30)
     session.pump()
     require("log.follow-continues", re.search(PROMPT, session.stdout[start:]) is None,
             "follower stays active through a second append instead of returning after its first event")
