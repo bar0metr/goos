@@ -55,8 +55,10 @@ func requests() []Request {
 		{Opcode: AdminAddGroup, Name: []byte("wheel")},
 		{Opcode: AdminDeleteGroup, Name: []byte("wheel")},
 		{Opcode: AdminSetMembers, Name: []byte("wheel"), IDs: []uint32{1000, 1001, 1002}},
+		{Opcode: AdminImportLegacy, Name: name, Home: home, Key: EncodeImportKeys([][]byte{key})},
 		{Opcode: LookupAuthorizeKey, Name: name, Key: key},
 		{Opcode: LookupGetAccount, Name: name},
+		{Opcode: LookupAuthorizeAndResolve, Name: name, Key: key},
 	}
 }
 
@@ -88,6 +90,7 @@ func replies() []Reply {
 		{Opcode: LookupAuthorizeKey, Result: ResultOK},
 		{Opcode: LookupAuthorizeKey, Result: ResultDenied},
 		{Opcode: LookupGetAccount, Result: ResultOK, Records: []Record{account}},
+		{Opcode: LookupAuthorizeAndResolve, Result: ResultOK, Records: []Record{account}},
 	}
 }
 
@@ -254,7 +257,7 @@ func TestRequestRejects(t *testing.T) {
 		{"reserved byte", func(m *ipc.Message) { m.Payload[7] = 1 }},
 		{"reserved tail", func(m *ipc.Message) { m.Payload[20] = 1 }},
 		{"name too long", func(m *ipc.Message) { m.Payload[2] = identity.MaxName + 1 }},
-		{"key too long", func(m *ipc.Message) { m.Payload[5] = identity.KeySize + 1 }},
+		{"key too long", func(m *ipc.Message) { m.Payload[5] = byte(maxPackedKeyLen + 1) }},
 	}
 	for _, request := range requests() {
 		for _, mutation := range mutations {
@@ -610,7 +613,7 @@ func TestVersionRejects(t *testing.T) {
 	request := requests()[0]
 	var wire ipc.Message
 	EncodeRequest(&request, 1, &wire)
-	for _, version := range []uint16{0, 1, 3} {
+	for _, version := range []uint16{0, 1, 2, 4} {
 		message := wire
 		message.Version = version
 		var decoded Request
@@ -620,7 +623,7 @@ func TestVersionRejects(t *testing.T) {
 	}
 	reply := replies()[0]
 	EncodeReply(&reply, 1, &wire)
-	for _, version := range []uint16{0, 1, 3} {
+	for _, version := range []uint16{0, 1, 2, 4} {
 		message := wire
 		message.Version = version
 		var decoded Reply
@@ -629,7 +632,7 @@ func TestVersionRejects(t *testing.T) {
 		}
 	}
 	EncodeControlRequest(OpAddAdmin, 9, 1, &wire)
-	for _, version := range []uint16{0, 1, 3} {
+	for _, version := range []uint16{0, 1, 2, 4} {
 		message := wire
 		message.Version = version
 		if _, _, _, ok := DecodeControlRequest(&message); ok {
@@ -814,4 +817,21 @@ func FuzzDecodeListReply(f *testing.F) {
 			return
 		}
 	})
+}
+
+func TestIsLookupOpcode(t *testing.T) {
+	// Every lookup opcode must run on a lookup session; the same opcodes must
+	// be refused on an administration session, and vice versa. Admission calls
+	// LookupAuthorizeAndResolve on the persistent lookup session, so omitting
+	// it here silently breaks account admission.
+	for _, op := range []Opcode{LookupAuthorizeKey, LookupGetAccount, LookupAuthorizeAndResolve} {
+		if !IsLookupOpcode(op) {
+			t.Fatalf("lookup opcode %d classified as administration", op)
+		}
+	}
+	for _, op := range []Opcode{AdminProvision, AdminAddAccount, AdminAddKey, AdminImportLegacy, AdminStatus} {
+		if IsLookupOpcode(op) {
+			t.Fatalf("administration opcode %d classified as lookup", op)
+		}
+	}
 }

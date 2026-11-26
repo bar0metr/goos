@@ -50,14 +50,15 @@ func (g *Group) NameString() string { return string(g.Name[:g.NameLen]) }
 // Store owns the accounts, groups, epoch, and monotonic allocation state. It
 // is a single mutation owner: every write goes through a Store method.
 type Store struct {
-	accounts      []Account
-	groups        []Group
-	epoch         [16]byte // 128-bit database identity; zero only for in-memory tests
-	nextAccountID uint64   // monotonic; never reused
-	nextGroupID   uint64   // monotonic; never reused
-	nextUID       uint64   // UID high-water: next value to allocate
-	nextGID       uint64   // GID high-water: next value to allocate
-	sequence      uint64   // committed mutation sequence
+	accounts       []Account
+	groups         []Group
+	epoch          [16]byte // 128-bit database identity; zero only for in-memory tests
+	nextAccountID  uint64   // monotonic; never reused
+	nextGroupID    uint64   // monotonic; never reused
+	nextUID        uint64   // UID high-water: next value to allocate
+	nextGID        uint64   // GID high-water: next value to allocate
+	sequence       uint64   // committed mutation sequence
+	legacyMigrated uint8    // persisted legacy-import marker version; 0 = not imported
 }
 
 // NewStore returns an empty store ready for its first mutation with a zero

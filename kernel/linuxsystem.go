@@ -7,6 +7,9 @@ package main
 // kernel clocks, and the CPU's random generator.
 
 import (
+	"encoding/binary"
+
+	"goos/internal/limits"
 	"goos/internal/timekeeping"
 	"goos/internal/version"
 	"goos/kernel/arch/amd64"
@@ -69,28 +72,23 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		}
 		return linuxcompat.Result{Value: uint64(value)}
 	case linuxabi.SysGetuid, linuxabi.SysGeteuid:
-		return linuxcompat.Result{Value: uint64(linuxcompat.StatUID)}
+		return linuxcompat.Result{Value: uint64(state.Credentials().UID)}
 	case linuxabi.SysGetgid, linuxabi.SysGetegid:
-		return linuxcompat.Result{Value: uint64(linuxcompat.StatGID)}
+		return linuxcompat.Result{Value: uint64(state.Credentials().GID)}
 	case linuxabi.SysSetuid:
 		// A process may set the identity it already has. It has no other to
 		// switch to and no privilege that would let it.
-		if arguments[0] != uint64(linuxcompat.StatUID) {
+		if arguments[0] != uint64(state.Credentials().UID) {
 			return linuxErrno(linuxabi.EPERM)
 		}
 		return linuxcompat.Result{}
 	case linuxabi.SysSetgid:
-		if arguments[0] != uint64(linuxcompat.StatGID) {
+		if arguments[0] != uint64(state.Credentials().GID) {
 			return linuxErrno(linuxabi.EPERM)
 		}
 		return linuxcompat.Result{}
 	case linuxabi.SysGetgroups:
-		// No supplementary groups exist. A negative size is the one bad
-		// argument left.
-		if int32(arguments[0]) < 0 {
-			return linuxErrno(linuxabi.EINVAL)
-		}
-		return linuxcompat.Result{}
+		return handler.getgroups(state, arguments)
 	case linuxabi.SysUname:
 		linuxcompat.EncodeUname(&local.linuxUname, version.Release)
 		if !vm.CopyOut(handler.root, arguments[0], local.linuxUname[:]) {
@@ -141,6 +139,36 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		return handler.getcpu(arguments)
 	}
 	return linuxErrno(linuxabi.ENOSYS)
+}
+
+// getgroups answers SysGetgroups: a zero size returns the required count, a
+// short buffer fails EINVAL without writing, and otherwise the supplementary
+// GIDs are copied to the user buffer (ADR 0234). The primary GID is not a
+// supplementary group and is not returned.
+func (handler *linuxCallHandler) getgroups(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
+	size := int32(arguments[0])
+	if size < 0 {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	credentials := state.Credentials()
+	count := int(credentials.GroupCount)
+	if size == 0 {
+		return linuxcompat.Result{Value: uint64(count)}
+	}
+	if size < int32(count) {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	if count == 0 {
+		return linuxcompat.Result{}
+	}
+	var buffer [limits.SupplementaryGroupsMax * 4]byte
+	for index := 0; index < count; index++ {
+		binary.LittleEndian.PutUint32(buffer[index*4:], credentials.Groups[index])
+	}
+	if !vm.CopyOut(handler.root, arguments[1], buffer[:count*4]) {
+		return linuxErrno(linuxabi.EFAULT)
+	}
+	return linuxcompat.Result{Value: uint64(count)}
 }
 
 // linuxCPUMaskSize is the kernel's CPU mask: one 64-bit word covers every

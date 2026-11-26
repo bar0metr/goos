@@ -410,6 +410,10 @@ func enterRecovery(stage supervisor.Stage, path, reason string) {
 		sys.HandleClose(identityControl)
 		identityControl = 0
 	}
+	if identityLookup != 0 {
+		sys.HandleClose(identityLookup)
+		identityLookup = 0
+	}
 	// Recovery runs no network either: both services run from the volume.
 	stopLinuxSockets()
 	stopNetwork()

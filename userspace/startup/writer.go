@@ -19,6 +19,8 @@ type Writer struct {
 	failed      bool
 	command     bool
 	cwd         bool
+	credentials Credentials
+	withCred    bool
 }
 
 // NewWriter starts an object with the given counts in target.
@@ -109,10 +111,29 @@ func (writer *Writer) Handle(name []byte, id handle.ID) {
 	writer.added[2]++
 }
 
+// Credentials appends the Linux credential snapshot to the object. It is
+// called once for an account-backed launch and never for an identity-free
+// system launch.
+func (writer *Writer) Credentials(credentials Credentials) {
+	if writer.failed || writer.withCred || !credentials.Valid() {
+		writer.failed = true
+		return
+	}
+	writer.credentials, writer.withCred = credentials, true
+}
+
 // Finish completes the object and validates it as a template.
 func (writer *Writer) Finish() ([]byte, bool) {
 	if writer.failed || !writer.command || !writer.cwd || writer.added[0] != writer.arguments || writer.added[1] != writer.environment || writer.added[2] != writer.handles {
 		return nil, false
+	}
+	if writer.withCred {
+		if writer.cursor+CredentialsSize > len(writer.target) {
+			return nil, false
+		}
+		encodeCredentials(writer.target[writer.cursor:], writer.credentials)
+		writer.cursor += CredentialsSize
+		writer.target[24] = flagCredentials
 	}
 	binary.LittleEndian.PutUint32(writer.target[8:12], uint32(writer.cursor))
 	object := writer.target[:writer.cursor]

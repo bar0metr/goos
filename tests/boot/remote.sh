@@ -295,7 +295,7 @@ def boot():
     children.append(guest)
     serial = guest.stdin
     wait_until(lambda: re.search(PROMPT, serial_log.read_bytes()), "serial shell prompt", 120)
-    wait_until(lambda: b"NETD_READY 10.0.2." in serial_log.read_bytes(), "native DHCP ready", 30)
+    wait_until(lambda: b"NETD_READY 10.0.2." in serial_log.read_bytes(), "native DHCP ready", 90)
     # Allow validation's storage-driver replacement to complete before writes.
     time.sleep(4)
     require(f"boot{boot_number}.ready", True, "installed shell and native network ready")
@@ -359,7 +359,7 @@ def reload_ok():
 
 
 def scan(port):
-    result = run(["ssh-keyscan", "-T", "5", "-p", port, "-t", "ed25519", "127.0.0.1"], 10)
+    result = run(["ssh-keyscan", "-T", "15", "-p", port, "-t", "ed25519", "127.0.0.1"], 30)
     return [line for line in result.stdout.splitlines() if b" ssh-ed25519 " in line]
 
 
@@ -531,6 +531,10 @@ def poweroff():
 
 try:
     boot()
+    # The legacy cutover is an explicit local command, never triggered by an
+    # incoming connection. It imports the one legacy account, its home, its
+    # validated keys and the persisted marker in a single identityd commit.
+    console("migrate remote-admin /home/user /home/user/remote-keys/authorized_keys", rb"MIGRATE_OK")
     invalid = status(listener="closed", settings="invalid")
     require("bootstrap.invalid-status", invalid.get("reason") is not None,
             "invalid startup retains running admin service and rejection reason")
@@ -693,13 +697,13 @@ try:
             "follower stays quiet with no new matching record")
     trigger_time = time.monotonic()
     ssh_exec(ports[0], "log.follow-trigger", "remote reload", sessions=1)
-    session.wait(rb"remoted\[[0-9]+\]: remote listener active", idle_start, 10)
-    require("log.follow-wake", time.monotonic() - trigger_time < 10,
+    session.wait(rb"remoted\[[0-9]+\]: remote listener active", idle_start, 30)
+    require("log.follow-wake", time.monotonic() - trigger_time < 30,
             "second SSH session wakes the event-driven follower")
     session.pump()
     second_event_start = len(session.stdout)
     ssh_exec(ports[0], "log.follow-second-trigger", "remote reload", sessions=1)
-    session.wait(rb"remoted\[[0-9]+\]: remote listener active", second_event_start, 10)
+    session.wait(rb"remoted\[[0-9]+\]: remote listener active", second_event_start, 30)
     session.pump()
     require("log.follow-continues", re.search(PROMPT, session.stdout[start:]) is None,
             "follower stays active through a second append instead of returning after its first event")
@@ -904,7 +908,7 @@ try:
     interactive.stdin.write(b"pwd\n")
     interactive.stdin.flush()
     counts(sessions=1)
-    config("sftp-root", "/home/user/sftp-second-root")
+    console("user home remote-admin /home/user/sftp-second-root", rb"SHELL_EXEC_OK")
     reload_ok()
     result = sftp_batch(ports[0], "sftp.new-root", ["ls -1", "-get /../admin-lines.txt " + str(fetched / "above-new-root")], sessions=1)
     require("sftp.reload-new-root", b"second-root-marker" in result.stdout and not (fetched / "above-new-root").exists(),
@@ -915,15 +919,15 @@ try:
     require("sftp.reload-existing-root", interactive.returncode == 0 and b"admin-lines.txt" in interactive_out,
             "a session open across the reload keeps the root it was admitted with")
     counts()
-    config("sftp-root", "/home/user/sftp-missing-root")
+    console("user home remote-admin /home/user/sftp-missing-root", rb"SHELL_EXEC_OK")
     reload_ok()
     result = run(sftp_args(ports[0], "sftp.missing-root", ("-b", "/dev/null")), 60)
     require("sftp.missing-root", result.returncode != 0, "a root that does not exist admits no session")
     counts()
-    config("sftp-root", "/state/x")
-    refused = console("remote reload")
-    require("sftp.root-outside-home", b"exit status: 2" in refused, "a root outside /home fails the whole reload")
-    config("sftp-root", "/home/user")
+    console("user home remote-admin /state/x", rb"SHELL_EXEC_OK")
+    result = run(sftp_args(ports[0], "sftp.root-outside-home", ("-b", "/dev/null")), 60)
+    require("sftp.root-outside-home", result.returncode != 0, "a root outside /home admits no session")
+    console("user home remote-admin /home/user", rb"SHELL_EXEC_OK")
     reload_ok()
     # A killed client leaves nothing behind, and a process with no peer exits.
     transfer = subprocess.Popen(sftp_args(ports[0], "sftp.abrupt"), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -34,17 +34,17 @@ func linuxErrno(errno linuxabi.Errno) linuxcompat.Result {
 // Open is the legacy form musl's open() uses on x86_64: openat from the
 // working directory.
 func (handler *linuxCallHandler) Open(request linuxcompat.Request) linuxcompat.Result {
-	return handler.openPath(request, linuxabi.AtFDCWD, request.Arguments[0], request.Arguments[1])
+	return handler.openPath(request, linuxabi.AtFDCWD, request.Arguments[0], request.Arguments[1], request.Arguments[2])
 }
 
 func (handler *linuxCallHandler) Openat(request linuxcompat.Request) linuxcompat.Result {
-	return handler.openPath(request, int32(request.Arguments[0]), request.Arguments[1], request.Arguments[2])
+	return handler.openPath(request, int32(request.Arguments[0]), request.Arguments[1], request.Arguments[2], request.Arguments[3])
 }
 
 // openPath sends one VFS request carrying the complete open intent. A
 // directory gets a descriptor that keeps its path; the VFS has no open file
-// for one.
-func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int32, address uint64, flags uint64) linuxcompat.Result {
+// for one. mode is the requested creation permission bits of an O_CREAT open.
+func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int32, address uint64, flags uint64, mode uint64) linuxcompat.Result {
 	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
 	if errno != 0 {
@@ -92,7 +92,12 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 		return linuxErrno(handler.vfsFailed())
 	}
 	openFlags := intent.VFSOpenFlags(pending.Note&noteTrailing != 0)
-	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationOpen, Rights: intent.OpenRights(), OpenFlags: openFlags, Path: path}, attachPaths)
+	open := vfs.Request{Operation: vfs.OperationOpen, Rights: intent.OpenRights(), OpenFlags: openFlags, Path: path}
+	if openFlags&vfs.OpenCreate != 0 {
+		open.Mode = uint16((mode &^ uint64(state.Umask())) & 0o7777)
+		open.ModeSet = true
+	}
+	reply, errno, blocked := handler.vfsExchange(open, attachPaths)
 	if blocked {
 		return linuxBlocked
 	}
@@ -616,9 +621,9 @@ func (handler *linuxCallHandler) Filesystem(request linuxcompat.Request) linuxco
 	case linuxabi.SysChdir:
 		return handler.chdir(request)
 	case linuxabi.SysMkdir:
-		return handler.mkdir(request, linuxabi.AtFDCWD, arguments[0])
+		return handler.mkdir(request, linuxabi.AtFDCWD, arguments[0], arguments[1])
 	case linuxabi.SysMkdirat:
-		return handler.mkdir(request, int32(arguments[0]), arguments[1])
+		return handler.mkdir(request, int32(arguments[0]), arguments[1], arguments[2])
 	case linuxabi.SysUnlink:
 		return handler.remove(request, linuxabi.AtFDCWD, arguments[0], false)
 	case linuxabi.SysRmdir:
@@ -1249,8 +1254,9 @@ func (handler *linuxCallHandler) chdir(request linuxcompat.Request) linuxcompat.
 	return linuxErrno(errno)
 }
 
-// mkdir ignores the mode argument: GoOS has no permission bits to set.
-func (handler *linuxCallHandler) mkdir(request linuxcompat.Request, dirfd int32, address uint64) linuxcompat.Result {
+// mkdir applies the caller's umask to the requested mode and creates the
+// directory with the session's trusted ownership.
+func (handler *linuxCallHandler) mkdir(request linuxcompat.Request, dirfd int32, address uint64, mode uint64) linuxcompat.Result {
 	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
 	state, found := linuxcompat.FindProcess(handler.root)
@@ -1276,7 +1282,7 @@ func (handler *linuxCallHandler) mkdir(request linuxcompat.Request, dirfd int32,
 	if !snapshotOK {
 		return linuxErrno(linuxabi.EIO)
 	}
-	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationMkdir, Path: path}, attachPaths)
+	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationMkdir, Path: path, Mode: uint16((mode &^ uint64(state.Umask())) & 0o7777), ModeSet: true}, attachPaths)
 	if blocked {
 		return linuxBlocked
 	}

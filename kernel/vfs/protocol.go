@@ -25,9 +25,10 @@ const (
 	// version 15 adds symbolic and hard links, the no-follow flag, the loop
 	// and cross-device statuses, and Unix metadata in a stat reply
 	// (ADR 0223); version 16 makes open/create/truncate intent one serialized
-	// VFS operation.
-	ProtocolVersion = uint16(16)
-	protocolHeader  = 40
+	// VFS operation; version 17 adds the requested creation mode to open,
+	// create, and mkdir requests (ADR 0234).
+	ProtocolVersion = uint16(17)
+	protocolHeader  = 42
 	// MaxProtocolData is the most write data one inline request carries.
 	MaxProtocolData = ipc.MaxPayload - protocolHeader
 	replyHeader     = 104
@@ -49,6 +50,9 @@ const (
 	flagOpenDirectory     = uint32(1 << 11)
 	flagOpenTrailingSlash = uint32(1 << 12)
 	flagOpenMask          = flagOpenCreate | flagOpenExclusive | flagOpenTruncate | flagOpenDirectory | flagOpenTrailingSlash
+	// flagMode marks a request whose creation Mode field is authoritative. A
+	// request without it uses the documented default mode (ADR 0234).
+	flagMode = uint32(1 << 2)
 	// flagNameAttached marks a reply whose name is in the attached object.
 	flagNameAttached = 1
 	// replyBatchEnd marks a directory batch that reached the listing's end.
@@ -210,8 +214,13 @@ type Request struct {
 	PathsAttached bool
 	NameReturn    bool
 	MountID       MountID
-	pathSize      int
-	targetSize    int
+	// Mode is the requested creation permission bits for open, create, and
+	// mkdir. ModeSet reports that Mode is authoritative; when false the
+	// receiver uses the documented default mode (ADR 0234).
+	Mode       uint16
+	ModeSet    bool
+	pathSize   int
+	targetSize int
 }
 
 // Reply answers a request. A listed name too long for the message is in the
@@ -437,7 +446,9 @@ func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 	if request.Operation < OperationOpen || request.Operation > lastOperation || correlation == 0 ||
 		len(request.Path) > limits.PathMax || len(request.Target) > limits.PathMax || len(request.Data) > MaxProtocolData ||
 		request.NameReturn && !request.Operation.listsNames() || request.Operation == OperationReadDirBatch && !request.NameReturn || request.PathsAttached && request.Operation.Bulk() ||
-		request.OpenFlags != 0 && request.Operation != OperationOpen || !request.OpenFlags.Valid() || request.OpenFlags&(OpenCreate|OpenDirectory) == OpenCreate|OpenDirectory {
+		request.OpenFlags != 0 && request.Operation != OperationOpen || !request.OpenFlags.Valid() || request.OpenFlags&(OpenCreate|OpenDirectory) == OpenCreate|OpenDirectory ||
+		request.Mode&^ramfs.ModePermissions != 0 || !request.ModeSet && request.Mode != 0 ||
+		request.ModeSet && request.Operation != OperationOpen && request.Operation != OperationCreate && request.Operation != OperationMkdir {
 		return ipc.Message{}, false
 	}
 	inline := len(request.Path) + len(request.Target)
@@ -447,6 +458,9 @@ func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 	}
 	if request.NameReturn {
 		flags |= flagNameReturn
+	}
+	if request.ModeSet {
+		flags |= flagMode
 	}
 	flags |= uint32(request.OpenFlags) << 8
 	if protocolHeader+inline+len(request.Data) > ipc.MaxPayload {
@@ -463,6 +477,7 @@ func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 	binary.LittleEndian.PutUint32(message.Payload[24:], request.Size)
 	binary.LittleEndian.PutUint32(message.Payload[28:], flags)
 	binary.LittleEndian.PutUint64(message.Payload[32:], uint64(request.MountID))
+	binary.LittleEndian.PutUint16(message.Payload[40:], request.Mode)
 	offset := protocolHeader
 	if !request.PathsAttached {
 		offset += copy(message.Payload[offset:], request.Path)
@@ -487,15 +502,18 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 	if attached {
 		inline = 0
 	}
-	if flags&^(flagPathsAttached|flagNameReturn|flagOpenMask) != 0 || pathSize > limits.PathMax || targetSize > limits.PathMax || dataSize > MaxProtocolData ||
+	if flags&^(flagPathsAttached|flagNameReturn|flagOpenMask|flagMode) != 0 || pathSize > limits.PathMax || targetSize > limits.PathMax || dataSize > MaxProtocolData ||
 		protocolHeader+inline+dataSize != int(message.PayloadSize) || attached && protocolHeader+pathSize+targetSize+dataSize <= ipc.MaxPayload {
 		return Request{}, false
 	}
 	operation := Operation(message.Payload[0])
 	rights := Rights(message.Payload[1])
 	openFlags := OpenFlags(flags >> 8)
+	mode := binary.LittleEndian.Uint16(message.Payload[40:])
 	if operation < OperationOpen || operation > lastOperation || rights&^allowedRights(operation) != 0 || flags&flagNameReturn != 0 && !operation.listsNames() || operation == OperationReadDirBatch && flags&flagNameReturn == 0 || attached && operation.Bulk() ||
-		openFlags != 0 && operation != OperationOpen || !openFlags.Valid() || openFlags&(OpenCreate|OpenDirectory) == OpenCreate|OpenDirectory {
+		openFlags != 0 && operation != OperationOpen || !openFlags.Valid() || openFlags&(OpenCreate|OpenDirectory) == OpenCreate|OpenDirectory ||
+		mode&^ramfs.ModePermissions != 0 || flags&flagMode == 0 && mode != 0 ||
+		flags&flagMode != 0 && operation != OperationOpen && operation != OperationCreate && operation != OperationMkdir {
 		return Request{}, false
 	}
 	request := Request{
@@ -506,6 +524,8 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 		Offset:        binary.LittleEndian.Uint64(message.Payload[16:]),
 		Size:          binary.LittleEndian.Uint32(message.Payload[24:]),
 		MountID:       MountID(binary.LittleEndian.Uint64(message.Payload[32:])),
+		Mode:          mode,
+		ModeSet:       flags&flagMode != 0,
 		PathsAttached: attached,
 		NameReturn:    flags&flagNameReturn != 0,
 		pathSize:      pathSize,

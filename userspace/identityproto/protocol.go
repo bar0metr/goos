@@ -21,9 +21,10 @@ const (
 	// Version 1 was the initial identity protocol (ADR 0233). Version 2 adds
 	// the database epoch, committed revision, and the account's supplementary
 	// group Unix GIDs to the record so lookup can return one coherent committed
-	// principal view (M4 FIX §5). A message of any other version is not this
-	// protocol and fails decoding.
-	Version = uint16(2)
+	// principal view (M4 FIX §5). Version 3 adds AdminSetGroupGID, an explicit
+	// Unix GID for a group (ADR 0234). A message of any other version is not
+	// this protocol and fails decoding.
+	Version = uint16(3)
 
 	requestHeader = 32
 	replyHeader   = 40
@@ -105,15 +106,26 @@ const (
 	AdminAddGroup
 	AdminDeleteGroup
 	AdminSetMembers
+	AdminSetGroupGID
+	AdminImportLegacy
 	// Lookup operations.
 	LookupAuthorizeKey
 	LookupGetAccount
-	lastOpcode = LookupGetAccount
+	LookupAuthorizeAndResolve
+	lastOpcode = LookupAuthorizeAndResolve
 )
 
 func isControlOpcode(op Opcode) bool { return op == OpAddAdmin || op == OpAddLookup }
-func isDataOpcode(op Opcode) bool    { return op >= AdminStatus && op <= lastOpcode }
-func isListOpcode(op Opcode) bool    { return op == AdminListAccounts || op == AdminListGroups }
+
+// IsLookupOpcode reports whether op may run on a lookup session. Every other
+// data opcode requires the administration session, so a lookup session can
+// never mutate or provision. This is the single classification the service's
+// session gate and its tests share.
+func IsLookupOpcode(op Opcode) bool {
+	return op == LookupAuthorizeKey || op == LookupGetAccount || op == LookupAuthorizeAndResolve
+}
+func isDataOpcode(op Opcode) bool { return op >= AdminStatus && op <= lastOpcode }
+func isListOpcode(op Opcode) bool { return op == AdminListAccounts || op == AdminListGroups }
 
 // Result is a data-operation result code.
 type Result uint8
@@ -152,7 +164,7 @@ const (
 
 func recordKindFor(op Opcode) RecordKind {
 	switch op {
-	case AdminGetAccount, AdminListAccounts, LookupGetAccount:
+	case AdminGetAccount, AdminListAccounts, LookupGetAccount, LookupAuthorizeAndResolve:
 		return RecordAccount
 	case AdminGetGroup, AdminListGroups:
 		return RecordGroup
@@ -327,7 +339,7 @@ func DecodeRequest(in *ipc.Message, out *Request) (correlation uint64, ok bool) 
 	nameLen, homeLen := int(payload[requestNameLen]), int(payload[requestHomeLen])
 	idCount, keyLen, fpLen := int(payload[requestIDCount]), int(payload[requestKeyLen]), int(payload[requestFPLen])
 	if nameLen > identity.MaxName || homeLen > identity.MaxHome || idCount > identity.MaxAccounts ||
-		keyLen > identity.KeySize || fpLen > identity.FingerprintSize ||
+		keyLen > maxPackedKeyLen || fpLen > identity.FingerprintSize ||
 		requestHeader+nameLen+homeLen+keyLen+fpLen+4*idCount != int(in.PayloadSize) {
 		return 0, false
 	}
@@ -413,10 +425,59 @@ func validRequest(r *Request) bool {
 	case AdminSetMembers:
 		return !r.Enabled && validName(r.Name) && scalar && len(r.Home) == 0 && len(r.Key) == 0 &&
 			len(r.Fingerprint) == 0 && len(r.IDs) <= identity.MaxAccounts
+	case AdminSetGroupGID:
+		return !r.Enabled && validName(r.Name) && r.UID == 0 && noData
+	case AdminImportLegacy:
+		_, keysOK := ParseImportKeys(r.Key)
+		return !r.Enabled && validName(r.Name) && validHome(r.Home) && keysOK &&
+			r.UID == 0 && r.GID == 0 && len(r.Fingerprint) == 0 && len(r.IDs) == 0
 	case LookupAuthorizeKey:
+		return !r.Enabled && validName(r.Name) && validKey(r.Key) && scalar && len(r.Home) == 0 && len(r.Fingerprint) == 0 && len(r.IDs) == 0
+	case LookupAuthorizeAndResolve:
 		return !r.Enabled && validName(r.Name) && validKey(r.Key) && scalar && len(r.Home) == 0 && len(r.Fingerprint) == 0 && len(r.IDs) == 0
 	}
 	return false
+}
+
+// MaxImportKeys bounds the keys the atomic legacy import carries, sized to the
+// fixed IPC payload budget: name (31) + home (64) + count (1) + keys (4 x 32).
+const MaxImportKeys = 4
+
+// maxPackedKeyLen bounds Request.Key on the wire: one count byte plus the
+// packed legacy-import keys. Opcode-specific validation still enforces the
+// exact single-key size for key operations.
+const maxPackedKeyLen = 1 + MaxImportKeys*identity.KeySize
+
+// ParseImportKeys decodes the packed [count][key...] form the atomic legacy
+// import carries in Request.Key.
+func ParseImportKeys(packed []byte) ([]identity.Key, bool) {
+	if len(packed) == 0 || packed[0] > MaxImportKeys {
+		return nil, false
+	}
+	count := int(packed[0])
+	if len(packed) != 1+count*identity.KeySize {
+		return nil, false
+	}
+	var keys []identity.Key
+	for i := 0; i < count; i++ {
+		var key identity.Key
+		copy(key[:], packed[1+i*identity.KeySize:])
+		keys = append(keys, key)
+	}
+	return keys, true
+}
+
+// EncodeImportKeys packs validated public keys for Request.Key.
+func EncodeImportKeys(keys [][]byte) []byte {
+	if len(keys) > MaxImportKeys {
+		return nil
+	}
+	out := make([]byte, 1, 1+len(keys)*identity.KeySize)
+	out[0] = byte(len(keys))
+	for _, key := range keys {
+		out = append(out, key...)
+	}
+	return out
 }
 
 // EncodeReply encodes one administration or lookup reply, other than a list
@@ -508,7 +569,7 @@ func validReply(r *Reply) bool {
 			return r.Accounts <= identity.MaxAccounts && r.Groups <= identity.MaxGroups && r.Keys <= identity.MaxTotalKeys && len(r.Records) == 0
 		}
 		return counts && len(r.Records) == 0
-	case AdminGetAccount, AdminGetGroup, LookupGetAccount:
+	case AdminGetAccount, AdminGetGroup, LookupGetAccount, LookupAuthorizeAndResolve:
 		if r.Result == ResultOK {
 			return counts && len(r.Records) == 1 && validRecord(&r.Records[0]) && r.Records[0].Kind == recordKindFor(r.Opcode)
 		}

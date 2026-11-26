@@ -6,19 +6,21 @@
 //
 //	offset  size  field
 //	0       4     magic "GST4"
-//	4       2     version (4)
+//	4       2     version (5)
 //	6       2     handle count
 //	8       4     total size of the object
 //	12      4     argument count (at least 1: argv[0])
 //	16      4     environment count
 //	20      4     offset of the string area
-//	24      8     reserved, zero
+//	24      1     credential flag (0 or 1); version 5
+//	25      7     reserved, zero
 //	32            string table: (2 + arguments + environment) entries of
 //	              {u32 offset, u32 length} — the command, the working
 //	              directory, each argument, each "NAME=VALUE" variable
 //	              handle table: entries of {u32 name offset, u32 name length,
 //	              u64 handle ID}
-//	              string area, up to the total size
+//	              string area, then, when the credential flag is set, the
+//	              fixed Credentials block at the end of the object
 //
 // All fields are little-endian. The string area starts right after the handle
 // table, every string lies inside it, and no string contains a zero byte, so
@@ -33,7 +35,7 @@ import (
 )
 
 const (
-	Version = 4
+	Version = 5
 	// MaxSize bounds a whole startup object. It is the kernel's limit; see
 	// kcall.MaxStartupSize for why it has this value.
 	MaxSize = kcall.MaxStartupSize
@@ -46,7 +48,88 @@ const (
 	HeaderSize    = 32
 	entrySize     = 8
 	handleSize    = 16
+
+	// flagCredentials, in reserved byte 24, marks an object whose trailing
+	// block carries the Linux credential snapshot (ADR 0234).
+	flagCredentials = 1
 )
+
+// CredentialsSize is the fixed encoded size of a Credentials block.
+const CredentialsSize = 4 + 4 + 8 + 16 + 1 + limits.SupplementaryGroupsMax*4
+
+// Credentials is the bounded Linux credential snapshot a launch carries: the
+// real/effective/saved UID/GID (equal at launch), the supplementary GIDs, the
+// stable account ID and the identity database epoch (ADR 0234). A zero value
+// is the identity-free legacy launch, which the kernel reports as UID/GID 0
+// for getuid and so on. It grants no authority.
+type Credentials struct {
+	UID        uint32
+	GID        uint32
+	AccountID  uint64
+	Epoch      [16]byte
+	Groups     [limits.SupplementaryGroupsMax]uint32
+	GroupCount uint8
+}
+
+// Valid reports whether the credential is well formed. A zero credential is
+// valid and means an identity-free launch.
+func (credentials Credentials) Valid() bool {
+	if credentials.GroupCount > limits.SupplementaryGroupsMax {
+		return false
+	}
+	for index := 1; index < int(credentials.GroupCount); index++ {
+		if credentials.Groups[index-1] >= credentials.Groups[index] {
+			return false
+		}
+	}
+	if credentials.AccountID == 0 {
+		return credentials.UID == 0 && credentials.GID == 0 && credentials.Epoch == [16]byte{}
+	}
+	return credentials.UID != 0 && credentials.GID != 0 && credentials.Epoch != [16]byte{}
+}
+
+func encodeCredentials(target []byte, credentials Credentials) {
+	binary.LittleEndian.PutUint32(target[0:], credentials.UID)
+	binary.LittleEndian.PutUint32(target[4:], credentials.GID)
+	binary.LittleEndian.PutUint64(target[8:], credentials.AccountID)
+	copy(target[16:32], credentials.Epoch[:])
+	target[32] = credentials.GroupCount
+	offset := 33
+	for index := 0; index < limits.SupplementaryGroupsMax; index++ {
+		binary.LittleEndian.PutUint32(target[offset:], credentials.Groups[index])
+		offset += 4
+	}
+}
+
+func decodeCredentials(source []byte) (Credentials, bool) {
+	var credentials Credentials
+	if len(source) != CredentialsSize {
+		return credentials, false
+	}
+	credentials.UID = binary.LittleEndian.Uint32(source[0:])
+	credentials.GID = binary.LittleEndian.Uint32(source[4:])
+	credentials.AccountID = binary.LittleEndian.Uint64(source[8:])
+	copy(credentials.Epoch[:], source[16:32])
+	credentials.GroupCount = source[32]
+	offset := 33
+	for index := 0; index < limits.SupplementaryGroupsMax; index++ {
+		credentials.Groups[index] = binary.LittleEndian.Uint32(source[offset:])
+		offset += 4
+	}
+	if !credentials.Valid() {
+		return Credentials{}, false
+	}
+	return credentials, true
+}
+
+func zero(data []byte) bool {
+	for _, value := range data {
+		if value != 0 {
+			return false
+		}
+	}
+	return true
+}
 
 var magic = [4]byte{'G', 'S', 'T', '4'}
 
@@ -64,6 +147,7 @@ type Data struct {
 	handleTable    int
 	stringArea     int
 	unboundAllowed bool
+	credentials    bool
 }
 
 // Size reads the total size a startup object's header declares, or reports
@@ -88,7 +172,8 @@ func DecodeTemplate(source []byte) (Data, bool) { return decode(source, true) }
 
 func decode(source []byte, allowUnbound bool) (Data, bool) {
 	size, ok := Size(source)
-	if !ok || size > len(source) || binary.LittleEndian.Uint64(source[24:32]) != 0 {
+	withCredentials := source[24] == flagCredentials
+	if !ok || size > len(source) || source[24] > flagCredentials || !zero(source[25:32]) {
 		return Data{}, false
 	}
 	source = source[:size]
@@ -108,7 +193,16 @@ func decode(source []byte, allowUnbound bool) (Data, bool) {
 	if uint64(binary.LittleEndian.Uint32(source[20:24])) != stringArea || stringArea > uint64(size) {
 		return Data{}, false
 	}
-	data := Data{source: source, arguments: int(arguments), environment: int(environment), handles: int(handles), handleTable: int(handleTable), stringArea: int(stringArea), unboundAllowed: allowUnbound}
+	// A credential block, when present, trails the string area.
+	if withCredentials {
+		if size-CredentialsSize < int(stringArea) {
+			return Data{}, false
+		}
+		if _, ok := decodeCredentials(source[size-CredentialsSize:]); !ok {
+			return Data{}, false
+		}
+	}
+	data := Data{source: source, arguments: int(arguments), environment: int(environment), handles: int(handles), handleTable: int(handleTable), stringArea: int(stringArea), unboundAllowed: allowUnbound, credentials: withCredentials}
 	command, ok := data.entry(0)
 	if !ok || len(command) == 0 || len(command) > limits.PathMax {
 		return Data{}, false
@@ -181,6 +275,15 @@ func (data Data) span(offset, length uint32) ([]byte, bool) {
 
 // Bytes returns the whole object.
 func (data Data) Bytes() []byte { return data.source }
+
+// Credentials returns the Linux credential snapshot the object carries, and
+// whether one is present. An object without one is an identity-free launch.
+func (data Data) Credentials() (Credentials, bool) {
+	if !data.credentials || len(data.source) < CredentialsSize {
+		return Credentials{}, false
+	}
+	return decodeCredentials(data.source[len(data.source)-CredentialsSize:])
+}
 
 // Command is the name or path the program was started by.
 func (data Data) Command() []byte { value, _ := data.at(0); return value }

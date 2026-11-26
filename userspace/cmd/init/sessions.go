@@ -62,6 +62,11 @@ type terminalSession struct {
 	// faults that prove each restarts on its own.
 	ttyProcess, shellProcess handle.ID
 	active                   bool
+	// principal and principalBound carry the account principal an SSH shell
+	// was admitted under, so commands it launches keep the account's VFS
+	// identity. Identity is data, never authority (ADR 0234).
+	principal      remotePrincipal
+	principalBound bool
 }
 
 // sessions are COM1's, which the boot test drives, and the framebuffer's. The

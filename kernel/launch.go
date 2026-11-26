@@ -294,7 +294,12 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 				random = &local.linuxStackRandom
 			}
 			linuxLaunchStartup = bound
-			stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], loaded.StackTop, linuxImage, &linuxLaunchStartup, random)
+			credentials, _ := bound.Credentials()
+			uid, gid := uint64(linuxcompat.LegacyUID), uint64(linuxcompat.LegacyGID)
+			if credentials.AccountID != 0 {
+				uid, gid = uint64(credentials.UID), uint64(credentials.GID)
+			}
+			stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], loaded.StackTop, linuxImage, &linuxLaunchStartup, random, uid, gid)
 			linuxLaunchStartup = startup.Data{}
 			clear(local.linuxStackRandom[:])
 			brkBase, brkLimit, brkOK := linuxcompat.BrkBounds(linuxImage.LoadEnd(), vm.PageSize, vm.UserMapBase)

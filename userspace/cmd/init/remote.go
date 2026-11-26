@@ -13,15 +13,37 @@ import (
 	"goos/kernel/vfs"
 	configproto "goos/userspace/config"
 	execproto "goos/userspace/exec"
+	"goos/userspace/identity"
+	"goos/userspace/identityproto"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
 	"goos/userspace/remoteapi"
+	"goos/userspace/remotepolicy"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 	userwait "goos/userspace/wait"
 )
 
 const remoteServiceName = "remoted"
+
+// remotePrincipal is the bounded account principal a worker is bound to at
+// admission. Identity is data, never authority: it selects the scoped grants
+// and launch credentials, but a worker- or client-supplied name, key, or
+// AccountID never widens them. It carries exactly what the launch and VFS
+// session need; the database revision is retained for the admission record.
+type remotePrincipal struct {
+	AccountID  uint64
+	Epoch      [16]byte
+	Revision   uint64
+	UID        uint32
+	GID        uint32
+	Groups     [identity.MaxSupplementaryGroups]uint32
+	GroupCount uint8
+	Home       [identity.MaxHome]byte
+	HomeLen    uint8
+	Name       [identity.MaxName]byte
+	NameLen    uint8
+}
 
 // Worker slots are not supervisor services. A slot is reused only after its
 // shell, jobs, processes, mappings, streams, and endpoints have been released.
@@ -43,7 +65,33 @@ type remoteWorker struct {
 	sftpRoot              [remoteapi.MaxSFTPRoot]byte
 	sftpRootSize          uint8
 	grace                 supervisor.RemoteGrace
+	// principal is the validated account principal bound at admission, and
+	// principalBound says one is present. Every account session uses it.
+	principal      remotePrincipal
+	principalBound bool
+	// pending is the bounded, one-use admission record an allowed handshake
+	// probe issues. The signed OperationAuthenticate must present its token,
+	// name and key; PID 1 consumes it exactly once.
+	pending remoteAdmission
 }
+
+// remoteAdmission is PID 1's outstanding handshake authorization record. It is
+// bound to this worker, the probed identity, and the one-use token, and it is
+// cleared on teardown and on the first matching signed authentication.
+type remoteAdmission struct {
+	valid    bool
+	token    uint64
+	username [remoteapi.MaxUsername]byte
+	userSize uint8
+	key      [32]byte
+	epoch    [16]byte
+	account  uint64
+}
+
+// remoteAdmissionTokens is PID 1's monotone one-use token counter. A token is
+// never reused, so a replayed or stale token cannot match an outstanding
+// record.
+var remoteAdmissionTokens uint64
 
 var (
 	remoteRegistry       supervisor.RemoteRegistry
@@ -298,7 +346,7 @@ func launchRemoteWorker(worker *remoteWorker, executable supervisor.Executable) 
 		{Name: "signer", Handle: handle.ID(signer[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 	}
-	event, result := launchRemoteExecutable(executable, "remoted-worker", grants, false, nil)
+	event, result := launchRemoteExecutable(executable, "remoted-worker", grants, false, nil, nil)
 	if result != supervisor.LaunchOK {
 		closeOpen(handle.ID(pair[1]))
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
@@ -314,11 +362,132 @@ func launchRemoteWorker(worker *remoteWorker, executable supervisor.Executable) 
 	notifyRemoteCounts()
 }
 
-func launchRemoteExecutable(executable supervisor.Executable, name string, grants []supervisor.Capability, shell bool, command []byte) (supervisor.LifecycleEvent, supervisor.LaunchStatus) {
+// bindRemotePrincipal revalidates the username+key the worker authenticated
+// with against the current committed identity snapshot and fetches the full
+// principal. It binds the result to the worker only on success. A disabled,
+// missing, removed-key, recreated, corrupt or unavailable account fails closed,
+// and a worker-supplied name or AccountID never chooses the grant: the whole
+// decision is re-derived from the identity database at admission.
+// consumeAdmission accepts exactly the outstanding record for this worker and
+// clears it, so a second Authenticate with the same token fails. A mismatched
+// token, name or key also clears the record: an uncertain admission never
+// leaves a reusable authorization behind.
+func (worker *remoteWorker) consumeAdmission(token uint64, username []byte, key [32]byte) (remoteAdmission, bool) {
+	pending := worker.pending
+	worker.pending = remoteAdmission{}
+	if !pending.valid || token == 0 || token != pending.token || key != pending.key ||
+		int(pending.userSize) != len(username) {
+		return remoteAdmission{}, false
+	}
+	for index := 0; index < len(username); index++ {
+		if username[index] != pending.username[index] {
+			return remoteAdmission{}, false
+		}
+	}
+	return pending, true
+}
+
+func bindRemotePrincipal(worker *remoteWorker, username []byte, key [32]byte, pendingEpoch [16]byte, pendingAccount uint64) remoteapi.Result {
+	// One coherent authorize-and-resolve: the key authorization and the
+	// principal record come from the same committed snapshot, so a concurrent
+	// key removal or account change cannot authorize one state and bind another.
+	record, result := identityAuthorizeAndResolve(username, key)
+	if result != identityproto.ResultOK {
+		if result == identityproto.ResultUnavailable || result == identityproto.ResultUnprovisioned {
+			return remoteapi.ResultUnavailable
+		}
+		return remoteapi.ResultPermissionDenied
+	}
+	// The probed record must still be the same identity in the same database
+	// epoch; a changed epoch or AccountID means deletion and recreation, which
+	// fails the outstanding admission even if the same key was re-added.
+	if record.Epoch != pendingEpoch || record.AccountID != pendingAccount {
+		return remoteapi.ResultPermissionDenied
+	}
+	if record.Kind != identityproto.RecordAccount || !record.Enabled || record.AccountID == 0 ||
+		record.UID == 0 || record.GID == 0 || len(record.Name) == 0 || len(record.Home) == 0 ||
+		len(record.Name) > identity.MaxName || len(record.Home) > identity.MaxHome ||
+		len(record.Groups) > identity.MaxSupplementaryGroups ||
+		!remotepolicy.ValidSFTPRoot(string(record.Home)) {
+		return remoteapi.ResultPermissionDenied
+	}
+	principal := remotePrincipal{
+		AccountID:  record.AccountID,
+		Epoch:      record.Epoch,
+		Revision:   record.Revision,
+		UID:        record.UID,
+		GID:        record.GID,
+		GroupCount: uint8(len(record.Groups)),
+	}
+	copy(principal.Groups[:], record.Groups)
+	principal.HomeLen = uint8(copy(principal.Home[:], record.Home))
+	principal.NameLen = uint8(copy(principal.Name[:], record.Name))
+	worker.principal = principal
+	worker.principalBound = true
+	return remoteapi.ResultOK
+}
+
+// principalSessionIdentity is the trusted immutable VFS principal a session
+// carries. It stays separate from the scoped authority; the UID/GID grant
+// nothing by themselves.
+func principalSessionIdentity(principal *remotePrincipal) vfs.SessionIdentity {
+	return vfs.SessionIdentity{AccountID: principal.AccountID, UID: principal.UID, PrimaryGID: principal.GID, Epoch: principal.Epoch}
+}
+
+// remoteShellAuthority is the restricted VFS authority of a shell or exec
+// session: the validated account home read-write, the additional-volume root
+// read-write as the shared writable storage grant, and the program tree
+// read-only so the shell can read the command index and resolve programs
+// (ADR 0234).
+func remoteShellAuthority(home []byte) (vfs.Authority, bool) {
+	authority, ok := vfs.RootedAuthority(home)
+	if !ok {
+		return authority, false
+	}
+	authority.Positives[0].Rights = vfs.Read | vfs.Write
+	authority.Positives[0].Size = uint8(copy(authority.Positives[0].Path[:], []byte("/mnt")))
+	authority.Positives[1].Rights = vfs.Read
+	authority.Positives[1].Size = uint8(copy(authority.Positives[1].Path[:], []byte("/system")))
+	authority.PositiveCount = 2
+	return authority, true
+}
+
+// openAccountSession asks the VFS for a session with a scoped authority and a
+// trusted principal. It is the account-aware equivalent of
+// openRemoteAuthoritySession and installs the SessionIdentity the kernel uses
+// for creation metadata (ADR 0234).
+func openAccountSession(authority vfs.Authority, identity vfs.SessionIdentity) (handle.ID, string) {
+	var pair [2]uint64
+	if !createChannel(&pair) {
+		return 0, "REMOTE_ACCOUNT_CHANNEL_FAILED"
+	}
+	correlation++
+	request, ok := vfs.AddIdentitySessionRequest(handle.ID(pair[1]), authority, identity, correlation)
+	if !ok {
+		closePair(pair)
+		return 0, "REMOTE_ACCOUNT_SEND_FAILED"
+	}
+	result, status, sent := filesystemRequests.Control(handle.ID(vfsControlHandle), &request, vfsSessionDeadline)
+	if !sent {
+		closePair(pair)
+		return 0, "REMOTE_ACCOUNT_SEND_FAILED"
+	}
+	if status != ipc.StatusOK || result != vfs.StatusOK {
+		closeOpen(handle.ID(pair[0]))
+		return 0, "REMOTE_ACCOUNT_REFUSED"
+	}
+	return handle.ID(pair[0]), ""
+}
+
+func launchRemoteExecutable(executable supervisor.Executable, name string, grants []supervisor.Capability, shell bool, command []byte, principal *remotePrincipal) (supervisor.LifecycleEvent, supervisor.LaunchStatus) {
 	slot, staging := stagingSlot()
 	variables := 0
 	if shell {
 		variables = 2
+	}
+	account := principal != nil
+	if account {
+		variables += 3
 	}
 	arguments := 1
 	if len(command) != 0 {
@@ -329,7 +498,13 @@ func launchRemoteExecutable(executable supervisor.Executable, name string, grant
 	}
 	writer := startup.NewWriter(staging, arguments, variables, len(grants))
 	writer.Command([]byte(name))
-	writer.CWD([]byte("/"))
+	// An account shell is rooted at its home, so its working directory must be
+	// inside that root for the shell's own initial VFS check to pass.
+	cwd := []byte("/")
+	if account {
+		cwd = principal.Home[:principal.HomeLen]
+	}
+	writer.CWD(cwd)
 	writer.Argument([]byte(name))
 	if len(command) != 0 {
 		if shell {
@@ -340,6 +515,14 @@ func launchRemoteExecutable(executable supervisor.Executable, name string, grant
 	if shell {
 		writer.Variable([]byte("PATH"), []byte(supervisor.SearchPath(boot.Mode())))
 		writer.Variable([]byte("GOOS_SESSION"), []byte("remote"))
+	}
+	if account {
+		writer.Variable([]byte("HOME"), principal.Home[:principal.HomeLen])
+		writer.Variable([]byte("USER"), principal.Name[:principal.NameLen])
+		writer.Variable([]byte("LOGNAME"), principal.Name[:principal.NameLen])
+		credentials := startup.Credentials{UID: principal.UID, GID: principal.GID, AccountID: principal.AccountID, Epoch: principal.Epoch, GroupCount: principal.GroupCount}
+		copy(credentials.Groups[:], principal.Groups[:principal.GroupCount])
+		writer.Credentials(credentials)
 	}
 	for _, grant := range grants {
 		writer.Handle([]byte(grant.Name), 0)
@@ -369,7 +552,37 @@ func pollRemoteWorker(worker *remoteWorker) {
 	defer closeMessageHandles(&message)
 	result := remoteapi.ResultInvalidArgument
 	switch request.Operation {
+	case remoteapi.OperationAuthorizeKey:
+		// Key authorization during the SSH handshake. The reply is only a
+		// decision, never a session or a grant; admission revalidates against
+		// the same committed snapshot at OperationAuthenticate. The reply
+		// codec carries only OK or PermissionDenied, so an unavailable store
+		// denies (fail closed) here and is reported at admission. The account
+		// database is the sole authority: the legacy import is an explicit
+		// local command, never triggered by an incoming connection.
+		if record, resolved := identityAuthorizeAndResolve(request.Username[:request.UserSize], request.Key); resolved == identityproto.ResultOK {
+			remoteAdmissionTokens++
+			worker.pending = remoteAdmission{valid: true, token: remoteAdmissionTokens, userSize: request.UserSize,
+				key: request.Key, epoch: record.Epoch, account: record.AccountID}
+			copy(worker.pending.username[:], request.Username[:request.UserSize])
+			result = remoteapi.ResultOK
+		} else {
+			worker.pending = remoteAdmission{}
+			result = remoteapi.ResultPermissionDenied
+		}
 	case remoteapi.OperationAuthenticate:
+		// Accept only the matching outstanding record, consume it once, then
+		// revalidate the same identity against the current committed snapshot.
+		// The probe's allowed reply is never sufficient for admission.
+		pending, ok := worker.consumeAdmission(request.Token, request.Username[:request.UserSize], request.Key)
+		if !ok {
+			result = remoteapi.ResultPermissionDenied
+			break
+		}
+		result = bindRemotePrincipal(worker, request.Username[:request.UserSize], request.Key, pending.epoch, pending.account)
+		if result != remoteapi.ResultOK {
+			break
+		}
 		result = remoteRegistry.Authenticate(worker.id, worker.owner, int(worker.limit))
 		if result == remoteapi.ResultOK {
 			notifyRemoteCounts()
@@ -379,7 +592,7 @@ func pollRemoteWorker(worker *remoteWorker) {
 		if result != remoteapi.ResultOK {
 			break
 		}
-		if request.Mode == remoteapi.ModeSFTP && worker.sftpRootSize == 0 {
+		if request.Mode == remoteapi.ModeSFTP && !worker.principalBound {
 			result = remoteapi.ResultPermissionDenied
 			break
 		}
@@ -439,7 +652,15 @@ func replyRemote(worker *remoteWorker, operation remoteapi.Operation, result rem
 	if operation == remoteapi.OperationOpen {
 		mode = worker.mode
 	}
-	return remoteapi.EncodeReply(&remoteapi.Reply{Operation: operation, Result: result, Session: worker.id, Mode: mode}, attachments, requestCorrelation, &reply) && sendMessage(uint64(worker.control), reply)
+	session := worker.id
+	token := uint64(0)
+	if operation == remoteapi.OperationAuthorizeKey {
+		session = 0
+		if result == remoteapi.ResultOK {
+			token = worker.pending.token
+		}
+	}
+	return remoteapi.EncodeReply(&remoteapi.Reply{Operation: operation, Result: result, Session: session, Mode: mode, Token: token}, attachments, requestCorrelation, &reply) && sendMessage(uint64(worker.control), reply)
 }
 
 func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
@@ -475,14 +696,27 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 	}
 	session.page = sys.Window(base, execproto.AreaSize)
 	session.pageBase, session.pageSize = base, size
-	files, reason := openVFSSession()
+	// The shell's VFS session is root-confined to the validated account home
+	// with the additional-volume root as the only shared writable grant, so
+	// one account cannot name another account's files. Program execution is
+	// delegated to PID 1 through the exec channel. The trusted SessionIdentity
+	// makes the shell's own creations use the account's UID and GID.
+	home := worker.principal.Home[:worker.principal.HomeLen]
+	authority, valid := remoteShellAuthority(home)
+	if !valid {
+		syslog.Warn("remote shell home root invalid", syslog.Uint("session", worker.id))
+		closeOpen(handle.ID(tty[0]))
+		failRemoteOpen(worker, remoteapi.ResultUnavailable)
+		return
+	}
+	files, reason := openAccountSession(authority, principalSessionIdentity(&worker.principal))
 	if reason != "" {
 		syslog.Warn("remote shell filesystem session failed", syslog.Str("reason", reason), syslog.Uint("session", worker.id))
 		closeOpen(handle.ID(tty[0]))
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
 		return
 	}
-	settings, _ := openConfigSession("", configproto.Read|configproto.Write|configproto.HostsRead)
+	settings, _ := openConfigSession("", configproto.Read|configproto.HostsRead)
 	grants := []supervisor.Capability{
 		{Name: "stdout", Handle: handle.ID(session.output[1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait},
 		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read},
@@ -498,7 +732,7 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 	if settings != 0 {
 		grants = append(grants, supervisor.Capability{Name: "config", Handle: settings, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
-	event, result := launchRemoteExecutable(executable, "shell", grants, true, worker.command[:worker.commandSize])
+	event, result := launchRemoteExecutable(executable, "shell", grants, true, worker.command[:worker.commandSize], &worker.principal)
 	if result != supervisor.LaunchOK {
 		syslog.Warn("remote shell launch failed", syslog.Uint("status", uint64(result)), syslog.Uint("session", worker.id))
 		closeOpen(files)
@@ -509,6 +743,7 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 	}
 	session.shellProcess, session.shellPID = event.ProcessHandle, event.Process
 	session.execClient = 0
+	session.principal, session.principalBound = worker.principal, true
 	session.active = true
 	attachments := []handle.ID{worker.tty, handle.ID(session.output[0])}
 	if session.execMode {
@@ -531,21 +766,23 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 }
 
 // launchRemoteSFTP starts the fixed sftpd image with its two streams and a VFS
-// session rooted at the directory this connection was admitted with. It grants
-// no terminal, launcher, configuration, network, or signing authority. The
-// process is the session's "shell" for reaping, so every path that ends a
-// connection ends it too.
+// session rooted at the admitted account home. It grants no terminal,
+// launcher, configuration, network, or signing authority. The process is the
+// session's "shell" for reaping, so every path that ends a connection ends it
+// too.
 func launchRemoteSFTP(worker *remoteWorker, executable supervisor.Executable) {
 	session := &worker.session
 	session.execMode = true
-	root := worker.sftpRoot[:worker.sftpRootSize]
+	// SFTP is rooted exactly at the validated account home; it never accepts
+	// a worker-, client- or legacy-configuration-chosen root.
+	root := worker.principal.Home[:worker.principal.HomeLen]
 	authority, valid := vfs.RootedAuthority(root)
 	if !valid || !createStream(&session.output) || !createStream(&session.input) {
 		syslog.Warn("remote SFTP stream allocation failed", syslog.Uint("session", worker.id))
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
 		return
 	}
-	files, reason := openRemoteAuthoritySession(authority)
+	files, reason := openAccountSession(authority, principalSessionIdentity(&worker.principal))
 	if reason != "" {
 		syslog.Warn("remote SFTP filesystem session failed", syslog.Str("reason", reason), syslog.Uint("session", worker.id))
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
@@ -564,7 +801,7 @@ func launchRemoteSFTP(worker *remoteWorker, executable supervisor.Executable) {
 		{Name: "vfs", Handle: files, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 	}
-	event, result := launchRemoteExecutable(executable, "sftpd", grants, false, root)
+	event, result := launchRemoteExecutable(executable, "sftpd", grants, false, root, &worker.principal)
 	if result != supervisor.LaunchOK {
 		syslog.Warn("remote SFTP launch failed", syslog.Uint("status", uint64(result)), syslog.Uint("session", worker.id))
 		closeOpen(files)
@@ -655,6 +892,9 @@ func closeRemoteWorker(worker *remoteWorker) {
 	if worker.id == 0 {
 		return
 	}
+	// Teardown clears any outstanding admission token so a closed connection
+	// can never be resumed.
+	worker.pending = remoteAdmission{}
 	remoteRegistry.BeginClose(worker.id, worker.owner)
 	remoteKill(worker.process)
 	releaseRemoteShell(worker)

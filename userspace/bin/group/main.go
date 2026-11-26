@@ -18,7 +18,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "group list|add NAME|delete NAME|members NAME [UID...]",
+	Usage:   "group list|add NAME|delete NAME|members NAME [UID...]|gid NAME GID",
 	Summary: "manage identity groups",
 	MinArgs: 1,
 	MaxArgs: commands.Unbounded,
@@ -52,6 +52,8 @@ func run(data startup.Data) {
 		named(data, channel, identityproto.AdminDeleteGroup)
 	case utility.Equal(argument, "members") && data.ArgCount() >= 2:
 		setMembers(data, channel)
+	case utility.Equal(argument, "gid") && data.ArgCount() == 3:
+		setGID(data, channel)
 	default:
 		utility.Usage()
 	}
@@ -81,6 +83,15 @@ func setMembers(data startup.Data, channel handle.ID) {
 		utility.Fail(nil, "too many members")
 	}
 	requireResult(exchange(channel, identityproto.Request{Opcode: identityproto.AdminSetMembers, Name: name, IDs: ids}).Result)
+}
+
+func setGID(data startup.Data, channel handle.ID) {
+	name := requiredName(data, 2)
+	gid, ok := parseUint32(required(data, 3))
+	if !ok {
+		utility.Usage()
+	}
+	requireResult(exchange(channel, identityproto.Request{Opcode: identityproto.AdminSetGroupGID, Name: name, GID: gid}).Result)
 }
 
 // list prints one group per line: name, gid, in service order.

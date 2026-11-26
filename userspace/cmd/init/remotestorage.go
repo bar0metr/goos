@@ -123,6 +123,22 @@ func remoteConfigPath(settings handle.ID, key string) (string, bool) {
 	return value, remoteapi.ValidAuthorityPath([]byte(value))
 }
 
+// remoteConfigText reads one text-valued remote setting without imposing a
+// path shape, for the legacy user label and SFTP root used by the migration.
+func remoteConfigText(settings handle.ID, key string) (string, bool) {
+	correlation++
+	request, ok := configproto.EncodeRequest(configproto.Request{Operation: configproto.OperationGet, Key: []byte(key)}, correlation)
+	if !ok || !sendMessage(uint64(settings), request) {
+		return "", false
+	}
+	message, status := receive(uint64(settings), vfsSessionDeadline)
+	reply, ok := configproto.DecodeReply(message)
+	if status != ipc.StatusOK || !ok || message.Correlation != correlation || reply.Operation != configproto.OperationGet || reply.Status != configproto.StatusOK || reply.Value.Kind != configproto.KindText {
+		return "", false
+	}
+	return string(reply.Value.Bytes()), true
+}
+
 // Protection is installed even while SSH is disabled. User sessions cannot
 // precede it, and a restarted VFS gets the same immutable scope slots back.
 func protectRemoteStorage() bool {

@@ -107,3 +107,48 @@ func TestWorkerRemembersEOFBeforeExecutionMode(t *testing.T) {
 		t.Fatal("EOF before exec can leave native stdin open")
 	}
 }
+
+// TestWorkerAdmitsTheVerifiedKey enforces §2 in the worker: the signed
+// authentication request must carry the identity the pinned SSH library
+// verified, never the probe callback's remembered key.
+func TestWorkerAdmitsTheVerifiedKey(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry *ast.FuncDecl
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Name.Name == "userspaceMain" {
+			entry = function
+			break
+		}
+	}
+	if entry == nil {
+		t.Fatal("userspaceMain not found")
+	}
+	var verified, probeKey int
+	ast.Inspect(entry.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch selector.Sel.Name {
+		case "VerifiedKey":
+			verified++
+		case "authenticatedKey":
+			probeKey++
+		}
+		return true
+	})
+	if verified != 1 {
+		t.Fatalf("worker reads the verified key %d times, want 1", verified)
+	}
+	if probeKey != 0 {
+		t.Fatalf("worker still admits the probe key %d times", probeKey)
+	}
+}

@@ -12,8 +12,10 @@ const (
 	// Version 9 adds the attach generation and fence to SetFilesystem and
 	// the notice that a filesystem service must be replaced. Version 10 adds an
 	// optional rooted path to AddSession authority. Version 11 adds the
-	// additional volume controls (ADR 0222).
-	ControlVersion      = uint16(11)
+	// additional volume controls (ADR 0222). Version 12 adds the trusted
+	// session identity to AddSession (ADR 0234). Version 13 adds bounded
+	// positive read/read-write path grants to AddSession (ADR 0234).
+	ControlVersion      = uint16(13)
 	operationAddSession = byte(1)
 	operationSync       = byte(2)
 	// operationSetFilesystem hands the service the client end of a channel to

@@ -251,7 +251,7 @@ func processControl(message ipc.Message) bool {
 		send(uint64(controlHandle), reply)
 		return true
 	}
-	server, authority, ok := vfs.DecodeAddSessionAuthority(message)
+	server, authority, identity, ok := vfs.DecodeAddSessionAuthority(message)
 	result := vfs.StatusInvalidArgument
 	if ok {
 		result = vfs.StatusResourceExhausted
@@ -262,10 +262,16 @@ func processControl(message ipc.Message) bool {
 					continue
 				}
 				result = service.SetAuthority(sessionOwner(index), authority)
+				if result == vfs.StatusOK && identity.AccountID != 0 {
+					result = service.SetIdentity(sessionOwner(index), identity)
+				}
 				if result == vfs.StatusOK {
 					sessions[index] = uint64(server)
 					sessionGenerations[index] = generation
 					liveSessions++
+				} else if identity.AccountID != 0 {
+					service.ForgetIdentity(sessionOwner(index))
+					service.ForgetAuthority(sessionOwner(index))
 				}
 				break
 			}

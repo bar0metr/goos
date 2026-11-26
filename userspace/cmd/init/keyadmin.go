@@ -7,6 +7,8 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/vfs"
 	configproto "goos/userspace/config"
+	"goos/userspace/identity"
+	"goos/userspace/identityproto"
 	"goos/userspace/remoteapi"
 	"goos/userspace/remotepolicy"
 )
@@ -94,6 +96,29 @@ func openRemoteKeyAuthority(keys string) (handle.ID, string) {
 }
 
 func remoteKeyControl(message *ipc.Message) bool {
+	// KeySync mirrors a key mutation the listener already committed to the
+	// authorized_keys file into the migrated account, so the account database
+	// stays authoritative. It fails closed when migration has not committed.
+	if remove, value, corr, ok := remoteapi.DecodeKeySyncRequest(message); ok {
+		result := remoteapi.ResultPermissionDenied
+		if name, ok := legacyRemoteAccount(); ok {
+			request := &identityproto.Request{Opcode: identityproto.AdminAddKey, Name: name, Key: value[:]}
+			if remove {
+				var key identity.Key
+				copy(key[:], value[:])
+				fingerprint := identity.Fingerprint(key)
+				request = &identityproto.Request{Opcode: identityproto.AdminRemoveKey, Name: name, Fingerprint: fingerprint[:]}
+			}
+			if reply, ok := identityAdminCall(request); ok && reply.Result == identityproto.ResultOK {
+				result = remoteapi.ResultOK
+			}
+		}
+		var out ipc.Message
+		if !remoteapi.EncodeKeyControlReply(remoteapi.KeyControlReply{Operation: remoteapi.KeySync, Result: result}, 0, corr, &out) || !sendMessage(uint64(remoteControl), out) {
+			return false
+		}
+		return true
+	}
 	op, token, ok := remoteapi.DecodeKeyControlRequest(message)
 	if !ok {
 		return false

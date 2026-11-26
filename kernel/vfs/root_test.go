@@ -232,7 +232,7 @@ func TestRootDoesNotExcludeMountBelowIt(t *testing.T) {
 }
 
 func TestAddSessionWireVersionAndShape(t *testing.T) {
-	if ControlVersion != 11 {
+	if ControlVersion != 13 {
 		t.Fatalf("control version %d", ControlVersion)
 	}
 	plain := Authority{Confined: true}
@@ -241,8 +241,8 @@ func TestAddSessionWireVersionAndShape(t *testing.T) {
 	if !ok || message.Version != ControlVersion {
 		t.Fatalf("encode %+v", message)
 	}
-	if _, decoded, ok := DecodeAddSessionAuthority(message); !ok || decoded != plain {
-		t.Fatalf("rootless round trip %+v %v", decoded, ok)
+	if _, decoded, identity, ok := DecodeAddSessionAuthority(message); !ok || decoded != plain || identity != (SessionIdentity{}) {
+		t.Fatalf("rootless round trip %+v %+v %v", decoded, identity, ok)
 	}
 	long := make([]byte, MaxRootPath)
 	long[0] = '/'
@@ -257,22 +257,22 @@ func TestAddSessionWireVersionAndShape(t *testing.T) {
 	if !ok {
 		t.Fatal("encode longest root")
 	}
-	if _, decoded, ok := DecodeAddSessionAuthority(message); !ok || decoded != rooted {
+	if _, decoded, _, ok := DecodeAddSessionAuthority(message); !ok || decoded != rooted {
 		t.Fatalf("rooted round trip %+v %v", decoded, ok)
 	}
 	for _, version := range []uint16{ControlVersion - 1, ControlVersion + 1, 0} {
 		old := message
 		old.Version = version
-		if _, _, ok := DecodeAddSessionAuthority(old); ok {
+		if _, _, _, ok := DecodeAddSessionAuthority(old); ok {
 			t.Fatalf("version %d decoded", version)
 		}
 	}
-	// A shorter payload than the grants, an over-long root, and bytes trailing
-	// a root that make it something else all fail.
-	for _, size := range []uint16{0, 2, 1 + MaxScopes, 2 + MaxScopes + MaxRootPath + 1} {
+	// A payload shorter than the flags, grants and root-size byte, and one
+	// with an over-long root, fail.
+	for _, size := range []uint16{0, 2, 2 + MaxScopes, 2 + MaxScopes + 1 + MaxRootPath + 1} {
 		short := message
 		short.PayloadSize = size
-		if _, _, ok := DecodeAddSessionAuthority(short); ok {
+		if _, _, _, ok := DecodeAddSessionAuthority(short); ok {
 			t.Fatalf("payload size %d decoded", size)
 		}
 	}
@@ -281,7 +281,7 @@ func TestAddSessionWireVersionAndShape(t *testing.T) {
 		bad, _ := AddSessionWithAuthorityRequest(5, short, 1)
 		size := bad.PayloadSize
 		bad.PayloadSize += uint16(copy(bad.Payload[size:], trailing))
-		if _, _, ok := DecodeAddSessionAuthority(bad); ok {
+		if _, _, _, ok := DecodeAddSessionAuthority(bad); ok {
 			t.Fatalf("trailing %q decoded", trailing)
 		}
 	}
@@ -302,12 +302,12 @@ func TestRootTravelsInAddSession(t *testing.T) {
 	if !ok {
 		t.Fatal("encode")
 	}
-	server, decoded, ok := DecodeAddSessionAuthority(message)
+	server, decoded, _, ok := DecodeAddSessionAuthority(message)
 	if !ok || server != 5 || decoded != authority {
 		t.Fatalf("decode %v %v %v", server, decoded, ok)
 	}
-	message.PayloadSize = 2 + MaxScopes + MaxRootPath + 1
-	if _, _, ok := DecodeAddSessionAuthority(message); ok {
+	message.PayloadSize = 2 + MaxScopes + 1 + MaxRootPath + 1
+	if _, _, _, ok := DecodeAddSessionAuthority(message); ok {
 		t.Fatal("oversize root decoded")
 	}
 	// A bad root in the message is refused rather than installed.
@@ -315,7 +315,7 @@ func TestRootTravelsInAddSession(t *testing.T) {
 	message.Payload[2+MaxScopes+1] = '.'
 	message.Payload[2+MaxScopes+2] = '.'
 	message.Payload[2+MaxScopes+3] = '/'
-	if _, _, ok := DecodeAddSessionAuthority(message); ok {
+	if _, _, _, ok := DecodeAddSessionAuthority(message); ok {
 		t.Fatal("non-canonical root decoded")
 	}
 }
@@ -331,5 +331,61 @@ func TestForgottenRootDoesNotReachTheEntrysNextOwner(t *testing.T) {
 	}
 	if status := namespace.AuthorizePath(Owner(10), []byte("/state/c"), Read, false); status != StatusOK {
 		t.Fatal(status)
+	}
+}
+
+// TestPositivePathsExtendARootedSession proves the bounded positive-path
+// grants that give an account shell its shared storage and read-only program
+// access without widening the home root.
+func TestPositivePathsExtendARootedSession(t *testing.T) {
+	namespace, _ := mountedNamespace(t)
+	for _, path := range []string{"/home", "/home/user", "/home/other", "/mnt", "/mnt/w", "/system", "/system/bin", "/state"} {
+		if status := namespace.Create([]byte(path), true); status != StatusOK {
+			t.Fatalf("mkdir %s: %v", path, status)
+		}
+	}
+	authority, ok := RootedAuthority([]byte("/home/user"))
+	if !ok {
+		t.Fatal("root refused")
+	}
+	authority.Positives[0].Rights = Read | Write
+	authority.Positives[0].Size = uint8(copy(authority.Positives[0].Path[:], []byte("/mnt")))
+	authority.Positives[1].Rights = Read
+	authority.Positives[1].Size = uint8(copy(authority.Positives[1].Path[:], []byte("/system")))
+	authority.PositiveCount = 2
+	if !authority.Valid() {
+		t.Fatal("authority with positive grants refused")
+	}
+	owner := Owner(9)
+	if status := namespace.SetAuthority(owner, authority); status != StatusOK {
+		t.Fatalf("set authority: %v", status)
+	}
+	// The home root stays read-write.
+	if status := namespace.AuthorizePath(owner, []byte("/home/user/a"), Write, false); status != StatusOK {
+		t.Fatalf("root write: %v", status)
+	}
+	// A read-write positive path and the path itself are writable.
+	for _, path := range []string{"/mnt", "/mnt/w", "/mnt/w/new"} {
+		if status := namespace.AuthorizePath(owner, []byte(path), Write, false); status != StatusOK {
+			t.Fatalf("positive write %s: %v", path, status)
+		}
+	}
+	// A read-only positive path is readable but never writable.
+	if status := namespace.AuthorizePath(owner, []byte("/system/bin/sh"), Read, false); status != StatusOK {
+		t.Fatalf("program read: %v", status)
+	}
+	if status := namespace.AuthorizePath(owner, []byte("/system/bin/sh"), Write, false); status != StatusPermissionDenied {
+		t.Fatalf("program write: %v", status)
+	}
+	// Everything else stays denied: another home, the state tree, and a name
+	// that merely shares a prefix with a granted path.
+	for _, path := range []string{"/home/other", "/home/other/b", "/state", "/", "/mntx", "/system2"} {
+		if status := namespace.AuthorizePath(owner, []byte(path), Read, false); status != StatusPermissionDenied {
+			t.Fatalf("%s: %v", path, status)
+		}
+	}
+	// The grants do not leak to another session.
+	if status := namespace.AuthorizePath(Owner(3), []byte("/home/other/b"), Read, false); status != StatusOK {
+		t.Fatalf("other session: %v", status)
 	}
 }

@@ -31,7 +31,7 @@ import (
 // version 1) is refused with ErrOldFormat; M4 does not silently upgrade it.
 const (
 	snapshotMagic    = "GOOS-IDENTITY-V2\n"
-	snapshotVersion  = uint16(2)
+	snapshotVersion  = uint16(3)
 	legacyMagic      = "GOOS-IDENTITY-V1\n"
 	legacyVersion    = uint16(1)
 	epochSize        = 16
@@ -94,6 +94,7 @@ func encodePayload(s *Store) ([]byte, error) {
 	out = appendU64(out, s.nextGroupID)
 	out = appendU64(out, s.nextUID)
 	out = appendU64(out, s.nextGID)
+	out = append(out, s.legacyMigrated)
 	out = appendU32(out, uint32(len(s.accounts)))
 	out = appendU32(out, uint32(len(s.groups)))
 	for i := range s.accounts {
@@ -155,7 +156,9 @@ func Decode(data []byte) (*Store, error) {
 	if version == legacyVersion {
 		return nil, ErrOldFormat
 	}
-	if version != snapshotVersion {
+	// Version 2 is the previous layout without the legacy-import marker; it is
+	// upgraded in memory and re-encoded at the next commit as version 3.
+	if version != 2 && version != snapshotVersion {
 		return nil, ErrInvalid
 	}
 	sequence := binary.LittleEndian.Uint64(data[magicSize+versionSize : snapshotHeaderSz])
@@ -164,7 +167,7 @@ func Decode(data []byte) (*Store, error) {
 	if !bytes.Equal(expected[:], data[len(data)-digestSize:]) {
 		return nil, ErrInvalid
 	}
-	return decodePayload(body[snapshotHeaderSz:], sequence)
+	return decodePayload(body[snapshotHeaderSz:], sequence, version)
 }
 
 // Validate verifies magic, version, digest, then payload bounds, epoch,
@@ -175,7 +178,7 @@ func Validate(data []byte) error {
 	return err
 }
 
-func decodePayload(payload []byte, sequence uint64) (*Store, error) {
+func decodePayload(payload []byte, sequence uint64, version uint16) (*Store, error) {
 	d := decoder{b: payload}
 	epoch, err := d.epoch()
 	if err != nil {
@@ -200,6 +203,15 @@ func decodePayload(payload []byte, sequence uint64) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	var legacyMigrated uint8
+	if version >= 3 {
+		if legacyMigrated, err = d.u8(); err != nil {
+			return nil, err
+		}
+		if legacyMigrated > 1 {
+			return nil, ErrInvalid
+		}
+	}
 	accountCount, err := d.u32()
 	if err != nil {
 		return nil, err
@@ -212,12 +224,13 @@ func decodePayload(payload []byte, sequence uint64) (*Store, error) {
 		return nil, ErrInvalid
 	}
 	s := &Store{
-		epoch:         epoch,
-		nextAccountID: nextAccountID,
-		nextGroupID:   nextGroupID,
-		nextUID:       nextUID,
-		nextGID:       nextGID,
-		sequence:      sequence,
+		epoch:          epoch,
+		nextAccountID:  nextAccountID,
+		nextGroupID:    nextGroupID,
+		nextUID:        nextUID,
+		nextGID:        nextGID,
+		sequence:       sequence,
+		legacyMigrated: legacyMigrated,
 	}
 	s.accounts = make([]Account, 0, int(accountCount))
 	s.groups = make([]Group, 0, int(groupCount))

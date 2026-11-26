@@ -392,6 +392,7 @@ func (service *Service) WriteFile(owner vfs.Owner, file vfs.Handle, data []byte)
 func (service *Service) CloseSession(owner vfs.Owner) int {
 	closed := service.namespace.CloseOwner(owner)
 	service.namespace.ForgetAuthority(owner)
+	service.namespace.ForgetIdentity(owner)
 	return closed
 }
 
@@ -466,6 +467,19 @@ func (service *Service) SetAuthority(owner vfs.Owner, authority vfs.Authority) v
 	return service.namespace.SetAuthority(owner, authority)
 }
 
+// SetIdentity records the trusted principal of a session. It is a PID 1
+// control, not a session operation (ADR 0234).
+func (service *Service) SetIdentity(owner vfs.Owner, identity vfs.SessionIdentity) vfs.Status {
+	return service.namespace.SetIdentity(owner, identity)
+}
+
+// ForgetIdentity drops a session's identity, and ForgetAuthority its
+// authority, without closing files. They undo a failed session open.
+func (service *Service) ForgetIdentity(owner vfs.Owner) { service.namespace.ForgetIdentity(owner) }
+
+// ForgetAuthority drops a session's authority.
+func (service *Service) ForgetAuthority(owner vfs.Owner) { service.namespace.ForgetAuthority(owner) }
+
 // Dispatch serves one request from the session owner. File handles are the
 // session's own: another session's handle is not found.
 func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply {
@@ -490,7 +504,13 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 			reply.Status = vfs.StatusPermissionDenied
 			break
 		}
-		reply.Handle, reply.Kind, reply.Status = service.namespace.OpenIntent(owner, request.Path, request.Rights&^vfs.NoFollow, request.OpenFlags)
+		// Open resolves the creation default exactly like Create/Mkdir: only a
+		// caller-set mode is used, otherwise the documented file default.
+		mode := request.Mode
+		if !request.ModeSet {
+			mode = vfs.DefaultFileMode
+		}
+		reply.Handle, reply.Kind, reply.Status = service.namespace.OpenIntentMode(owner, request.Path, request.Rights&^vfs.NoFollow, request.OpenFlags, mode)
 	case vfs.OperationClose:
 		reply.Status = service.namespace.Close(owner, request.Handle)
 	case vfs.OperationRead:
@@ -506,7 +526,15 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 	case vfs.OperationSeek:
 		reply.Status = service.namespace.Seek(owner, request.Handle, request.Offset)
 	case vfs.OperationCreate, vfs.OperationMkdir:
-		reply.Status = service.namespace.Create(request.Path, request.Operation == vfs.OperationMkdir)
+		directory := request.Operation == vfs.OperationMkdir
+		mode := request.Mode
+		if !request.ModeSet {
+			mode = vfs.DefaultFileMode
+			if directory {
+				mode = vfs.DefaultDirMode
+			}
+		}
+		reply.Status = service.namespace.CreateAs(owner, request.Path, directory, mode)
 	case vfs.OperationReadDir:
 		entry, cursor, status := service.namespace.ReadDirFor(owner, request.Path, int(request.Offset))
 		reply.Status, reply.Cursor = status, uint32(cursor)
@@ -548,7 +576,7 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 			reply.Status = vfs.StatusPermissionDenied
 			break
 		}
-		reply.Status = service.namespace.Symlink(request.Path, request.Target)
+		reply.Status = service.namespace.SymlinkAs(owner, request.Path, request.Target)
 	case vfs.OperationLink:
 		if service.onImage(request.Target) {
 			reply.Status = vfs.StatusPermissionDenied

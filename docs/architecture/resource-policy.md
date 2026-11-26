@@ -241,6 +241,8 @@ records.
 | `kernel/vfs.MaxCache` | 512 (64 sets × 8 ways) | profile (ADR 0230) | namespace | static | entry evicted | none |
 | `kernel/vfs.MaxScopes`, `kernel/vfs.MaxAuthorities` | 8, 64 | policy | session | static | `StatusResourceExhausted` | none |
 | `kernel/vfs.MaxRootPath` | 64 | protocol | n/a | n/a | refused | n/a |
+| `kernel/vfs.MaxPositivePaths` | 2 | policy | session | two fixed `PositivePath` records per rooted session | `StatusResourceExhausted` | none |
+| `userspace/identityproto.MaxImportKeys` | 4 | protocol | message | n/a (inline in one request payload) | refused | n/a |
 | `kernel/vfs.MaxPath` | `limits.PathMax` | protocol (ADR 0110) | n/a | n/a | `StatusInvalidArgument` | n/a |
 | `kernel/vfs.MaxLinkExpansions` | 40 | protocol (ADR 0223, Linux's bound) | path resolution | three `PathMax` buffers per namespace, allocated when a mount can hold links | `StatusLoop`, Linux `ELOOP` | n/a |
 | `kernel/vfs.MaxProtocolData`, `kernel/vfs.MaxReplyData`, `kernel/vfs.MaxInlineName`, `kernel/vfs.MaxDirBatch` | message payload less headers; 4096 | protocol | n/a | n/a | n/a | n/a |
@@ -404,6 +406,19 @@ rows below bound what the store and its records may hold.
 | `nextUID` / `nextGID` high-water marks | uint64 in [1000, 0xFFFFFFFF]; `0xFFFFFFFF` sentinel | policy | global | two uint64 marks in the store and snapshot | `ResultExhausted` | none |
 | identityd session slots (`maxSessions`) | 16 | policy | `identityd` service | one session slot each, static | new admin or lookup session refused, `ResultExhausted` | none |
 | directory enumeration (`identityd.maxDirEntries`) | 8 | policy | `identityd` service | none | startup reconciliation fails closed, `Unavailable` | none |
+
+### Session identity and Linux credentials
+
+A trusted principal rides the `AddSession` control request and the startup
+object; both are bounded by fixed inline records, not by caller-driven
+allocation.
+
+| Bound | Default / max | Class | Owner | Memory | At exhaustion | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `internal/limits.SupplementaryGroupsMax` | 16 | policy | account / process | 16 `uint32` group slots in one credential or record | `ResultInvalid` / `EINVAL` | none |
+| `kernel/vfs.SessionIdentity` | 32 bytes (AccountID, UID, GID, epoch) | protocol (control request) | session | one `ownerIdentity` per `MaxAuthorities` (64) slot | `StatusResourceExhausted` | none |
+| `userspace/startup.Credentials` | 97 bytes (UID, GID, AccountID, epoch, 16 groups) | protocol (GST5 startup object) | launch | a fixed block after the string area, inside `startup.MaxSize` (64 KiB) | startup `Finish` fails | none |
+| `kernel/compat/linux.ProcessState.credentials` | 97 bytes | policy | process | one snapshot per process, inherited across fork/exec and shared across threads | n/a | none |
 
 ### Log persistence
 

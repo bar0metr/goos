@@ -73,6 +73,16 @@ type filesystemVolume interface {
 	FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status)
 }
 
+// creationVolume creates objects with a resolved creation context (mode, UID,
+// GID). A volume that persists Unix metadata implements it; a volume without
+// one (FAT32) keeps the legacy Volume and linkVolume methods and presents
+// synthesized modes, never claiming persisted ownership (ADR 0234).
+type creationVolume interface {
+	CreateNameWith(parent ramfs.NodeID, name ramfs.Name, create ramfs.CreateContext) (ramfs.NodeID, ramfs.Status)
+	MkdirNameWith(parent ramfs.NodeID, name ramfs.Name, create ramfs.CreateContext) (ramfs.NodeID, ramfs.Status)
+	SymlinkNameWith(parent ramfs.NodeID, name ramfs.Name, target []byte, create ramfs.CreateContext) (ramfs.NodeID, ramfs.Status)
+}
+
 // Serve performs one decoded request on volume. A read fills, and a write
 // takes its bytes from, the request's slot of cache, the file cache mapping;
 // a listed name is placed in name, which the reply aliases until the caller
@@ -99,7 +109,11 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 			case !mapped:
 				reply.Status = ramfs.StatusIOError
 			default:
-				reply.Node, reply.Status = links.SymlinkName(request.Parent, requested, target)
+				if creation, ok := volume.(creationVolume); ok {
+					reply.Node, reply.Status = creation.SymlinkNameWith(request.Parent, requested, target, request.Create)
+				} else {
+					reply.Node, reply.Status = links.SymlinkName(request.Parent, requested, target)
+				}
 			}
 		case OperationLink:
 			links, supported := volume.(hardLinkVolume)
@@ -126,9 +140,17 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 		case OperationOpen:
 			reply.Node, reply.Status = volume.OpenName(request.Parent, requested)
 		case OperationCreate:
-			reply.Node, reply.Status = volume.CreateName(request.Parent, requested)
+			if creation, ok := volume.(creationVolume); ok {
+				reply.Node, reply.Status = creation.CreateNameWith(request.Parent, requested, request.Create)
+			} else {
+				reply.Node, reply.Status = volume.CreateName(request.Parent, requested)
+			}
 		case OperationMkdir:
-			reply.Node, reply.Status = volume.MkdirName(request.Parent, requested)
+			if creation, ok := volume.(creationVolume); ok {
+				reply.Node, reply.Status = creation.MkdirNameWith(request.Parent, requested, request.Create)
+			} else {
+				reply.Node, reply.Status = volume.MkdirName(request.Parent, requested)
+			}
 		case OperationRename:
 			reply.Status = volume.RenameName(request.Node, request.Parent, requested)
 		default:

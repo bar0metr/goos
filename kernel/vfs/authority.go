@@ -13,7 +13,20 @@ const (
 	maxScopeDepth  = 32
 	// MaxRootPath is the longest path a session can be rooted at.
 	MaxRootPath = 64
+	// MaxPositivePaths bounds the additional read or read-write paths a
+	// root-confined session may reach, for explicitly granted program and
+	// storage paths (ADR 0234).
+	MaxPositivePaths = 2
 )
+
+// PositivePath is one additional path a root-confined session may reach. The
+// path is canonical and bounded; Rights is Read or Read|Write. It never
+// overrides the root confinement or the scope denials.
+type PositivePath struct {
+	Path   [MaxRootPath]byte
+	Size   uint8
+	Rights Rights
+}
 
 // Authority grants access to installed scope slots. Confined sessions have no
 // access outside their grants, and overlapping grants intersect. An ordinary
@@ -23,12 +36,16 @@ const (
 // directory in Root and what lies under it, whatever else it is granted. The
 // root is a path, not a scope slot: a subtree slot records every node it covers
 // and stops at maxScopeWalk, which a user's own directory can exceed, and a slot
-// lives as long as the namespace, which a configurable root must not.
+// lives as long as the namespace, which a configurable root must not. The
+// Positives name a bounded set of further paths such a session may reach, read
+// or read-write, without widening the root.
 type Authority struct {
-	Confined bool
-	Grants   [MaxScopes]Rights
-	Root     [MaxRootPath]byte
-	RootSize uint8
+	Confined      bool
+	Grants        [MaxScopes]Rights
+	Root          [MaxRootPath]byte
+	RootSize      uint8
+	Positives     [MaxPositivePaths]PositivePath
+	PositiveCount uint8
 }
 
 func (authority Authority) Valid() bool {
@@ -45,7 +62,25 @@ func (authority Authority) Valid() bool {
 			return false
 		}
 	}
-	return authority.RootSize == 0 || ValidRootPath(authority.Root[:authority.RootSize])
+	if authority.RootSize != 0 && !ValidRootPath(authority.Root[:authority.RootSize]) {
+		return false
+	}
+	if authority.PositiveCount > MaxPositivePaths {
+		return false
+	}
+	for index := 0; index < int(authority.PositiveCount); index++ {
+		positive := &authority.Positives[index]
+		if positive.Rights != Read && positive.Rights != Read|Write || positive.Size == 0 || positive.Size > MaxRootPath ||
+			!ValidRootPath(positive.Path[:positive.Size]) {
+			return false
+		}
+		for _, value := range positive.Path[positive.Size:] {
+			if value != 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // RootedAuthority returns the authority of a session limited to root. The
@@ -116,21 +151,26 @@ type ownerAuthority struct {
 // rootedSessions holds the sessions' roots by authority entry. check is the
 // canonical path insideRoot compares; resolve keeps Namespace.requested.
 type rootedSessions struct {
-	roots [MaxAuthorities][MaxRootPath]byte
-	sizes [MaxAuthorities]uint8
-	check [MaxPath]byte
+	roots          [MaxAuthorities][MaxRootPath]byte
+	sizes          [MaxAuthorities]uint8
+	positives      [MaxAuthorities][MaxPositivePaths]PositivePath
+	positiveCounts [MaxAuthorities]uint8
+	check          [MaxPath]byte
 }
 
-// setRoot records entry's root, or that it has none.
+// setRoot records entry's root and positive paths, or that it has none.
 func (namespace *Namespace) setRoot(entry int, authority *Authority) {
-	if authority.RootSize == 0 && namespace.rooted == nil {
+	if authority.RootSize == 0 && authority.PositiveCount == 0 && namespace.rooted == nil {
 		return
 	}
 	if namespace.rooted == nil {
 		namespace.rooted = new(rootedSessions)
 	}
 	namespace.rooted.sizes[entry] = uint8(copy(namespace.rooted.roots[entry][:], authority.Root[:authority.RootSize]))
+	namespace.rooted.positives[entry] = authority.Positives
+	namespace.rooted.positiveCounts[entry] = authority.PositiveCount
 	authority.Root, authority.RootSize = [MaxRootPath]byte{}, 0
+	authority.Positives, authority.PositiveCount = [MaxPositivePaths]PositivePath{}, 0
 }
 
 // InstallScope binds an unused slot to an existing directory or an exact name
@@ -423,12 +463,15 @@ func (namespace *Namespace) nodeScopes(backend Backend, node ramfs.NodeID) (uint
 	return mask, StatusOK
 }
 
-// insideRoot reports whether a session without a root, or one whose root
-// contains path, may name it. It compares the canonical path the namespace goes
-// on to resolve, so ".." cannot leave the root. A path spelled differently from
-// the root, as a case-insensitive filesystem would accept, is refused. A moved
-// path must lie strictly below the root: the root itself stays where it is.
-func (namespace *Namespace) insideRoot(owner Owner, path []byte, moving bool) bool {
+// insideRoot reports whether a session without a root, or one whose root or an
+// explicitly granted positive path contains path, may name it with rights. It
+// compares the canonical path the namespace goes on to resolve, so ".." cannot
+// leave the root. A path spelled differently from the root, as a
+// case-insensitive filesystem would accept, is refused. A moved path must lie
+// strictly below the root or a positive path: the anchor itself stays where it
+// is. A positive path grants at most its own rights; the root grants read and
+// write.
+func (namespace *Namespace) insideRoot(owner Owner, path []byte, moving bool, rights Rights) bool {
 	rooted := namespace.rooted
 	if rooted == nil {
 		return true
@@ -442,13 +485,29 @@ func (namespace *Namespace) insideRoot(owner Owner, path []byte, moving bool) bo
 			return true
 		}
 		canonical, ok := canonicalPath(&rooted.check, path)
-		if !ok || canonical < size || string(rooted.check[:size]) != string(rooted.roots[index][:size]) {
+		if !ok {
 			return false
 		}
-		if canonical == size {
-			return !moving
+		if canonical >= size && string(rooted.check[:size]) == string(rooted.roots[index][:size]) {
+			if canonical == size {
+				return !moving
+			}
+			return rooted.check[size] == '/'
 		}
-		return rooted.check[size] == '/'
+		for positive := 0; positive < int(rooted.positiveCounts[index]); positive++ {
+			entry := &rooted.positives[index][positive]
+			if rights&^entry.Rights != 0 {
+				continue
+			}
+			psize := int(entry.Size)
+			if canonical >= psize && string(rooted.check[:psize]) == string(entry.Path[:psize]) {
+				if canonical == psize {
+					return !moving
+				}
+				return rooted.check[psize] == '/'
+			}
+		}
+		return false
 	}
 	return true
 }
@@ -473,7 +532,7 @@ func (namespace *Namespace) AuthorizePath(owner Owner, path []byte, rights Right
 	if rights == 0 || rights & ^(Read|Write) != 0 || owner == 0 {
 		return StatusInvalidArgument
 	}
-	if !namespace.insideRoot(owner, path, moving) {
+	if !namespace.insideRoot(owner, path, moving, rights) {
 		return StatusPermissionDenied
 	}
 	if rights&Write != 0 && namespace.reservedTarget(path) {

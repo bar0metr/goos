@@ -34,15 +34,16 @@ const (
 	// metadata in every reply that describes a node, and the read-link,
 	// symlink and link operations (ADR 0223); version 14 adds the entry
 	// rename and replace that name their source, and the clean unmount
-	// (ADR 0226).
-	Version = uint16(14)
+	// (ADR 0226); version 15 adds the resolved creation context (mode, UID,
+	// GID) to create, mkdir, and symlink requests (ADR 0234).
+	Version = uint16(15)
 	// RequestDeadline bounds one exchange. A filesystem service that stalls
 	// surfaces as an I/O error on its mounts rather than a hung namespace. It
 	// is above the block protocol's own deadline, so a slow device is reported
 	// by the service before the VFS gives up on the service.
 	RequestDeadline = 6 * clock.TicksPerSecond
 
-	requestHeader = 40
+	requestHeader = 50
 	// replyHeader holds the fixed fields and, from byte unixOffset, the Unix
 	// metadata record.
 	replyHeader = unixOffset + ramfs.UnixRecordSize
@@ -166,7 +167,9 @@ func MetadataChangeOf(request Request) (ramfs.MetadataChange, bool) {
 }
 
 // Request is one backend call. Node, Parent, Offset, Size, Slot and Name are
-// used as the operation needs them; the rest are zero.
+// used as the operation needs them; the rest are zero. Create carries the
+// resolved creation context: the mode's low 12 bits and the owning UID and
+// primary GID.
 type Request struct {
 	Operation Operation
 	Node      ramfs.NodeID
@@ -182,7 +185,9 @@ type Request struct {
 	// run on through the slots after it, so one exchange moves up to the
 	// rest of the cache.
 	Slot uint32
-	Name []byte
+	// Create is the resolved creation context of a create, mkdir, or symlink.
+	Create ramfs.CreateContext
+	Name   []byte
 }
 
 // Reply answers the request with the same correlation.
@@ -267,7 +272,8 @@ func validName(name []byte) bool {
 // cache mapping.
 func EncodeRequest(request Request, correlation uint64, message *ipc.Message, cache []byte) bool {
 	if message == nil || correlation == 0 || !validOperation(request.Operation) || len(request.Name) > ramfs.MaxName ||
-		!validName(request.Name) || !validTransfer(request) {
+		!validName(request.Name) || !validTransfer(request) || !request.Create.Valid() ||
+		request.Create != (ramfs.CreateContext{}) && request.Operation != OperationCreate && request.Operation != OperationMkdir && request.Operation != OperationSymlink {
 		return false
 	}
 	inline := len(request.Name) <= maxRequestName
@@ -285,6 +291,9 @@ func EncodeRequest(request Request, correlation uint64, message *ipc.Message, ca
 	binary.LittleEndian.PutUint64(payload[16:], uint64(request.Parent))
 	binary.LittleEndian.PutUint64(payload[24:], request.Offset)
 	binary.LittleEndian.PutUint32(payload[32:], request.Size)
+	binary.LittleEndian.PutUint16(payload[40:], request.Create.Mode)
+	binary.LittleEndian.PutUint32(payload[42:], request.Create.UID)
+	binary.LittleEndian.PutUint32(payload[46:], request.Create.GID)
 	if inline {
 		message.PayloadSize += uint16(copy(payload[requestHeader:], request.Name))
 	} else {
@@ -314,6 +323,11 @@ func DecodeRequest(message *ipc.Message, cache []byte, name *[ramfs.MaxName]byte
 		Parent:    ramfs.NodeID(binary.LittleEndian.Uint64(payload[16:])),
 		Offset:    binary.LittleEndian.Uint64(payload[24:]),
 		Size:      binary.LittleEndian.Uint32(payload[32:]),
+		Create: ramfs.CreateContext{
+			Mode: binary.LittleEndian.Uint16(payload[40:]),
+			UID:  binary.LittleEndian.Uint32(payload[42:]),
+			GID:  binary.LittleEndian.Uint32(payload[46:]),
+		},
 	}
 	switch {
 	case cached:
@@ -330,7 +344,8 @@ func DecodeRequest(message *ipc.Message, cache []byte, name *[ramfs.MaxName]byte
 	default:
 		request.Name = payload[requestHeader : requestHeader+nameSize]
 	}
-	if !validOperation(request.Operation) || !validName(request.Name) || !validTransfer(request) {
+	if !validOperation(request.Operation) || !validName(request.Name) || !validTransfer(request) || !request.Create.Valid() ||
+		request.Create != (ramfs.CreateContext{}) && request.Operation != OperationCreate && request.Operation != OperationMkdir && request.Operation != OperationSymlink {
 		return Request{}, false
 	}
 	return request, true

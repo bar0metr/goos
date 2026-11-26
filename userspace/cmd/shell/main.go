@@ -91,6 +91,11 @@ func userspaceMain() {
 	if !validStartup {
 		fatal("SHELL_STARTUP_INVALID\n")
 	}
+	// The working directory PID 1 chose is the shell's initial directory; an
+	// account shell is rooted there, so its own VFS check must start inside it.
+	if initialCWD := startupData.CWD(); len(initialCWD) != 0 {
+		cwdSize = copy(cwd[:], initialCWD)
+	}
 	outputHandle, found = startupData.Handle("stdout")
 	if !found {
 		fatal("SHELL_OUTPUT_MISSING\n")

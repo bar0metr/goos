@@ -80,7 +80,11 @@ func TestWorkerCloseTokenAndReplyCorrelation(t *testing.T) {
 	}
 }
 func TestAuthenticateHasNoSessionOrGeometry(t *testing.T) {
-	request := Request{Operation: OperationAuthenticate}
+	request := Request{Operation: OperationAuthenticate, UserSize: 5}
+	copy(request.Username[:], "alice")
+	for i := 0; i < 32; i++ {
+		request.Key[i] = byte(i + 1)
+	}
 	var message ipc.Message
 	if !EncodeRequest(&request, 13, &message) {
 		t.Fatal("authenticate encoding")
@@ -97,6 +101,11 @@ func TestAuthenticateHasNoSessionOrGeometry(t *testing.T) {
 	request.Geometry, _ = MakeGeometry(80, 24, []byte("xterm"))
 	if EncodeRequest(&request, 13, &message) {
 		t.Fatal("authenticate selected geometry")
+	}
+	request.Geometry = Geometry{}
+	request.UserSize = 0
+	if EncodeRequest(&request, 13, &message) {
+		t.Fatal("authenticate without username accepted")
 	}
 	reply := Reply{Operation: OperationAuthenticate, Result: ResultOK, Session: 0x100000001}
 	if !EncodeReply(&reply, nil, 13, &message) {

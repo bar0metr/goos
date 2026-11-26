@@ -281,7 +281,7 @@ func serve(current *session) {
 // only on lookup sessions, administration operations only on admin sessions.
 // A lookup session therefore cannot provision, reset or otherwise mutate.
 func sessionAllows(current *session, op identityproto.Opcode) bool {
-	if op == identityproto.LookupAuthorizeKey || op == identityproto.LookupGetAccount {
+	if identityproto.IsLookupOpcode(op) {
 		return !current.admin
 	}
 	return current.admin

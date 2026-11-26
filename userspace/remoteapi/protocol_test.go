@@ -40,6 +40,8 @@ func TestRequestRoundTrip(t *testing.T) {
 		{Operation: OperationOpen, Geometry: geometry},
 		{Operation: OperationClose, Session: 1<<32 | 1},
 		{Operation: OperationGeometry, Session: 1<<32 | 1, Geometry: geometry},
+		{Operation: OperationAuthorizeKey, Mode: ModeTerminal, Username: [MaxUsername]byte{'a', 'l', 'i', 'c', 'e'}, UserSize: 5, Key: [32]byte{7}},
+		{Operation: OperationAuthenticate, Mode: ModeTerminal, Username: [MaxUsername]byte{'a', 'l', 'i', 'c', 'e'}, UserSize: 5, Key: [32]byte{7}, Token: 0x1234},
 	} {
 		var message ipc.Message
 		if !EncodeRequest(&request, 7, &message) {
@@ -125,4 +127,43 @@ func FuzzDecodeRequest(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestAdmissionTokenWire proves the one-use admission token survives the wire,
+// that a probe can never present one, and that a denial never carries one.
+func TestAdmissionTokenWire(t *testing.T) {
+	probe := Request{Operation: OperationAuthorizeKey, Mode: ModeTerminal, Username: [MaxUsername]byte{'a'}, UserSize: 1, Key: [32]byte{1}}
+	var message ipc.Message
+	if !EncodeRequest(&probe, 1, &message) {
+		t.Fatal("encode probe")
+	}
+	// A probe must not carry a token.
+	tampered := probe
+	tampered.Token = 5
+	if EncodeRequest(&tampered, 1, &message) {
+		t.Fatal("probe with a token encoded")
+	}
+	// The token must survive the request wire.
+	auth := Request{Operation: OperationAuthenticate, Mode: ModeTerminal, Username: [MaxUsername]byte{'a'}, UserSize: 1, Key: [32]byte{1}, Token: 0xdeadbeef}
+	if !EncodeRequest(&auth, 2, &message) {
+		t.Fatal("encode authenticate")
+	}
+	var got Request
+	if !DecodeRequest(&message, &got) || got.Token != auth.Token || got != auth {
+		t.Fatalf("authenticate round trip: token=%x", got.Token)
+	}
+	// An allowed probe reply carries the issued token.
+	allowed := Reply{Operation: OperationAuthorizeKey, Result: ResultOK, Token: 0x99}
+	if !EncodeReply(&allowed, nil, 3, &message) {
+		t.Fatal("encode allowed reply")
+	}
+	var reply Reply
+	if !DecodeReply(&message, 3, OperationAuthorizeKey, &reply) || reply.Token != 0x99 {
+		t.Fatalf("allowed reply round trip: token=%x", reply.Token)
+	}
+	// A denial must not carry a token.
+	denied := Reply{Operation: OperationAuthorizeKey, Result: ResultPermissionDenied, Token: 0x99}
+	if EncodeReply(&denied, nil, 4, &message) {
+		t.Fatal("denial with a token encoded")
+	}
 }

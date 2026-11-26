@@ -8,6 +8,7 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/userspace/config"
+	syslog "goos/userspace/log"
 	"goos/userspace/remoteapi"
 	"goos/userspace/remotepolicy"
 	"goos/userspace/remoteservice"
@@ -178,6 +179,76 @@ func keyControlCall(op remoteapi.KeyControlOperation, token uint64) (remoteapi.K
 	return remoteapi.KeyControlReply{}, 0, errors.New("remote key authority did not answer")
 }
 
+// rawKeyForFingerprint finds the raw 32-byte Ed25519 key whose SSH-blob
+// fingerprint matches the canonical "SHA256:base64" value.
+func rawKeyForFingerprint(data, fingerprint []byte) ([]byte, bool) {
+	entries, err := remotepolicy.ListAuthorizedKeys(data)
+	if err != nil {
+		return nil, false
+	}
+	keys, err := remotepolicy.ParseAuthorizedKeys(data)
+	if err != nil {
+		return nil, false
+	}
+	for index, entry := range entries {
+		if entry.Fingerprint != string(fingerprint) {
+			continue
+		}
+		key, ok := keys.At(index)
+		return key, ok
+	}
+	return nil, false
+}
+
+// syncKeyToAccount mirrors a committed key add or remove into the migrated
+// account database, so the account database stays authoritative. It is
+// best-effort: the legacy file keeps the change either way, and a mirror
+// failure is reported rather than undoing the file mutation.
+func syncKeyToAccount(remove bool, value [32]byte) bool {
+	sequence++
+	corr := sequence
+	var request ipc.Message
+	if !remoteapi.EncodeKeySyncRequest(remove, value, corr, &request) || !remoteapi.SendWithin(control, &request, remoteservice.Now()+budget) {
+		return false
+	}
+	previous := pumpingRPC
+	pumpingRPC = true
+	defer func() { pumpingRPC = previous }()
+	deadline := remoteservice.Now() + budget
+	for remoteservice.Now() < deadline {
+		serviceTCP()
+		serviceSigners()
+		advance()
+		var message ipc.Message
+		status := remoteservice.Receive(control, 0, &message)
+		if status == kcall.StatusNotFound {
+			var interests [kcall.WaitAnyMaxObjects]sys.Interest
+			interests[0] = sys.Interest{Handle: control, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+			interests[1] = sys.Interest{Handle: tcpChannel, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+			_, waitStatus := sys.WaitAny(&interests, 2, 1)
+			if waitStatus != kcall.StatusOK && waitStatus != kcall.StatusTimeout {
+				return false
+			}
+			continue
+		}
+		if status != kcall.StatusOK {
+			return false
+		}
+		if message.Kind == ipc.KindNotification {
+			notice(&message)
+			continue
+		}
+		if message.Correlation != corr {
+			remoteservice.CloseHandles(&message)
+			return false
+		}
+		reply, valid := remoteapi.DecodeKeyControlReply(&message, remoteapi.KeySync, corr)
+		remoteservice.CloseHandles(&message)
+		return valid && reply.Result == remoteapi.ResultOK
+	}
+	return false
+}
+
 func keyReloadHost(policy remotepolicy.Policy) (*remotepolicy.HostKey, error) {
 	if _, ok := identities.Current(); !ok {
 		return nil, errors.New("host identity unavailable; use remote reload first")
@@ -268,6 +339,8 @@ func keyAdmin(op remoteapi.AdminOperation, argument []byte) (result remoteapi.Ad
 		return result, []byte(err.Error() + "\n")
 	}
 	affected := string(argument)
+	var syncRemove bool
+	var syncValue [32]byte
 	if op == remoteapi.AdminKeyAdd {
 		added, err := remotepolicy.ParseAuthorizedKeys(argument)
 		if err != nil || added.Len() != 1 {
@@ -275,6 +348,24 @@ func keyAdmin(op remoteapi.AdminOperation, argument []byte) (result remoteapi.Ad
 		}
 		public, _ := added.At(0)
 		affected, _ = remotepolicy.Fingerprint(public)
+		copy(syncValue[:], public)
+	} else if op == remoteapi.AdminKeyRemove {
+		if !remotepolicy.ValidFingerprint(argument) {
+			return remoteapi.AdminInvalid, []byte("expected full canonical SHA256 fingerprint\n")
+		}
+		data, err := adapter.Read(path, remotepolicy.MaxAuthorizedKeysBytes)
+		if errors.Is(err, remotepolicy.ErrNotFound) {
+			data = nil
+		}
+		if err != nil {
+			return result, []byte(err.Error() + "\n")
+		}
+		raw, ok := rawKeyForFingerprint(data, argument)
+		if !ok {
+			return remoteapi.AdminInvalid, []byte("authorized key fingerprint not found\n")
+		}
+		copy(syncValue[:], raw)
+		syncRemove = true
 	}
 	update := remotepolicy.KeyUpdate{Files: adapter, Check: check, Reload: func(candidate []byte) (uint64, error) {
 		if err := reloadCandidate(candidate, grant.Revision, path, adapter); err != nil {
@@ -293,6 +384,15 @@ func keyAdmin(op remoteapi.AdminOperation, argument []byte) (result remoteapi.Ad
 	})
 	if err != nil {
 		return result, []byte(err.Error() + "\n")
+	}
+	if op == remoteapi.AdminKeyAdd || op == remoteapi.AdminKeyRemove {
+		// The account database is the sole key authority: a key mutation is only
+		// reported as committed once identityd has durably recorded it. A failed
+		// mirror fails the command instead of leaving a stale file authoritative.
+		if !syncKeyToAccount(syncRemove, syncValue) {
+			syslog.Warn("remote key mirror into account database failed", syslog.Str("fingerprint", affected))
+			return remoteapi.AdminUnavailable, []byte("remote key mirror into the account database failed\n")
+		}
 	}
 	return remoteapi.AdminOK, []byte("authorized keys committed fingerprint=" + affected + " generation=" + strconv.FormatUint(generation, 10) + "\n")
 }
