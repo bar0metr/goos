@@ -16,7 +16,7 @@ checks=0
 monitor=${TMPDIR:-/tmp}/goos-boot-monitor.$$
 heap_first=
 shell_ready_sequence=0
-shell_ready_limit=2400
+shell_ready_limit=9000
 
 cleanup() {
 	if [ -n "$pid" ]; then
