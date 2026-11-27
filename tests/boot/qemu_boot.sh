@@ -913,7 +913,7 @@ heap_address=$(heap_symbol || true)
 # commands are read from the installed volume (ADR 0175), which takes longer
 # than launching them from the archive did, and the guest falls behind the
 # script; the deadline leaves room for that and for a loaded host.
-wait_for_marker boot '^arena-stress-complete$' 1800 "$log"
+wait_for_marker boot '^arena-stress-complete$' 5400 "$log"
 heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
 heap_first=$(cat "$monitor.heap" 2>/dev/null || true)
 rm -f "$monitor.heap"
