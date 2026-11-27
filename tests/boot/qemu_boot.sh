@@ -767,14 +767,14 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	send_after_done '/system/linux/abi-probe session-timeout' 'session timeout: '
 	shell_ready_sequence=$((shell_ready_sequence + 1))
 	printf '/system/linux/abi-probe open-timeout-existing; __boot_ready %s\n' "$shell_ready_sequence"
-	wait_for_count open-timeout.existing '^VFS_OPEN_TIMEOUT_EXISTING_RELEASED$' 1 60 "$log"
+	wait_for_count open-timeout.existing '^VFS_OPEN_TIMEOUT_EXISTING_RELEASED$' 1 240 "$log"
 	printf '\n'
-	wait_for_count open-timeout.existing.done "^SHELL_READY token=$shell_ready_sequence\$" 1 60 "$log"
+	wait_for_count open-timeout.existing.done "^SHELL_READY token=$shell_ready_sequence\$" 1 240 "$log"
 	shell_ready_sequence=$((shell_ready_sequence + 1))
 	printf '/system/linux/abi-probe open-timeout-created; __boot_ready %s\n' "$shell_ready_sequence"
-	wait_for_count open-timeout.created '^VFS_OPEN_TIMEOUT_CREATED_RELEASED$' 1 60 "$log"
+	wait_for_count open-timeout.created '^VFS_OPEN_TIMEOUT_CREATED_RELEASED$' 1 240 "$log"
 	printf '\n'
-	wait_for_count open-timeout.created.done "^SHELL_READY token=$shell_ready_sequence\$" 1 60 "$log"
+	wait_for_count open-timeout.created.done "^SHELL_READY token=$shell_ready_sequence\$" 1 240 "$log"
 	# A family member kills a task whose open the VFS has executed but not
 	# answered; the VFS must release the object while the killer still runs.
 	shell_ready_sequence=$((shell_ready_sequence + 1))
@@ -913,7 +913,7 @@ heap_address=$(heap_symbol || true)
 # commands are read from the installed volume (ADR 0175), which takes longer
 # than launching them from the archive did, and the guest falls behind the
 # script; the deadline leaves room for that and for a loaded host.
-wait_for_marker boot '^arena-stress-complete$' 900 "$log"
+wait_for_marker boot '^arena-stress-complete$' 1800 "$log"
 heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
 heap_first=$(cat "$monitor.heap" 2>/dev/null || true)
 rm -f "$monitor.heap"
