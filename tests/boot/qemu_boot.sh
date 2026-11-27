@@ -883,9 +883,9 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	printf 'cat /missing\n'
 	count=0
 	while [ "$count" -lt 30 ]; do
-		sleep 0.2
+		sleep 1.5
 		printf 'ls\n'
-		sleep 0.2
+		sleep 1.5
 		printf 'cat motd\n'
 		count=$((count + 1))
 	done
